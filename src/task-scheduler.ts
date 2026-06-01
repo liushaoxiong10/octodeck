@@ -13,10 +13,9 @@ import {
 import { getSystemSettings } from './runtime-config.js';
 import {
   ContainerOutput,
-  runContainerAgent,
-  runHostAgent,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { resolveBackend } from './backends/registry.js';
 import {
   addGroupMember,
   advanceSkippedTask,
@@ -90,6 +89,15 @@ function resolveTaskExecutionMode(
   return 'container';
 }
 
+function resolveTaskExecutionNode(
+  task: ScheduledTask,
+  deps: SchedulerDependencies,
+): string | undefined {
+  if (task.execution_node) return task.execution_node;
+  const group = deps.registeredGroups()[task.chat_jid];
+  return group?.executionNode;
+}
+
 function ensureTaskWorkspace(
   task: ScheduledTask,
   deps: SchedulerDependencies,
@@ -128,6 +136,7 @@ function ensureTaskWorkspace(
     folder,
     added_at: new Date().toISOString(),
     executionMode,
+    executionNode: executionMode === 'host' ? resolveTaskExecutionNode(task, deps) : undefined,
     created_by: ownerId,
   };
 
@@ -441,59 +450,68 @@ async function runTask(
 
   try {
     const executionMode = resolveTaskExecutionMode(task, deps);
-    const runAgent =
-      executionMode === 'host' ? runHostAgent : runContainerAgent;
+    const backend = resolveBackend(workspaceGroup);
 
     // Resolve owner's home folder for correct volume mounts (skills, memory, CLAUDE.md)
     const ownerHomeFolder = workspaceGroup.created_by
       ? getUserHomeGroup(workspaceGroup.created_by)?.folder || workspace.folder
       : workspace.folder;
 
-    const output = await runAgent(
-      workspaceGroup,
-      {
-        prompt: task.prompt,
-        sessionId,
-        groupFolder: workspace.folder,
-        chatJid: workspace.jid,
-        isMain: isAdminHome,
-        isHome,
-        isAdminHome,
-        isScheduledTask: true,
-        taskRunId: options?.taskRunId,
-      },
-      (proc, identifier, selectedProviderId) =>
-        deps.onProcess(
-          effectiveJid,
-          proc,
-          executionMode === 'container' ? identifier : null,
-          workspace.folder,
-          identifier,
-          options?.taskRunId,
-          selectedProviderId,
-        ),
-      async (streamedOutput: ContainerOutput) => {
-        // Broadcast stream events to WebSocket clients viewing the task workspace
-        if (streamedOutput.status === 'stream' && streamedOutput.streamEvent) {
-          deps.broadcastStreamEvent?.(workspace.jid, streamedOutput.streamEvent);
-        }
-        if (streamedOutput.result) {
-          result = streamedOutput.result;
-          lastOutputTime = Date.now();
-          resetIdleTimer();
-        }
-        if (streamedOutput.status === 'error') {
-          error = streamedOutput.error || 'Unknown error';
-          lastOutputTime = Date.now();
-        }
-        // Finalize run log on first non-stream output (success/error/closed).
-        // Don't wait for the process to exit — idle timeout can be very long.
-        if (streamedOutput.status !== 'stream') {
-          finalizeRunLog();
-        }
-      },
-      ownerHomeFolder,
-    );
+    let output: ContainerOutput;
+    if (!backend.supportsExecutionMode(executionMode)) {
+      output = {
+        status: 'error',
+        result: `后端 ${backend.displayName} 不支持执行模式 ${executionMode}`,
+        error: `backend ${backend.id} does not support executionMode ${executionMode}`,
+      };
+    } else {
+      output = await backend.run({
+        group: workspaceGroup,
+        executionMode,
+        input: {
+          prompt: task.prompt,
+          sessionId,
+          groupFolder: workspace.folder,
+          chatJid: workspace.jid,
+          isMain: isAdminHome,
+          isHome,
+          isAdminHome,
+          isScheduledTask: true,
+          taskRunId: options?.taskRunId,
+        },
+        onProcess: (proc, identifier, selectedProviderId) =>
+          deps.onProcess(
+            effectiveJid,
+            proc,
+            executionMode === 'container' ? identifier : null,
+            workspace.folder,
+            identifier,
+            options?.taskRunId,
+            selectedProviderId,
+          ),
+        onOutput: async (streamedOutput: ContainerOutput) => {
+          // Broadcast stream events to WebSocket clients viewing the task workspace
+          if (streamedOutput.status === 'stream' && streamedOutput.streamEvent) {
+            deps.broadcastStreamEvent?.(workspace.jid, streamedOutput.streamEvent);
+          }
+          if (streamedOutput.result) {
+            result = streamedOutput.result;
+            lastOutputTime = Date.now();
+            resetIdleTimer();
+          }
+          if (streamedOutput.status === 'error') {
+            error = streamedOutput.error || 'Unknown error';
+            lastOutputTime = Date.now();
+          }
+          // Finalize run log on first non-stream output (success/error/closed).
+          // Don't wait for the process to exit — idle timeout can be very long.
+          if (streamedOutput.status !== 'stream') {
+            finalizeRunLog();
+          }
+        },
+        ownerHomeFolder,
+      });
+    }
 
     if (idleTimer) clearTimeout(idleTimer);
 
@@ -704,6 +722,7 @@ async function runScriptTask(
     const scriptResult = await runScript(
       task.script_command,
       task.group_folder,
+      resolveTaskExecutionNode(task, deps),
     );
 
     if (scriptResult.timedOut) {

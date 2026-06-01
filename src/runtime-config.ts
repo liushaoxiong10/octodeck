@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-import { ASSISTANT_NAME, DATA_DIR } from './config.js';
+import { AGENT_RUNNER_SECRET, ASSISTANT_NAME, DATA_DIR, WEB_PORT } from './config.js';
 import { logger } from './logger.js';
 
 const MAX_FIELD_LENGTH = 2000;
@@ -123,6 +123,8 @@ export interface CachedOAuthUsage {
 }
 
 export interface ClaudeProviderConfig {
+  apiType?: ModelEndpointApiType;
+  providerId?: string;
   anthropicBaseUrl: string;
   anthropicAuthToken: string;
   anthropicApiKey: string;
@@ -302,6 +304,13 @@ export interface BalancingConfig {
   recoveryIntervalMs: number;
 }
 
+export interface ProviderModelConfig {
+  id: string;
+  displayName: string;
+  enabled: boolean;
+  fetchedAt: string | null;
+}
+
 const DEFAULT_BALANCING_CONFIG: BalancingConfig = {
   strategy: 'round-robin',
   unhealthyThreshold: 3,
@@ -313,10 +322,13 @@ interface StoredProviderV4 {
   id: string;
   name: string;
   type: 'official' | 'third_party';
+  apiType?: ModelEndpointApiType;
   enabled: boolean;
   weight: number;
   anthropicBaseUrl: string;
   anthropicModel: string;
+  models?: ProviderModelConfig[];
+  modelsFetchedAt?: string | null;
   secrets: EncryptedSecrets;
   customEnv?: Record<string, string>;
   updatedAt: string;
@@ -334,11 +346,14 @@ export interface UnifiedProvider {
   id: string;
   name: string;
   type: 'official' | 'third_party';
+  apiType: ModelEndpointApiType;
   enabled: boolean;
   weight: number;
   anthropicBaseUrl: string;
   anthropicAuthToken: string;
   anthropicModel: string;
+  models: ProviderModelConfig[];
+  modelsFetchedAt: string | null;
   anthropicApiKey: string;
   claudeCodeOauthToken: string;
   claudeOAuthCredentials: ClaudeOAuthCredentials | null;
@@ -351,10 +366,13 @@ export interface UnifiedProviderPublic {
   id: string;
   name: string;
   type: 'official' | 'third_party';
+  apiType: ModelEndpointApiType;
   enabled: boolean;
   weight: number;
   anthropicBaseUrl: string;
   anthropicModel: string;
+  models: ProviderModelConfig[];
+  modelsFetchedAt: string | null;
   hasAnthropicAuthToken: boolean;
   anthropicAuthTokenMasked: string | null;
   hasAnthropicApiKey: boolean;
@@ -370,6 +388,16 @@ export interface UnifiedProviderPublic {
 
 const MAX_PROVIDERS = 20;
 const POOL_CONFIG_FILE = path.join(CLAUDE_CONFIG_DIR, 'provider-pool.json');
+
+export type ModelEndpointApiType = 'claude' | 'openai-chat' | 'openai-responses';
+
+function normalizeApiType(input: unknown): ModelEndpointApiType {
+  if (input === undefined || input === null || input === '') return 'claude';
+  if (input === 'claude' || input === 'openai-chat' || input === 'openai-responses') {
+    return input;
+  }
+  throw new Error('Invalid field: apiType');
+}
 
 interface ClaudeConfigAuditEntry {
   timestamp: string;
@@ -425,6 +453,31 @@ function normalizeModel(input: unknown): string {
     throw new Error('Field too long: anthropicModel');
   }
   return value;
+}
+
+function normalizeProviderModels(input: unknown, fetchedAt: string | null): ProviderModelConfig[] {
+  if (!Array.isArray(input)) return [];
+  const out: ProviderModelConfig[] = [];
+  const seen = new Set<string>();
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object') continue;
+    const obj = raw as Record<string, unknown>;
+    const id = normalizeModel(typeof obj.id === 'string' ? obj.id : '');
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const displayNameRaw = typeof obj.displayName === 'string'
+      ? obj.displayName
+      : typeof (obj as any).display_name === 'string'
+        ? (obj as any).display_name
+        : id;
+    out.push({
+      id,
+      displayName: normalizeModel(displayNameRaw) || id,
+      enabled: typeof obj.enabled === 'boolean' ? obj.enabled : true,
+      fetchedAt: typeof obj.fetchedAt === 'string' ? obj.fetchedAt : fetchedAt,
+    });
+  }
+  return out.slice(0, 256);
 }
 
 function normalizeFeishuAppId(input: unknown): string {
@@ -1001,10 +1054,13 @@ function toStoredProviderV4(provider: UnifiedProvider): StoredProviderV4 {
     id: provider.id,
     name: provider.name,
     type: provider.type,
+    apiType: provider.apiType || 'claude',
     enabled: provider.enabled,
     weight: Math.max(1, Math.min(100, provider.weight || 1)),
     anthropicBaseUrl: provider.anthropicBaseUrl || '',
     anthropicModel: provider.anthropicModel || '',
+    models: normalizeProviderModels(provider.models, provider.modelsFetchedAt),
+    modelsFetchedAt: provider.modelsFetchedAt ?? null,
     secrets: encryptSecrets(secrets),
     ...(Object.keys(sanitizedEnv).length > 0
       ? { customEnv: sanitizedEnv }
@@ -1019,11 +1075,14 @@ function fromStoredProviderV4(stored: StoredProviderV4): UnifiedProvider {
     id: stored.id,
     name: stored.name,
     type: stored.type,
+    apiType: normalizeApiType(stored.apiType),
     enabled: stored.enabled,
     weight: Math.max(1, Math.min(100, stored.weight || 1)),
     anthropicBaseUrl: stored.anthropicBaseUrl || '',
     anthropicAuthToken: secrets.anthropicAuthToken || '',
     anthropicModel: stored.anthropicModel || '',
+    models: normalizeProviderModels(stored.models, stored.modelsFetchedAt ?? null),
+    modelsFetchedAt: stored.modelsFetchedAt ?? null,
     anthropicApiKey: secrets.anthropicApiKey || '',
     claudeCodeOauthToken: secrets.claudeCodeOauthToken || '',
     claudeOAuthCredentials: secrets.claudeOAuthCredentials ?? null,
@@ -1052,11 +1111,14 @@ function migrateV3toV4(v3: ClaudeStoredStateV3Resolved): {
       id: OFFICIAL_CLAUDE_PROFILE_ID,
       name: '官方 Claude',
       type: 'official',
+      apiType: 'claude',
       enabled: isOfficialClaudeMode(v3.activeProfileId),
       weight: 1,
       anthropicBaseUrl: '',
       anthropicAuthToken: '',
       anthropicModel: '',
+      models: [],
+      modelsFetchedAt: null,
       anthropicApiKey: v3.officialSecrets.anthropicApiKey,
       claudeCodeOauthToken: v3.officialSecrets.claudeCodeOauthToken,
       claudeOAuthCredentials: v3.officialSecrets.claudeOAuthCredentials ?? null,
@@ -1072,11 +1134,16 @@ function migrateV3toV4(v3: ClaudeStoredStateV3Resolved): {
       id: profile.id,
       name: profile.name,
       type: 'third_party',
+      apiType: 'claude',
       enabled: profile.id === v3.activeProfileId,
       weight: 1,
       anthropicBaseUrl: profile.anthropicBaseUrl,
       anthropicAuthToken: profile.anthropicAuthToken,
       anthropicModel: profile.anthropicModel,
+      models: profile.anthropicModel
+        ? [{ id: profile.anthropicModel, displayName: profile.anthropicModel, enabled: true, fetchedAt: null }]
+        : [],
+      modelsFetchedAt: null,
       anthropicApiKey: '',
       claudeCodeOauthToken: '',
       claudeOAuthCredentials: null,
@@ -1235,9 +1302,11 @@ export function saveBalancingConfig(
 export function createProvider(input: {
   name: string;
   type: 'official' | 'third_party';
+  apiType?: ModelEndpointApiType;
   anthropicBaseUrl?: string;
   anthropicAuthToken?: string;
   anthropicModel?: string;
+  models?: Array<{ id: string; displayName?: string }>;
   anthropicApiKey?: string;
   claudeCodeOauthToken?: string;
   claudeOAuthCredentials?: ClaudeOAuthCredentials | null;
@@ -1255,10 +1324,24 @@ export function createProvider(input: {
   }
 
   const now = new Date().toISOString();
+  const selectedModel = input.anthropicModel ? normalizeModel(input.anthropicModel) : '';
+  const fetchedModels = normalizeProviderModels(
+    input.models?.map((m) => ({
+      id: m.id,
+      displayName: m.displayName || m.id,
+      enabled: true,
+      fetchedAt: now,
+    })) || [],
+    input.models?.length ? now : null,
+  );
+  const modelList = selectedModel && !fetchedModels.some((m) => m.id === selectedModel)
+    ? [{ id: selectedModel, displayName: selectedModel, enabled: true, fetchedAt: null }, ...fetchedModels]
+    : fetchedModels;
   const provider: UnifiedProvider = {
     id: crypto.randomBytes(8).toString('hex'),
     name: normalizeProfileName(input.name),
     type: input.type,
+    apiType: normalizeApiType(input.apiType),
     enabled: input.enabled ?? state.providers.length === 0,
     weight: Math.max(1, Math.min(100, input.weight ?? 1)),
     anthropicBaseUrl: input.anthropicBaseUrl
@@ -1267,9 +1350,9 @@ export function createProvider(input: {
     anthropicAuthToken: input.anthropicAuthToken
       ? normalizeSecret(input.anthropicAuthToken, 'anthropicAuthToken')
       : '',
-    anthropicModel: input.anthropicModel
-      ? normalizeModel(input.anthropicModel)
-      : '',
+    anthropicModel: selectedModel,
+    models: modelList.slice(0, 256),
+    modelsFetchedAt: input.models?.length ? now : null,
     anthropicApiKey: input.anthropicApiKey
       ? normalizeSecret(input.anthropicApiKey, 'anthropicApiKey')
       : '',
@@ -1292,6 +1375,7 @@ export function updateProvider(
   id: string,
   patch: {
     name?: string;
+    apiType?: ModelEndpointApiType;
     anthropicBaseUrl?: string;
     anthropicModel?: string;
     customEnv?: Record<string, string>;
@@ -1309,6 +1393,9 @@ export function updateProvider(
     ...current,
     ...(patch.name !== undefined
       ? { name: normalizeProfileName(patch.name) }
+      : {}),
+    ...(patch.apiType !== undefined
+      ? { apiType: normalizeApiType(patch.apiType) }
       : {}),
     ...(patch.anthropicBaseUrl !== undefined
       ? { anthropicBaseUrl: normalizeBaseUrl(patch.anthropicBaseUrl) }
@@ -1329,9 +1416,61 @@ export function updateProvider(
     updatedAt: new Date().toISOString(),
   };
 
+  if (patch.anthropicModel !== undefined && updated.anthropicModel) {
+    const models = normalizeProviderModels(updated.models, updated.modelsFetchedAt);
+    if (!models.some((m) => m.id === updated.anthropicModel)) {
+      models.unshift({
+        id: updated.anthropicModel,
+        displayName: updated.anthropicModel,
+        enabled: true,
+        fetchedAt: null,
+      });
+      updated.models = models.slice(0, 256);
+    }
+  }
+
   state.providers[idx] = updated;
   writeStoredStateV4(state.providers, state.balancing);
   return updated;
+}
+
+export function updateProviderModels(
+  id: string,
+  models: Array<{ id: string; displayName?: string }>,
+  selectedModel?: string,
+): UnifiedProvider {
+  const state = readStoredStateV4();
+  if (!state) throw new Error('Claude 配置不存在');
+
+  const idx = state.providers.findIndex((p) => p.id === id);
+  if (idx < 0) throw new Error('未找到指定供应商');
+
+  const fetchedAt = new Date().toISOString();
+  const normalizedModels = normalizeProviderModels(
+    models.map((m) => ({
+      id: m.id,
+      displayName: m.displayName || m.id,
+      enabled: true,
+      fetchedAt,
+    })),
+    fetchedAt,
+  );
+  const current = state.providers[idx];
+  const requestedModel = selectedModel ? normalizeModel(selectedModel) : '';
+  const selected = requestedModel || current.anthropicModel || normalizedModels[0]?.id || '';
+  const finalModels = selected && !normalizedModels.some((m) => m.id === selected)
+    ? [{ id: selected, displayName: selected, enabled: true, fetchedAt: null }, ...normalizedModels]
+    : normalizedModels;
+
+  state.providers[idx] = {
+    ...current,
+    anthropicModel: selected,
+    models: finalModels,
+    modelsFetchedAt: fetchedAt,
+    updatedAt: fetchedAt,
+  };
+  writeStoredStateV4(state.providers, state.balancing);
+  return state.providers[idx];
 }
 
 export function updateProviderSecrets(
@@ -1445,11 +1584,21 @@ export function deleteProvider(id: string): void {
 /** Convert a UnifiedProvider to the flat ClaudeProviderConfig used by container runner */
 export function providerToConfig(
   provider: UnifiedProvider,
+  options?: { proxyBaseUrl?: string },
 ): ClaudeProviderConfig {
+  const apiType = provider.apiType || 'claude';
+  const proxyBaseUrl = (options?.proxyBaseUrl || process.env.HAPPYCLAW_MODEL_PROXY_BASE_URL || `http://127.0.0.1:${WEB_PORT}`).replace(/\/+$/, '');
+  const useProxy = apiType !== 'claude';
   return {
-    anthropicBaseUrl: provider.anthropicBaseUrl,
-    anthropicAuthToken: provider.anthropicAuthToken,
-    anthropicApiKey: provider.anthropicApiKey,
+    apiType,
+    providerId: provider.id,
+    anthropicBaseUrl: useProxy
+      ? `${proxyBaseUrl}/api/model-proxy/${encodeURIComponent(provider.id)}`
+      : provider.anthropicBaseUrl,
+    anthropicAuthToken: useProxy ? '' : provider.anthropicAuthToken,
+    anthropicApiKey: useProxy
+      ? AGENT_RUNNER_SECRET
+      : provider.anthropicApiKey,
     claudeCodeOauthToken: provider.claudeCodeOauthToken,
     claudeOAuthCredentials: provider.claudeOAuthCredentials,
     anthropicModel: provider.anthropicModel,
@@ -1465,10 +1614,13 @@ export function toPublicProvider(
     id: provider.id,
     name: provider.name,
     type: provider.type,
+    apiType: provider.apiType || 'claude',
     enabled: provider.enabled,
     weight: provider.weight,
     anthropicBaseUrl: provider.anthropicBaseUrl,
     anthropicModel: provider.anthropicModel,
+    models: provider.models,
+    modelsFetchedAt: provider.modelsFetchedAt,
     hasAnthropicAuthToken: !!provider.anthropicAuthToken,
     anthropicAuthTokenMasked: maskSecret(provider.anthropicAuthToken),
     hasAnthropicApiKey: !!provider.anthropicApiKey,
@@ -3618,6 +3770,12 @@ export interface SystemSettings {
   // 跨天积压任务集体在重启那一秒并发 fire 刷屏。
   // 0 = 关闭（保留旧行为：无视逾期时长全部 backfill）。默认 300000 (5 分钟)。
   taskBackfillGraceMs: number;
+  // ─── Multi-backend support ─────────────────────────────────────
+  // 默认 agent 后端 ID（'claude-sdk' 等）。当 group.backend 未设置时使用本字段。
+  defaultBackend: string;
+  // 允许使用的 backend 白名单（admin 控制）。空数组表示沿用 defaults。
+  // group.backend 必须在白名单内才会生效，否则降级到 defaultBackend。
+  allowedBackends: string[];
 }
 
 const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
@@ -3640,6 +3798,8 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   disableMemoryLayerForAdminHost: false,
   pluginAutoScan: true,
   taskBackfillGraceMs: 300000,
+  defaultBackend: 'claude-sdk',
+  allowedBackends: ['claude-sdk'],
 };
 
 function parseIntEnv(envVar: string | undefined, fallback: number): number {
@@ -3743,6 +3903,15 @@ function readSystemSettingsFromFile(): SystemSettings | null {
       raw.taskBackfillGraceMs >= 0
         ? raw.taskBackfillGraceMs
         : DEFAULT_SYSTEM_SETTINGS.taskBackfillGraceMs,
+    defaultBackend:
+      typeof raw.defaultBackend === 'string' && raw.defaultBackend.trim()
+        ? raw.defaultBackend.trim()
+        : DEFAULT_SYSTEM_SETTINGS.defaultBackend,
+    allowedBackends: Array.isArray(raw.allowedBackends)
+      ? (raw.allowedBackends as unknown[]).filter(
+          (v): v is string => typeof v === 'string' && v.trim().length > 0,
+        )
+      : DEFAULT_SYSTEM_SETTINGS.allowedBackends.slice(),
   };
 }
 
@@ -3815,6 +3984,14 @@ function buildEnvFallbackSettings(): SystemSettings {
       process.env.TASK_BACKFILL_GRACE_MS,
       DEFAULT_SYSTEM_SETTINGS.taskBackfillGraceMs,
     ),
+    defaultBackend:
+      process.env.DEFAULT_BACKEND?.trim() ||
+      DEFAULT_SYSTEM_SETTINGS.defaultBackend,
+    allowedBackends: process.env.ALLOWED_BACKENDS
+      ? process.env.ALLOWED_BACKENDS.split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : DEFAULT_SYSTEM_SETTINGS.allowedBackends.slice(),
   };
 }
 
@@ -3922,6 +4099,29 @@ export function saveSystemSettings(
     if (merged.taskBackfillGraceMs < 1000) merged.taskBackfillGraceMs = 1000;
     if (merged.taskBackfillGraceMs > 86400000)
       merged.taskBackfillGraceMs = 86400000;
+  }
+
+  // ─── Backend selection validation ───
+  // defaultBackend 必须非空字符串；allowedBackends 必须是非空字符串数组并包含 defaultBackend
+  if (
+    typeof merged.defaultBackend !== 'string' ||
+    !merged.defaultBackend.trim()
+  ) {
+    merged.defaultBackend = DEFAULT_SYSTEM_SETTINGS.defaultBackend;
+  } else {
+    merged.defaultBackend = merged.defaultBackend.trim();
+  }
+  if (!Array.isArray(merged.allowedBackends)) {
+    merged.allowedBackends = DEFAULT_SYSTEM_SETTINGS.allowedBackends.slice();
+  } else {
+    merged.allowedBackends = merged.allowedBackends
+      .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+      .map((s) => s.trim());
+  }
+  if (merged.allowedBackends.length === 0) {
+    merged.allowedBackends = [merged.defaultBackend];
+  } else if (!merged.allowedBackends.includes(merged.defaultBackend)) {
+    merged.allowedBackends = [merged.defaultBackend, ...merged.allowedBackends];
   }
 
   // Validate externalClaudeDir: must be empty or an absolute directory path

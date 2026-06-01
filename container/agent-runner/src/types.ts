@@ -39,6 +39,10 @@ export interface ContainerInput {
    * host absolute path for host mode).
    */
   plugins?: Array<{ type: 'local'; path: string }>;
+  /** AgentLink ID used by remote MCP tools when local operations run on hcagent. */
+  remoteExecutionLinkId?: string;
+  /** Server base URL used by remote MCP tools to call /api/agent-link/tool. */
+  remoteToolServerUrl?: string;
   /** Runtime context audit bootstrap from the host/container launcher. */
   contextAudit?: ClaudeContextAudit;
 }

@@ -18,6 +18,9 @@ import { Toaster } from '@/components/ui/sonner';
 
 const ChatPage = lazy(() => import('./pages/ChatPage').then(m => ({ default: m.ChatPage })));
 const TasksPage = lazy(() => import('./pages/TasksPage').then(m => ({ default: m.TasksPage })));
+const DevicesPage = lazy(() => import('./pages/DevicesPage').then(m => ({ default: m.DevicesPage })));
+const AgentsPage = lazy(() => import('./pages/AgentsPage').then(m => ({ default: m.AgentsPage })));
+const ModelEndpointsPage = lazy(() => import('./pages/ModelEndpointsPage').then(m => ({ default: m.ModelEndpointsPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then(m => ({ default: m.SettingsPage })));
 const BillingPage = lazy(() => import('./pages/BillingPage'));
 
@@ -60,6 +63,9 @@ export function App() {
           <Route path="/chat/:groupFolder?" element={<Suspense fallback={null}><ChatPage /></Suspense>} />
           <Route path="/groups" element={<Navigate to="/settings?tab=groups" replace />} />
           <Route path="/tasks" element={<Suspense fallback={null}><TasksPage /></Suspense>} />
+          <Route path="/devices" element={<Suspense fallback={null}><DevicesPage /></Suspense>} />
+          <Route path="/agents" element={<Suspense fallback={null}><AgentsPage /></Suspense>} />
+          <Route path="/model-endpoints" element={<Suspense fallback={null}><ModelEndpointsPage /></Suspense>} />
           <Route path="/monitor" element={<Navigate to="/settings?tab=monitor" replace />} />
           <Route path="/usage" element={<Navigate to="/settings?tab=usage" replace />} />
           <Route path="/billing" element={<Suspense fallback={null}><BillingPage /></Suspense>} />

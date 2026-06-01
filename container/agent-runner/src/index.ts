@@ -42,6 +42,7 @@ import {
 import { StreamEventProcessor } from './stream-processor.js';
 import { PREDEFINED_AGENTS } from './agent-definitions.js';
 import { createMcpTools } from './mcp-tools.js';
+import { REMOTE_LOCAL_TOOL_NAMES, createRemoteMcpTools } from './remote-mcp-tools.js';
 
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
@@ -75,6 +76,8 @@ const DEFAULT_ALLOWED_TOOLS = [
   'NotebookEdit',
   'mcp__happyclaw__*'
 ];
+
+const REMOTE_TOOL_GUIDANCE = `\n\n<remote-execution>\nThis workspace is bound to a connected hcagent client. Do not use native local tools for machine, filesystem, shell, or network operations. Use the mcp__happyclaw__remote_* tools instead: remote_bash, remote_read, remote_write, remote_edit, remote_glob, remote_grep, remote_ls, remote_web_fetch, remote_web_search. Treat their results as the authoritative client workspace state.\n</remote-execution>`;
 
 const MEMORY_FLUSH_ALLOWED_TOOLS = [
   'mcp__happyclaw__memory_search',
@@ -1271,6 +1274,9 @@ async function runQuery(
     ...(containerInput.agentId
       ? [{ name: 'agent-override.md', text: CONVERSATION_AGENT_BLOCK }]
       : []),
+    ...(containerInput.remoteExecutionLinkId
+      ? [{ name: 'remote-execution', text: REMOTE_TOOL_GUIDANCE }]
+      : []),
   ];
   const systemPromptAppend = promptPieces.map((piece) => piece.text).join('\n');
   const promptAudit = buildPromptAudit(promptPieces);
@@ -1350,6 +1356,9 @@ async function runQuery(
   }
 
   try {
+    const remoteDisallowedTools = containerInput.remoteExecutionLinkId
+      ? Array.from(new Set([...(disallowedTools || []), ...REMOTE_LOCAL_TOOL_NAMES]))
+      : disallowedTools;
     const q = query({
       prompt: stream,
       options: {
@@ -1361,7 +1370,7 @@ async function runQuery(
         ...(sessionId && resumeAt ? { resumeSessionAt: resumeAt } : {}),
         systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: systemPromptAppend },
         allowedTools,
-        ...(disallowedTools && { disallowedTools }),
+        ...(remoteDisallowedTools && { disallowedTools: remoteDisallowedTools }),
         thinking: { type: 'adaptive' as const, display: 'summarized' as const },
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
@@ -1806,7 +1815,22 @@ async function main(): Promise<void> {
   const buildMcpServerConfig = () => createSdkMcpServer({
     name: 'happyclaw',
     version: '1.0.0',
-    tools: createMcpTools(mcpToolsConfig),
+    tools: [
+      ...createMcpTools(mcpToolsConfig),
+      ...(containerInput.remoteExecutionLinkId
+        ? createRemoteMcpTools({
+            linkId: containerInput.remoteExecutionLinkId,
+            cwd: WORKSPACE_GROUP,
+            serverBaseUrl:
+              containerInput.remoteToolServerUrl ||
+              process.env.HAPPYCLAW_SERVER_URL ||
+              'http://127.0.0.1:3000',
+            secret: process.env.HAPPYCLAW_AGENT_RUNNER_SECRET || '',
+            timeoutMs: 120_000,
+            maxOutputBytes: 1_048_576,
+          })
+        : []),
+    ],
   });
   let mcpServerConfig = buildMcpServerConfig();
   const memoryRecallPrompt = buildMemoryRecallPrompt(isHome, disableMemoryLayer);

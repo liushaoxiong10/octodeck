@@ -4,6 +4,7 @@ import {
   Key,
   Loader2,
   Plus,
+  RefreshCw,
   X,
 } from 'lucide-react';
 
@@ -11,10 +12,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { api } from '../../api/client';
-import type { ProviderWithHealth, EnvRow } from './types';
+import type { ProviderWithHealth, EnvRow, ProviderModelConfig } from './types';
 import { getErrorMessage } from './types';
 
 type ProviderType = 'official' | 'third_party';
+type EndpointApiType = 'claude' | 'openai-chat' | 'openai-responses';
 type OfficialAuthTab = 'oauth' | 'setup_token' | 'api_key';
 
 const RESERVED_ENV_KEYS = new Set([
@@ -80,6 +82,7 @@ export function ProviderEditor({
 
   // 基础字段
   const [providerType, setProviderType] = useState<ProviderType>('third_party');
+  const [apiType, setApiType] = useState<EndpointApiType>('claude');
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
@@ -106,6 +109,8 @@ export function ProviderEditor({
 
   // 状态
   const [saving, setSaving] = useState(false);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelOptions, setModelOptions] = useState<ProviderModelConfig[]>([]);
 
   // 初始化表单
   useEffect(() => {
@@ -113,6 +118,7 @@ export function ProviderEditor({
 
     if (isCreate) {
       setProviderType('third_party');
+      setApiType('claude');
       setName('');
       setBaseUrl('');
       setModel('');
@@ -126,8 +132,10 @@ export function ProviderEditor({
       setAuthTokenDirty(false);
       setClearTokenOnSave(false);
       setCustomEnvRows([]);
+      setModelOptions([]);
     } else {
       setProviderType(provider.type);
+      setApiType(provider.apiType ?? 'claude');
       setName(provider.name);
       setBaseUrl(provider.anthropicBaseUrl || '');
       setModel(provider.anthropicModel || '');
@@ -140,6 +148,7 @@ export function ProviderEditor({
       setAuthToken('');
       setAuthTokenDirty(false);
       setClearTokenOnSave(false);
+      setModelOptions(provider.models || []);
       const envRows = Object.entries(provider.customEnv || {}).map(([key, value]) => ({ key, value }));
       setCustomEnvRows(envRows);
     }
@@ -223,6 +232,7 @@ export function ProviderEditor({
         const createBody: Record<string, unknown> = {
           name: trimmedName,
           type: providerType,
+          apiType: providerType === 'official' ? 'claude' : apiType,
           customEnv: envResult.customEnv,
           weight,
         };
@@ -289,6 +299,9 @@ export function ProviderEditor({
         }
 
         if (model.trim()) createBody.anthropicModel = model.trim();
+        if (modelOptions.length > 0) {
+          createBody.models = modelOptions.map((m) => ({ id: m.id, displayName: m.displayName || m.id }));
+        }
 
         await api.post('/api/config/claude/providers', createBody);
         setNotice('提供商已创建。');
@@ -296,6 +309,7 @@ export function ProviderEditor({
         // ── 编辑模式 ──
         const patchBody: Record<string, unknown> = {
           name: trimmedName,
+          apiType: providerType === 'official' ? 'claude' : apiType,
           customEnv: envResult.customEnv,
           weight,
         };
@@ -376,6 +390,47 @@ export function ProviderEditor({
       setSaving(false);
     }
   };
+
+  const handleFetchModels = useCallback(async () => {
+    setFetchingModels(true);
+    setError(null);
+    try {
+      if (isCreate) {
+        const requestApiType = providerType === 'official' ? 'claude' : apiType;
+        const requestBaseUrl = providerType === 'official'
+          ? 'https://api.anthropic.com'
+          : baseUrl.trim();
+        const requestToken = providerType === 'official'
+          ? apiKey.trim()
+          : authToken.trim();
+        if (!requestBaseUrl || !requestToken) {
+          setError('请填写 Base URL 和 Token 后再拉取模型列表');
+          return;
+        }
+        const data = await api.post<{ models: ProviderModelConfig[] }>(
+          '/api/config/claude/providers/models/fetch',
+          { apiType: requestApiType, baseUrl: requestBaseUrl, token: requestToken },
+        );
+        setModelOptions(data.models || []);
+        setModel(data.models?.[0]?.id || model);
+        setNotice(`已拉取 ${data.models?.length ?? 0} 个模型`);
+        return;
+      }
+
+      const data = await api.post<{ provider: ProviderWithHealth; models: ProviderModelConfig[] }>(
+        `/api/config/claude/providers/${provider!.id}/models/fetch`,
+      );
+      setModelOptions(data.models || []);
+      setModel(data.provider.anthropicModel || data.models?.[0]?.id || model);
+      setNotice(`已拉取 ${data.models?.length ?? 0} 个模型`);
+    } catch (err) {
+      setError(getErrorMessage(err, '拉取模型列表失败'));
+    } finally {
+      setFetchingModels(false);
+    }
+  }, [isCreate, provider, providerType, apiType, baseUrl, apiKey, authToken, model, setError, setNotice]);
+
+  const hasFetchedModels = modelOptions.length > 0;
 
   const handleClose = () => {
     if (!saving && !oauthExchanging) {
@@ -592,23 +647,40 @@ export function ProviderEditor({
             </div>
           )}
 
-          {/* ─── 第三方模式 ─── */}
+          {/* ─── 第三方 / 模型端点模式 ─── */}
           {providerType === 'third_party' && (
             <div className="space-y-4">
               <div>
-                <label className="block text-xs text-muted-foreground mb-1">ANTHROPIC_BASE_URL</label>
+                <label className="block text-xs text-muted-foreground mb-1">端点 API 类型</label>
+                <select
+                  value={apiType}
+                  onChange={(e) => setApiType(e.target.value as EndpointApiType)}
+                  disabled={saving}
+                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                >
+                  <option value="claude">Claude Messages API</option>
+                  <option value="openai-chat">OpenAI Chat Completions API</option>
+                  <option value="openai-responses">OpenAI Responses API</option>
+                </select>
+                <p className="text-xs text-muted-foreground mt-1">
+                  非 Claude API 在云端访问时会先经由 HappyClaw 本地模型代理转换为 Claude Messages 兼容响应。
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs text-muted-foreground mb-1">模型端点 Base URL</label>
                 <Input
                   type="text"
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
                   disabled={saving}
-                  placeholder="https://your-relay.example.com/v1"
+                  placeholder={apiType === 'claude' ? 'https://your-relay.example.com/v1' : 'https://api.openai.com/v1'}
                 />
               </div>
 
               <div>
                 <label className="block text-xs text-muted-foreground mb-1">
-                  ANTHROPIC_AUTH_TOKEN{' '}
+                  访问 Token / API Key{' '}
                   {!isCreate && provider?.hasAnthropicAuthToken
                     ? `(${provider.anthropicAuthTokenMasked})`
                     : ''}
@@ -653,9 +725,24 @@ export function ProviderEditor({
 
           {/* ─── 模型选择 ─── */}
           <div>
-            <label className="block text-xs text-muted-foreground mb-1">
-              {providerType === 'official' ? '模型' : 'ANTHROPIC_MODEL'}
-            </label>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label className="block text-xs text-muted-foreground">
+                {providerType === 'official' ? '模型' : '模型 ID'}
+              </label>
+              {(providerType === 'third_party' || authTab === 'api_key' || !isCreate) && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={handleFetchModels}
+                  disabled={saving || fetchingModels}
+                  className="h-7 px-2 text-xs"
+                >
+                  {fetchingModels ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+                  从供应商拉取模型
+                </Button>
+              )}
+            </div>
             {providerType === 'official' ? (
               <>
                 <select
@@ -665,25 +752,41 @@ export function ProviderEditor({
                   className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30"
                 >
                   <option value="">default（默认）</option>
+                  {hasFetchedModels && modelOptions.map((m) => (
+                    <option key={m.id} value={m.id}>{m.displayName || m.id}</option>
+                  ))}
                   <option value="sonnet">sonnet</option>
                   <option value="haiku">haiku</option>
                 </select>
                 <p className="text-xs text-muted-foreground mt-1">
-                  别名自动解析为最新版本，留空使用 default。
+                  {hasFetchedModels ? `已保存 ${modelOptions.length} 个模型；也可继续使用 sonnet/haiku/default 别名。` : '别名自动解析为最新版本，留空使用 default。'}
                 </p>
               </>
             ) : (
               <>
+                {hasFetchedModels && (
+                  <select
+                    value={modelOptions.some((m) => m.id === model) ? model : ''}
+                    onChange={(e) => e.target.value && setModel(e.target.value)}
+                    disabled={saving}
+                    className="mb-2 w-full rounded-md border border-border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  >
+                    <option value="">选择已拉取模型（{modelOptions.length}）</option>
+                    {modelOptions.map((m) => (
+                      <option key={m.id} value={m.id}>{m.displayName || m.id}</option>
+                    ))}
+                  </select>
+                )}
                 <Input
                   type="text"
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
                   disabled={saving}
-                  placeholder="第三方 API 的模型名称"
+                  placeholder={apiType === 'claude' ? 'Claude 兼容模型名称' : 'OpenAI 模型名称，如 gpt-5'}
                   className="font-mono"
                 />
                 <p className="text-xs text-muted-foreground mt-1">
-                  注入为 ANTHROPIC_MODEL 环境变量，值取决于第三方 API 支持的模型。
+                  作为模型端点的目标模型；Claude API 直接注入，OpenAI API 会在代理转换时写入对应请求。
                 </p>
               </>
             )}

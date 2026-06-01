@@ -4,10 +4,13 @@ export interface UnifiedProviderPublic {
   id: string;
   name: string;
   type: 'official' | 'third_party';
+  apiType: 'claude' | 'openai-chat' | 'openai-responses';
   enabled: boolean;
   weight: number;
   anthropicBaseUrl: string;
   anthropicModel: string;
+  models: ProviderModelConfig[];
+  modelsFetchedAt: string | null;
   hasAnthropicAuthToken: boolean;
   anthropicAuthTokenMasked: string | null;
   hasAnthropicApiKey: boolean;
@@ -19,6 +22,13 @@ export interface UnifiedProviderPublic {
   claudeOAuthCredentialsAccessTokenMasked: string | null;
   customEnv: Record<string, string>;
   updatedAt: string;
+}
+
+export interface ProviderModelConfig {
+  id: string;
+  displayName: string;
+  enabled: boolean;
+  fetchedAt: string | null;
 }
 
 export interface ProviderHealthStatus {
@@ -107,6 +117,17 @@ export interface SystemSettings {
   disableMemoryLayerForAdminHost: boolean;
   pluginAutoScan: boolean;
   taskBackfillGraceMs: number;
+  defaultBackend: string;
+  allowedBackends: string[];
+}
+
+export interface BackendInfo {
+  id: string;
+  displayName: string;
+  usesProviderPool: boolean;
+  supportsHost: boolean;
+  supportsContainer: boolean;
+  kind?: 'builtin' | 'custom';
 }
 
 // ─── OAuth Usage ────────────────────────────────────────────
@@ -129,7 +150,7 @@ export interface CachedOAuthUsage {
   error?: string;
 }
 
-export type SettingsTab = 'claude' | 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'plugins' | 'agent-definitions' | 'users' | 'about' | 'bindings' | 'usage' | 'monitor';
+export type SettingsTab = 'registration' | 'appearance' | 'system' | 'profile' | 'my-channels' | 'security' | 'groups' | 'memory' | 'skills' | 'mcp-servers' | 'plugins' | 'agent-definitions' | 'users' | 'about' | 'bindings' | 'usage' | 'monitor';
 
 export function getErrorMessage(err: unknown, fallback: string): string {
   if (typeof err === 'object' && err !== null && 'message' in err) {

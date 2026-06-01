@@ -4,6 +4,8 @@ import path from 'path';
 import { GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
 import { getSystemSettings } from './runtime-config.js';
+import { runViaAgentLink } from './backends/agent-link-driver.js';
+import type { HostCliDriverConfig } from './backends/host-cli-driver.js';
 
 export interface ScriptRunResult {
   stdout: string;
@@ -29,12 +31,80 @@ const MAX_BUFFER = 1024 * 1024; // 1MB
 export async function runScript(
   command: string,
   groupFolder: string,
+  executionNode?: string | null,
 ): Promise<ScriptRunResult> {
   const { scriptTimeout } = getSystemSettings();
   const cwd = path.join(GROUPS_DIR, groupFolder);
   const startTime = Date.now();
 
   activeScriptCount++;
+
+  if (executionNode && executionNode !== 'server-local' && /^cl_[0-9a-f]{16}$/.test(executionNode)) {
+    const linkId = executionNode;
+    try {
+      const cfg: HostCliDriverConfig = {
+        backendId: 'script',
+        resolveBinary: () => '/bin/sh',
+        buildArgv: () => ['-c', command],
+        outputProtocol: 'plain-text',
+        timeoutMs: scriptTimeout,
+        maxOutputBytes: MAX_BUFFER,
+        envOverrides: {
+          PATH: process.env.PATH || '',
+          LANG: process.env.LANG || 'en_US.UTF-8',
+          TZ:
+            process.env.TZ ||
+            Intl.DateTimeFormat().resolvedOptions().timeZone,
+          GROUP_FOLDER: groupFolder,
+          HOME: process.env.HOME || cwd,
+        },
+      };
+      const output = await runViaAgentLink(
+        {
+          group: {
+            name: groupFolder,
+            folder: groupFolder,
+            added_at: new Date(startTime).toISOString(),
+            executionMode: 'host',
+            executionNode: linkId,
+          },
+          input: {
+            prompt: command,
+            groupFolder,
+            chatJid: `script:${groupFolder}`,
+            isMain: false,
+            isScheduledTask: true,
+          },
+          executionMode: 'host',
+          onProcess: () => undefined,
+        },
+        cfg,
+        linkId,
+      );
+      return {
+        stdout: output.status === 'success' ? output.result ?? '' : '',
+        stderr: output.status === 'error' ? output.error || output.result || '' : '',
+        exitCode: output.status === 'success' ? 0 : 1,
+        timedOut: false,
+        durationMs: Date.now() - startTime,
+      };
+    } catch (err) {
+      const durationMs = Date.now() - startTime;
+      logger.error(
+        { command: command.slice(0, 100), groupFolder, executionNode, err },
+        'Remote Device script execution failed',
+      );
+      return {
+        stdout: '',
+        stderr: err instanceof Error ? err.message : String(err),
+        exitCode: 1,
+        timedOut: false,
+        durationMs,
+      };
+    } finally {
+      activeScriptCount--;
+    }
+  }
 
   try {
     return await new Promise<ScriptRunResult>((resolve) => {

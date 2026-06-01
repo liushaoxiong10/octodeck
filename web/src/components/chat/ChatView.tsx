@@ -508,7 +508,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     setMobileTerminal(false);
   }, [groupJid]);
 
-  // If current group is host mode, force-close any mounted terminal.
+  // If current group uses Device native execution, force-close any mounted terminal.
   useEffect(() => {
     if (canUseTerminal) return;
     setTerminalVisible(false);
@@ -576,7 +576,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               <>
                 <span className="text-muted-foreground/40">·</span>
                 <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-medium border ${group.execution_mode === 'host' ? 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-800' : 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/30 dark:text-sky-300 dark:border-sky-800'}`}>
-                  {group.execution_mode === 'host' ? '宿主机' : 'Docker'}
+                  {group.execution_mode === 'host' ? 'Device' : 'Docker'}
                 </span>
               </>
             )}

@@ -34,6 +34,7 @@ export function TasksPage() {
     scheduleValue: string;
     executionType: 'agent' | 'script';
     executionMode?: 'host' | 'container';
+    executionNode?: string;
     scriptCommand: string;
     notifyChannels: string[] | null;
     chatJid?: string;
@@ -45,6 +46,7 @@ export function TasksPage() {
       data.scheduleValue,
       data.executionType,
       data.executionMode,
+      data.executionNode,
       data.scriptCommand,
       data.notifyChannels,
       data.chatJid,

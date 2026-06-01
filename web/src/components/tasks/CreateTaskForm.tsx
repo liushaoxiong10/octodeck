@@ -17,6 +17,7 @@ import { INTERVAL_UNITS, CHANNEL_OPTIONS, toggleNotifyChannel } from '../../util
 import { useConnectedChannels } from '../../hooks/useConnectedChannels';
 import { useTasksStore } from '../../stores/tasks';
 import { useGroupsStore } from '../../stores/groups';
+import { useAgentLinksStore } from '../../stores/agentLinks';
 import { formatGroupLabel } from '../settings/channel-meta';
 
 interface CreateTaskFormProps {
@@ -26,6 +27,7 @@ interface CreateTaskFormProps {
     scheduleValue: string;
     executionType: 'agent' | 'script';
     executionMode?: 'host' | 'container';
+    executionNode?: string;
     scriptCommand: string;
     notifyChannels: string[] | null;
     chatJid?: string;
@@ -64,12 +66,15 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
   const [chatJid, setChatJid] = useState<string>('');
   const [contextMode, setContextMode] = useState<'group' | 'isolated'>('group');
   const [executionModeExplicit, setExecutionModeExplicit] = useState<boolean>(false);
+  const [executionNode, setExecutionNode] = useState('');
+  const [executionNodeExplicit, setExecutionNodeExplicit] = useState(false);
   const connectedChannels = useConnectedChannels();
 
   const groupNames = useTasksStore((s) => s.groupNames);
   const loadTasks = useTasksStore((s) => s.loadTasks);
   const groups = useGroupsStore((s) => s.groups);
   const loadGroups = useGroupsStore((s) => s.loadGroups);
+  const { links: devices, load: loadDevices } = useAgentLinksStore();
 
   useEffect(() => {
     if (Object.keys(groupNames).length === 0) {
@@ -77,6 +82,9 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
     }
     if (Object.keys(groups).length === 0) {
       loadGroups();
+    }
+    if (isAdmin) {
+      loadDevices();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -92,6 +100,12 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
       prev.executionMode === next ? prev : { ...prev, executionMode: next },
     );
   }, [chatJid, groups, executionModeExplicit, isAdmin]);
+
+  useEffect(() => {
+    if (executionNodeExplicit) return;
+    const sourceNode = chatJid ? groups[chatJid]?.execution_node : undefined;
+    setExecutionNode(sourceNode && sourceNode.startsWith('cl_') ? sourceNode : '');
+  }, [chatJid, groups, executionNodeExplicit]);
 
   const isScript = formData.executionType === 'script';
 
@@ -192,6 +206,9 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
     } else {
       if (!formData.prompt.trim()) newErrors.prompt = '请输入 Prompt';
     }
+    if (isAdmin && formData.executionMode === 'host' && !executionNode) {
+      newErrors.executionNode = '请选择执行 Device';
+    }
     if (formData.scheduleType === 'cron') {
       if (!formData.scheduleValue.trim()) {
         newErrors.scheduleValue = '请输入 Cron 表达式';
@@ -238,6 +255,7 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
         scheduleValue: finalScheduleValue,
         executionType: formData.executionType,
         executionMode: executionModeExplicit ? formData.executionMode : undefined,
+        executionNode: formData.executionMode === 'host' && executionNode ? executionNode : undefined,
         scriptCommand: formData.scriptCommand,
         notifyChannels,
         chatJid: chatJid || undefined,
@@ -436,7 +454,7 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="host">宿主机</SelectItem>
+                    <SelectItem value="host">Device 原生执行</SelectItem>
                     <SelectItem value="container">Docker 容器</SelectItem>
                   </SelectContent>
                 </Select>
@@ -444,6 +462,40 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
                   {executionModeExplicit
                     ? '已手动指定执行模式，不再跟随源工作区'
                     : '默认继承源工作区的执行模式，选择后将锁定不再自动同步'}
+                </p>
+              </div>
+            )}
+
+            {isAdmin && formData.executionMode === 'host' && (
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">
+                  执行 Device
+                </label>
+                <Select
+                  value={executionNode}
+                  onValueChange={(value) => {
+                    setExecutionNodeExplicit(true);
+                    setExecutionNode(value);
+                  }}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {devices.map((device) => (
+                      <SelectItem key={device.id} value={device.id} disabled={!device.online}>
+                        {device.online ? '🟢' : '⚪️'} {device.displayName} ({device.id})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {errors.executionNode && (
+                  <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.executionNode}</p>
+                )}
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {executionNodeExplicit
+                    ? '已手动指定执行 Device，不再跟随源工作区'
+                    : '默认继承源工作区的执行 Device'}
                 </p>
               </div>
             )}

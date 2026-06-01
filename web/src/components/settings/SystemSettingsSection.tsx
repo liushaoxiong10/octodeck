@@ -73,8 +73,8 @@ const fields: FieldConfig[] = [
   },
   {
     key: 'maxConcurrentHostProcesses',
-    label: '最大并发宿主机进程数',
-    description: '同时运行的宿主机模式进程数量上限',
+    label: '最大并发 Device 原生进程数',
+    description: '同时运行的 Device 原生执行进程数量上限',
     unit: '个',
     toDisplay: (v) => v,
     toStored: (v) => v,
@@ -167,6 +167,8 @@ export function SystemSettingsSection() {
   const [externalClaudeDir, setExternalClaudeDir] = useState('');
   const [disableMemoryLayerForAdminHost, setDisableMemoryLayerForAdminHost] = useState(false);
   const [pluginAutoScan, setPluginAutoScan] = useState<boolean>(true);
+  const [defaultBackend, setDefaultBackend] = useState<string>('claude-sdk');
+  const [allowedBackends, setAllowedBackends] = useState<string[]>(['claude-sdk']);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -194,6 +196,8 @@ export function SystemSettingsSection() {
         setExternalClaudeDir(data.externalClaudeDir ?? '');
         setDisableMemoryLayerForAdminHost(data.disableMemoryLayerForAdminHost ?? false);
         setPluginAutoScan(data.pluginAutoScan ?? true);
+        setDefaultBackend(data.defaultBackend ?? 'claude-sdk');
+        setAllowedBackends(data.allowedBackends ?? ['claude-sdk']);
       } catch (err) {
         toast.error(getErrorMessage(err, '加载系统参数失败'));
       } finally {
@@ -241,6 +245,8 @@ export function SystemSettingsSection() {
         externalClaudeDir,
         disableMemoryLayerForAdminHost,
         pluginAutoScan,
+        defaultBackend,
+        allowedBackends,
       };
       for (const f of fields) {
         const val = displayValues[f.key];
@@ -262,6 +268,8 @@ export function SystemSettingsSection() {
       setExternalClaudeDir(data.externalClaudeDir ?? '');
       setDisableMemoryLayerForAdminHost(data.disableMemoryLayerForAdminHost ?? false);
       setPluginAutoScan(data.pluginAutoScan ?? true);
+      setDefaultBackend(data.defaultBackend ?? 'claude-sdk');
+      setAllowedBackends(data.allowedBackends ?? ['claude-sdk']);
       // 刷新计费状态，更新导航栏可见性
       loadBillingStatus();
       toast.success('系统参数已保存，新参数将对后续启动的容器/进程生效');
@@ -446,7 +454,7 @@ export function SystemSettingsSection() {
 
         <div className="flex items-center justify-between">
           <div className="flex-1 pr-4">
-            <Label>启动 5s + 每小时自动扫描宿主机 marketplace</Label>
+            <Label>启动 5s + 每小时自动扫描服务端本地 marketplace</Label>
             <p className="text-xs text-muted-foreground mt-0.5">
               开启时（默认）服务启动 5 秒后扫一次 ~/.claude/plugins/marketplaces/ 入共享 catalog，
               并每小时自动扫一次。关闭后定时扫描全部停掉，admin 仍可在 Plugins 页手动点扫描按钮。
@@ -489,7 +497,7 @@ export function SystemSettingsSection() {
             </p>
             <p className="text-xs text-muted-foreground mt-2">
               <strong>仅作用范围</strong>：admin 的主容器（is_home=1，folder=main）。admin
-              创建的其他 host 子群组、member 容器、Docker 容器模式均不受影响。
+              创建的其他 Device 原生执行子群组、member 容器、Docker 容器模式均不受影响。
             </p>
             <p className="text-xs text-muted-foreground mt-2">
               <strong>数据迁移提示</strong>：启用后 Agent 不再读取 data/groups/user-global/

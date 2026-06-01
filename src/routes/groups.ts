@@ -55,10 +55,12 @@ import {
   unpinGroup,
   deleteAgent,
   deleteImContextBindingsByWorkspace,
+  getAgentLinkById,
 } from '../db.js';
 import { logger } from '../logger.js';
 import {
   getContainerEnvConfig,
+  getSystemSettings,
   saveContainerEnvConfig,
   toPublicContainerEnvConfig,
 } from '../runtime-config.js';
@@ -161,6 +163,8 @@ interface GroupPayloadItem {
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
   conversation_source?: 'manual' | 'feishu_thread';
   conversation_nav_mode?: 'horizontal' | 'vertical_threads';
+  backend?: string;
+  execution_node?: string;
 }
 
 function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
@@ -271,6 +275,8 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       activation_mode: group.activation_mode ?? 'auto',
       conversation_source: group.conversation_source ?? 'manual',
       conversation_nav_mode: group.conversation_nav_mode ?? 'horizontal',
+      backend: group.backend,
+      execution_node: group.executionNode?.startsWith('cl_') ? group.executionNode : undefined,
     };
   }
 
@@ -352,6 +358,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
 
   // If user didn't specify execution mode, pick based on Docker availability
   const executionMode = validation.data.execution_mode || (await isDockerAvailable() ? 'container' : 'host');
+  const executionNode = validation.data.execution_node;
   const customCwd = validation.data.custom_cwd; // Schema already trims and converts empty to undefined
   const initSourcePath = validation.data.init_source_path;
   const initGitUrl = validation.data.init_git_url;
@@ -389,68 +396,23 @@ groupRoutes.post('/', authMiddleware, async (c) => {
         403,
       );
     }
+    if (!executionNode) {
+      return c.json({ error: 'execution_node is required for Device native execution' }, 400);
+    }
+    if (!/^cl_[0-9a-f]{16}$/.test(executionNode)) {
+      return c.json({ error: 'Invalid execution_node format' }, 400);
+    }
+    const link = getAgentLinkById(executionNode);
+    if (!link || link.userId !== authUser.id || link.revokedAt) {
+      return c.json({ error: 'execution_node not found' }, 400);
+    }
     if (customCwd) {
       if (!path.isAbsolute(customCwd)) {
         return c.json({ error: 'custom_cwd must be an absolute path' }, 400);
       }
 
-      // 检查路径是否存在
-      let realPath: string;
-      try {
-        const stat = fs.statSync(customCwd);
-        if (!stat.isDirectory()) {
-          return c.json(
-            { error: 'custom_cwd must be an existing directory' },
-            400,
-          );
-        }
-        realPath = fs.realpathSync(customCwd);
-      } catch {
-        return c.json({ error: 'custom_cwd directory does not exist' }, 400);
-      }
-
-      // 白名单校验：检查路径是否在允许的根目录下
-      const allowlist = loadMountAllowlist();
-      if (
-        allowlist &&
-        allowlist.allowedRoots &&
-        allowlist.allowedRoots.length > 0
-      ) {
-        let allowed = false;
-        for (const root of allowlist.allowedRoots) {
-          const expandedRoot = root.path.startsWith('~')
-            ? path.join(
-                process.env.HOME || '/Users/user',
-                root.path.slice(root.path.startsWith('~/') ? 2 : 1),
-              )
-            : path.resolve(root.path);
-
-          let realRoot: string;
-          try {
-            realRoot = fs.realpathSync(expandedRoot);
-          } catch {
-            continue; // 允许的根目录不存在，跳过
-          }
-
-          const relative = path.relative(realRoot, realPath);
-          if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
-            allowed = true;
-            break;
-          }
-        }
-
-        if (!allowed) {
-          const allowedPaths = allowlist.allowedRoots
-            .map((r) => r.path)
-            .join(', ');
-          return c.json(
-            {
-              error: `custom_cwd must be under an allowed root. Allowed roots: ${allowedPaths}. Check config/mount-allowlist.json`,
-            },
-            403,
-          );
-        }
-      }
+      // Remote Device workdirs live on the daemon filesystem. The server can
+      // only validate syntax here; existence/allowlist are enforced by the device runtime.
     }
   } else if (customCwd) {
     return c.json({ error: 'custom_cwd is only valid for host mode' }, 400);
@@ -573,6 +535,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     initSourcePath: executionMode !== 'host' ? initSourcePath : undefined,
     initGitUrl: executionMode !== 'host' ? initGitUrl : undefined,
     created_by: authUser.id,
+    executionNode: executionMode === 'host' ? executionNode : undefined,
   };
 
   setRegisteredGroup(jid, group);
@@ -647,6 +610,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       member_role: 'owner',
       member_count: 1,
       is_shared: false,
+      execution_node: group.executionNode?.startsWith('cl_') ? group.executionNode : undefined,
     },
   });
 });
@@ -673,6 +637,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned,
     activation_mode,
     execution_mode,
+    backend,
+    execution_node,
   } = validation.data;
   const name = rawName ? normalizeGroupName(rawName) : undefined;
 
@@ -681,9 +647,35 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     !name &&
     is_pinned === undefined &&
     activation_mode === undefined &&
-    execution_mode === undefined
+    execution_mode === undefined &&
+    backend === undefined &&
+    execution_node === undefined
   ) {
     return c.json({ error: 'No fields to update' }, 400);
+  }
+
+  // backend 必须在 SystemSettings.allowedBackends 白名单内（空字符串忽略，由前端表达"清空"语义未启用）
+  if (backend !== undefined) {
+    const settings = getSystemSettings();
+    if (!settings.allowedBackends.includes(backend)) {
+      return c.json(
+        {
+          error: `Backend "${backend}" is not in allowedBackends whitelist`,
+        },
+        400,
+      );
+    }
+  }
+
+  // execution_node 校验：必须是当前用户拥有的、未吊销的 AgentLink ID
+  if (execution_node !== undefined) {
+    if (!/^cl_[0-9a-f]{16}$/.test(execution_node)) {
+      return c.json({ error: 'Invalid execution_node format' }, 400);
+    }
+    const link = getAgentLinkById(execution_node);
+    if (!link || link.userId !== authUser.id || link.revokedAt) {
+      return c.json({ error: 'execution_node not found' }, 400);
+    }
   }
 
   // 不允许修改 is_home=true 的主容器执行模式（主容器由 loadState 强制管理）
@@ -707,7 +699,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned !== undefined &&
     !name &&
     activation_mode === undefined &&
-    execution_mode === undefined;
+    execution_mode === undefined &&
+    backend === undefined &&
+    execution_node === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -749,8 +743,14 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     unpinGroup(authUser.id, jid);
   }
 
-  // Update registered group if name, activation_mode, or execution_mode changed
-  if (name || activation_mode !== undefined || execution_mode !== undefined) {
+  // Update registered group if name, activation_mode, execution_mode, backend or execution_node changed
+  if (
+    name ||
+    activation_mode !== undefined ||
+    execution_mode !== undefined ||
+    backend !== undefined ||
+    execution_node !== undefined
+  ) {
     const updated: RegisteredGroup = {
       name: name || existing.name,
       folder: existing.folder,
@@ -773,6 +773,11 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         activation_mode !== undefined
           ? activation_mode
           : existing.activation_mode,
+      backend: backend !== undefined ? backend : existing.backend,
+      executionNode:
+        execution_node !== undefined
+          ? execution_node
+          : existing.executionNode,
     };
 
     setRegisteredGroup(jid, updated);

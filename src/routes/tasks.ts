@@ -22,6 +22,7 @@ import {
   getRegisteredGroup,
   getAllRegisteredGroups,
   getUserHomeGroup,
+  getAgentLinkById,
   deleteGroupData,
 } from '../db.js';
 import type { AuthUser } from '../types.js';
@@ -114,6 +115,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     execution_type,
     script_command,
     notify_channels,
+    execution_node,
   } = validation.data;
   const authUser = c.get('user') as AuthUser;
 
@@ -155,16 +157,17 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
   }
 
   // Determine execution_mode by inheriting from the source workspace.
-  // - Source is host: default host (admin-only via hasHostExecutionPermission
+  // - Source uses Device native execution: default host (admin-only via hasHostExecutionPermission
   //   check above), allow explicit container downgrade.
-  // - Source is container: default container; explicit host request rejected
+  // - Source is container: default container; explicit Device native request rejected
   //   even for admins, to keep task execution consistent with its workspace.
   const sourceIsHost = isHostExecutionGroup(group);
   let taskExecutionMode: 'host' | 'container';
+  let taskExecutionNode: string | null = null;
   if (validation.data.execution_mode === 'host') {
     if (!sourceIsHost) {
       return c.json(
-        { error: '当前工作区运行在容器模式，任务不能使用宿主机执行模式' },
+        { error: '当前工作区运行在容器模式，任务不能使用 Device 原生执行模式' },
         400,
       );
     }
@@ -174,6 +177,22 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     taskExecutionMode = 'container';
   } else {
     taskExecutionMode = sourceIsHost ? 'host' : 'container';
+  }
+  if (taskExecutionMode === 'host') {
+    const inheritedNode = group.executionNode?.startsWith('cl_')
+      ? group.executionNode
+      : undefined;
+    taskExecutionNode = execution_node ?? inheritedNode ?? null;
+    if (!taskExecutionNode) {
+      return c.json({ error: 'execution_node is required for Device native execution' }, 400);
+    }
+    if (!/^cl_[0-9a-f]{16}$/.test(taskExecutionNode)) {
+      return c.json({ error: 'Invalid execution_node format' }, 400);
+    }
+    const link = getAgentLinkById(taskExecutionNode);
+    if (!link || link.userId !== authUser.id || link.revokedAt) {
+      return c.json({ error: 'execution_node not found' }, 400);
+    }
   }
 
   const taskId = crypto.randomUUID();
@@ -209,6 +228,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     context_mode: validation.data.context_mode || 'group',
     execution_type: execType,
     execution_mode: taskExecutionMode,
+    execution_node: taskExecutionNode,
     script_command: script_command ?? null,
     next_run: nextRun,
     status: 'active',
@@ -259,9 +279,9 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
     return c.json({ error: '只有管理员可以创建或修改脚本类型任务' }, 403);
   }
 
-  // Only admin can set execution_mode to 'host'
+  // Only admin can set execution_mode to Device native execution
   if (validation.data.execution_mode === 'host' && authUser.role !== 'admin') {
-    return c.json({ error: '只有管理员可以设置宿主机执行模式' }, 403);
+    return c.json({ error: '只有管理员可以设置 Device 原生执行模式' }, 403);
   }
 
   // Validate chat_jid if being changed
@@ -280,9 +300,9 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
     effectiveTargetGroup = targetGroup;
   }
 
-  // Final-state consistency: after the patch, if the task runs as 'host', the
-  // target workspace must itself be a host workspace. Container workspaces
-  // reject host execution for ALL roles (including admin) — execution mode
+  // Final-state consistency: after the patch, if the task uses Device native
+  // execution, the target workspace must itself be a Device-native workspace.
+  // Container workspaces reject Device native execution for ALL roles (including admin) — execution mode
   // must match the source workspace's capabilities.
   const finalExecutionMode =
     patchData.execution_mode ?? existing.execution_mode;
@@ -294,7 +314,7 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
     return c.json(
       {
         error:
-          '目标工作区运行在容器模式，任务不能使用宿主机执行模式。请同时把执行模式改为 container。',
+          '目标工作区运行在容器模式，任务不能使用 Device 原生执行模式。请同时把执行模式改为 container。',
       },
       400,
     );

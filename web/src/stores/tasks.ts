@@ -19,6 +19,7 @@ export interface ScheduledTask {
   created_at: string;
   notify_channels?: string[] | null;
   execution_mode?: 'host' | 'container' | null;
+  execution_node?: string | null;
   workspace_jid?: string | null;
   workspace_folder?: string | null;
 }
@@ -47,6 +48,7 @@ interface TasksState {
     scheduleValue: string,
     executionType?: 'agent' | 'script',
     executionMode?: 'host' | 'container',
+    executionNode?: string,
     scriptCommand?: string,
     notifyChannels?: string[] | null,
     chatJid?: string,
@@ -98,6 +100,7 @@ export const useTasksStore = create<TasksState>((set, get) => ({
     scheduleValue: string,
     executionType?: 'agent' | 'script',
     executionMode?: 'host' | 'container',
+    executionNode?: string,
     scriptCommand?: string,
     notifyChannels?: string[] | null,
     chatJid?: string,
@@ -119,6 +122,9 @@ export const useTasksStore = create<TasksState>((set, get) => ({
       }
       if (executionMode) {
         body.execution_mode = executionMode;
+      }
+      if (executionNode) {
+        body.execution_node = executionNode;
       }
       if (scriptCommand) {
         body.script_command = scriptCommand;

@@ -1,0 +1,419 @@
+import { useEffect, useMemo, useState } from 'react';
+import { Loader2, RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { api } from '../../api/client';
+import {
+  useCustomBackendsStore,
+  type CustomBackendDef,
+} from '../../stores/customBackends';
+import { useAgentLinksStore } from '../../stores/agentLinks';
+import { getErrorMessage, type ProvidersListResponse } from './types';
+
+type RuntimeMode = 'local-device' | 'server-side';
+type WorkdirMode = 'auto' | 'custom';
+
+interface CustomBackendFormDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** null = 创建；非 null = 编辑现有 */
+  backend: CustomBackendDef | null;
+}
+
+interface ModelInfo {
+  id: string;
+  displayName?: string;
+}
+
+interface FormState {
+  id: string;
+  displayName: string;
+  runtime: RuntimeMode;
+  timeoutMinutes: string;
+  maxOutputMb: string;
+  deviceLinkId: string;
+  agentClientId: string;
+  serverProviderId: string;
+  model: string;
+  workdirMode: WorkdirMode;
+  workdir: string;
+}
+
+const INITIAL: FormState = {
+  id: '',
+  displayName: '',
+  runtime: 'local-device',
+  timeoutMinutes: '',
+  maxOutputMb: '',
+  deviceLinkId: '',
+  agentClientId: '',
+  serverProviderId: '',
+  model: '',
+  workdirMode: 'auto',
+  workdir: '',
+};
+
+function backendToForm(b: CustomBackendDef): FormState {
+  return {
+    id: b.id,
+    displayName: b.displayName,
+    runtime: b.runtime ?? (b.deviceLinkId ? 'local-device' : 'server-side'),
+    timeoutMinutes:
+      typeof b.timeoutMs === 'number' ? String(Math.round(b.timeoutMs / 60000)) : '',
+    maxOutputMb:
+      typeof b.maxOutputBytes === 'number'
+        ? String(Math.round(b.maxOutputBytes / 1048576))
+        : '',
+    deviceLinkId: b.deviceLinkId ?? '',
+    agentClientId: b.agentClientId ?? '',
+    serverProviderId: '',
+    model: b.model ?? '',
+    workdirMode: b.workdirMode ?? 'auto',
+    workdir: b.workdir ?? '',
+  };
+}
+
+function defaultId(runtime: RuntimeMode, providerId: string) {
+  const suffix = providerId.replace(/[^a-z0-9_-]/gi, '-').toLowerCase() || 'agent';
+  return runtime === 'server-side' ? `server-${suffix}` : `device-${suffix}`;
+}
+
+export default function CustomBackendFormDialog({
+  open,
+  onOpenChange,
+  backend,
+}: CustomBackendFormDialogProps) {
+  const { create, update } = useCustomBackendsStore();
+  const { links: devices, load: loadDevices } = useAgentLinksStore();
+  const [form, setForm] = useState<FormState>(INITIAL);
+  const [submitting, setSubmitting] = useState(false);
+  const [serverModels, setServerModels] = useState<ModelInfo[]>([]);
+  const [localModels, setLocalModels] = useState<ModelInfo[]>([]);
+  const [providersLoading, setProvidersLoading] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [serverProviders, setServerProviders] = useState<ProvidersListResponse['providers']>([]);
+  const isEdit = backend !== null;
+  const selectedDevice = devices.find((d) => d.id === form.deviceLinkId);
+  const availableClients = selectedDevice?.agentClients ?? [];
+  const selectedClient = availableClients.find((c) => c.id === form.agentClientId);
+
+  useEffect(() => {
+    if (!open) return;
+    setForm(backend ? backendToForm(backend) : INITIAL);
+    setServerModels([]);
+    setLocalModels([]);
+    void loadDevices();
+    void loadServerProviders();
+  }, [open, backend, loadDevices]);
+
+  const set = <K extends keyof FormState>(key: K, val: FormState[K]) =>
+    setForm((prev) => ({ ...prev, [key]: val }));
+
+  const modelOptions = useMemo(() => {
+    if (form.runtime === 'server-side') return serverModels;
+    return localModels;
+  }, [form.runtime, localModels, serverModels]);
+
+  async function loadServerProviders() {
+    setProvidersLoading(true);
+    try {
+      const data = await api.get<ProvidersListResponse>('/api/config/claude/providers');
+      const enabled = (data.providers ?? []).filter((p) => p.enabled);
+      setServerProviders(enabled);
+      if (enabled.length > 0) {
+        const models = Array.from(
+          new Map(enabled.map((p) => [p.anthropicModel, { id: p.anthropicModel, displayName: p.anthropicModel }])).values(),
+        );
+        setServerModels(models);
+        setForm((prev) => ({
+          ...prev,
+          serverProviderId: prev.serverProviderId || enabled[0].id,
+          model: prev.runtime === 'server-side' && !prev.model ? models[0]?.id ?? '' : prev.model,
+        }));
+      }
+    } catch (err) {
+      toast.error(getErrorMessage(err, '加载 server-side 模型失败'));
+    } finally {
+      setProvidersLoading(false);
+    }
+  }
+
+  async function loadLocalModels(deviceId = form.deviceLinkId, providerId = form.agentClientId) {
+    if (!deviceId || !providerId) return;
+    setModelsLoading(true);
+    try {
+      const data = await api.get<{ models: ModelInfo[] }>(
+        `/api/agent-links/${encodeURIComponent(deviceId)}/providers/${encodeURIComponent(providerId)}/models`,
+      );
+      const models = data.models ?? [];
+      setLocalModels(models);
+      setForm((prev) => ({ ...prev, model: prev.model || models[0]?.id || '' }));
+    } catch (err) {
+      setLocalModels([]);
+      toast.error(getErrorMessage(err, '从设备查询模型失败'));
+    } finally {
+      setModelsLoading(false);
+    }
+  }
+
+  const handleSubmit = async () => {
+    if (!isEdit && !/^[a-z][a-z0-9_-]{0,63}$/.test(form.id)) {
+      toast.error('ID 必须以小写字母开头，仅包含 [a-z0-9_-]，最长 64 字符');
+      return;
+    }
+    if (!form.displayName.trim()) {
+      toast.error('显示名称不能为空');
+      return;
+    }
+    if (form.runtime === 'local-device') {
+      if (!form.deviceLinkId) {
+        toast.error('请选择设备');
+        return;
+      }
+      if (!form.agentClientId) {
+        toast.error('请选择该设备上报的 Agent client');
+        return;
+      }
+      if (!availableClients.some((c) => c.id === form.agentClientId)) {
+        toast.error('只能添加客户端上报的 Agent client');
+        return;
+      }
+    }
+    if (!form.model.trim()) {
+      toast.error('请选择模型');
+      return;
+    }
+    if (form.workdirMode === 'custom' && !form.workdir.startsWith('/')) {
+      toast.error('Workdir 必须是绝对路径');
+      return;
+    }
+
+    const timeoutMs = form.timeoutMinutes.trim()
+      ? Math.round(Number(form.timeoutMinutes) * 60000)
+      : undefined;
+    const maxOutputBytes = form.maxOutputMb.trim()
+      ? Math.round(Number(form.maxOutputMb) * 1048576)
+      : undefined;
+
+    if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 60_000 || timeoutMs > 86_400_000)) {
+      toast.error('超时时间必须在 1 分钟 ~ 24 小时之间');
+      return;
+    }
+    if (maxOutputBytes !== undefined && (!Number.isFinite(maxOutputBytes) || maxOutputBytes < 1_048_576 || maxOutputBytes > 104_857_600)) {
+      toast.error('单次输出上限必须在 1 ~ 100 MB 之间');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const common = {
+        displayName: form.displayName.trim(),
+        timeoutMs,
+        maxOutputBytes,
+        runtime: form.runtime,
+        model: form.model.trim(),
+        workdirMode: form.workdirMode,
+        workdir: form.workdirMode === 'custom' ? form.workdir.trim() : undefined,
+        deviceLinkId: form.runtime === 'local-device' ? form.deviceLinkId.trim() : undefined,
+        supportsHost: true,
+      } as const;
+      const providerId = form.runtime === 'server-side' ? form.serverProviderId : form.agentClientId;
+      if (isEdit && backend) {
+        await update(backend.id, {
+          ...common,
+          agentClientId: form.runtime === 'local-device' ? form.agentClientId : null,
+          deviceLinkId: form.runtime === 'local-device' ? form.deviceLinkId.trim() : null,
+          ...(form.runtime === 'server-side'
+            ? { binary: 'claude', argvTemplate: ['-p', '{prompt}', '--model', form.model], outputProtocol: 'plain-text' as const }
+            : {}),
+        });
+        toast.success('已更新自定义 Agent');
+      } else {
+        await create({
+          id: form.id || defaultId(form.runtime, providerId),
+          ...common,
+          agentClientId: form.runtime === 'local-device' ? form.agentClientId : undefined,
+          ...(form.runtime === 'server-side'
+            ? { binary: 'claude', argvTemplate: ['-p', '{prompt}', '--model', form.model], outputProtocol: 'plain-text' as const, usesProviderPool: true }
+            : {}),
+        });
+        toast.success('已创建自定义 Agent');
+      }
+      onOpenChange(false);
+    } catch (err) {
+      toast.error(getErrorMessage(err, '保存失败'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const applyProviderDefaults = (providerId: string) => {
+    setForm((prev) => ({
+      ...prev,
+      agentClientId: providerId,
+      model: '',
+      id: prev.id || defaultId(prev.runtime, providerId),
+      displayName: prev.displayName || `${selectedDevice?.displayName ?? 'Device'} ${providerId}`,
+    }));
+    void loadLocalModels(form.deviceLinkId, providerId);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{isEdit ? `编辑自定义 Agent: ${backend?.id}` : '新增自定义 Agent'}</DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-5 py-2">
+          <section className="rounded-2xl border border-border bg-muted/20 p-4 space-y-3">
+            <div>
+              <div className="text-sm font-semibold text-foreground">Agent 配置</div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                所有字段在一个表单里完成；切换运行位置后只显示对应必填项。
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {(['local-device', 'server-side'] as RuntimeMode[]).map((runtime) => (
+                <button
+                  key={runtime}
+                  type="button"
+                  onClick={() => setForm((prev) => ({ ...prev, runtime, deviceLinkId: runtime === 'server-side' ? '' : prev.deviceLinkId, agentClientId: '', model: '' }))}
+                  className={`rounded-2xl border p-4 text-left transition ${form.runtime === runtime ? 'border-primary bg-primary/10 shadow-sm' : 'border-border bg-background hover:bg-muted/30'}`}
+                >
+                  <div className="text-sm font-semibold">{runtime === 'local-device' ? 'LocalRuntime' : 'Server Side'}</div>
+                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                    {runtime === 'local-device'
+                      ? 'Provider CLI 在选中 Device 上运行，模型列表实时从该设备/provider 查询。'
+                      : 'Loop 在服务端运行，使用服务端 Provider Pool，不需要选择 Device。'}
+                  </p>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <section className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs text-zinc-500 mb-1">ID</label>
+              <Input value={form.id} onChange={(e) => set('id', e.target.value)} disabled={isEdit} placeholder="如 codex-agent" />
+            </div>
+            <div>
+              <label className="block text-xs text-zinc-500 mb-1">显示名称</label>
+              <Input value={form.displayName} onChange={(e) => set('displayName', e.target.value)} placeholder="如 Mac Codex" />
+            </div>
+          </section>
+
+          <section className="space-y-3">
+            <div className="text-xs font-medium text-muted-foreground">运行位置</div>
+            {form.runtime === 'local-device' ? (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="block text-xs text-zinc-500 mb-1">Device</label>
+                  <select
+                    value={form.deviceLinkId}
+                    onChange={(e) => setForm((prev) => ({ ...prev, deviceLinkId: e.target.value, agentClientId: '', model: '' }))}
+                    className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+                  >
+                    <option value="">请选择设备</option>
+                    {devices.map((d) => (
+                      <option key={d.id} value={d.id}>{d.displayName} ({d.id}){d.online ? ' · online' : ' · offline'}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-zinc-500 mb-1">Provider CLI</label>
+                  <select
+                    value={form.agentClientId}
+                    onChange={(e) => applyProviderDefaults(e.target.value)}
+                    disabled={!form.deviceLinkId || availableClients.length === 0}
+                    className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+                  >
+                    <option value="">{!form.deviceLinkId ? '请先选择设备' : availableClients.length === 0 ? '该设备尚未上报可用 Provider CLI' : '请选择 Provider CLI'}</option>
+                    {availableClients.map((c) => <option key={c.id} value={c.id}>{c.displayName} ({c.id}){c.version ? ` · ${c.version}` : ''}</option>)}
+                  </select>
+                  {selectedClient ? <p className="mt-1 text-xs text-muted-foreground">权限模式：{selectedClient.permissionModes?.join(', ') || '—'}</p> : null}
+                </div>
+              </div>
+            ) : (
+              <div>
+                <label className="block text-xs text-zinc-500 mb-1">Server Side Provider</label>
+                <select
+                  value={form.serverProviderId}
+                  onChange={(e) => set('serverProviderId', e.target.value)}
+                  disabled={providersLoading || serverProviders.length === 0}
+                  className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+                >
+                  <option value="">{providersLoading ? '加载中...' : '请选择 server-side provider'}</option>
+                  {serverProviders.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.anthropicModel})</option>)}
+                </select>
+              </div>
+            )}
+          </section>
+
+          <section className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <label className="block text-xs text-zinc-500">模型</label>
+              {form.runtime === 'local-device' ? (
+                <Button type="button" variant="outline" size="sm" onClick={() => loadLocalModels()} disabled={!form.deviceLinkId || !form.agentClientId || modelsLoading}>
+                  {modelsLoading ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+                  实时查询
+                </Button>
+              ) : null}
+            </div>
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <select
+                value={modelOptions.some((m) => m.id === form.model) ? form.model : ''}
+                onChange={(e) => set('model', e.target.value)}
+                disabled={modelsLoading || modelOptions.length === 0}
+                className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+              >
+                <option value="">{modelsLoading ? '查询中...' : modelOptions.length === 0 ? '暂无模型，可手动输入' : '从列表选择模型'}</option>
+                {modelOptions.map((m) => <option key={m.id} value={m.id}>{m.displayName ?? m.id}</option>)}
+              </select>
+              <Input value={form.model} onChange={(e) => set('model', e.target.value)} placeholder="或手动输入模型 ID" />
+            </div>
+          </section>
+
+          <section className="space-y-3">
+            <div className="text-xs font-medium text-muted-foreground">Workdir</div>
+            <div className="grid grid-cols-2 gap-3">
+              <button type="button" onClick={() => set('workdirMode', 'auto')} className={`rounded-xl border p-3 text-left ${form.workdirMode === 'auto' ? 'border-primary bg-primary/10' : 'border-border'}`}>
+                <div className="text-sm font-medium">自动生成 Workdir</div>
+                <p className="mt-1 text-xs text-muted-foreground">由 Agent 运行时按工作区生成路径。</p>
+              </button>
+              <button type="button" onClick={() => set('workdirMode', 'custom')} className={`rounded-xl border p-3 text-left ${form.workdirMode === 'custom' ? 'border-primary bg-primary/10' : 'border-border'}`}>
+                <div className="text-sm font-medium">指定绝对路径</div>
+                <p className="mt-1 text-xs text-muted-foreground">Workdir 绑定到 Agent 自身。</p>
+              </button>
+            </div>
+            {form.workdirMode === 'custom' ? <Input value={form.workdir} onChange={(e) => set('workdir', e.target.value)} placeholder="/Users/me/project" /> : null}
+          </section>
+
+          <section className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs text-zinc-500 mb-1">超时（分钟，留空=默认）</label>
+              <Input type="number" min={1} max={1440} value={form.timeoutMinutes} onChange={(e) => set('timeoutMinutes', e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs text-zinc-500 mb-1">输出上限（MB，留空=默认）</label>
+              <Input type="number" min={1} max={100} value={form.maxOutputMb} onChange={(e) => set('maxOutputMb', e.target.value)} />
+            </div>
+          </section>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>取消</Button>
+          <Button onClick={handleSubmit} disabled={submitting}>{submitting ? '保存中...' : isEdit ? '保存' : '创建'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

@@ -7,6 +7,7 @@ import { STORE_DIR, GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
 import {
   AgentKind,
+  AgentLink,
   AgentStatus,
   AuthAuditLog,
   AuthEventType,
@@ -628,6 +629,31 @@ export function initDatabase(): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- Phase 5.1: hcagent client links. Online state lives only in
+    -- AgentLinkRegistry memory; this table tracks identity, token hash,
+    -- capabilities and last-seen heartbeat.
+    CREATE TABLE IF NOT EXISTS agent_links (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      token_hash TEXT NOT NULL,
+      capabilities TEXT NOT NULL DEFAULT '[]',
+      agent_clients TEXT NOT NULL DEFAULT '[]',
+      resources TEXT NOT NULL DEFAULT '{}',
+      os TEXT,
+      arch TEXT,
+      hostname TEXT,
+      client_version TEXT,
+      last_connected_at TEXT,
+      last_seen_at TEXT,
+      created_at TEXT NOT NULL,
+      revoked_at TEXT,
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_links_user ON agent_links(user_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_links_active
+      ON agent_links(user_id) WHERE revoked_at IS NULL;
   `);
 
   // Lightweight migrations for existing DBs
@@ -667,6 +693,7 @@ export function initDatabase(): void {
   ensureColumn('scheduled_tasks', 'script_command', 'TEXT');
   ensureColumn('scheduled_tasks', 'notify_channels', 'TEXT');
   ensureColumn('scheduled_tasks', 'execution_mode', 'TEXT');
+  ensureColumn('scheduled_tasks', 'execution_node', 'TEXT');
   ensureColumn('scheduled_tasks', 'workspace_jid', 'TEXT');
   ensureColumn('scheduled_tasks', 'workspace_folder', 'TEXT');
   ensureColumn('registered_groups', 'selected_skills', 'TEXT');
@@ -702,6 +729,11 @@ export function initDatabase(): void {
   ensureColumn('registered_groups', 'feishu_chat_mode', 'TEXT');
   ensureColumn('registered_groups', 'feishu_group_message_type', 'TEXT');
   ensureColumn('registered_groups', 'sender_allowlist', 'TEXT');
+  ensureColumn('registered_groups', 'backend', 'TEXT');
+  // Phase 5.1: per-group execution node (server-local | <agent_link_id>)
+  ensureColumn('registered_groups', 'execution_node', 'TEXT');
+  ensureColumn('agent_links', 'agent_clients', "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn('agent_links', 'resources', "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn('messages', 'token_usage', 'TEXT');
   ensureColumn('messages', 'turn_id', 'TEXT');
   ensureColumn('messages', 'session_id', 'TEXT');
@@ -788,6 +820,11 @@ export function initDatabase(): void {
     'status',
     'created_at',
     'created_by',
+    'execution_type',
+    'script_command',
+    'execution_mode',
+    'execution_node',
+    'notify_channels',
   ]);
   assertSchema(
     'registered_groups',
@@ -1986,8 +2023,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, execution_mode, next_run, status, created_at, created_by, notify_channels)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, execution_mode, execution_node, next_run, status, created_at, created_by, notify_channels)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -2002,6 +2039,7 @@ export function createTask(
       ? null
       : toUtf8String(task.script_command, 'scheduled_tasks.script_command'),
     task.execution_mode ?? null,
+    task.execution_node ?? null,
     task.next_run,
     task.status,
     task.created_at,
@@ -2024,6 +2062,7 @@ function mapTaskRow(row: unknown): ScheduledTask {
   }
   // Normalize new nullable fields
   if (r.execution_mode === undefined) r.execution_mode = null;
+  if (r.execution_node === undefined) r.execution_node = null;
   if (r.workspace_jid === undefined) r.workspace_jid = null;
   if (r.workspace_folder === undefined) r.workspace_folder = null;
   // Defensive: legacy BLOB cells in TEXT-affinity columns come back as Buffer.
@@ -2064,6 +2103,7 @@ export function updateTask(
       | 'context_mode'
       | 'execution_type'
       | 'execution_mode'
+      | 'execution_node'
       | 'script_command'
       | 'next_run'
       | 'status'
@@ -2099,6 +2139,10 @@ export function updateTask(
   if (updates.execution_mode !== undefined) {
     fields.push('execution_mode = ?');
     values.push(updates.execution_mode);
+  }
+  if (updates.execution_node !== undefined) {
+    fields.push('execution_node = ?');
+    values.push(updates.execution_node);
   }
   if (updates.script_command !== undefined) {
     fields.push('script_command = ?');
@@ -2494,6 +2538,8 @@ type RegisteredGroupRow = {
   feishu_chat_mode: string | null;
   feishu_group_message_type: string | null;
   sender_allowlist: string | null;
+  backend: string | null;
+  execution_node: string | null;
 };
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
@@ -2533,6 +2579,8 @@ function parseGroupRow(
     sender_allowlist: row.sender_allowlist != null
       ? (JSON.parse(row.sender_allowlist) as string[])
       : undefined,
+    backend: row.backend ?? undefined,
+    executionNode: row.execution_node ?? undefined,
   };
 }
 
@@ -2564,8 +2612,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist, backend, execution_node)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2593,6 +2641,8 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.feishu_chat_mode ?? null,
     group.feishu_group_message_type ?? null,
     group.sender_allowlist != null ? JSON.stringify(group.sender_allowlist) : null,
+    group.backend ?? null,
+    group.executionNode ?? null,
   );
 }
 
@@ -5883,4 +5933,253 @@ export function closeDatabase(): void {
   if (db) {
     db.close();
   }
+}
+
+// ───────────────────────── Agent Links (Phase 5.1) ─────────────────────────
+
+type AgentLinkRow = {
+  id: string;
+  user_id: string;
+  display_name: string;
+  token_hash: string;
+  capabilities: string;
+  agent_clients: string;
+  resources: string;
+  os: string | null;
+  arch: string | null;
+  hostname: string | null;
+  client_version: string | null;
+  last_connected_at: string | null;
+  last_seen_at: string | null;
+  created_at: string;
+  revoked_at: string | null;
+};
+
+function parseAgentLinkRow(row: AgentLinkRow): AgentLink {
+  let caps: string[] = [];
+  let agentClients: AgentLink['agentClients'] = [];
+  let resources: AgentLink['resources'] | undefined;
+  try {
+    const parsed = JSON.parse(row.capabilities);
+    if (Array.isArray(parsed)) caps = parsed.filter((c) => typeof c === 'string');
+  } catch {
+    /* ignore malformed */
+  }
+  try {
+    const parsed = JSON.parse(row.agent_clients || '[]');
+    if (Array.isArray(parsed)) {
+      agentClients = parsed
+        .filter((c) => c && typeof c.id === 'string' && typeof c.binary === 'string')
+        .map((c) => ({
+          id: c.id,
+          displayName: typeof c.displayName === 'string' ? c.displayName : c.id,
+          binary: c.binary,
+          ...(typeof c.version === 'string' ? { version: c.version } : {}),
+          ...(Array.isArray(c.permissionModes)
+            ? { permissionModes: c.permissionModes.filter((m: unknown) => typeof m === 'string') }
+            : {}),
+          ...(Array.isArray(c.capabilities)
+            ? { capabilities: c.capabilities.filter((m: unknown) => typeof m === 'string') }
+            : {}),
+        }));
+    }
+  } catch {
+    /* ignore malformed */
+  }
+  try {
+    const parsed = JSON.parse(row.resources || '{}');
+    if (parsed && typeof parsed === 'object') {
+      resources = {
+        ...(typeof parsed.cpuCount === 'number' ? { cpuCount: parsed.cpuCount } : {}),
+        ...(typeof parsed.cpuUsedPercent === 'number'
+          ? { cpuUsedPercent: parsed.cpuUsedPercent }
+          : {}),
+        ...(typeof parsed.load1 === 'number' ? { load1: parsed.load1 } : {}),
+        ...(typeof parsed.load5 === 'number' ? { load5: parsed.load5 } : {}),
+        ...(typeof parsed.load15 === 'number' ? { load15: parsed.load15 } : {}),
+        ...(typeof parsed.memoryTotalBytes === 'number'
+          ? { memoryTotalBytes: parsed.memoryTotalBytes }
+          : {}),
+        ...(typeof parsed.memoryUsedBytes === 'number'
+          ? { memoryUsedBytes: parsed.memoryUsedBytes }
+          : {}),
+        ...(typeof parsed.memoryUsedPercent === 'number'
+          ? { memoryUsedPercent: parsed.memoryUsedPercent }
+          : {}),
+        ...(typeof parsed.diskTotalBytes === 'number'
+          ? { diskTotalBytes: parsed.diskTotalBytes }
+          : {}),
+        ...(typeof parsed.diskUsedBytes === 'number'
+          ? { diskUsedBytes: parsed.diskUsedBytes }
+          : {}),
+        ...(typeof parsed.diskUsedPercent === 'number'
+          ? { diskUsedPercent: parsed.diskUsedPercent }
+          : {}),
+        ...(typeof parsed.collectedAt === 'string' ? { collectedAt: parsed.collectedAt } : {}),
+      };
+    }
+  } catch {
+    /* ignore malformed */
+  }
+  return {
+    id: row.id,
+    userId: row.user_id,
+    displayName: row.display_name,
+    capabilities: caps,
+    agentClients,
+    resources,
+    os: row.os ?? undefined,
+    arch: row.arch ?? undefined,
+    hostname: row.hostname ?? undefined,
+    clientVersion: row.client_version ?? undefined,
+    lastConnectedAt: row.last_connected_at ?? undefined,
+    lastSeenAt: row.last_seen_at ?? undefined,
+    createdAt: row.created_at,
+    revokedAt: row.revoked_at ?? undefined,
+  };
+}
+
+/** 内部使用：返回 token_hash，仅 ws 握手时调用。 */
+export function getAgentLinkRowForAuth(
+  id: string,
+): { id: string; userId: string; tokenHash: string; revoked: boolean } | undefined {
+  const row = db
+    .prepare('SELECT id, user_id, token_hash, revoked_at FROM agent_links WHERE id = ?')
+    .get(id) as
+    | { id: string; user_id: string; token_hash: string; revoked_at: string | null }
+    | undefined;
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    userId: row.user_id,
+    tokenHash: row.token_hash,
+    revoked: row.revoked_at != null,
+  };
+}
+
+/** ws 握手时遍历未撤销的 link，做 bcrypt.compare。 */
+export function listAgentLinkAuthCandidates(): Array<{
+  id: string;
+  userId: string;
+  tokenHash: string;
+}> {
+  const rows = db
+    .prepare(
+      'SELECT id, user_id, token_hash FROM agent_links WHERE revoked_at IS NULL',
+    )
+    .all() as Array<{ id: string; user_id: string; token_hash: string }>;
+  return rows.map((r) => ({ id: r.id, userId: r.user_id, tokenHash: r.token_hash }));
+}
+
+export function createAgentLink(input: {
+  id: string;
+  userId: string;
+  displayName: string;
+  tokenHash: string;
+}): AgentLink {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO agent_links
+     (id, user_id, display_name, token_hash, capabilities, created_at)
+     VALUES (?, ?, ?, ?, '[]', ?)`,
+  ).run(input.id, input.userId, input.displayName, input.tokenHash, now);
+  return {
+    id: input.id,
+    userId: input.userId,
+    displayName: input.displayName,
+    capabilities: [],
+    createdAt: now,
+  };
+}
+
+export function listAgentLinksByUser(userId: string): AgentLink[] {
+  const rows = db
+    .prepare(
+      'SELECT * FROM agent_links WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC',
+    )
+    .all(userId) as AgentLinkRow[];
+  return rows.map(parseAgentLinkRow);
+}
+
+export function getAgentLinkById(id: string): AgentLink | undefined {
+  const row = db
+    .prepare('SELECT * FROM agent_links WHERE id = ?')
+    .get(id) as AgentLinkRow | undefined;
+  if (!row) return undefined;
+  return parseAgentLinkRow(row);
+}
+
+/** ws hello 上报时刷新 client metadata + last_connected_at。 */
+export function recordAgentLinkConnect(
+  id: string,
+  meta: {
+    capabilities: string[];
+    agentClients?: AgentLink['agentClients'];
+    resources?: AgentLink['resources'];
+    os?: string;
+    arch?: string;
+    hostname?: string;
+    clientVersion?: string;
+  },
+): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE agent_links
+       SET capabilities = ?, agent_clients = ?, resources = ?, os = ?, arch = ?, hostname = ?, client_version = ?,
+           last_connected_at = ?, last_seen_at = ?
+     WHERE id = ?`,
+  ).run(
+    JSON.stringify(meta.capabilities),
+    JSON.stringify(meta.agentClients ?? []),
+    JSON.stringify(meta.resources ?? {}),
+    meta.os ?? null,
+    meta.arch ?? null,
+    meta.hostname ?? null,
+    meta.clientVersion ?? null,
+    now,
+    now,
+    id,
+  );
+}
+
+export function recordAgentLinkResources(
+  id: string,
+  resources?: AgentLink['resources'],
+): void {
+  const now = new Date().toISOString();
+  db.prepare('UPDATE agent_links SET resources = ?, last_seen_at = ? WHERE id = ?').run(
+    JSON.stringify(resources ?? {}),
+    now,
+    id,
+  );
+}
+
+/** 心跳 / 任意帧到达时更新 last_seen_at。 */
+export function touchAgentLinkSeen(id: string): void {
+  const now = new Date().toISOString();
+  db.prepare('UPDATE agent_links SET last_seen_at = ? WHERE id = ?').run(now, id);
+}
+
+export function revokeAgentLink(id: string, userId: string): boolean {
+  const now = new Date().toISOString();
+  const result = db
+    .prepare(
+      'UPDATE agent_links SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL',
+    )
+    .run(now, id, userId);
+  return result.changes > 0;
+}
+
+/** Token rotation: 替换 hash，但 link id 不变。 */
+export function rotateAgentLinkToken(
+  id: string,
+  userId: string,
+  newTokenHash: string,
+): boolean {
+  const result = db
+    .prepare(
+      'UPDATE agent_links SET token_hash = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL',
+    )
+    .run(newTokenHash, id, userId);
+  return result.changes > 0;
 }

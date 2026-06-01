@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -22,6 +22,7 @@ import { Input } from '@/components/ui/input';
 import { DirectoryBrowser } from '../shared/DirectoryBrowser';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
+import { useAgentLinksStore } from '../../stores/agentLinks';
 
 interface CreateContainerDialogProps {
   open: boolean;
@@ -38,6 +39,7 @@ export function CreateContainerDialog({
   const [loading, setLoading] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [executionMode, setExecutionMode] = useState<'container' | 'host'>('container');
+  const [executionNode, setExecutionNode] = useState('');
   const [customCwd, setCustomCwd] = useState('');
   const [initMode, setInitMode] = useState<'empty' | 'local' | 'git'>('empty');
   const [initSourcePath, setInitSourcePath] = useState('');
@@ -45,11 +47,17 @@ export function CreateContainerDialog({
 
   const createFlow = useChatStore((s) => s.createFlow);
   const canHostExec = useAuthStore((s) => s.user?.role === 'admin');
+  const { links: devices, load: loadDevices } = useAgentLinksStore();
+
+  useEffect(() => {
+    if (open && canHostExec) void loadDevices();
+  }, [open, canHostExec, loadDevices]);
 
   const reset = () => {
     setName('');
     setAdvancedOpen(false);
     setExecutionMode('container');
+    setExecutionNode('');
     setCustomCwd('');
     setInitMode('empty');
     setInitSourcePath('');
@@ -69,7 +77,12 @@ export function CreateContainerDialog({
     try {
       const options: Record<string, string> = {};
       if (executionMode === 'host') {
+        if (!executionNode) {
+          toast.error('请选择执行 Device');
+          return;
+        }
         options.execution_mode = 'host';
+        options.execution_node = executionNode;
         if (customCwd.trim()) options.custom_cwd = customCwd.trim();
       } else {
         if (initMode === 'local' && initSourcePath.trim()) {
@@ -159,10 +172,10 @@ export function CreateContainerDialog({
                       <div>
                         <div className="flex items-center gap-1.5">
                           <Monitor className="w-4 h-4 text-muted-foreground" />
-                          <span className="text-sm font-medium">宿主机模式</span>
+                          <span className="text-sm font-medium">Device 原生执行</span>
                         </div>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          {canHostExec ? '直接在服务器上执行' : '需要管理员权限'}
+                          {canHostExec ? '在选中的 Device 上执行命令和工具' : '需要管理员权限'}
                         </p>
                       </div>
                     </label>
@@ -189,7 +202,7 @@ export function CreateContainerDialog({
                               <FolderInput className="w-4 h-4 text-muted-foreground" />
                               <span className="text-sm font-medium">复制本地目录</span>
                             </div>
-                            <p className="text-xs text-muted-foreground mt-0.5">将宿主机目录复制到工作区（隔离副本）</p>
+                            <p className="text-xs text-muted-foreground mt-0.5">将服务端本地目录复制到工作区（隔离副本）</p>
                           </div>
                         </label>
                       )}
@@ -221,14 +234,29 @@ export function CreateContainerDialog({
                   </div>
                 )}
 
-                {/* Host mode: custom cwd */}
+                {/* Device native execution: target and custom cwd */}
                 {executionMode === 'host' && (
                   <>
+                    <div>
+                      <label className="block text-sm font-medium mb-2">执行 Device</label>
+                      <select
+                        value={executionNode}
+                        onChange={(e) => setExecutionNode(e.target.value)}
+                        className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+                      >
+                        <option value="" disabled>请选择 Device</option>
+                        {devices.map((device) => (
+                          <option key={device.id} value={device.id} disabled={!device.online}>
+                            {device.online ? '🟢' : '⚪️'} {device.displayName} ({device.id}){device.online ? '' : ' · 离线'}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                     <DirectoryBrowser value={customCwd} onChange={setCustomCwd} placeholder="默认: data/groups/{folder}/" />
                     <div className="flex items-start gap-2 p-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg">
                       <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
                       <p className="text-xs text-amber-700 dark:text-amber-300">
-                        宿主机模式下 Agent 可访问完整文件系统和工具链，请谨慎使用。
+                        Device 原生执行下 Agent 可访问所选 Device 的文件系统和工具链，请谨慎使用。
                       </p>
                     </div>
                   </>

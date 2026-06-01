@@ -180,7 +180,7 @@ describe('extractSessionHistory', () => {
     expect(result).toBeNull();
   });
 
-  test('wraps history in <system_context> block with restart prelude', () => {
+  test('legacy SDK recovery wraps history in <system_context> block with restart prelude', () => {
     writeTranscript('s5', [
       { type: 'user', message: { content: 'hello' } },
       {

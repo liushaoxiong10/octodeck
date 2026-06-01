@@ -18,6 +18,7 @@ import {
   getAgent,
   clearSenderAllowlist,
   deleteSessionsByProviderId,
+  getAgentLinkById,
   VALID_ACTIVATION_MODES,
 } from '../db.js';
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
@@ -37,6 +38,9 @@ import {
   UnifiedProviderPatchSchema,
   UnifiedProviderSecretsSchema,
   BalancingConfigSchema,
+  ModelDiscoveryRequestSchema,
+  CustomBackendCreateSchema,
+  CustomBackendPatchSchema,
 } from '../schemas.js';
 import {
   getClaudeProviderConfig,
@@ -48,6 +52,7 @@ import {
   saveBalancingConfig,
   createProvider,
   updateProvider,
+  updateProviderModels,
   updateProviderSecrets,
   toggleProvider,
   deleteProvider,
@@ -84,6 +89,7 @@ import {
   saveUserWhatsAppConfig,
   updateAllSessionCredentials,
 } from '../runtime-config.js';
+import { discoverProviderModels } from '../model-endpoint/discovery.js';
 import type {
   ClaudeOAuthCredentials,
   CachedOAuthUsage,
@@ -100,6 +106,17 @@ import {
   clearBillingEnabledCache,
 } from '../billing.js';
 import { providerPool } from '../provider-pool.js';
+import { listBackends, isBuiltinBackend } from '../backends/registry.js';
+import {
+  deleteCustomBackend,
+  getCustomBackend,
+  listCustomBackends,
+  upsertCustomBackend,
+} from '../backends/custom-loader.js';
+import {
+  buildAgentBackendFromClient,
+  resolveDeviceAgentClient,
+} from '../backends/agent-client-adapter.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -406,6 +423,32 @@ configRoutes.post(
   },
 );
 
+// ─── POST /claude/providers/models/fetch — 创建供应商前按临时凭据拉取模型列表 ─────
+configRoutes.post(
+  '/claude/providers/models/fetch',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const validation = ModelDiscoveryRequestSchema.safeParse(body);
+    if (!validation.success) {
+      return c.json(
+        { error: 'Invalid request body', details: validation.error.format() },
+        400,
+      );
+    }
+
+    try {
+      const models = await discoverProviderModels(validation.data);
+      return c.json({ models });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '拉取模型列表失败';
+      logger.warn({ err }, 'Failed to fetch provider models before create');
+      return c.json({ error: message }, 400);
+    }
+  },
+);
+
 // ─── PATCH /claude/providers/:id — 更新供应商非密钥字段 ─────
 configRoutes.patch(
   '/claude/providers/:id',
@@ -437,7 +480,9 @@ configRoutes.patch(
       // safe to apply mid-session.
       const protocolFieldChanged = !!(
         previous &&
-        ((validation.data.anthropicBaseUrl !== undefined &&
+        ((validation.data.apiType !== undefined &&
+          validation.data.apiType !== previous.apiType) ||
+          (validation.data.anthropicBaseUrl !== undefined &&
           validation.data.anthropicBaseUrl !== previous.anthropicBaseUrl) ||
           (validation.data.anthropicModel !== undefined &&
             validation.data.anthropicModel !== previous.anthropicModel))
@@ -614,6 +659,40 @@ configRoutes.post(
     const { id } = c.req.param();
     providerPool.resetHealth(id);
     return c.json({ ok: true });
+  },
+);
+
+// ─── POST /claude/providers/:id/models/fetch — 从供应商 API 拉取模型列表 ─────
+configRoutes.post(
+  '/claude/providers/:id/models/fetch',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const { id } = c.req.param();
+    const actor = (c.get('user') as AuthUser).username;
+    try {
+      const provider = getProviders().find((p) => p.id === id);
+      if (!provider) return c.json({ error: '未找到指定供应商' }, 404);
+
+      const token = provider.anthropicApiKey || provider.anthropicAuthToken || provider.claudeCodeOauthToken;
+      if (!token) return c.json({ error: '供应商缺少 API Key / Token，无法拉取模型列表' }, 400);
+
+      const models = await discoverProviderModels({
+        apiType: provider.apiType || 'claude',
+        baseUrl: provider.anthropicBaseUrl || 'https://api.anthropic.com',
+        token,
+      });
+      const updated = updateProviderModels(id, models, provider.anthropicModel || models[0]?.id);
+      appendClaudeConfigAudit(actor, 'fetch_provider_models', [
+        `id:${id}`,
+        `models:${models.length}`,
+      ]);
+      return c.json({ provider: toPublicProvider(updated), models: updated.models });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '拉取模型列表失败';
+      logger.warn({ err }, 'Failed to fetch provider models');
+      return c.json({ error: message }, 400);
+    }
   },
 );
 
@@ -1300,6 +1379,182 @@ configRoutes.put(
         err instanceof Error ? err.message : 'Invalid system settings payload';
       logger.warn({ err }, 'Invalid system settings payload');
       return c.json({ error: message }, 400);
+    }
+  },
+);
+
+// ─── Agent backends (auth-only, used by admin UI for dropdowns) ─────
+configRoutes.get('/backends', authMiddleware, (c) => {
+  try {
+    const items = listBackends().map((b) => ({
+      id: b.id,
+      displayName: b.displayName,
+      usesProviderPool: b.usesProviderPool,
+      supportsHost: b.supportsExecutionMode('host'),
+      supportsContainer: b.supportsExecutionMode('container'),
+      kind: isBuiltinBackend(b.id) ? 'builtin' : 'custom',
+    }));
+    return c.json({ backends: items });
+  } catch (err) {
+    logger.error({ err }, 'Failed to list backends');
+    return c.json({ error: 'Failed to list backends' }, 500);
+  }
+});
+
+// ─── Custom CLI backends (admin only) ───────────────────────────────
+configRoutes.get(
+  '/custom-backends',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    try {
+      return c.json({ backends: listCustomBackends() });
+    } catch (err) {
+      logger.error({ err }, 'Failed to list custom backends');
+      return c.json({ error: 'Failed to list custom backends' }, 500);
+    }
+  },
+);
+
+configRoutes.post(
+  '/custom-backends',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const validation = CustomBackendCreateSchema.safeParse(body);
+    if (!validation.success) {
+      return c.json(
+        { error: 'Invalid request body', details: validation.error.format() },
+        400,
+      );
+    }
+    const user = c.get('user') as AuthUser;
+    try {
+      if (getCustomBackend(validation.data.id)) {
+        return c.json({ error: `id ${validation.data.id} 已存在` }, 409);
+      }
+      const payload = validation.data.agentClientId
+        ? buildAgentBackendFromClient({
+            id: validation.data.id,
+            displayName: validation.data.displayName,
+            deviceLinkId: validation.data.deviceLinkId!,
+            agentClientId: validation.data.agentClientId,
+            discoveredClient: resolveDeviceAgentClient(
+              getAgentLinkById(validation.data.deviceLinkId!),
+              validation.data.agentClientId,
+            ),
+            timeoutMs: validation.data.timeoutMs,
+            maxOutputBytes: validation.data.maxOutputBytes,
+            runtime: validation.data.runtime,
+            model: validation.data.model,
+            workdirMode: validation.data.workdirMode,
+            workdir: validation.data.workdir,
+          })
+        : {
+            id: validation.data.id,
+            displayName: validation.data.displayName,
+            binary: validation.data.binary!,
+            argvTemplate: validation.data.argvTemplate!,
+            outputProtocol: validation.data.outputProtocol!,
+            supportsHost: validation.data.supportsHost ?? true,
+            supportsContainer: false,
+            usesProviderPool: validation.data.usesProviderPool ?? false,
+            timeoutMs: validation.data.timeoutMs,
+            maxOutputBytes: validation.data.maxOutputBytes,
+            env: validation.data.env,
+            runtime: validation.data.runtime,
+            model: validation.data.model,
+            workdirMode: validation.data.workdirMode,
+            workdir: validation.data.workdir,
+            deviceLinkId: validation.data.deviceLinkId ?? null,
+            agentClientId: validation.data.agentClientId ?? null,
+          };
+      const def = upsertCustomBackend(
+        payload,
+        user.username,
+      );
+      return c.json(def, 201);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Failed to create custom backend';
+      logger.warn({ err }, 'Failed to create custom backend');
+      return c.json({ error: msg }, 400);
+    }
+  },
+);
+
+configRoutes.patch(
+  '/custom-backends/:id',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const id = c.req.param('id');
+    const existing = getCustomBackend(id);
+    if (!existing) {
+      return c.json({ error: 'Not found' }, 404);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    const validation = CustomBackendPatchSchema.safeParse(body);
+    if (!validation.success) {
+      return c.json(
+        { error: 'Invalid request body', details: validation.error.format() },
+        400,
+      );
+    }
+    const user = c.get('user') as AuthUser;
+    try {
+      const merged = {
+        ...existing,
+        ...validation.data,
+        id,
+        supportsContainer: false,
+      };
+      const payload = merged.agentClientId
+        ? buildAgentBackendFromClient({
+            id,
+            displayName: merged.displayName,
+            deviceLinkId: merged.deviceLinkId!,
+            agentClientId: merged.agentClientId,
+            discoveredClient: resolveDeviceAgentClient(
+              getAgentLinkById(merged.deviceLinkId!),
+              merged.agentClientId,
+            ),
+            timeoutMs: merged.timeoutMs,
+            maxOutputBytes: merged.maxOutputBytes,
+            runtime: merged.runtime,
+            model: merged.model,
+            workdirMode: merged.workdirMode,
+            workdir: merged.workdir,
+          })
+        : merged;
+      const def = upsertCustomBackend(payload, user.username);
+      return c.json(def);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Failed to update custom backend';
+      logger.warn({ err }, 'Failed to update custom backend');
+      return c.json({ error: msg }, 400);
+    }
+  },
+);
+
+configRoutes.delete(
+  '/custom-backends/:id',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    const id = c.req.param('id');
+    const user = c.get('user') as AuthUser;
+    try {
+      const removed = deleteCustomBackend(id, user.username);
+      if (!removed) return c.json({ error: 'Not found' }, 404);
+      return c.json({ ok: true });
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Failed to delete custom backend';
+      logger.warn({ err }, 'Failed to delete custom backend');
+      return c.json({ error: msg }, 400);
     }
   },
 );

@@ -13,7 +13,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { CONTAINER_IMAGE, DATA_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
+import { AGENT_RUNNER_SECRET, CONTAINER_IMAGE, DATA_DIR, GROUPS_DIR, TIMEZONE, WEB_PORT } from './config.js';
 import { logger } from './logger.js';
 import { resolveHostNodeBinary } from './node-resolver.js';
 import {
@@ -228,6 +228,10 @@ export interface ContainerInput {
    * plugins.json; never set by the caller.
    */
   plugins?: Array<{ type: 'local'; path: string }>;
+  /** AgentLink ID used by agent-runner remote MCP tools. */
+  remoteExecutionLinkId?: string;
+  /** Base URL for agent-runner -> server tool bridge calls. */
+  remoteToolServerUrl?: string;
   /** Runtime context audit bootstrap; agent-runner enriches it with SDK usage. */
   contextAudit?: ClaudeContextAudit;
 }
@@ -269,6 +273,24 @@ function mkdirForContainer(dirPath: string): void {
 interface ResolvedProvider {
   config: ClaudeProviderConfig;
   customEnv: Record<string, string>;
+}
+
+function withModelProxyBaseUrl(
+  config: ClaudeProviderConfig,
+  executionMode: 'container' | 'host',
+): ClaudeProviderConfig {
+  if (!config.providerId || config.apiType === 'claude') return config;
+  const base =
+    executionMode === 'container'
+      ? process.env.HAPPYCLAW_MODEL_PROXY_CONTAINER_BASE_URL ||
+        `http://host.docker.internal:${WEB_PORT}`
+      : process.env.HAPPYCLAW_MODEL_PROXY_BASE_URL ||
+        process.env.HAPPYCLAW_SERVER_URL ||
+        `http://127.0.0.1:${WEB_PORT}`;
+  return {
+    ...config,
+    anthropicBaseUrl: `${base.replace(/\/+$/, '')}/api/model-proxy/${encodeURIComponent(config.providerId)}`,
+  };
 }
 
 /**
@@ -750,7 +772,10 @@ export function buildVolumeMounts(
   // Global config merged with per-container overrides.
   const envDir = path.join(DATA_DIR, 'env', group.folder);
   fs.mkdirSync(envDir, { recursive: true });
-  const globalConfig = resolvedProvider?.config ?? getClaudeProviderConfig();
+  const globalConfig = withModelProxyBaseUrl(
+    resolvedProvider?.config ?? getClaudeProviderConfig(),
+    'container',
+  );
   const containerOverride = getContainerEnvConfig(group.folder);
   const envLines = buildContainerEnvLines(
     globalConfig,
@@ -879,6 +904,7 @@ function buildContainerArgs(
 
   // Set timezone so container Node.js processes use local time (Asia/Shanghai)
   args.push('-e', `TZ=${tz}`);
+  args.push('--add-host=host.docker.internal:host-gateway');
 
   // Docker: -v with :ro suffix for readonly
   for (const mount of mounts) {
@@ -1453,7 +1479,10 @@ export async function runHostAgent(
   const containerOverride = getContainerEnvConfig(group.folder);
   const hostPoolResult = trySelectPoolProvider(group.folder, input.agentId);
   const hostSelectedProfileId = hostPoolResult?.profileId ?? null;
-  const globalConfig = hostPoolResult?.resolved.config ?? getClaudeProviderConfig();
+  const globalConfig = withModelProxyBaseUrl(
+    hostPoolResult?.resolved.config ?? getClaudeProviderConfig(),
+    'host',
+  );
   let hostProviderFailureReported = false;
   if (hostPoolResult?.resetSession && input.sessionId) {
     logger.info(
@@ -1562,6 +1591,8 @@ export async function runHostAgent(
     // 路径映射
     hostEnv['HAPPYCLAW_WORKSPACE_GROUP'] = groupDir;
     hostEnv['HAPPYCLAW_WORKSPACE_IPC'] = groupIpcDir;
+    hostEnv['HAPPYCLAW_AGENT_RUNNER_SECRET'] = AGENT_RUNNER_SECRET;
+    hostEnv['HAPPYCLAW_SERVER_URL'] = process.env.HAPPYCLAW_SERVER_URL || `http://127.0.0.1:${WEB_PORT}`;
 
     if (!disableMemoryLayer) {
       // Per-user global memory（HappyClaw 自带 memory 层）
@@ -1755,6 +1786,11 @@ export async function runHostAgent(
       const hostInput: ContainerInput = {
         ...input,
         plugins: prepareHostPlugins(group.created_by),
+        remoteExecutionLinkId:
+          group.executionNode && group.executionNode !== 'server-local'
+            ? group.executionNode
+            : undefined,
+        remoteToolServerUrl: hostEnv['HAPPYCLAW_SERVER_URL'],
         contextAudit: hostClaudeContextPlan.audit,
       };
       proc.stdin.write(JSON.stringify(hostInput));

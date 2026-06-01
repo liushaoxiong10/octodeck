@@ -119,7 +119,7 @@ export function TaskCard({
                       : 'bg-cyan-100 dark:bg-cyan-900/40 text-cyan-800 dark:text-cyan-300'
                   }`}
                 >
-                  {task.execution_mode === 'host' ? '宿主机' : 'Docker'}
+                  {task.execution_mode === 'host' ? 'Device' : 'Docker'}
                 </span>
               )}
               <span className="text-xs text-muted-foreground">

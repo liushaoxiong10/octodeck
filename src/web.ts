@@ -59,6 +59,12 @@ import agentDefinitionsRoutes from './routes/agent-definitions.js';
 import { usage as usageRoutes } from './routes/usage.js';
 import billingRoutes from './routes/billing.js';
 import bugReportRoutes from './routes/bug-report.js';
+import daemonRoutes from './routes/daemon.js';
+import modelProxyRoutes from './routes/model-proxy.js';
+import agentLinkRoutes, {
+  handleAgentLinkUpgrade,
+} from './routes/agent-link.js';
+import { handleAgentLinkToolHttpRequest } from './routes/agent-link-tool.js';
 import {
   checkBillingAccess,
   formatBillingAccessDeniedMessage,
@@ -254,6 +260,17 @@ app.route('/api/groups', workspaceConfigRoutes); // Workspace config under /api/
 app.route('/api', monitorRoutes);
 app.route('/api/usage', usageRoutes);
 app.route('/api/billing', billingRoutes);
+app.route('/api/daemon', daemonRoutes);
+app.route('/api/model-proxy', modelProxyRoutes);
+app.post('/api/devices/tool', async (c) => {
+  return handleAgentLinkToolHttpRequest(c.req.raw);
+});
+app.post('/api/agent-link/tool', async (c) => {
+  return handleAgentLinkToolHttpRequest(c.req.raw);
+});
+app.route('/api/devices', agentLinkRoutes);
+app.route('/api/agent-link', agentLinkRoutes);
+app.route('/api/agent-links', agentLinkRoutes);
 app.route('/api/bug-report', bugReportRoutes);
 
 // --- POST /api/messages ---
@@ -934,6 +951,12 @@ function setupWebSocket(server: any): WebSocketServer {
 
   server.on('upgrade', (request: any, socket: any, head: any) => {
     const { pathname } = new URL(request.url, `http://${request.headers.host}`);
+
+    // Phase 5.1: hcagent client link — auth via X-Link-Token, not session cookie.
+    if (pathname === '/api/agent-link/ws') {
+      void handleAgentLinkUpgrade(request, socket, head);
+      return;
+    }
 
     if (pathname !== '/ws') {
       socket.destroy();

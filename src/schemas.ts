@@ -13,6 +13,7 @@ export const TaskPatchSchema = z.object({
   context_mode: z.enum(['group', 'isolated']).optional(),
   execution_type: z.enum(['agent', 'script']).optional(),
   execution_mode: z.enum(['host', 'container']).optional(),
+  execution_node: z.string().min(1).max(64).optional(),
   script_command: z.string().max(4096).nullable().optional(),
   status: z.enum(['active', 'paused']).optional(),
   next_run: z.string().optional(),
@@ -37,6 +38,7 @@ export const TaskCreateSchema = z
     context_mode: z.enum(['group', 'isolated']).optional(),
     execution_type: z.enum(['agent', 'script']).optional(),
     execution_mode: z.enum(['host', 'container']).optional(),
+    execution_node: z.string().min(1).max(64).optional(),
     script_command: z.string().max(4096).optional(),
     notify_channels: z
       .array(z.enum(['feishu', 'telegram', 'qq', 'wechat', 'dingtalk', 'discord']))
@@ -121,6 +123,8 @@ export const MessageCreateSchema = z
 export const GroupCreateSchema = z.object({
   name: z.string().min(1).max(MAX_GROUP_NAME_LEN),
   execution_mode: z.enum(['container', 'host']).optional(),
+  // Device target for native execution: built-in server device or connected hcagent device.
+  execution_node: z.string().min(1).max(64).optional(),
   custom_cwd: z
     .string()
     .optional()
@@ -196,6 +200,9 @@ export const GroupPatchSchema = z.object({
     .enum(['auto', 'always', 'when_mentioned', 'owner_mentioned', 'disabled'])
     .optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
+  backend: z.string().min(1).max(64).optional(),
+  // Phase 5.1: 'server-local' | <agent_link_id> ('cl_' + 16 hex)
+  execution_node: z.string().min(1).max(64).optional(),
 });
 
 export const LoginSchema = z.object({
@@ -254,7 +261,151 @@ export const SystemSettingsSchema = z.object({
       'taskBackfillGraceMs must be 0 (disabled) or between 1000 (1s) and 86400000 (24h)',
     )
     .optional(),
+  defaultBackend: z.string().min(1).max(64).optional(),
+  allowedBackends: z.array(z.string().min(1).max(64)).max(32).optional(),
 });
+
+// ─── Custom CLI backend ─────────────────────────────────────────
+const CUSTOM_BACKEND_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
+const RESERVED_CUSTOM_BACKEND_IDS = new Set(['claude-sdk']);
+
+const CustomBackendBaseShape = {
+  id: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(CUSTOM_BACKEND_ID_RE, '小写字母开头，仅 [a-z0-9_-]'),
+  displayName: z.string().min(1).max(64),
+  binary: z.string().min(1).max(512).optional(),
+  argvTemplate: z.array(z.string().max(1000)).min(1).max(64).optional(),
+  outputProtocol: z.enum(['jsonline-stream-json', 'plain-text']).optional(),
+  supportsHost: z.boolean().optional(),
+  supportsContainer: z.boolean().optional(),
+  usesProviderPool: z.boolean().optional(),
+  timeoutMs: z.number().int().min(60_000).max(86_400_000).optional(),
+  maxOutputBytes: z.number().int().min(1_048_576).max(104_857_600).optional(),
+  env: z.record(z.string().max(256), z.string().max(4096)).optional(),
+  runtime: z.enum(['local-device', 'server-side']).optional(),
+  model: z.string().min(1).max(256).optional(),
+  supportsNativeSessions: z.boolean().optional(),
+  sessionArgvTemplate: z.array(z.string().max(1000)).max(64).optional(),
+  resumeArgvTemplate: z.array(z.string().max(1000)).min(1).max(64).optional(),
+  workdirMode: z.enum(['auto', 'custom']).optional(),
+  workdir: z.string().min(1).max(1024).optional(),
+  deviceLinkId: z
+    .string()
+    .regex(/^cl_[0-9a-f]{16}$/)
+    .nullable()
+    .optional(),
+  agentClientId: z.string().min(1).max(64).nullable().optional(),
+};
+
+export const CustomBackendCreateSchema = z
+  .object(CustomBackendBaseShape)
+  .superRefine((data, ctx) => {
+    if (RESERVED_CUSTOM_BACKEND_IDS.has(data.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['id'],
+        message: `id ${data.id} 与内置 backend 冲突`,
+      });
+    }
+    if (data.supportsContainer === true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['supportsContainer'],
+        message: '当前不支持 container 模式',
+      });
+    }
+    if ((data.runtime ?? 'local-device') === 'local-device' && !data.deviceLinkId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['deviceLinkId'],
+        message: 'LocalRuntime 必须选择设备',
+      });
+    }
+    if (data.workdirMode === 'custom') {
+      if (!data.workdir) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['workdir'], message: '自定义 Workdir 必填' });
+      } else if (!data.workdir.startsWith('/')) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['workdir'], message: 'Workdir 必须是绝对路径' });
+      }
+    }
+    if (data.agentClientId) {
+      if (!data.deviceLinkId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['deviceLinkId'],
+          message: '选择 Agent client 时必须选择设备',
+        });
+      }
+      return;
+    }
+    if (!data.binary) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['binary'], message: 'binary 必填' });
+    }
+    if (!data.outputProtocol) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['outputProtocol'], message: 'outputProtocol 必填' });
+    }
+    if (!data.argvTemplate) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['argvTemplate'], message: 'argvTemplate 必填' });
+    } else if (!data.argvTemplate.some((s) => s.includes('{prompt}'))) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['argvTemplate'],
+        message: 'argvTemplate 必须包含 {prompt} 占位符',
+      });
+    }
+  });
+
+export const CustomBackendPatchSchema = z
+  .object({
+    displayName: CustomBackendBaseShape.displayName.optional(),
+    binary: CustomBackendBaseShape.binary.optional(),
+    argvTemplate: CustomBackendBaseShape.argvTemplate.optional(),
+    outputProtocol: CustomBackendBaseShape.outputProtocol.optional(),
+    supportsHost: CustomBackendBaseShape.supportsHost,
+    supportsContainer: CustomBackendBaseShape.supportsContainer,
+    usesProviderPool: CustomBackendBaseShape.usesProviderPool,
+    timeoutMs: CustomBackendBaseShape.timeoutMs,
+    maxOutputBytes: CustomBackendBaseShape.maxOutputBytes,
+    env: CustomBackendBaseShape.env,
+    runtime: CustomBackendBaseShape.runtime,
+    model: CustomBackendBaseShape.model,
+    supportsNativeSessions: CustomBackendBaseShape.supportsNativeSessions,
+    sessionArgvTemplate: CustomBackendBaseShape.sessionArgvTemplate,
+    resumeArgvTemplate: CustomBackendBaseShape.resumeArgvTemplate,
+    workdirMode: CustomBackendBaseShape.workdirMode,
+    workdir: CustomBackendBaseShape.workdir,
+    deviceLinkId: CustomBackendBaseShape.deviceLinkId,
+    agentClientId: CustomBackendBaseShape.agentClientId,
+  })
+  .superRefine((data, ctx) => {
+    if (data.supportsContainer === true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['supportsContainer'],
+        message: '当前不支持 container 模式',
+      });
+    }
+    if (data.workdirMode === 'custom') {
+      if (!data.workdir) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['workdir'], message: '自定义 Workdir 必填' });
+      } else if (!data.workdir.startsWith('/')) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['workdir'], message: 'Workdir 必须是绝对路径' });
+      }
+    }
+    if (
+      data.argvTemplate &&
+      !data.argvTemplate.some((s) => s.includes('{prompt}'))
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['argvTemplate'],
+        message: 'argvTemplate 必须包含 {prompt} 占位符',
+      });
+    }
+  });
 
 export const AppearanceConfigSchema = z.object({
   appName: z.string().max(32).optional(),
@@ -641,9 +792,19 @@ export const UnifiedProviderCreateSchema = z
   .object({
     name: z.string().min(1).max(64),
     type: z.enum(['official', 'third_party']),
+    apiType: z.enum(['claude', 'openai-chat', 'openai-responses']).optional(),
     anthropicBaseUrl: z.string().max(2000).optional(),
     anthropicAuthToken: z.string().max(2000).optional(),
     anthropicModel: z.string().max(128).optional(),
+    models: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(256),
+          displayName: z.string().min(1).max(256).optional(),
+        }),
+      )
+      .max(256)
+      .optional(),
     anthropicApiKey: z.string().max(2000).optional(),
     claudeCodeOauthToken: z.string().max(2000).optional(),
     claudeOAuthCredentials: ClaudeOAuthCredentialsSchema.optional(),
@@ -665,9 +826,16 @@ export const UnifiedProviderCreateSchema = z
     }
   });
 
+export const ModelDiscoveryRequestSchema = z.object({
+  apiType: z.enum(['claude', 'openai-chat', 'openai-responses']),
+  baseUrl: z.string().max(2000),
+  token: z.string().min(1).max(2000),
+});
+
 export const UnifiedProviderPatchSchema = z
   .object({
     name: z.string().min(1).max(64).optional(),
+    apiType: z.enum(['claude', 'openai-chat', 'openai-responses']).optional(),
     anthropicBaseUrl: z.string().max(2000).optional(),
     anthropicModel: z.string().max(128).optional(),
     customEnv: z.record(z.string().max(256), z.string().max(4096)).optional(),
@@ -676,6 +844,7 @@ export const UnifiedProviderPatchSchema = z
   .refine(
     (data) =>
       data.name !== undefined ||
+      data.apiType !== undefined ||
       data.anthropicBaseUrl !== undefined ||
       data.anthropicModel !== undefined ||
       data.customEnv !== undefined ||

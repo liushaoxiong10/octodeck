@@ -72,6 +72,56 @@ export interface RegisteredGroup {
   binding_mode?: ImBindingMode; // IM 绑定模式（默认 single_context）
   feishu_chat_mode?: string; // 飞书群模式：group/topic/p2p 等
   feishu_group_message_type?: string; // 飞书群消息形式：chat/thread
+  backend?: string; // Agent 后端选择（默认走 SystemSettings.defaultBackend，最终回退 'claude-sdk'）
+  /**
+   * 命令执行节点。
+   *   - undefined / 'server-local' → server 进程内 spawn（沿用旧逻辑）
+   *   - 其他值 → AgentLink ID（cl_xxxx），通过 ws 转发给已注册的 hcagent 客户端执行
+   * 不在线的 link 会降级回 'server-local' 并打 warn。
+   */
+  executionNode?: string;
+}
+
+/**
+ * AgentLink — 用户自有的 hcagent 客户端注册记录。
+ * Server 持有 token 的 bcrypt hash，明文 token 仅在创建时一次性返回给前端。
+ * 在线状态不入库，由 AgentLinkRegistry 内存维护。
+ */
+export interface AgentLink {
+  id: string; // 'cl_' + 16 hex
+  userId: string;
+  displayName: string;
+  capabilities: string[];
+  agentClients?: Array<{
+    id: string;
+    displayName: string;
+    binary: string;
+    version?: string;
+    permissionModes?: string[];
+    capabilities?: string[];
+  }>;
+  resources?: {
+    cpuCount?: number;
+    cpuUsedPercent?: number;
+    load1?: number;
+    load5?: number;
+    load15?: number;
+    memoryTotalBytes?: number;
+    memoryUsedBytes?: number;
+    memoryUsedPercent?: number;
+    diskTotalBytes?: number;
+    diskUsedBytes?: number;
+    diskUsedPercent?: number;
+    collectedAt?: string;
+  };
+  os?: string;
+  arch?: string;
+  hostname?: string;
+  clientVersion?: string;
+  lastConnectedAt?: string;
+  lastSeenAt?: string;
+  createdAt: string;
+  revokedAt?: string;
 }
 
 export interface GroupMember {
@@ -140,6 +190,7 @@ export interface ScheduledTask {
   execution_type: 'agent' | 'script';
   script_command: string | null;
   execution_mode?: 'host' | 'container' | null;
+  execution_node?: string | null;
   workspace_jid?: string | null;
   workspace_folder?: string | null;
   next_run: string | null;

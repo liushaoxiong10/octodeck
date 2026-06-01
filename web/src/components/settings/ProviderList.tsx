@@ -159,6 +159,9 @@ export function ProviderList({
                       >
                         {provider.type === 'official' ? '官方' : '第三方'}
                       </span>
+                      <span className="text-[11px] px-1.5 py-0.5 rounded shrink-0 bg-slate-100 dark:bg-slate-900/50 text-slate-600 dark:text-slate-300 font-mono">
+                        {provider.apiType}
+                      </span>
                       {showWeight && (
                         <span
                           className="text-[11px] px-1.5 py-0.5 rounded shrink-0 bg-teal-100 dark:bg-teal-900/40 text-teal-700 dark:text-teal-300 font-mono"
@@ -236,6 +239,11 @@ export function ProviderList({
                     {provider.anthropicModel && (
                       <span className="font-mono text-muted-foreground">
                         {provider.anthropicModel}
+                      </span>
+                    )}
+                    {provider.models?.length > 0 && (
+                      <span title={provider.modelsFetchedAt ? `最近拉取：${new Date(provider.modelsFetchedAt).toLocaleString('zh-CN')}` : undefined}>
+                        {provider.models.length} 个模型
                       </span>
                     )}
                     <CredentialBadges provider={provider} />

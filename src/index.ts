@@ -24,12 +24,16 @@ import {
   AvailableGroup,
   ContainerInput,
   ContainerOutput,
-  runContainerAgent,
-  runHostAgent,
   willClearSessionOnProviderSwitch,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { resolveBackend } from './backends/registry.js';
+import { loadCustomBackendsFromDisk } from './backends/custom-loader.js';
+import {
+  closeAllSessions as closeAllAgentLinkSessions,
+  setServerVersion as setAgentLinkServerVersion,
+} from './agent-link/registry.js';
 import {
   closeDatabase,
   createTask,
@@ -213,6 +217,7 @@ import { verifyPairingCode } from './telegram-pairing.js';
 import { sdkQuery } from './sdk-query.js';
 import { executeSessionReset } from './commands.js';
 import { buildRecentConversationHistoryContext } from './conversation-history.js';
+import { shouldInjectHistoryContext } from './backends/session-policy.js';
 import { scanHostMarketplaces } from './plugin-importer.js';
 import { expandMessagesIfNeeded } from './plugin-expander-core.js';
 import { makeExpandContext } from './plugin-expander-context.js';
@@ -2860,11 +2865,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const shared = isGroupShared(group.folder);
   let prompt = formatMessages(missedMessages, shared);
+  const backendForPromptPolicy = resolveBackend(effectiveGroup);
 
   // Recovery mode: session was cleared to prevent session ghost, so inject
   // recent conversation history to give the fresh session context.
   const isRecovery = recoveryGroups.delete(chatJid);
-  if (isRecovery) {
+  if (isRecovery && shouldInjectHistoryContext(backendForPromptPolicy)) {
     const historyContext = buildRecentConversationHistoryContext(
       chatJid,
       new Set(missedMessages.map((m) => m.id)),
@@ -2882,7 +2888,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         'Recovery: injected recent conversation history into prompt',
       );
     }
-  } else if (willClearSessionOnProviderSwitch(effectiveGroup.folder)) {
+  } else if (
+    shouldInjectHistoryContext(backendForPromptPolicy) &&
+    willClearSessionOnProviderSwitch(effectiveGroup.folder)
+  ) {
     // Proactive provider switch (sticky binding unhealthy/disabled) will clear
     // the SDK session inside the runner. Inject history so the new provider's
     // first turn keeps context, matching the recovery + reactive-failure paths.
@@ -4194,30 +4203,26 @@ async function runAgent(
 
     let output: ContainerOutput;
 
-    if (executionMode === 'host') {
-      output = await runHostAgent(
-        group,
+    const backend = resolveBackend(group);
+    if (!backend.supportsExecutionMode(executionMode)) {
+      logger.error(
         {
-          prompt,
-          sessionId,
-          turnId,
-          groupFolder: group.folder,
-          chatJid,
-          currentSourceJid,
-          isMain: isAdminHome,
-          isHome,
-          isAdminHome,
-          images,
-          messageTaskId,
+          backendId: backend.id,
+          executionMode,
+          group: group.folder,
         },
-        onProcessCb,
-        wrappedOnOutput,
-        ownerHomeFolder,
+        'Selected backend does not support execution mode',
       );
+      output = {
+        status: 'error',
+        result: `后端 ${backend.displayName} 不支持执行模式 ${executionMode}`,
+        error: `backend ${backend.id} does not support executionMode ${executionMode}`,
+      };
     } else {
-      output = await runContainerAgent(
+      output = await backend.run({
         group,
-        {
+        executionMode,
+        input: {
           prompt,
           sessionId,
           turnId,
@@ -4230,10 +4235,10 @@ async function runAgent(
           images,
           messageTaskId,
         },
-        onProcessCb,
-        wrappedOnOutput,
+        onProcess: onProcessCb,
+        onOutput: wrappedOnOutput,
         ownerHomeFolder,
-      );
+      });
     }
 
     // 仅从成功的最终输出中更新 session ID；
@@ -6084,10 +6089,14 @@ async function processAgentConversation(
   const sessionId = getSession(effectiveGroup.folder, agentId) || undefined;
   let currentAgentSessionId = sessionId;
   let prompt = formatMessages(missedMessages, false);
+  const backendForPromptPolicy = resolveBackend(effectiveGroup);
   // Inject history when the SDK session is fresh, or when a proactive provider
   // switch (sticky binding unhealthy/disabled) will clear the existing session
   // inside the runner — otherwise the new provider's first turn loses context.
-  if (!sessionId || willClearSessionOnProviderSwitch(effectiveGroup.folder, agentId)) {
+  if (
+    shouldInjectHistoryContext(backendForPromptPolicy) &&
+    (!sessionId || willClearSessionOnProviderSwitch(effectiveGroup.folder, agentId))
+  ) {
     const historyContext = buildRecentConversationHistoryContext(
       virtualChatJid,
       new Set(missedMessages.map((m) => m.id)),
@@ -6660,22 +6669,30 @@ async function processAgentConversation(
     const ownerHomeFolder = resolveOwnerHomeFolder(effectiveGroup);
 
     let output: ContainerOutput;
-    if (executionMode === 'host') {
-      output = await runHostAgent(
-        effectiveGroup,
-        containerInput,
-        onProcessCb,
-        wrappedOnOutput,
-        ownerHomeFolder,
+    const backend = backendForPromptPolicy;
+    if (!backend.supportsExecutionMode(executionMode)) {
+      logger.error(
+        {
+          backendId: backend.id,
+          executionMode,
+          group: effectiveGroup.folder,
+        },
+        'Selected backend does not support execution mode',
       );
+      output = {
+        status: 'error',
+        result: `后端 ${backend.displayName} 不支持执行模式 ${executionMode}`,
+        error: `backend ${backend.id} does not support executionMode ${executionMode}`,
+      };
     } else {
-      output = await runContainerAgent(
-        effectiveGroup,
-        containerInput,
-        onProcessCb,
-        wrappedOnOutput,
+      output = await backend.run({
+        group: effectiveGroup,
+        executionMode,
+        input: containerInput,
+        onProcess: onProcessCb,
+        onOutput: wrappedOnOutput,
         ownerHomeFolder,
-      );
+      });
     }
 
     // Finalize session
@@ -8647,6 +8664,25 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
 
+  // Load custom backends from disk and register into the backend registry
+  try {
+    loadCustomBackendsFromDisk();
+  } catch (err) {
+    logger.warn({ err }, 'Failed to load custom backends from disk');
+  }
+
+  // Phase 5.1: hcagent client links — set server version (used in hello_ack)
+  try {
+    const pkgPath = path.join(process.cwd(), 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkgRaw = fs.readFileSync(pkgPath, 'utf-8');
+      const pkg = JSON.parse(pkgRaw) as { version?: string };
+      if (pkg.version) setAgentLinkServerVersion(pkg.version);
+    }
+  } catch {
+    /* ignore — keep default '0.0.0' */
+  }
+
   // Clean up stale completed agents (task + spawn, older than 1 hour) to prevent DB bloat
   try {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
@@ -8786,6 +8822,13 @@ async function main(): Promise<void> {
       shutdownWebServer().catch((err) =>
         logger.warn({ err }, 'Error shutting down web server'),
       ),
+      Promise.resolve().then(() => {
+        try {
+          closeAllAgentLinkSessions('server_shutdown');
+        } catch (err) {
+          logger.warn({ err }, 'Error closing agent-link sessions');
+        }
+      }),
       queue
         .shutdown(15_000)
         .catch((err) => logger.warn({ err }, 'Error shutting down queue')),

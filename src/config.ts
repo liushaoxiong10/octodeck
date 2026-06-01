@@ -72,6 +72,9 @@ function getOrCreateSessionSecret(): string {
 
 export const WEB_SESSION_SECRET = getOrCreateSessionSecret();
 
+export const AGENT_RUNNER_SECRET = process.env.HAPPYCLAW_AGENT_RUNNER_SECRET || WEB_SESSION_SECRET;
+process.env.HAPPYCLAW_AGENT_RUNNER_SECRET = AGENT_RUNNER_SECRET;
+
 // Ensure WeChat iLink API domains bypass HTTP proxy.
 // These Chinese domestic services are unreachable through most overseas proxies.
 const WECHAT_NO_PROXY_DOMAINS = [

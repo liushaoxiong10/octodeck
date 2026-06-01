@@ -1,8 +1,9 @@
 /**
- * Agent Capability Preflight — shared capability declarations for host mode.
+ * Agent Capability Preflight — shared capability declarations for local native execution.
  *
- * Container mode gets these tools via Dockerfile; host mode relies on the
- * host OS having them installed.  This module detects what's available and
+ * Container mode gets these tools via Dockerfile; device native execution relies on the
+ * selected Device OS having them installed.  This module detects what's available on the
+ * local server runtime and
  * returns environment variables + log messages so `runHostAgent()` can act
  * on the results.
  */
@@ -226,7 +227,7 @@ export function logCapabilityPreflight(
       : logger.warn.bind(logger);
     logFn(
       { group: groupName, tool: cap.name },
-      `Host preflight: ${cap.name} not found — some agent capabilities will be unavailable. Install: ${cap.installHint}`,
+       `Local native preflight: ${cap.name} not found — some device native execution capabilities will be unavailable. Install: ${cap.installHint}`,
     );
   }
 }

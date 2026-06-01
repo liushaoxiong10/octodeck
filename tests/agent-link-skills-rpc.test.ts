@@ -1,0 +1,87 @@
+import { describe, expect, test, vi } from 'vitest';
+
+import { InboundFrame, OutboundFrame } from '../src/agent-link/protocol.js';
+import { deliverSkillsResult, requestProviderSkills } from '../src/agent-link/skills-rpc.js';
+
+describe('agent-link skills rpc', () => {
+  test('protocol accepts skills.request and skills.result frames', () => {
+    const outbound = OutboundFrame.parse({
+      type: 'skills.request',
+      id: 0,
+      requestId: 'req_1',
+      providerId: 'claude-code',
+      cwd: '/workspace/demo',
+    });
+    expect(outbound).toMatchObject({ type: 'skills.request', providerId: 'claude-code' });
+
+    const inbound = InboundFrame.parse({
+      type: 'skills.result',
+      requestId: 'req_1',
+      ok: true,
+      workspaceSkills: [{ id: 'project-skill', name: 'Project Skill', source: 'workspace', enabled: true }],
+      cliSkills: [{ id: 'cli-skill', name: 'CLI Skill', source: 'cli', enabled: true }],
+      error: null,
+      durationMs: 12,
+    });
+    expect(inbound).toMatchObject({ type: 'skills.result', workspaceSkills: [{ id: 'project-skill' }] });
+  });
+
+  test('sends skills.request and resolves from matching skills.result', async () => {
+    const sent: unknown[] = [];
+    const session = {
+      state: 'open',
+      send(frame: unknown) {
+        sent.push(frame);
+        return true;
+      },
+    } as any;
+
+    const promise = requestProviderSkills(session, {
+      linkId: 'cl_1234567890abcdef',
+      providerId: 'claude-code',
+      cwd: '/workspace/demo',
+      timeoutMs: 1000,
+    });
+
+    expect(sent[0]).toMatchObject({
+      type: 'skills.request',
+      providerId: 'claude-code',
+      cwd: '/workspace/demo',
+    });
+
+    const requestId = (sent[0] as any).requestId;
+    deliverSkillsResult({
+      type: 'skills.result',
+      requestId,
+      ok: true,
+      workspaceSkills: [{ id: 'project-skill', name: 'Project Skill', source: 'workspace', enabled: true }],
+      cliSkills: [{ id: 'cli-skill', name: 'CLI Skill', source: 'cli', enabled: true }],
+      error: null,
+      durationMs: 10,
+    });
+
+    await expect(promise).resolves.toEqual({
+      ok: true,
+      workspaceSkills: [{ id: 'project-skill', name: 'Project Skill', source: 'workspace', enabled: true }],
+      cliSkills: [{ id: 'cli-skill', name: 'CLI Skill', source: 'cli', enabled: true }],
+      error: null,
+      durationMs: 10,
+    });
+  });
+
+  test('rejects when session send fails', async () => {
+    const session = {
+      state: 'open',
+      send: vi.fn(() => false),
+    } as any;
+
+    await expect(
+      requestProviderSkills(session, {
+        linkId: 'cl_1234567890abcdef',
+        providerId: 'claude-code',
+        cwd: '/workspace/demo',
+        timeoutMs: 1000,
+      }),
+    ).rejects.toThrow('send_failed');
+  });
+});
