@@ -1,4 +1,4 @@
-# HappyClaw Web API 参考
+# OctoDeck Web API 参考
 
 > 本文档从 `CLAUDE.md` §7 拆分而来。修改 / 新增 API 端点时请同步更新。
 >

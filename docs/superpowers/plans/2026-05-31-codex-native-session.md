@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Enable Codex custom/device backends to use `codex exec resume <sessionId> <prompt>` instead of HappyClaw `<system_context>` history injection.
+**Goal:** Enable Codex custom/device backends to use `codex exec resume <sessionId> <prompt>` instead of OctoDeck `<system_context>` history injection.
 
 **Architecture:** Add a generic `resumeArgvTemplate` to custom backend definitions. Dynamic backends render this full argv template when a native session id exists; existing append-style `sessionArgvTemplate` remains for Claude Code and TraeCLI.
 
-**Tech Stack:** TypeScript, Bun, Vitest, HappyClaw backend registry/custom backend loader.
+**Tech Stack:** TypeScript, Bun, Vitest, OctoDeck backend registry/custom backend loader.
 
 ---
 

@@ -5,10 +5,13 @@ export interface Skill {
   id: string;
   name: string;
   description: string;
-  source: 'user' | 'project' | 'external';
+  source: 'user' | 'project' | 'external' | 'cli' | 'workspace';
   enabled: boolean;
   packageName?: string;
   installedAt?: string;
+  content?: string;
+  deviceId?: string;
+  workspacePath?: string;
   userInvocable: boolean;
   allowedTools: string[];
   argumentHint: string | null;

@@ -12,7 +12,7 @@ describe('device-first host migration', () => {
       name: 'Device Workspace',
       execution_mode: 'host',
       execution_node: 'cl_1234567890abcdef',
-      custom_cwd: '/Users/lsx/code/app/happyclaw',
+      custom_cwd: '/Users/lsx/code/app/octodeck',
     });
 
     expect(parsed.execution_node).toBe('cl_1234567890abcdef');

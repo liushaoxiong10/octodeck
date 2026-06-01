@@ -3,6 +3,7 @@ import { File, Folder, Loader2, Lock, Trash2, RefreshCw, Package } from 'lucide-
 import { Card, CardContent } from '@/components/ui/card';
 import { useSkillsStore, type SkillDetail as SkillDetailType } from '../../stores/skills';
 import { MarkdownRenderer } from '../chat/MarkdownRenderer';
+import { normalizeSkillDisplayText } from '../../utils/skillsGrouping';
 
 interface SkillDetailProps {
   skillId: string | null;
@@ -73,6 +74,8 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
     );
   }
 
+  const packageName = normalizeSkillDisplayText(detail.packageName).trim();
+
   return (
     <Card className="overflow-hidden">
       <div className="p-6 border-b border-border">
@@ -87,7 +90,7 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
                     : 'bg-muted text-muted-foreground'
                 }`}
               >
-                {detail.source === 'user' ? '用户级' : detail.source === 'external' ? '宿主机' : '项目级'}
+                {detail.source === 'user' ? '用户级' : detail.source === 'external' ? '本地/系统' : '项目级'}
               </span>
               {detail.userInvocable && (
                 <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300">
@@ -115,7 +118,7 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
             </div>
           ) : (
             <div className="flex items-center gap-2">
-              {detail.packageName && (
+              {packageName && (
                 <button
                   disabled={reinstalling || deleting}
                   onClick={async () => {
@@ -163,11 +166,11 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
 
         {/* 元信息区域 */}
         <div className="space-y-2 text-sm">
-          {detail.packageName && (
+          {packageName && (
             <div className="flex items-center gap-1.5">
               <Package size={14} className="text-muted-foreground" />
               <span className="text-muted-foreground">来源：</span>
-              <span className="text-foreground font-mono text-xs">{detail.packageName}</span>
+              <span className="text-foreground font-mono text-xs">{packageName}</span>
             </div>
           )}
           {detail.installedAt && (
@@ -239,11 +242,11 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
       <div className="p-6 bg-muted">
         <p className="text-sm text-muted-foreground">
           {detail.source === 'user'
-            ? detail.packageName
-              ? `通过 ${detail.packageName} 安装，可重新安装以获取最新版本`
+            ? packageName
+              ? `通过 ${packageName} 安装，可重新安装以获取最新版本`
               : '用户级技能可启用/禁用或删除，也可在对话中让 AI 安装或卸载技能'
             : detail.source === 'external'
-              ? '宿主机技能为只读，来自 ~/.claude/skills/'
+              ? '本地/系统技能为只读，来自 ~/.claude/skills/'
               : '项目级技能为只读，不可修改或删除'}
         </p>
       </div>

@@ -1,4 +1,4 @@
-// Device routes — REST CRUD for hcagent client tokens + ws upgrade handler.
+// Device routes — REST CRUD for octodeck-daemon client tokens + ws upgrade handler.
 // The transport/protocol is still called Agent Link internally for backwards
 // compatibility, but the user-facing management surface is Devices.
 //

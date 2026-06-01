@@ -193,7 +193,7 @@ export function buildClaudeContextPlan(args: ClaudeContextPlanArgs): ClaudeConte
         }] : []),
       ],
     },
-    happyclawPrompt: { totalBytes: 0, files: [] },
+    octodeckPrompt: { totalBytes: 0, files: [] },
     warnings,
   };
 

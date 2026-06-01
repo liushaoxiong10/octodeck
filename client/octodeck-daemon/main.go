@@ -25,12 +25,12 @@ func hostname() string {
 
 func main() {
 	var configPath string
-	flag.StringVar(&configPath, "config", "", "path to config.json (default ~/.hcagent/config.json)")
+	flag.StringVar(&configPath, "config", "", "path to config.json (default ~/.octodeck-daemon/config.json)")
 	flag.Parse()
 
 	cfg, err := loadConfig(configPath)
 	if err != nil {
-		log.Fatalf("hcagent: %v", err)
+		log.Fatalf("octodeck-daemon: %v", err)
 	}
 	cfg.AgentClients = discoverAgentClients()
 
@@ -42,15 +42,15 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		s := <-sigCh
-		log.Printf("hcagent: received %s, shutting down", s)
+		log.Printf("octodeck-daemon: received %s, shutting down", s)
 		cancel()
 	}()
 
-	log.Printf("hcagent: starting, server=%s linkId=%s allowed=%d agentClients=%d max=%d",
+	log.Printf("octodeck-daemon: starting, server=%s linkId=%s allowed=%d agentClients=%d max=%d",
 		cfg.Server, cfg.LinkID, len(cfg.AllowedBinaries), len(cfg.AgentClients), cfg.MaxConcurrentRuns)
 
 	if err := runForever(ctx, cfg); err != nil {
-		log.Printf("hcagent: terminated: %v", err)
+		log.Printf("octodeck-daemon: terminated: %v", err)
 		os.Exit(1)
 	}
 }
@@ -78,7 +78,7 @@ func runForever(ctx context.Context, cfg *Config) error {
 				return nil
 			}
 			wait := backoffSchedule[min(attempt, len(backoffSchedule)-1)]
-			log.Printf("hcagent: dial failed (%v); retry in %s", err, wait)
+			log.Printf("octodeck-daemon: dial failed (%v); retry in %s", err, wait)
 			attempt++
 			select {
 			case <-ctx.Done():
@@ -89,14 +89,14 @@ func runForever(ctx context.Context, cfg *Config) error {
 		}
 
 		attempt = 0 // reset backoff on a successful handshake
-		log.Printf("hcagent: connected (server=%s)", client.helloAck.ServerVersion)
+		log.Printf("octodeck-daemon: connected (server=%s)", client.helloAck.ServerVersion)
 
 		runErr := client.run(ctx)
 		client.close(fmt.Sprintf("loop_exit:%v", runErr))
 		if ctx.Err() != nil {
 			return nil
 		}
-		log.Printf("hcagent: connection lost: %v; reconnecting", runErr)
+		log.Printf("octodeck-daemon: connection lost: %v; reconnecting", runErr)
 		// short fixed delay before next attempt
 		select {
 		case <-ctx.Done():

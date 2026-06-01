@@ -6,7 +6,7 @@
  * The agent-runner SDK transparently surfaces non-DMI plugin commands. Commands
  * marked `disable-model-invocation: true` are intentionally hidden from the
  * model — they are meant to be expanded by the CLI when a human types them.
- * In SDK mode we lose that expansion, so HappyClaw needs its own index to
+ * In SDK mode we lose that expansion, so OctoDeck needs its own index to
  * resolve `/foo` and `/plugin:foo` slashes from IM / Web messages before they
  * reach the agent. PR2.b will build the expander on top of this index; PR2.a
  * (this module) only lists + resolves entries.

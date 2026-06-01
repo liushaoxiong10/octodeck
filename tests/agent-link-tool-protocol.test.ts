@@ -7,7 +7,7 @@ import { encodeFrame, parseInboundFrame } from '../src/agent-link/protocol.js';
 const repoRoot = process.cwd();
 
 describe('agent-link tool protocol', () => {
-  test('accepts tool.event frames from hcagent', () => {
+  test('accepts tool.event frames from octodeck-daemon', () => {
     const parsed = parseInboundFrame(
       JSON.stringify({
         type: 'tool.event',
@@ -24,7 +24,7 @@ describe('agent-link tool protocol', () => {
     }
   });
 
-  test('accepts tool.result frames from hcagent', () => {
+  test('accepts tool.result frames from octodeck-daemon', () => {
     const parsed = parseInboundFrame(
       JSON.stringify({
         type: 'tool.result',
@@ -44,7 +44,7 @@ describe('agent-link tool protocol', () => {
     }
   });
 
-  test('encodes tool.request frames sent to hcagent', () => {
+  test('encodes tool.request frames sent to octodeck-daemon', () => {
     const encoded = encodeFrame({
       type: 'tool.request',
       id: 7,
@@ -63,12 +63,12 @@ describe('agent-link tool protocol', () => {
     });
   });
 
-  test('accepts hello and ping resource snapshots from hcagent', () => {
+  test('accepts hello and ping resource snapshots from octodeck-daemon', () => {
     const hello = parseInboundFrame(
       JSON.stringify({
         type: 'hello',
         id: 1,
-        version: 'hcagent/0.1.0',
+        version: 'octodeck-daemon/0.1.0',
         capabilities: ['run.host-cli'],
         resources: {
           cpuCount: 10,

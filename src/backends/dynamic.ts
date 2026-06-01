@@ -29,7 +29,7 @@ export interface CustomBackendDef {
   env?: Record<string, string>;
   runtime?: 'local-device' | 'server-side';
   model?: string;
-  /** Native CLI session resume support. When true, HappyClaw skips prompt history injection. */
+  /** Native CLI session resume support. When true, OctoDeck skips prompt history injection. */
   supportsNativeSessions?: boolean;
   /** Extra argv rendered and appended only when input.sessionId is present. */
   sessionArgvTemplate?: string[];
@@ -37,9 +37,9 @@ export interface CustomBackendDef {
   resumeArgvTemplate?: string[];
   workdirMode?: 'auto' | 'custom';
   workdir?: string;
-  /** Optional device id. When set, this backend runs on the selected hcagent device. */
+  /** Optional device id. When set, this backend runs on the selected octodeck-daemon device. */
   deviceLinkId?: string | null;
-  /** Agent client discovered by hcagent on the selected device. */
+  /** Agent client discovered by octodeck-daemon on the selected device. */
   agentClientId?: string | null;
   createdAt?: string;
   updatedAt?: string;

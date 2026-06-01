@@ -123,7 +123,7 @@ export const MessageCreateSchema = z
 export const GroupCreateSchema = z.object({
   name: z.string().min(1).max(MAX_GROUP_NAME_LEN),
   execution_mode: z.enum(['container', 'host']).optional(),
-  // Device target for native execution: built-in server device or connected hcagent device.
+  // Device target for native execution: built-in server device or connected octodeck-daemon device.
   execution_node: z.string().min(1).max(64).optional(),
   custom_cwd: z
     .string()

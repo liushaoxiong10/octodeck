@@ -1,5 +1,5 @@
 /**
- * AgentLinkRegistry — process-wide map of online hcagent sessions.
+ * AgentLinkRegistry — process-wide map of online octodeck-daemon sessions.
  *
  * 单例。`Map<linkId, AgentLinkSession>`。
  * 同 linkId 重复连接时主动踢掉旧 session（防 token 泄露后 attacker 抢线）。

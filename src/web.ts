@@ -56,6 +56,7 @@ import mcpServersRoutes from './routes/mcp-servers.js';
 import pluginsRoutes from './routes/plugins.js';
 import workspaceConfigRoutes from './routes/workspace-config.js';
 import agentDefinitionsRoutes from './routes/agent-definitions.js';
+import agentTeamsRoutes from './routes/agent-teams.js';
 import { usage as usageRoutes } from './routes/usage.js';
 import billingRoutes from './routes/billing.js';
 import bugReportRoutes from './routes/bug-report.js';
@@ -255,6 +256,7 @@ app.route('/api/browse', browseRoutes);
 app.route('/api/mcp-servers', mcpServersRoutes);
 app.route('/api/plugins', pluginsRoutes);
 app.route('/api/agent-definitions', agentDefinitionsRoutes);
+app.route('/api/agent-teams', agentTeamsRoutes);
 app.route('/api/groups', agentRoutes); // Agent routes under /api/groups/:jid/agents
 app.route('/api/groups', workspaceConfigRoutes); // Workspace config under /api/groups/:jid/workspace-config
 app.route('/api', monitorRoutes);
@@ -952,7 +954,7 @@ function setupWebSocket(server: any): WebSocketServer {
   server.on('upgrade', (request: any, socket: any, head: any) => {
     const { pathname } = new URL(request.url, `http://${request.headers.host}`);
 
-    // Phase 5.1: hcagent client link — auth via X-Link-Token, not session cookie.
+    // Phase 5.1: octodeck-daemon client link — auth via X-Link-Token, not session cookie.
     if (pathname === '/api/agent-link/ws') {
       void handleAgentLinkUpgrade(request, socket, head);
       return;
@@ -1003,7 +1005,7 @@ function setupWebSocket(server: any): WebSocketServer {
       socket.destroy();
       return;
     }
-    request.__happyclawSessionId = token;
+    request.__octodeckSessionId = token;
 
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
@@ -1011,7 +1013,7 @@ function setupWebSocket(server: any): WebSocketServer {
   });
 
   wss.on('connection', (ws, request: any) => {
-    const sessionId = request?.__happyclawSessionId as string | undefined;
+    const sessionId = request?.__octodeckSessionId as string | undefined;
     logger.info('WebSocket client connected');
     const connSession = sessionId ? getCachedSessionWithUser(sessionId) : undefined;
     wsClients.set(ws, {

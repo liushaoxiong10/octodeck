@@ -83,7 +83,7 @@ export function SystemInfo({ status }: SystemInfoProps) {
               </div>
             )}
             <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">宿主机</span>
+              <span className="text-muted-foreground">本地/系统</span>
               <span className="text-foreground font-medium font-mono text-xs flex items-center">
                 {extractVersion(versions?.host) || '未知'}
                 <VersionBadge current={versions?.host} latest={versions?.latest} />

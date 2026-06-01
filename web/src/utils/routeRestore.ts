@@ -2,8 +2,8 @@
 // land on the user's previous location instead of the manifest start_url.
 // Disabled by default; toggled from Settings → Profile.
 
-const STORAGE_KEY_ENABLED = 'happyclaw-pwa-restore-enabled';
-const STORAGE_KEY_ROUTE = 'happyclaw-pwa-last-route';
+const STORAGE_KEY_ENABLED = 'octodeck-pwa-restore-enabled';
+const STORAGE_KEY_ROUTE = 'octodeck-pwa-last-route';
 
 const BLACKLIST_PATTERNS: RegExp[] = [
   /^\/login(\?|$)/,

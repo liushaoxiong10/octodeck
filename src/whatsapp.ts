@@ -269,7 +269,7 @@ export function createWhatsAppConnection(
       printQRInTerminal: false,
       // 用 pino 兼容的 logger（baileys 期望 pino 接口）
       logger: logger.child({ feature: 'whatsapp-baileys' }) as never,
-      browser: ['HappyClaw', 'Desktop', '1.0.0'],
+      browser: ['OctoDeck', 'Desktop', '1.0.0'],
       markOnlineOnConnect: false,
     });
 

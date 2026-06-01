@@ -235,7 +235,7 @@ const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
 const OOM_EXIT_RE = /code 137/;
 
 function buildWebTraceUrl(folder: string | undefined, turnId?: string): string | null {
-  const base = process.env.HAPPYCLAW_WEB_URL || process.env.PUBLIC_BASE_URL || process.env.WEB_BASE_URL;
+  const base = process.env.OCTODECK_WEB_URL || process.env.PUBLIC_BASE_URL || process.env.WEB_BASE_URL;
   if (!base || !folder) return null;
   const url = new URL(`/chat/${encodeURIComponent(folder)}`, base);
   if (turnId) url.searchParams.set('turn', turnId);
@@ -2751,7 +2751,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (chatJid === 'web:main' && effectiveGroup.is_home) {
     for (let i = missedMessages.length - 1; i >= 0; i--) {
       const sender = missedMessages[i]?.sender;
-      if (!sender || sender === 'happyclaw-agent' || sender === '__system__')
+      if (!sender || sender === 'octodeck-agent' || sender === '__system__')
         continue;
       const senderUser = getUserById(sender);
       if (senderUser?.status === 'active' && senderUser.role === 'admin') {
@@ -2902,7 +2902,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         limit: 30,
         maxMessageLength: 700,
         intro:
-          '检测到本次因切换 provider 需要使用新的底层模型 session。以下是 HappyClaw 保存的最近对话记录，供你延续上下文。',
+          '检测到本次因切换 provider 需要使用新的底层模型 session。以下是 OctoDeck 保存的最近对话记录，供你延续上下文。',
       },
     );
     if (historyContext) {
@@ -4309,7 +4309,7 @@ async function sendMessage(
     const persistedMsgId = storeMessageDirect(
       msgId,
       jid,
-      'happyclaw-agent',
+      'octodeck-agent',
       ASSISTANT_NAME,
       text,
       timestamp,
@@ -4322,7 +4322,7 @@ async function sendMessage(
       {
         id: persistedMsgId,
         chat_jid: jid,
-        sender: 'happyclaw-agent',
+        sender: 'octodeck-agent',
         sender_name: ASSISTANT_NAME,
         content: text,
         timestamp,
@@ -4403,7 +4403,7 @@ function saveInterruptedStreamingMessages(): void {
       storeMessageDirect(
         msgId,
         jid,
-        'happyclaw-agent',
+        'octodeck-agent',
         ASSISTANT_NAME,
         interruptedText,
         timestamp,
@@ -4510,7 +4510,7 @@ function recoverStreamingBuffer(): void {
           storeMessageDirect(
             msgId,
             jid,
-            'happyclaw-agent',
+            'octodeck-agent',
             ASSISTANT_NAME,
             interruptedText,
             timestamp,
@@ -4906,7 +4906,7 @@ function startIpcWatcher(): void {
                   const persistedImgMsgId = storeMessageDirect(
                     imgMsgId,
                     imgChatJid,
-                    'happyclaw-agent',
+                    'octodeck-agent',
                     ASSISTANT_NAME,
                     displayText,
                     imgTimestamp,
@@ -4916,7 +4916,7 @@ function startIpcWatcher(): void {
                   broadcastNewMessage(imgChatJid, {
                     id: persistedImgMsgId,
                     chat_jid: imgChatJid,
-                    sender: 'happyclaw-agent',
+                    sender: 'octodeck-agent',
                     sender_name: ASSISTANT_NAME,
                     content: displayText,
                     timestamp: imgTimestamp,
@@ -6083,7 +6083,7 @@ async function processAgentConversation(
   broadcastAgentStatus(chatJid, agentId, 'running', agent.name, agent.prompt);
 
   // Get or use agent-specific session before building the prompt. If the
-  // session was cleared by provider/model switching, inject persisted HappyClaw
+  // session was cleared by provider/model switching, inject persisted OctoDeck
   // chat history so the new model does not mistake the fresh SDK session for
   // an empty conversation.
   const sessionId = getSession(effectiveGroup.folder, agentId) || undefined;
@@ -6104,7 +6104,7 @@ async function processAgentConversation(
         limit: 30,
         maxMessageLength: 700,
         intro:
-          '检测到当前 agent 的底层模型 session 是新的（可能因为切换 provider/model 或恢复失败）。以下是 HappyClaw 保存的最近对话记录，供你延续上下文。',
+          '检测到当前 agent 的底层模型 session 是新的（可能因为切换 provider/model 或恢复失败）。以下是 OctoDeck 保存的最近对话记录，供你延续上下文。',
       },
     );
     if (historyContext) {
@@ -6295,7 +6295,7 @@ async function processAgentConversation(
             const persistedMsgId = storeMessageDirect(
               msgId,
               virtualChatJid,
-              'happyclaw-agent',
+              'octodeck-agent',
               ASSISTANT_NAME,
               interruptedText,
               timestamp,
@@ -6315,7 +6315,7 @@ async function processAgentConversation(
               {
                 id: persistedMsgId,
                 chat_jid: virtualChatJid,
-                sender: 'happyclaw-agent',
+                sender: 'octodeck-agent',
                 sender_name: ASSISTANT_NAME,
                 content: interruptedText,
                 timestamp,
@@ -6437,7 +6437,7 @@ async function processAgentConversation(
         const persistedMsgId = storeMessageDirect(
           msgId,
           virtualChatJid,
-          'happyclaw-agent',
+          'octodeck-agent',
           ASSISTANT_NAME,
           text,
           timestamp,
@@ -6457,7 +6457,7 @@ async function processAgentConversation(
           {
             id: persistedMsgId,
             chat_jid: virtualChatJid,
-            sender: 'happyclaw-agent',
+            sender: 'octodeck-agent',
             sender_name: ASSISTANT_NAME,
             content: text,
             timestamp,
@@ -6777,7 +6777,7 @@ async function processAgentConversation(
         const persistedMsgId = storeMessageDirect(
           msgId,
           virtualChatJid,
-          'happyclaw-agent',
+          'octodeck-agent',
           ASSISTANT_NAME,
           interruptedText,
           timestamp,
@@ -6796,7 +6796,7 @@ async function processAgentConversation(
           {
             id: persistedMsgId,
             chat_jid: virtualChatJid,
-            sender: 'happyclaw-agent',
+            sender: 'octodeck-agent',
             sender_name: ASSISTANT_NAME,
             content: interruptedText,
             timestamp,
@@ -6828,7 +6828,7 @@ async function processAgentConversation(
         const persistedMsgId = storeMessageDirect(
           msgId,
           virtualChatJid,
-          'happyclaw-agent',
+          'octodeck-agent',
           ASSISTANT_NAME,
           partialReply,
           timestamp,
@@ -6847,7 +6847,7 @@ async function processAgentConversation(
           {
             id: persistedMsgId,
             chat_jid: virtualChatJid,
-            sender: 'happyclaw-agent',
+            sender: 'octodeck-agent',
             sender_name: ASSISTANT_NAME,
             content: partialReply,
             timestamp,
@@ -6916,7 +6916,7 @@ async function processAgentConversation(
         storeMessageDirect(
           injectId,
           agent.spawned_from_jid,
-          'happyclaw-agent',
+          'octodeck-agent',
           ASSISTANT_NAME,
           resultText,
           injectTs,
@@ -6925,7 +6925,7 @@ async function processAgentConversation(
         broadcastNewMessage(agent.spawned_from_jid, {
           id: injectId,
           chat_jid: agent.spawned_from_jid,
-          sender: 'happyclaw-agent',
+          sender: 'octodeck-agent',
           sender_name: ASSISTANT_NAME,
           content: resultText,
           timestamp: injectTs,
@@ -6975,7 +6975,7 @@ async function startMessageLoop(): Promise<void> {
   }
   messageLoopRunning = true;
 
-  logger.info('happyclaw running');
+  logger.info('octodeck running');
 
   while (!shuttingDown) {
     try {
@@ -7480,11 +7480,11 @@ async function ensureDockerRunning(): Promise<void> {
     }
   }
 
-  // Kill and clean up orphaned happyclaw containers from previous runs
+  // Kill and clean up orphaned octodeck containers from previous runs
   try {
     const { stdout } = await execFileAsync(
       'docker',
-      ['ps', '--filter', 'name=happyclaw-', '--format', '{{.Names}}'],
+      ['ps', '--filter', 'name=octodeck-', '--format', '{{.Names}}'],
       { timeout: 10000 },
     );
     const output = typeof stdout === 'string' ? stdout : String(stdout);
@@ -7516,7 +7516,7 @@ async function ensureDockerRunning(): Promise<void> {
  * are re-routed to the new user's home folder on first message receipt.
  *
  * In multi-bot setups where the same human talks to multiple bots (each owned
- * by a different HappyClaw user), re-routing is skipped — the chat stays with
+ * by a different OctoDeck user), re-routing is skipped — the chat stays with
  * its original owner as long as that owner still has an active connection on
  * the **same channel type** (feishu/telegram/qq/wechat).
  */
@@ -7583,7 +7583,7 @@ function buildOnNewChat(
       //   1. Credential transfer: admin disables their Feishu channel, member
       //      enables the same appId → re-route chat to the new user.
       //   2. Multi-bot setup: same human talks to multiple bots, each owned by
-      //      a different HappyClaw user → do NOT re-route.
+      //      a different OctoDeck user → do NOT re-route.
       //
       // Distinguish by checking whether the previous owner still has an active
       // connection on the SAME channel type.  Checking all channel types would
@@ -8661,7 +8661,7 @@ function migrateGlobalMemoryToPerUser(): void {
 
 async function main(): Promise<void> {
   migrateDataDirectories();
-  initDatabase();
+  await initDatabase();
   logger.info('Database initialized');
 
   // Load custom backends from disk and register into the backend registry
@@ -8671,7 +8671,7 @@ async function main(): Promise<void> {
     logger.warn({ err }, 'Failed to load custom backends from disk');
   }
 
-  // Phase 5.1: hcagent client links — set server version (used in hello_ack)
+  // Phase 5.1: octodeck-daemon client links — set server version (used in hello_ack)
   try {
     const pkgPath = path.join(process.cwd(), 'package.json');
     if (fs.existsSync(pkgPath)) {
@@ -8837,7 +8837,7 @@ async function main(): Promise<void> {
     clearTimeout(forceExitTimer);
 
     try {
-      closeDatabase();
+      await closeDatabase();
     } catch (err) {
       logger.warn({ err }, 'Error closing database');
     }
@@ -9941,6 +9941,6 @@ async function checkImBindingsHealth(): Promise<void> {
 }
 
 main().catch((err) => {
-  logger.error({ err }, 'Failed to start happyclaw');
+  logger.error({ err }, 'Failed to start octodeck');
   process.exit(1);
 });

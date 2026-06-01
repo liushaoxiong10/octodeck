@@ -1,8 +1,8 @@
 {
-  "name": "happyclaw-agent-runner",
+  "name": "octodeck-agent-runner",
   "version": "1.0.0",
   "type": "module",
-  "description": "Container-side agent runner for HappyClaw",
+  "description": "Container-side agent runner for OctoDeck",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
@@ -21,7 +21,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/riba2534/happyclaw.git",
+    "url": "git+https://github.com/liushaoxiong10/octodeck.git",
     "directory": "container/agent-runner"
   },
   "author": "riba2534",
@@ -29,6 +29,6 @@
     "claude-agent-sdk",
     "agent-runner",
     "mcp",
-    "happyclaw"
+    "octodeck"
   ]
 }

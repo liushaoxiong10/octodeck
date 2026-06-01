@@ -4,9 +4,9 @@
 
 **Goal:** Agent 详情页 Skills 模块从对应后端 CLI 获取 workspace skills 和 cli skills，并分组展示。
 
-**Architecture:** 复用现有 Agent Link RPC 模式，新增 `skills.request` / `skills.result`。服务端按 device/client 转发查询，hcagent 在设备侧扫描对应 CLI 的 workspace/user skill 目录并返回结构化列表，前端 AgentsPage 在 Skills tab 异步加载并展示。
+**Architecture:** 复用现有 Agent Link RPC 模式，新增 `skills.request` / `skills.result`。服务端按 device/client 转发查询，octodeck-daemon 在设备侧扫描对应 CLI 的 workspace/user skill 目录并返回结构化列表，前端 AgentsPage 在 Skills tab 异步加载并展示。
 
-**Tech Stack:** TypeScript/Hono/Zod/WebSocket RPC、React/Zustand、Go hcagent、Vitest、Go test。
+**Tech Stack:** TypeScript/Hono/Zod/WebSocket RPC、React/Zustand、Go octodeck-daemon、Vitest、Go test。
 
 ---
 
@@ -23,12 +23,12 @@
 - [ ] registry 在收到 `skills.result` 时交给 `deliverSkillsResult`，断线时调用 `failSkillsRequestsForLink`。
 - [ ] 新增 REST：`GET /api/agent-links/:id/providers/:providerId/skills?cwd=...`，校验用户、设备、client、在线状态后转发 RPC。
 
-### Task 2: 扩展 hcagent 协议与设备侧 skill 发现
+### Task 2: 扩展 octodeck-daemon 协议与设备侧 skill 发现
 
 **Files:**
-- Modify: `client/hcagent/protocol.go`
-- Create: `client/hcagent/skill_discovery.go`
-- Modify: `client/hcagent/ws.go`
+- Modify: `client/octodeck-daemon/protocol.go`
+- Create: `client/octodeck-daemon/skill_discovery.go`
+- Modify: `client/octodeck-daemon/ws.go`
 
 - [ ] 新增 Go frame 类型 `skills.request` / `skills.result` 和 `SkillInfo`。
 - [ ] 实现 `skillDiscoverer.handle`，异步扫描并返回结果。
@@ -50,14 +50,14 @@
 
 **Files:**
 - Create: `tests/agent-link-skills-rpc.test.ts`
-- Create: `client/hcagent/skill_discovery_test.go`
+- Create: `client/octodeck-daemon/skill_discovery_test.go`
 - Modify: `tests/frontend-agents-module.test.ts`
 
 - [ ] Vitest 覆盖 skills RPC schema 与 pending result delivery。
 - [ ] Go test 覆盖 workspace/cli skill 目录扫描、disabled skill、frontmatter 解析。
 - [ ] 前端测试覆盖 AgentsPage 包含 skills API 调用和分组展示文案。
 - [ ] 运行 `npm test -- tests/agent-link-skills-rpc.test.ts tests/frontend-agents-module.test.ts`。
-- [ ] 运行 `go test ./...` in `client/hcagent`。
+- [ ] 运行 `go test ./...` in `client/octodeck-daemon`。
 - [ ] 运行 `npm run typecheck`。
 
 ### Self-review

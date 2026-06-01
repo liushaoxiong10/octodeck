@@ -40,7 +40,7 @@ func TestDiscoverAgentClientsCollectsVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
-	t.Setenv("HCAGENT_EXTRA_PATH", "")
+	t.Setenv("OCTODECK_DAEMON_EXTRA_PATH", "")
 
 	clients := discoverAgentClients()
 	for _, c := range clients {
@@ -68,7 +68,7 @@ func TestDiscoverAgentClientsFindsHomeLocalBinWhenPathIsMinimal(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", "/usr/bin:/bin")
-	t.Setenv("HCAGENT_EXTRA_PATH", "")
+	t.Setenv("OCTODECK_DAEMON_EXTRA_PATH", "")
 
 	clients := discoverAgentClients()
 	ids := map[string]string{}
@@ -94,7 +94,7 @@ func TestDiscoverAgentClientsFindsExtraPathWhenPathIsMinimal(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", "/usr/bin:/bin")
-	t.Setenv("HCAGENT_EXTRA_PATH", dir)
+	t.Setenv("OCTODECK_DAEMON_EXTRA_PATH", dir)
 
 	clients := discoverAgentClients()
 	for _, c := range clients {
@@ -102,5 +102,5 @@ func TestDiscoverAgentClientsFindsExtraPathWhenPathIsMinimal(t *testing.T) {
 			return
 		}
 	}
-	t.Fatalf("missing codex from HCAGENT_EXTRA_PATH: %#v", clients)
+	t.Fatalf("missing codex from OCTODECK_DAEMON_EXTRA_PATH: %#v", clients)
 }

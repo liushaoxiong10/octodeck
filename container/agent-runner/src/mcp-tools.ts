@@ -1,5 +1,5 @@
 /**
- * MCP Tool Definitions for HappyClaw Agent Runner.
+ * MCP Tool Definitions for OctoDeck Agent Runner.
  *
  * Uses SDK's `tool()` helper to define in-process MCP tools.
  * These tools communicate with the host process via IPC files.
@@ -30,7 +30,7 @@ export interface McpContext {
   workspaceGroup: string;
   workspaceGlobal: string;
   workspaceMemory: string;
-  // 禁用 HappyClaw 的 memory MCP 工具（memory_append/search/get），
+  // 禁用 OctoDeck 的 memory MCP 工具（memory_append/search/get），
   // 让 Agent 完全按用户本机 ~/.claude/ 下的 Playbook 约定管理记忆
   disableMemoryLayer?: boolean;
 }
@@ -192,7 +192,7 @@ export function buildSendMessageData(
 }
 
 /**
- * Create all HappyClaw MCP tool definitions for in-process SDK MCP server.
+ * Create all OctoDeck MCP tool definitions for in-process SDK MCP server.
  */
 export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
   const MESSAGES_DIR = path.join(ctx.workspaceIpc, 'messages');

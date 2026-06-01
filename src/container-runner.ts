@@ -1,5 +1,5 @@
 /**
- * Container Runner for happyclaw
+ * Container Runner for octodeck
  * Spawns agent execution in Docker container and handles IPC
  */
 import {
@@ -75,7 +75,7 @@ import {
 /**
  * 宿主机的 ~/.claude.json 路径。
  * 所有工作区共享此文件，确保 deviceId (userID) 一致。
- * 即使 HappyClaw 项目删除重建，此文件始终存在于宿主机上。
+ * 即使 OctoDeck 项目删除重建，此文件始终存在于宿主机上。
  */
 function getHostClaudeJsonPath(): string {
   return path.join(os.homedir(), '.claude.json');
@@ -234,6 +234,12 @@ export interface ContainerInput {
   remoteToolServerUrl?: string;
   /** Runtime context audit bootstrap; agent-runner enriches it with SDK usage. */
   contextAudit?: ClaudeContextAudit;
+  /**
+   * Lightweight execution hint for one-shot structured output tasks.
+   * Backends may use this to skip the full interactive agent runner, tools,
+   * skills, MCP setup, and memory layer.
+   */
+  executionProfile?: 'single-turn-json';
 }
 
 export interface ContainerOutput {
@@ -282,10 +288,10 @@ function withModelProxyBaseUrl(
   if (!config.providerId || config.apiType === 'claude') return config;
   const base =
     executionMode === 'container'
-      ? process.env.HAPPYCLAW_MODEL_PROXY_CONTAINER_BASE_URL ||
+      ? process.env.OCTODECK_MODEL_PROXY_CONTAINER_BASE_URL ||
         `http://host.docker.internal:${WEB_PORT}`
-      : process.env.HAPPYCLAW_MODEL_PROXY_BASE_URL ||
-        process.env.HAPPYCLAW_SERVER_URL ||
+      : process.env.OCTODECK_MODEL_PROXY_BASE_URL ||
+        process.env.OCTODECK_SERVER_URL ||
         `http://127.0.0.1:${WEB_PORT}`;
   return {
     ...config,
@@ -976,7 +982,7 @@ export async function runContainerAgent(
     const agentSuffix = input.agentId
       ? `-${input.agentId.replace(/[^a-zA-Z0-9-]/g, '-')}`
       : '';
-    const containerName = `happyclaw-${safeName}${agentSuffix}-${Date.now()}`;
+    const containerName = `octodeck-${safeName}${agentSuffix}-${Date.now()}`;
     const containerArgs = buildContainerArgs(mounts, containerName, TIMEZONE);
 
     logger.debug(
@@ -1578,7 +1584,7 @@ export async function runHostAgent(
       hostEnv['AUTO_COMPACT_WINDOW'] = String(hostAutoCompact);
     }
 
-    // admin 主容器 + 系统设置 disableMemoryLayerForAdminHost 时禁用 HappyClaw 记忆层：
+    // admin 主容器 + 系统设置 disableMemoryLayerForAdminHost 时禁用 OctoDeck 记忆层：
     // 不注入 memory MCP 工具 / WORKSPACE_GLOBAL/MEMORY env / 记忆提示，
     // 三件套仍通过同步后的 session .claude 生效，避免 externalClaudeDir 漂移。
     // 仅作用于 admin 主容器（is_home=1, folder=main），不影响 admin 创建的其他子群组。
@@ -1589,27 +1595,27 @@ export async function runHostAgent(
       getSystemSettings().disableMemoryLayerForAdminHost;
 
     // 路径映射
-    hostEnv['HAPPYCLAW_WORKSPACE_GROUP'] = groupDir;
-    hostEnv['HAPPYCLAW_WORKSPACE_IPC'] = groupIpcDir;
-    hostEnv['HAPPYCLAW_AGENT_RUNNER_SECRET'] = AGENT_RUNNER_SECRET;
-    hostEnv['HAPPYCLAW_SERVER_URL'] = process.env.HAPPYCLAW_SERVER_URL || `http://127.0.0.1:${WEB_PORT}`;
+    hostEnv['OCTODECK_WORKSPACE_GROUP'] = groupDir;
+    hostEnv['OCTODECK_WORKSPACE_IPC'] = groupIpcDir;
+    hostEnv['OCTODECK_AGENT_RUNNER_SECRET'] = AGENT_RUNNER_SECRET;
+    hostEnv['OCTODECK_SERVER_URL'] = process.env.OCTODECK_SERVER_URL || `http://127.0.0.1:${WEB_PORT}`;
 
     if (!disableMemoryLayer) {
-      // Per-user global memory（HappyClaw 自带 memory 层）
+      // Per-user global memory（OctoDeck 自带 memory 层）
       const ownerId = group.created_by;
       if (ownerId) {
         const userGlobalDir = path.join(GROUPS_DIR, 'user-global', ownerId);
         fs.mkdirSync(userGlobalDir, { recursive: true });
-        hostEnv['HAPPYCLAW_WORKSPACE_GLOBAL'] = userGlobalDir;
+        hostEnv['OCTODECK_WORKSPACE_GLOBAL'] = userGlobalDir;
       } else {
         const legacyGlobalDir = path.join(GROUPS_DIR, 'global');
         fs.mkdirSync(legacyGlobalDir, { recursive: true });
-        hostEnv['HAPPYCLAW_WORKSPACE_GLOBAL'] = legacyGlobalDir;
+        hostEnv['OCTODECK_WORKSPACE_GLOBAL'] = legacyGlobalDir;
       }
       const memoryFolder = group.is_home
         ? group.folder
         : ownerHomeFolder || group.folder;
-      hostEnv['HAPPYCLAW_WORKSPACE_MEMORY'] = path.join(
+      hostEnv['OCTODECK_WORKSPACE_MEMORY'] = path.join(
         DATA_DIR,
         'memory',
         memoryFolder,
@@ -1628,14 +1634,14 @@ export async function runHostAgent(
     hostEnv['CLAUDE_CONFIG_DIR'] = resolvedSessionsDir;
 
     if (disableMemoryLayer) {
-      hostEnv['HAPPYCLAW_DISABLE_MEMORY_LAYER'] = 'true';
+      hostEnv['OCTODECK_DISABLE_MEMORY_LAYER'] = 'true';
       // 直接注入到进程 env，SDK 按 process.env 读，避免 settings.json 合并差异影响必需项。
       for (const [key, value] of Object.entries(REQUIRED_SETTINGS_ENV)) {
         hostEnv[key] = value;
       }
       // 同样，per-user MCP servers 通过 env 透传，agent-runner 合并进 SDK mcpServers 参数。
       if (hostMcpServers && Object.keys(hostMcpServers).length > 0) {
-        hostEnv['HAPPYCLAW_USER_MCP_SERVERS_JSON'] =
+        hostEnv['OCTODECK_USER_MCP_SERVERS_JSON'] =
           JSON.stringify(hostMcpServers);
       }
     }
@@ -1643,7 +1649,7 @@ export async function runHostAgent(
     hostEnv['DEBUG_CLAUDE_AGENT_SDK'] = '1';
     // Claude Code 2.1.114+ 禁止 root 使用 --dangerously-skip-permissions，
     // IS_SANDBOX=1 告知 CLI 当前运行在受控环境中以绕过此限制。
-    // host 模式由 happyclaw 主进程托管（见 permissionMode: 'bypassPermissions'），
+    // host 模式由 octodeck 主进程托管（见 permissionMode: 'bypassPermissions'），
     // 相当于显式沙箱，故无条件声明而不再仅限 root —— 非 root 部署也保留语义对齐。
     hostEnv['IS_SANDBOX'] = '1';
 
@@ -1790,7 +1796,7 @@ export async function runHostAgent(
           group.executionNode && group.executionNode !== 'server-local'
             ? group.executionNode
             : undefined,
-        remoteToolServerUrl: hostEnv['HAPPYCLAW_SERVER_URL'],
+        remoteToolServerUrl: hostEnv['OCTODECK_SERVER_URL'],
         contextAudit: hostClaudeContextPlan.audit,
       };
       proc.stdin.write(JSON.stringify(hostInput));

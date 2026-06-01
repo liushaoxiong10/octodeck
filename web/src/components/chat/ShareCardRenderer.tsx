@@ -190,11 +190,11 @@ export const ShareCardRenderer = forwardRef<HTMLDivElement, ShareCardRendererPro
         >
           <img
             src="/icons/icon-192.png"
-            alt="HappyClaw"
+            alt="OctoDeck"
             style={{ width: 16, height: 16, borderRadius: 3 }}
           />
           <span style={{ fontSize: 12, color: '#94a3b8' }}>
-            HappyClaw · github.com/riba2534/happyclaw
+            OctoDeck · github.com/liushaoxiong10/octodeck
           </span>
         </div>
       </div>

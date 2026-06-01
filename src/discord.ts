@@ -732,7 +732,7 @@ export function createDiscordConnection(
           readyFired = true;
           opts.onReady?.();
 
-          // Register HappyClaw slash commands as Discord Application Commands
+          // Register OctoDeck slash commands as Discord Application Commands
           try {
             await readyClient.application.commands.set([
               { name: 'clear', description: '清除当前对话的会话上下文' },
@@ -774,7 +774,7 @@ export function createDiscordConnection(
             ? `discord:dm:${interaction.user.id}`
             : `discord:${interaction.channelId}`;
 
-          // Build command string matching HappyClaw's text command format
+          // Build command string matching OctoDeck's text command format
           let cmdBody = interaction.commandName;
           const enabledOpt = interaction.options.getString('enabled');
           if (enabledOpt) cmdBody += ' ' + enabledOpt;

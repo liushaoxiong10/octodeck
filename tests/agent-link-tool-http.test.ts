@@ -13,7 +13,7 @@ vi.mock('../src/agent-link/tool-rpc.js', () => ({
 
 describe('agent-link tool HTTP bridge', () => {
   test('devices tool endpoint remains compatible with agent-link tool bridge', async () => {
-    process.env.HAPPYCLAW_AGENT_RUNNER_SECRET = 'secret';
+    process.env.OCTODECK_AGENT_RUNNER_SECRET = 'secret';
     getSessionMock.mockReturnValue({ state: 'open', send: vi.fn() });
     invokeRemoteToolMock.mockResolvedValue({
       ok: true,
@@ -48,7 +48,7 @@ describe('agent-link tool HTTP bridge', () => {
   });
 
   test('rejects requests without runner secret', async () => {
-    process.env.HAPPYCLAW_AGENT_RUNNER_SECRET = 'secret';
+    process.env.OCTODECK_AGENT_RUNNER_SECRET = 'secret';
     const { handleAgentLinkToolHttpRequest } = await import('../src/routes/agent-link-tool.js');
     const res = await handleAgentLinkToolHttpRequest(
       new Request('http://localhost/api/agent-link/tool', { method: 'POST' }),
@@ -57,7 +57,7 @@ describe('agent-link tool HTTP bridge', () => {
   });
 
   test('invokes remote tool for online link', async () => {
-    process.env.HAPPYCLAW_AGENT_RUNNER_SECRET = 'secret';
+    process.env.OCTODECK_AGENT_RUNNER_SECRET = 'secret';
     getSessionMock.mockReturnValue({ state: 'open', send: vi.fn() });
     invokeRemoteToolMock.mockResolvedValue({
       ok: true,

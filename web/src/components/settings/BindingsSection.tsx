@@ -320,7 +320,7 @@ export function BindingsSection() {
         title="删除 IM 渠道"
         message={
           deleteGroup
-            ? `确认从 HappyClaw 中删除「${deleteGroup.name}」的注册记录？此操作仅清理本机绑定，不会影响该 IM 群本身。如果 bot 之后再次收到该群消息，会自动重新注册。`
+            ? `确认从 OctoDeck 中删除「${deleteGroup.name}」的注册记录？此操作仅清理本机绑定，不会影响该 IM 群本身。如果 bot 之后再次收到该群消息，会自动重新注册。`
             : ''
         }
         confirmText="删除"

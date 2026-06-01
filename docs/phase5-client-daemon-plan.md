@@ -8,7 +8,7 @@
 
 | 方面 | 决策 |
 | ---- | ---- |
-| 客户端形态 | Go 静态二进制（`hcagent`），本目标 **不写代码**，只定协议 + server 端绑定 |
+| 客户端形态 | Go 静态二进制（`octodeck-daemon`），本目标 **不写代码**，只定协议 + server 端绑定 |
 | 通道 | Client 出站 WebSocket 到 `/api/agent-link/ws`，单连接复用所有 RPC |
 | 用户 ↔ Client | 1 用户 N client；group 显式选定哪台 client 执行（沿用 `group.backend` 的下拉位置，多一层「执行节点」选项） |
 | Server-local spawn | **彻底移除**（最终态）。Phase 5.1 不动现有 spawn，仅为 Phase 5.2 铺路 |
@@ -36,7 +36,7 @@
 
 ```
                        ┌──────────────────────────────┐
-                       │   happyclaw server (this)    │
+                       │   octodeck server (this)    │
                        │  ─ /api/agent-link/ws (WS)   │
                        │  ─ AgentLinkRegistry         │
                        │  ─ resolveBackend()          │
@@ -49,7 +49,7 @@
                        └──────────────┬───────────────┘
                                       │ WSS (client 出站)
                           ┌───────────▼──────────┐
-                          │  hcagent (Go)        │
+                          │  octodeck-daemon (Go)        │
                           │   ─ outbound ws conn │
                           │   ─ command runner   │   ← Phase 5.2 起接管
                           │   ─ file streamer    │
@@ -145,7 +145,7 @@ WS 握手鉴权流程：
 
 ### Client 端（Phase 5.1 不实现，仅约定）
 
-Go 项目骨架放 `client/hcagent/`（Phase 5.1 末期可选 commit 一份「能连上、发 hello、保活」的最小 demo，~300 行 Go），用 `nhooyr.io/websocket` + `koanf` 配置。**本期允许只做到 server 端，让客户端用 wscat/简单脚本验证连接。**
+Go 项目骨架放 `client/octodeck-daemon/`（Phase 5.1 末期可选 commit 一份「能连上、发 hello、保活」的最小 demo，~300 行 Go），用 `nhooyr.io/websocket` + `koanf` 配置。**本期允许只做到 server 端，让客户端用 wscat/简单脚本验证连接。**
 
 ---
 
@@ -190,8 +190,8 @@ Go 项目骨架放 `client/hcagent/`（Phase 5.1 末期可选 commit 一份「�
 2. `src/backends/dispatch.ts` 真正切流量：`executionNode != 'server-local'` 时走 link
 3. 新建 `src/agent-link/run-rpc.ts`：把 `BackendRunArgs` 包装成 `run.request`，把 client 流式回包重新装成 `ContainerOutput`（含 `onOutput` 回调）
 4. `src/backends/host-cli-driver.ts` 不动；新增 `runHostCliViaLink()` 当 dispatch 选 link 时使用
-5. `client/hcagent/`（Go）真实实现：维持 ws 连接、收 `run.request` 后 spawn 命令、按行回 `run.event`、close 时回 `run.result`、收到 `run.cancel` 杀进程
-6. Client 配置文件 `~/.hcagent/config.json`：server URL + token + 可执行白名单
+5. `client/octodeck-daemon/`（Go）真实实现：维持 ws 连接、收 `run.request` 后 spawn 命令、按行回 `run.event`、close 时回 `run.result`、收到 `run.cancel` 杀进程
+6. Client 配置文件 `~/.octodeck-daemon/config.json`：server URL + token + 可执行白名单
 
 ### 不在范围
 - SDK 工具调用下发（5.3）
@@ -253,14 +253,14 @@ Go 项目骨架放 `client/hcagent/`（Phase 5.1 末期可选 commit 一份「�
 - `maxOutputBytes` 双端各自 enforce（client 超限主动 close，server 收到时再 cap 一次）
 - runId 用 `crypto.randomUUID()`；server 维护 `Map<runId, ownerUserId>`，跨用户事件丢弃
 
-### Client 端 (`client/hcagent/`) Phase 5.2 最小实现
+### Client 端 (`client/octodeck-daemon/`) Phase 5.2 最小实现
 
 目录结构（约 8 个 Go 文件 + go.mod）：
 ```
-client/hcagent/
+client/octodeck-daemon/
 ├── go.mod
 ├── main.go             // 入口 + 信号处理 + 配置加载
-├── config.go           // ~/.hcagent/config.json 读写
+├── config.go           // ~/.octodeck-daemon/config.json 读写
 ├── ws.go               // 出站 ws 连接 + 重连退避（1s,2s,4s,...,30s）
 ├── protocol.go         // 帧编解码 + type guards
 ├── runner.go           // run.request handler：spawn + stdout pump + run.cancel 监听
@@ -269,12 +269,12 @@ client/hcagent/
 └── README.md           // 安装/启动/卸载说明
 ```
 
-发布形态：`go build -ldflags="-s -w" -o hcagent`，目标 `darwin/arm64`、`darwin/amd64`、`linux/amd64`、`linux/arm64`。本期**仅本地构建**，不接 CI、不打 release。
+发布形态：`go build -ldflags="-s -w" -o octodeck-daemon`，目标 `darwin/arm64`、`darwin/amd64`、`linux/amd64`、`linux/arm64`。本期**仅本地构建**，不接 CI、不打 release。
 
 Client 配置：
 ```json
 {
-  "server": "https://my-happyclaw.example.com",
+  "server": "https://my-octodeck.example.com",
   "token": "<注册时 server 返回的明文>",
   "linkId": "cl_xxxx",
   "allowedBinaries": [
@@ -287,7 +287,7 @@ Client 配置：
 
 ### 验收点（Phase 5.2 在 5.1 基础上追加）
 
-1. 用一台真实 Mac 安装 hcagent + 启动，`/api/agent-link` 列表显示在线
+1. 用一台真实 Mac 安装 octodeck-daemon + 启动，`/api/agent-link` 列表显示在线
 2. 在 group 里把 backend 设为 `coco`、execution node 设为这台 client，发消息 → server 日志显示「dispatch via link」，client 端真的 spawn 出 coco，stdout 实时流回前端
 3. 输出超长 / 超时 / 用户中断三种异常路径 client 都能正确退出，server 端 ContainerOutput 状态正确
 4. 杀掉 client（kill -9），server 端进行中的 run 在 5s 心跳超时后被标记 error，不会卡住任务
@@ -308,11 +308,11 @@ Client 配置：
 | 6 | 前端 `agentLinks` store + `AgentLinksSection` + group 下拉 | 5.1 |
 | 7 | `src/agent-link/run-rpc.ts`：runOnLink，加 runId 路由 | 5.2 |
 | 8 | `src/backends/dispatch.ts` 真正分发，所有调 backend.run 入口替换 | 5.2 |
-| 9 | client `client/hcagent/`：Go 项目骨架 + ws + runner + safety | 5.2 |
-| 10 | tsc + wscat 冒烟（5.1）+ hcagent 端到端跑一次 coco（5.2） | 5.1+5.2 |
+| 9 | client `client/octodeck-daemon/`：Go 项目骨架 + ws + runner + safety | 5.2 |
+| 10 | tsc + wscat 冒烟（5.1）+ octodeck-daemon 端到端跑一次 coco（5.2） | 5.1+5.2 |
 
 ## 后续阶段简述（仍不在本次范围）
 
 - **Phase 5.3** — SDK 下发：把 `container/agent-runner` 移植到客户端，需在 client 上有 Node + `@anthropic-ai/claude-agent-sdk` + `claude` CLI；这步最难
 - **Phase 5.4** — Container 下发：client 端调本机 docker，server 不再持有 docker daemon
-- **Phase 5.5** — 移除 server-local：所有 admin 都先安装一个本机 hcagent，把 server 的 spawn 路径全部删掉
+- **Phase 5.5** — 移除 server-local：所有 admin 都先安装一个本机 octodeck-daemon，把 server 的 spawn 路径全部删掉

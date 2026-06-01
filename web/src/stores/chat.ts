@@ -1901,7 +1901,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (typeof document === 'undefined' || !document.hidden) {
           showToast(`${desc} ${status}`, event.taskSummary);
         }
-        notifyIfHidden(`HappyClaw: ${desc} ${status}`, event.taskSummary);
+        notifyIfHidden(`OctoDeck: ${desc} ${status}`, event.taskSummary);
       }
 
       set((s) => {
@@ -2422,7 +2422,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // Apply saved conversation order from localStorage (only to conversations)
         let orderedAgents = visibleAgents;
         try {
-          const savedOrder = localStorage.getItem(`happyclaw-agent-order-${jid}`);
+          const savedOrder = localStorage.getItem(`octodeck-agent-order-${jid}`);
           if (savedOrder) {
             const ids: string[] = JSON.parse(savedOrder);
             const conversations = visibleAgents.filter((a) => a.kind === 'conversation');
@@ -2502,7 +2502,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     // Persist to localStorage
     try {
-      localStorage.setItem(`happyclaw-agent-order-${jid}`, JSON.stringify(orderedIds));
+      localStorage.setItem(`octodeck-agent-order-${jid}`, JSON.stringify(orderedIds));
     } catch { /* ignore */ }
   },
 

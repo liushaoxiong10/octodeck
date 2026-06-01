@@ -1,14 +1,14 @@
-# HappyClaw Claude Code 插件自动化导入与运行设计方案
+# OctoDeck Claude Code 插件自动化导入与运行设计方案
 
 ## 1. 背景与目标
 
-HappyClaw 当前通过 `@anthropic-ai/claude-agent-sdk` 启动 Claude Code Agent，并已经具备把本地 Claude Code plugin 目录注入 SDK 的基础能力。SDK 的 `options.plugins` 会被转换为 Claude Code CLI 的 `--plugin-dir <path>` 参数，因此插件中的 `agents/`、`skills/`、`hooks/`、`mcp-servers/`、普通 slash command 可以被 Claude Code 原生加载。
+OctoDeck 当前通过 `@anthropic-ai/claude-agent-sdk` 启动 Claude Code Agent，并已经具备把本地 Claude Code plugin 目录注入 SDK 的基础能力。SDK 的 `options.plugins` 会被转换为 Claude Code CLI 的 `--plugin-dir <path>` 参数，因此插件中的 `agents/`、`skills/`、`hooks/`、`mcp-servers/`、普通 slash command 可以被 Claude Code 原生加载。
 
 当前仍存在三个核心缺口：
 
 1. 插件导入依赖手动从宿主机同步到用户 cache，缺少全局 catalog、版本追踪和自动发现。
 2. 用户启用状态与插件文件混在 per-user cache 中，不利于多用户共享、审计和回滚。
-3. 带 `disable-model-invocation: true` 的 slash command 在 SDK 模式下不会被模型主动调用；这类命令在 Claude Code REPL 中属于“用户手动输入后由 CLI 展开”的命令，需要 HappyClaw 在消息进入 Agent 前补齐展开逻辑。
+3. 带 `disable-model-invocation: true` 的 slash command 在 SDK 模式下不会被模型主动调用；这类命令在 Claude Code REPL 中属于“用户手动输入后由 CLI 展开”的命令，需要 OctoDeck 在消息进入 Agent 前补齐展开逻辑。
 
 本方案目标：
 
@@ -22,7 +22,7 @@ HappyClaw 当前通过 `@anthropic-ai/claude-agent-sdk` 启动 Claude Code Agent
 
 1. **原生优先**
 
-   Plugin 的资源加载继续走 Claude Code SDK/CLI 原生机制。HappyClaw 只负责导入、启用、路径转换和必要的 slash command 展开。
+   Plugin 的资源加载继续走 Claude Code SDK/CLI 原生机制。OctoDeck 只负责导入、启用、路径转换和必要的 slash command 展开。
 
 2. **Catalog 与用户启用分离**
 
@@ -30,11 +30,11 @@ HappyClaw 当前通过 `@anthropic-ai/claude-agent-sdk` 启动 Claude Code Agent
 
 3. **不把 Markdown command 当脚本接口**
 
-   Claude Code command 是 Markdown prompt，加 frontmatter 和动态上下文。HappyClaw 不应把 fenced bash 块当作本地脚本直接执行。只有 Claude Code 明确定义的 inline `!` bash context 可以作为 command expansion 的一部分处理。
+   Claude Code command 是 Markdown prompt，加 frontmatter 和动态上下文。OctoDeck 不应把 fenced bash 块当作本地脚本直接执行。只有 Claude Code 明确定义的 inline `!` bash context 可以作为 command expansion 的一部分处理。
 
 4. **手动命令才展开 `disable-model-invocation`**
 
-   `disable-model-invocation: true` 的含义是禁止模型通过 SlashCommand tool 自动触发，但用户手动输入 `/xxx` 仍应可执行。HappyClaw 的展开逻辑只针对用户真实消息，不提供给模型自动调用。
+   `disable-model-invocation: true` 的含义是禁止模型通过 SlashCommand tool 自动触发，但用户手动输入 `/xxx` 仍应可执行。OctoDeck 的展开逻辑只针对用户真实消息，不提供给模型自动调用。
 
 5. **安全默认**
 
@@ -246,7 +246,7 @@ getEffectiveExternalDir()/plugins/marketplaces
     },
     {
       "type": "directory",
-      "path": "/opt/happyclaw/plugin-marketplaces"
+      "path": "/opt/octodeck/plugin-marketplaces"
     }
   ]
 }
@@ -343,7 +343,7 @@ commit-commands/commands/commit.md
   /commit-commands:commit
 ```
 
-为了避免覆盖 HappyClaw 内置命令：
+为了避免覆盖 OctoDeck 内置命令：
 
 - `clear/list/status/recall/where/bind/new/spawn/allow/...` 这些内置命令优先。
 - 如果 plugin 也提供 `/status`，裸 `/status` 不注册，仍可用 `/codex:status`。
@@ -421,7 +421,7 @@ parseCommandMarkdown(file): {
 
 建议接入位置：
 
-1. IM 端仍先走 `handleCommand()` 处理 HappyClaw 内置命令。
+1. IM 端仍先走 `handleCommand()` 处理 OctoDeck 内置命令。
 2. `handleCommand()` 对 plugin command 返回 `null`，让消息进入普通消息流。
 3. 在消息进入 Agent 前统一调用：
 
@@ -453,7 +453,7 @@ expandPluginSlashCommandIfNeeded({
 4. 命中但不是 `disable-model-invocation: true`：
    - 不展开，走 SDK 原生 plugin command。
 5. 命中且 DMI=true：
-   - 说明这是“用户手动命令”，允许 HappyClaw 展开为 Agent prompt。
+   - 说明这是“用户手动命令”，允许 OctoDeck 展开为 Agent prompt。
 
 展开后 prompt 结构：
 
@@ -513,7 +513,7 @@ Expansion 层执行 inline `!`，把 stdout 注入 body。
 
 ### 8.5 不执行 fenced bash
 
-不把以下内容当作 HappyClaw 本地脚本：
+不把以下内容当作 OctoDeck 本地脚本：
 
 ```markdown
 ```bash
@@ -527,7 +527,7 @@ node ...
 - 可能需要 AskUserQuestion、Task、Bash run_in_background、上下文判断。
 - 直接执行会绕过 Claude Code 的工具权限和交互逻辑。
 
-对于这类内容，HappyClaw 展开后交给 Agent，由 Claude Code SDK 中的工具机制执行。
+对于这类内容，OctoDeck 展开后交给 Agent，由 Claude Code SDK 中的工具机制执行。
 
 ### 8.6 `review --background` 语义
 
@@ -539,7 +539,7 @@ node ...
 - 让 Agent 看到 command 中关于 `Bash(... run_in_background: true)` 的说明。
 - 由 Claude Code 自己处理 background Bash。
 
-如果后续需要 HappyClaw 自管后台任务，应另行设计通用 job system，而不是写 codex 特例。
+如果后续需要 OctoDeck 自管后台任务，应另行设计通用 job system，而不是写 codex 特例。
 
 ## 9. 权限与安全
 
@@ -842,11 +842,11 @@ DELETE /api/plugins/marketplaces/:name
 
 1. **无法 100% 复刻 Claude Code REPL**
 
-   Claude Code REPL 内部可能有未公开行为。方案尽量复用 SDK/CLI 原生 plugin 加载，HappyClaw 只补 command expansion。
+   Claude Code REPL 内部可能有未公开行为。方案尽量复用 SDK/CLI 原生 plugin 加载，OctoDeck 只补 command expansion。
 
 2. **复杂交互 command 仍依赖 Agent**
 
-   AskUserQuestion、Task、background Bash、Skill 等语义不在 HappyClaw 本地执行。它们通过展开后的 prompt 交给 Agent 处理。
+   AskUserQuestion、Task、background Bash、Skill 等语义不在 OctoDeck 本地执行。它们通过展开后的 prompt 交给 Agent 处理。
 
 3. **Inline bash 有供应链风险**
 
@@ -858,14 +858,14 @@ DELETE /api/plugins/marketplaces/:name
 
 ## 15. 最终效果
 
-完成后，HappyClaw 的 Claude Code plugin 能力将形成完整闭环：
+完成后，OctoDeck 的 Claude Code plugin 能力将形成完整闭环：
 
 1. Admin 安装或更新 Claude Code plugin。
-2. HappyClaw 自动扫描并导入 catalog。
+2. OctoDeck 自动扫描并导入 catalog。
 3. 用户从 catalog 启用插件。
-4. HappyClaw materialize 用户 runtime，并在 Agent 启动时通过 SDK `options.plugins` 注入。
+4. OctoDeck materialize 用户 runtime，并在 Agent 启动时通过 SDK `options.plugins` 注入。
 5. 普通 plugin 资源由 Claude Code 原生加载。
-6. 用户手动输入的 DMI slash command 由 HappyClaw 展开为 Agent prompt，补齐 SDK 模式缺口。
+6. 用户手动输入的 DMI slash command 由 OctoDeck 展开为 Agent prompt，补齐 SDK 模式缺口。
 7. Web 与 IM 通道共享同一套 plugin command 行为。
 
 该方案不是针对某个插件的临时适配，而是围绕 Claude Code plugin 的公开目录结构、SDK plugin 注入能力和 command markdown 语义建立的通用实现。

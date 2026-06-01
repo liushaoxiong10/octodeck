@@ -70,7 +70,7 @@ func agentClientSearchDirs() []string {
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		add(dir)
 	}
-	for _, dir := range filepath.SplitList(os.Getenv("HCAGENT_EXTRA_PATH")) {
+	for _, dir := range filepath.SplitList(os.Getenv("OCTODECK_DAEMON_EXTRA_PATH")) {
 		add(dir)
 	}
 

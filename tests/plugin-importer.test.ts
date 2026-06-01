@@ -61,8 +61,8 @@ function seedHostPlugin(opts: {
 }
 
 beforeEach(() => {
-  tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-imp-data-'));
-  tmpHostDir = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-imp-host-'));
+  tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'octodeck-imp-data-'));
+  tmpHostDir = fs.mkdtempSync(path.join(os.tmpdir(), 'octodeck-imp-host-'));
 });
 
 afterEach(() => {

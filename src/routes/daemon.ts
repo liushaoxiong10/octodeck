@@ -35,7 +35,7 @@ export function buildDaemonInstallScript(opts: DaemonInstallScriptOptions): stri
       ],
       allowedRoots: [],
       maxConcurrentRuns: 4,
-      version: 'hcagent/0.1.0',
+      version: 'octodeck-daemon/0.1.0',
     },
     null,
     2,
@@ -47,16 +47,16 @@ set -euo pipefail
 SERVER=${shellQuote(server)}
 LINK_ID=${shellQuote(opts.deviceId)}
 TOKEN=${shellQuote(opts.token)}
-INSTALL_DIR="${'${HOME}'}/.hcagent"
+INSTALL_DIR="${'${HOME}'}/.octodeck-daemon"
 CONFIG_FILE="${'${INSTALL_DIR}'}/config.json"
-BIN_URL="${'${SERVER}'}/api/daemon/hcagent-bin"
+BIN_URL="${'${SERVER}'}/api/daemon/octodeck-daemon-bin"
 OS="$(uname -s)"
-PLIST="${'${HOME}'}/Library/LaunchAgents/com.happyclaw.hcagent.plist"
+PLIST="${'${HOME}'}/Library/LaunchAgents/com.octodeck.octodeck-daemon.plist"
 SYSTEMD_DIR="${'${HOME}'}/.config/systemd/user"
-SERVICE="${'${SYSTEMD_DIR}'}/happyclaw-hcagent.service"
-HCAGENT_PATH="${'${HOME}'}/.local/bin:${'${HOME}'}/bin:${'${HOME}'}/.bun/bin:${'${HOME}'}/.npm-global/bin:${'${HOME}'}/.volta/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Applications/cmux.app/Contents/Resources/bin"
+SERVICE="${'${SYSTEMD_DIR}'}/octodeck-daemon.service"
+OCTODECK_DAEMON_PATH="${'${HOME}'}/.local/bin:${'${HOME}'}/bin:${'${HOME}'}/.bun/bin:${'${HOME}'}/.npm-global/bin:${'${HOME}'}/.volta/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Applications/cmux.app/Contents/Resources/bin"
 
-log() { printf '[hcagent-install] %s\n' "$*"; }
+log() { printf '[octodeck-daemon-install] %s\n' "$*"; }
 need() { command -v "$1" >/dev/null 2>&1 || { printf 'missing required command: %s\n' "$1" >&2; exit 1; }; }
 
 need curl
@@ -64,17 +64,17 @@ need curl
 mkdir -p "${'${INSTALL_DIR}'}/bin"
 
 if [ "${'${OS}'}" = "Darwin" ]; then
-  log "stopping existing hcagent launch agent if present"
-  launchctl bootout "gui/$(id -u)/com.happyclaw.hcagent" >/dev/null 2>&1 || true
+  log "stopping existing octodeck-daemon launch agent if present"
+  launchctl bootout "gui/$(id -u)/com.octodeck.octodeck-daemon" >/dev/null 2>&1 || true
   launchctl bootout "gui/$(id -u)" "${'${PLIST}'}" >/dev/null 2>&1 || true
 elif command -v systemctl >/dev/null 2>&1; then
-  log "stopping existing hcagent systemd service if present"
-  systemctl --user stop happyclaw-hcagent.service >/dev/null 2>&1 || true
+  log "stopping existing octodeck-daemon systemd service if present"
+  systemctl --user stop octodeck-daemon.service >/dev/null 2>&1 || true
 fi
 
-log "downloading hcagent binary"
-curl -fsSL "${'${BIN_URL}'}" -o "${'${INSTALL_DIR}'}/bin/hcagent"
-chmod +x "${'${INSTALL_DIR}'}/bin/hcagent"
+log "downloading octodeck-daemon binary"
+curl -fsSL "${'${BIN_URL}'}" -o "${'${INSTALL_DIR}'}/bin/octodeck-daemon"
+chmod +x "${'${INSTALL_DIR}'}/bin/octodeck-daemon"
 
 cat > "${'${CONFIG_FILE}'}" <<'JSON'
 ${configJson}
@@ -88,10 +88,10 @@ if [ "${'${OS}'}" = "Darwin" ]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.happyclaw.hcagent</string>
+  <key>Label</key><string>com.octodeck.octodeck-daemon</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${'${INSTALL_DIR}'}/bin/hcagent</string>
+    <string>${'${INSTALL_DIR}'}/bin/octodeck-daemon</string>
     <string>-config</string>
     <string>${'${CONFIG_FILE}'}</string>
   </array>
@@ -99,27 +99,27 @@ if [ "${'${OS}'}" = "Darwin" ]; then
   <key>KeepAlive</key><true/>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>${'${HCAGENT_PATH}'}</string>
-    <key>HCAGENT_EXTRA_PATH</key><string>${'${HCAGENT_PATH}'}</string>
+    <key>PATH</key><string>${'${OCTODECK_DAEMON_PATH}'}</string>
+    <key>OCTODECK_DAEMON_EXTRA_PATH</key><string>${'${OCTODECK_DAEMON_PATH}'}</string>
   </dict>
-  <key>StandardOutPath</key><string>${'${INSTALL_DIR}'}/hcagent.log</string>
-  <key>StandardErrorPath</key><string>${'${INSTALL_DIR}'}/hcagent.err.log</string>
+  <key>StandardOutPath</key><string>${'${INSTALL_DIR}'}/octodeck-daemon.log</string>
+  <key>StandardErrorPath</key><string>${'${INSTALL_DIR}'}/octodeck-daemon.err.log</string>
 </dict>
 </plist>
 PLIST
   launchctl bootstrap "gui/$(id -u)" "${'${PLIST}'}"
-  launchctl kickstart -k "gui/$(id -u)/com.happyclaw.hcagent" >/dev/null 2>&1 || true
-  log "hcagent installed and started via launchctl"
+  launchctl kickstart -k "gui/$(id -u)/com.octodeck.octodeck-daemon" >/dev/null 2>&1 || true
+  log "octodeck-daemon installed and started via launchctl"
 elif command -v systemctl >/dev/null 2>&1; then
   mkdir -p "${'${SYSTEMD_DIR}'}"
   cat > "${'${SERVICE}'}" <<SERVICE
 [Unit]
-Description=HappyClaw hcagent daemon
+Description=OctoDeck Daemon
 
 [Service]
-Environment=PATH=${'${HCAGENT_PATH}'}
-Environment=HCAGENT_EXTRA_PATH=${'${HCAGENT_PATH}'}
-ExecStart=${'${INSTALL_DIR}'}/bin/hcagent -config ${'${CONFIG_FILE}'}
+Environment=PATH=${'${OCTODECK_DAEMON_PATH}'}
+Environment=OCTODECK_DAEMON_EXTRA_PATH=${'${OCTODECK_DAEMON_PATH}'}
+ExecStart=${'${INSTALL_DIR}'}/bin/octodeck-daemon -config ${'${CONFIG_FILE}'}
 Restart=always
 RestartSec=3
 
@@ -127,11 +127,11 @@ RestartSec=3
 WantedBy=default.target
 SERVICE
   systemctl --user daemon-reload
-  systemctl --user enable --now happyclaw-hcagent.service
-  log "hcagent installed and started via systemd user service"
+  systemctl --user enable --now octodeck-daemon.service
+  log "octodeck-daemon installed and started via systemd user service"
 else
-  log "no supported service manager found; starting hcagent in background"
-  nohup "${'${INSTALL_DIR}'}/bin/hcagent" -config "${'${CONFIG_FILE}'}" >"${'${INSTALL_DIR}'}/hcagent.log" 2>"${'${INSTALL_DIR}'}/hcagent.err.log" &
+  log "no supported service manager found; starting octodeck-daemon in background"
+  nohup "${'${INSTALL_DIR}'}/bin/octodeck-daemon" -config "${'${CONFIG_FILE}'}" >"${'${INSTALL_DIR}'}/octodeck-daemon.log" 2>"${'${INSTALL_DIR}'}/octodeck-daemon.err.log" &
 fi
 
 log "device ${'${LINK_ID}'} configured for ${'${SERVER}'}"
@@ -140,13 +140,13 @@ log "device ${'${LINK_ID}'} configured for ${'${SERVER}'}"
 
 const daemonRoutes = new Hono<{ Variables: Variables }>();
 
-daemonRoutes.get('/hcagent-bin', async () => {
-  const binaryPath = path.resolve(process.cwd(), 'client/hcagent/hcagent');
+daemonRoutes.get('/octodeck-daemon-bin', async () => {
+  const binaryPath = path.resolve(process.cwd(), 'client/octodeck-daemon/octodeck-daemon');
   let data: Buffer;
   try {
     data = await readFile(binaryPath);
   } catch {
-    return new Response('hcagent binary not found; build client/hcagent/hcagent first\n', {
+    return new Response('octodeck-daemon binary not found; build client/octodeck-daemon/octodeck-daemon first\n', {
       status: 404,
       headers: { 'content-type': 'text/plain; charset=utf-8' },
     });
@@ -156,7 +156,7 @@ daemonRoutes.get('/hcagent-bin', async () => {
     status: 200,
     headers: {
       'content-type': 'application/octet-stream',
-      'content-disposition': 'attachment; filename="hcagent"',
+      'content-disposition': 'attachment; filename="octodeck-daemon"',
       'cache-control': 'no-store',
     },
   });

@@ -138,7 +138,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
     <div className="h-full flex flex-shrink-0">
       <nav className="w-[4.5rem] h-full bg-muted/30 flex flex-col items-center py-3 gap-1 flex-shrink-0">
         <div className="w-11 h-11 rounded-xl overflow-hidden mb-3 flex-shrink-0">
-          <img src={`${import.meta.env.BASE_URL}icons/icon-192.png`} alt="HappyClaw" className="w-full h-full object-cover" />
+          <img src={`${import.meta.env.BASE_URL}icons/icon-192.png`} alt="OctoDeck" className="w-full h-full object-cover" />
         </div>
 
         {navItems.map(({ path, icon: Icon, label }) => {
@@ -205,7 +205,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
       >
         <div className="w-[16.5rem] h-full flex flex-col bg-muted/30">
           <div className="flex items-center gap-2 px-4 pt-6 pb-3 mb-3 flex-shrink-0">
-            <img src={`${import.meta.env.BASE_URL}icons/logo-text.svg`} alt={appearance?.appName || 'HappyClaw'} className="h-10" />
+            <img src={`${import.meta.env.BASE_URL}icons/logo-text.svg`} alt={appearance?.appName || 'OctoDeck'} className="h-10" />
             <div className="flex-1" />
             <button onClick={onToggleCollapse} className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-accent text-muted-foreground hover:text-foreground transition-colors cursor-pointer">
               <PanelLeftClose className="w-4 h-4" />

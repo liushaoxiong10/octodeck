@@ -3,7 +3,7 @@ import { describe, expect, test, vi } from 'vitest';
 import { runHostCli } from '../src/backends/host-cli-driver.js';
 
 describe('host CLI stream-json protocol', () => {
-  test('emits TraeCLI stream_event deltas as HappyClaw text_delta events', async () => {
+  test('emits TraeCLI stream_event deltas as OctoDeck text_delta events', async () => {
     const outputs: any[] = [];
     const script = [
       `console.log(JSON.stringify({type:'system',subtype:'init',session_id:'sess-1'}));`,
@@ -47,5 +47,37 @@ describe('host CLI stream-json protocol', () => {
     ]);
     expect(outputs.at(-1)).toMatchObject({ status: 'success', result: '你好', newSessionId: 'sess-1' });
     expect(result).toMatchObject({ status: 'success', result: '你好', newSessionId: 'sess-1' });
+  });
+
+  test('lets a group-specific timeout override backend default timeout', async () => {
+    const result = await runHostCli(
+      {
+        group: {
+          name: 'Timeout Override',
+          folder: 'host-cli-timeout-override-test',
+          executionNode: 'server-local',
+          containerConfig: { timeout: 1_000 },
+        } as any,
+        input: {
+          prompt: 'hello',
+          groupFolder: 'host-cli-timeout-override-test',
+          chatJid: 'web:test',
+          isMain: true,
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: 'fake-timeout-cli',
+        resolveBinary: () => process.execPath,
+        buildArgv: () => ['-e', `setTimeout(() => console.log('done'), 100);`],
+        outputProtocol: 'plain-text',
+        timeoutMs: 1,
+        maxOutputBytes: 100_000,
+      },
+    );
+
+    expect(result.status).toBe('success');
+    expect(result.result).toContain('done');
   });
 });

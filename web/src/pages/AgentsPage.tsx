@@ -28,9 +28,12 @@ import {
   type CustomBackendDef,
 } from '../stores/customBackends';
 import { useTasksStore, type ScheduledTask } from '../stores/tasks';
+import { useAgentTeamsStore, type AgentTeam, type AgentTeamShape } from '../stores/agentTeams';
 import CustomBackendFormDialog from '../components/settings/CustomBackendFormDialog';
 import type { BackendInfo, SystemSettings } from '../components/settings/types';
 import { getErrorMessage } from '../components/settings/types';
+import { MarkdownRenderer } from '../components/chat/MarkdownRenderer';
+import { groupSkillsByPackage } from '../utils/skillsGrouping';
 
 type AgentRuntime = 'builtin' | 'server-side' | 'local-device';
 
@@ -47,6 +50,8 @@ interface AgentSkillInfo {
   description?: string;
   source: 'workspace' | 'cli';
   enabled?: boolean;
+  packageName?: string;
+  content?: string;
 }
 
 interface AgentSkillsResponse {
@@ -55,8 +60,19 @@ interface AgentSkillsResponse {
   durationMs?: number;
 }
 
+const AGENT_SECTIONS = ['Agent 管理', 'Agent.md', 'Agent Team'] as const;
+type AgentSectionName = (typeof AGENT_SECTIONS)[number];
+
 const MODULES = ['Instructions', 'Skills', 'Tasks', 'Args', 'ENV', 'Settings'] as const;
 type AgentModuleName = (typeof MODULES)[number];
+
+const TEAM_SHAPES: Array<{ value: AgentTeamShape; label: string; description: string }> = [
+  { value: 'auto', label: 'Let AI decide', description: 'Main agent picks the shape from your goal.' },
+  { value: 'pipeline', label: 'Pipeline', description: 'Agents take turns, one after another.' },
+  { value: 'parallel', label: 'Parallel', description: 'All agents fan out at once; results merge.' },
+  { value: 'leader-worker', label: 'Leader-worker', description: 'A lead coordinates worker contributions.' },
+  { value: 'judge-route', label: 'Judge route', description: 'A judge reviews and routes the next step.' },
+];
 
 export function AgentsPage() {
   const { hasPermission } = useAuthStore();
@@ -68,6 +84,7 @@ export function AgentsPage() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [activeSection, setActiveSection] = useState<AgentSectionName>('Agent 管理');
   const [activeModule, setActiveModule] = useState<AgentModuleName>('Instructions');
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<CustomBackendDef | null>(null);
@@ -291,11 +308,10 @@ export function AgentsPage() {
               </div>
               <div>
                 <h1 className="text-2xl font-bold tracking-tight text-foreground lg:text-3xl">
-                  Agent 管理
+                  {activeSection}
                 </h1>
                 <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                  左侧浏览所有 Agent，右侧查看运行画像、模型、能力、任务和启动参数；设备型 Agent
-                  会绑定到真实 Device 上执行。
+                  Agent 管理、agent.md 角色说明和 Agent Team 定义是同级能力；agent.md 和 Team 不隶属于某个 Agent 详情。
                 </p>
               </div>
             </div>
@@ -304,7 +320,7 @@ export function AgentsPage() {
                 <RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} />
                 刷新
               </Button>
-              {canManage ? (
+              {canManage && activeSection === 'Agent 管理' ? (
                 <Button size="sm" onClick={handleCreate}>
                   <Plus className="size-4" />
                   新增 Agent
@@ -312,6 +328,22 @@ export function AgentsPage() {
               ) : null}
             </div>
           </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2 rounded-2xl border border-border/80 bg-background/80 p-2 shadow-sm backdrop-blur">
+          {AGENT_SECTIONS.map((section) => {
+            const active = activeSection === section;
+            return (
+              <button
+                key={section}
+                type="button"
+                onClick={() => setActiveSection(section)}
+                className={`rounded-xl px-4 py-2 text-sm font-medium transition ${active ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`}
+              >
+                {section}
+              </button>
+            );
+          })}
         </div>
 
         {!canManage ? (
@@ -324,7 +356,8 @@ export function AgentsPage() {
           <div className="flex items-center justify-center py-12">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
           </div>
-        ) : (
+        ) : activeSection === 'Agent 管理' ? (
+          <AgentManagementSection>
           <div className="grid gap-5 lg:grid-cols-[minmax(280px,1fr)_minmax(0,2fr)]">
             <aside className="space-y-3">
               <Card className="overflow-hidden border-border/80 bg-background/90">
@@ -444,6 +477,11 @@ export function AgentsPage() {
               )}
             </main>
           </div>
+          </AgentManagementSection>
+        ) : activeSection === 'Agent.md' ? (
+          <AgentMdPanel generatorAgent={selectedAgent ?? agents[0] ?? null} />
+        ) : (
+          <AgentTeamWorkspace agents={agents} defaultGeneratorId={selectedAgent?.id ?? defaultBackend} />
         )}
 
         <CustomBackendFormDialog
@@ -479,7 +517,7 @@ function AgentSummary({
   onDelete: (backend: CustomBackendDef) => void;
   removing: string | null;
 }) {
-  const creator = agent.custom ? 'System Admin' : 'HappyClaw';
+  const creator = agent.custom ? 'System Admin' : 'OctoDeck';
   const backendLabel = agent.custom?.agentClientId ?? (agent.usesProviderPool ? 'provider-pool' : agent.id);
   const model = agent.model ?? (agent.usesProviderPool ? 'Provider Pool' : '默认模型');
   const online = agent.runtime !== 'local-device' || selectedDevice?.online;
@@ -540,7 +578,7 @@ function AgentSummary({
               ? `运行设备：${selectedDevice ? `${selectedDevice.displayName} (${selectedDevice.hostname ?? selectedDevice.id})` : agent.custom?.deviceLinkId ?? '未绑定'}`
               : agent.runtime === 'server-side'
                 ? '运行位置：Server Side Provider Pool'
-                : '运行位置：HappyClaw 内置后端'}
+                : '运行位置：OctoDeck 内置后端'}
             {selectedClient?.version ? ` · Client ${selectedClient.version}` : ''}
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -612,7 +650,7 @@ function AgentModuleTabs({
           <div
             role="tablist"
             aria-label="Agent detail modules"
-            className="grid grid-cols-2 gap-1 sm:grid-cols-3 xl:grid-cols-6"
+            className="grid grid-cols-2 gap-1 sm:grid-cols-4 xl:grid-cols-8"
           >
             {MODULES.map((module) => {
               const active = module === activeModule;
@@ -701,7 +739,7 @@ function renderModuleContent(args: {
           <p>
             {custom
               ? custom.runtime === 'local-device'
-                ? '通过 Agent Link 把请求发送到所选 Device，由该设备上的 hcagent 启动 CLI 并回传输出。'
+                ? '通过 Agent Link 把请求发送到所选 Device，由该设备上的 octodeck-daemon 启动 CLI 并回传输出。'
                 : '通过服务端 provider pool 运行，适合无需绑定设备的 Agent。'
               : '内置 Agent 由系统提供，主要用于兼容默认运行链路。'}
           </p>
@@ -820,6 +858,10 @@ function renderModuleContent(args: {
   }
 }
 
+function AgentManagementSection({ children }: { children: React.ReactNode }) {
+  return <>{children}</>;
+}
+
 function SummaryCell({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0 bg-background p-4">
@@ -858,6 +900,624 @@ function EmptyText({ children }: { children: React.ReactNode }) {
   return (
     <div className="rounded-2xl border border-dashed border-border bg-muted/20 px-4 py-6 text-center text-xs text-muted-foreground">
       {children}
+    </div>
+  );
+}
+
+function AgentTeamWorkspace({ agents, defaultGeneratorId }: { agents: AgentListItem[]; defaultGeneratorId: string }) {
+  const { teams, loading, saving, error, load, loadAgentMdDefinitions, update, remove } = useAgentTeamsStore();
+  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editingJson, setEditingJson] = useState('');
+  const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? teams[0] ?? null;
+  const defaultGenerator = agents.find((agent) => agent.id === defaultGeneratorId) ?? agents[0] ?? null;
+  const openCreateDialog = () => setCreateOpen(true);
+
+  useEffect(() => {
+    void load().then(() => loadAgentMdDefinitions());
+  }, [load, loadAgentMdDefinitions]);
+
+  useEffect(() => {
+    if (!selectedTeam) {
+      setSelectedTeamId(null);
+      setEditingJson('');
+      return;
+    }
+    if (!selectedTeamId || selectedTeam.id !== selectedTeamId) {
+      setSelectedTeamId(selectedTeam.id);
+    }
+    setEditingJson(JSON.stringify(toEditableTeam(selectedTeam), null, 2));
+  }, [selectedTeam?.id, selectedTeam?.updatedAt]);
+
+  const handleSave = async () => {
+    if (!selectedTeam) return;
+    try {
+      const parsed = JSON.parse(editingJson) as Partial<AgentTeam>;
+      const team = await update(selectedTeam.id, parsed);
+      setSelectedTeamId(team.id);
+      toast.success('Agent Team 已保存');
+    } catch (err) {
+      toast.error(err instanceof SyntaxError ? 'JSON 格式不正确' : getErrorMessage(err, '保存 Agent Team 失败'));
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!selectedTeam) return;
+    if (!confirm(`确认删除 Agent Team「${selectedTeam.name}」？`)) return;
+    try {
+      await remove(selectedTeam.id);
+      setSelectedTeamId(null);
+      toast.success('Agent Team 已删除');
+    } catch (err) {
+      toast.error(getErrorMessage(err, '删除 Agent Team 失败'));
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-4 lg:grid-cols-[minmax(260px,1fr)_minmax(0,2fr)]">
+        <aside className="rounded-2xl border border-border bg-background/80 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">Team 列表</h3>
+              <p className="mt-1 text-xs text-muted-foreground">{teams.length} 个已保存 Team</p>
+            </div>
+            <Button size="sm" onClick={openCreateDialog} disabled={!defaultGenerator}>
+              <Plus className="size-4" />
+              创建 Team
+            </Button>
+          </div>
+          {loading ? <div className="mb-2 text-xs text-muted-foreground">正在加载 Team…</div> : null}
+          {teams.length === 0 ? (
+            <EmptyText>还没有 Agent Team。点击「创建 Team」开始生成。</EmptyText>
+          ) : (
+            <div className="space-y-2">
+              {teams.map((team) => (
+                <button
+                  key={team.id}
+                  type="button"
+                  onClick={() => setSelectedTeamId(team.id)}
+                  className={`w-full rounded-xl border p-3 text-left transition ${selectedTeam?.id === team.id ? 'border-primary bg-primary/5' : 'border-border bg-background/80 hover:bg-muted/40'}`}
+                >
+                  <div className="truncate text-sm font-medium text-foreground">{team.name}</div>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    <Pill tone="blue">{shapeLabel(team.shape)}</Pill>
+                    <Pill>{team.roles.length} roles</Pill>
+                  </div>
+                  <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{team.goal}</div>
+                </button>
+              ))}
+            </div>
+          )}
+          {error ? <div className="mt-3 text-xs text-red-600 dark:text-red-400">{error}</div> : null}
+        </aside>
+
+        <AgentTeamPanel
+          selectedTeam={selectedTeam}
+          editingJson={editingJson}
+          saving={saving}
+          onEditingJsonChange={setEditingJson}
+          onSave={handleSave}
+          onDelete={handleDelete}
+        />
+      </div>
+
+      <AgentTeamCreateDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        agents={agents}
+        defaultGeneratorId={defaultGenerator?.id ?? defaultGeneratorId}
+        onCreated={(team) => setSelectedTeamId(team.id)}
+      />
+    </div>
+  );
+}
+
+function AgentTeamPanel({
+  selectedTeam,
+  editingJson,
+  saving,
+  onEditingJsonChange,
+  onSave,
+  onDelete,
+}: {
+  selectedTeam: AgentTeam | null;
+  editingJson: string;
+  saving: boolean;
+  onEditingJsonChange: (value: string) => void;
+  onSave: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <section className="rounded-2xl border border-border bg-background/80 p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">Team 详情</h3>
+          <p className="mt-1 text-xs text-muted-foreground">查看角色拆分、编辑 JSON 或删除 Team。</p>
+        </div>
+        {selectedTeam ? (
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={onSave} disabled={saving}>
+              {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+              保存
+            </Button>
+            <Button variant="outline" size="sm" onClick={onDelete} disabled={saving}>
+              <Trash2 className="size-4" />
+              删除
+            </Button>
+          </div>
+        ) : null}
+      </div>
+      {selectedTeam ? (
+        <div className="space-y-3">
+          <div className="rounded-xl border border-border bg-muted/20 p-3">
+            <h4 className="text-base font-semibold text-foreground">{selectedTeam.name}</h4>
+            <p className="mt-1 text-xs text-muted-foreground">由 {selectedTeam.createdByAgentId} 生成 · {shapeLabel(selectedTeam.shape)}</p>
+            <p className="mt-2 text-sm text-muted-foreground">{selectedTeam.description}</p>
+          </div>
+          <div className="grid gap-2 md:grid-cols-2">
+            {selectedTeam.roles.map((role) => (
+              <div key={role.id} className="rounded-xl border border-border bg-muted/20 p-3">
+                <div className="text-sm font-medium text-foreground">{role.name}</div>
+                <div className="mt-1 text-xs text-muted-foreground">{role.responsibility}</div>
+              </div>
+            ))}
+          </div>
+          <label className="grid gap-1.5">
+            <span className="text-xs font-medium text-muted-foreground">编辑 Team JSON</span>
+            <textarea
+              value={editingJson}
+              onChange={(event) => onEditingJsonChange(event.target.value)}
+              className="min-h-96 rounded-xl border border-border bg-background px-3 py-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring"
+            />
+          </label>
+        </div>
+      ) : (
+        <EmptyText>选择左侧 Agent Team 查看详情，或点击「创建 Team」生成新的 Team。</EmptyText>
+      )}
+    </section>
+  );
+}
+
+function AgentTeamCreateDialog({
+  open,
+  onOpenChange,
+  agents,
+  defaultGeneratorId,
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  agents: AgentListItem[];
+  defaultGeneratorId: string;
+  onCreated: (team: AgentTeam) => void;
+}) {
+  const { saving, generate } = useAgentTeamsStore();
+  const [generatorAgentId, setGeneratorAgentId] = useState(defaultGeneratorId);
+  const [goal, setGoal] = useState('');
+  const [shape, setShape] = useState<AgentTeamShape>('auto');
+  const [generatedPreviewTeam, setGeneratedPreviewTeam] = useState<AgentTeam | null>(null);
+  const generatorAgent = agents.find((agent) => agent.id === generatorAgentId) ?? agents[0] ?? null;
+  const shapeMeta = TEAM_SHAPES.find((item) => item.value === shape) ?? TEAM_SHAPES[0];
+
+  useEffect(() => {
+    if (!open) return;
+    setGeneratorAgentId(defaultGeneratorId);
+    setGeneratedPreviewTeam(null);
+  }, [open, defaultGeneratorId]);
+
+  if (!open) return null;
+
+  const handleGenerate = async () => {
+    if (!generatorAgent) {
+      toast.error('请先选择生成器 Agent');
+      return;
+    }
+    const trimmedGoal = goal.trim();
+    if (!trimmedGoal) {
+      toast.error('请输入希望这个 team 能够完成的事情');
+      return;
+    }
+    try {
+      const team = await generate({ generatorAgentId: generatorAgent.id, goal: trimmedGoal, shape });
+      setGeneratedPreviewTeam(team);
+      onCreated(team);
+      toast.success('Agent Team 已生成，右侧已展示 Agent 返回结果');
+    } catch (err) {
+      toast.error(getErrorMessage(err, '生成 Agent Team 失败'));
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div className="max-h-[90vh] w-full max-w-6xl overflow-y-auto rounded-3xl border border-border bg-background p-5 shadow-2xl">
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-foreground">创建 Team</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              左侧填写生成参数，右侧展示 Agent 返回后的 Team 结果。现有 agent.md 简介会提供给模型。
+            </p>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>关闭</Button>
+        </div>
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,1fr)]">
+          <section className="space-y-4 rounded-2xl border border-border bg-muted/10 p-4">
+            <div>
+              <h4 className="text-sm font-semibold text-foreground">生成参数</h4>
+              <p className="mt-1 text-xs text-muted-foreground">选择生成器 Agent、描述目标，并指定协作形态。</p>
+            </div>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">选择生成器 Agent</span>
+              <select
+                value={generatorAgent?.id ?? ''}
+                onChange={(event) => {
+                  setGeneratorAgentId(event.target.value);
+                  setGeneratedPreviewTeam(null);
+                }}
+                className="rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+              >
+                {agents.map((agent) => (
+                  <option key={agent.id} value={agent.id}>{agent.displayName}</option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">希望这个 team 能够完成的事情</span>
+              <textarea
+                value={goal}
+                onChange={(event) => {
+                  setGoal(event.target.value);
+                  setGeneratedPreviewTeam(null);
+                }}
+                className="min-h-36 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                placeholder="例如：完成一个从需求分析、前端实现到上线验证的功能开发团队"
+              />
+            </label>
+            <div>
+              <div className="mb-2 text-xs font-medium text-muted-foreground">Interaction shape (optional)</div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {TEAM_SHAPES.map((item) => (
+                  <label key={item.value} className={`rounded-xl border p-3 text-left transition ${shape === item.value ? 'border-primary bg-primary/5' : 'border-border bg-background/80 hover:bg-muted/40'}`}>
+                    <div className="flex items-center gap-2">
+                      <input type="radio" checked={shape === item.value} onChange={() => {
+                        setShape(item.value);
+                        setGeneratedPreviewTeam(null);
+                      }} />
+                      <span className="text-sm font-medium text-foreground">{item.label}</span>
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">{item.description}</div>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border pt-4">
+              <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>取消</Button>
+              <Button onClick={handleGenerate} disabled={saving || !generatorAgent}>
+                {saving ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+                生成 Team
+              </Button>
+            </div>
+          </section>
+
+          <aside className="space-y-4 rounded-2xl border border-border bg-background/80 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h4 className="text-sm font-semibold text-foreground">Team 预览</h4>
+                <p className="mt-1 text-xs text-muted-foreground">生成完成后这里会展示真实的 Team pipeline、角色、工作流和验收标准。</p>
+              </div>
+              <Pill tone="blue">{generatedPreviewTeam ? shapeLabel(generatedPreviewTeam.shape) : shapeMeta.label}</Pill>
+            </div>
+            {saving ? (
+              <div className="rounded-2xl border border-primary/30 bg-primary/5 p-4 text-sm text-foreground">
+                <div className="flex items-center gap-2 font-semibold">
+                  <Loader2 className="size-4 animate-spin" />
+                  正在等待 Agent 返回 Team 定义…
+                </div>
+                <p className="mt-2 text-xs leading-5 text-muted-foreground">不会使用本地草稿兜底；返回后会在这里展示真实生成结果。</p>
+              </div>
+            ) : generatedPreviewTeam ? (
+              <GeneratedTeamPreview team={generatedPreviewTeam} requestedShape={shape} />
+            ) : (
+              <div className="space-y-3 rounded-2xl border border-dashed border-border bg-muted/10 p-4">
+                <div className="text-sm font-semibold text-foreground">等待 Agent 生成结果</div>
+                <p className="text-xs leading-5 text-muted-foreground">
+                  点击「生成 Team」后，系统会等待生成器 Agent 返回完整 Team 定义；这里不会显示内置角色或本地模拟流程。
+                </p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="rounded-xl border border-border bg-background/80 p-3">
+                    <div className="text-xs font-medium text-muted-foreground">生成器 Agent</div>
+                    <div className="mt-1 truncate text-sm font-semibold text-foreground">{generatorAgent?.displayName ?? '未选择'}</div>
+                  </div>
+                  <div className="rounded-xl border border-border bg-background/80 p-3">
+                    <div className="text-xs font-medium text-muted-foreground">请求的 Interaction shape</div>
+                    <div className="mt-1 text-sm font-semibold text-foreground">{shapeMeta.label}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div className="rounded-xl border border-dashed border-border bg-muted/10 p-3 text-xs text-muted-foreground">
+              生成时会把已保存的 agent.md 简介提供给模型；如果现有定义不足，模型可以返回新的 agent.md 并由系统自动保存。
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AgentMdPanel({ generatorAgent }: { generatorAgent: AgentListItem | null }) {
+  const {
+    agentMdDefinitions,
+    saving,
+    createAgentMdDefinition,
+    updateAgentMdDefinition,
+    removeAgentMdDefinition,
+  } = useAgentTeamsStore();
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = selectedId ? agentMdDefinitions.find((definition) => definition.id === selectedId) ?? null : null;
+  const [draft, setDraft] = useState({
+    name: '',
+    summary: '',
+    content: '',
+  });
+  const generatorName = generatorAgent?.displayName ?? 'Agent';
+  const generatorId = generatorAgent?.id ?? 'manual';
+
+  useEffect(() => {
+    if (!selected) {
+      setSelectedId(null);
+      setDraft({ name: '', summary: '', content: defaultAgentMdContent(generatorName) });
+      return;
+    }
+    if (!selectedId || selected.id !== selectedId) {
+      setSelectedId(selected.id);
+    }
+    setDraft({ name: selected.name, summary: selected.summary, content: selected.content });
+  }, [selected?.id, selected?.updatedAt, selectedId, generatorName]);
+
+  const handleNew = () => {
+    setSelectedId(null);
+    setDraft({ name: '', summary: '', content: defaultAgentMdContent(generatorName) });
+  };
+
+  const handleSave = async () => {
+    const name = draft.name.trim();
+    const summary = draft.summary.trim();
+    const content = draft.content.trim();
+    if (!name || !summary || !content) {
+      toast.error('请填写 agent.md 的名称、简介和内容');
+      return;
+    }
+    try {
+      const payload = { name, summary, content, createdByAgentId: generatorId };
+      const saved = selected
+        ? await updateAgentMdDefinition(selected.id, payload)
+        : await createAgentMdDefinition(payload);
+      setSelectedId(saved.id);
+      toast.success('agent.md 已保存');
+    } catch (err) {
+      toast.error(getErrorMessage(err, '保存 agent.md 失败'));
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!selected) return;
+    if (!confirm(`确认删除 agent.md「${selected.name}」？`)) return;
+    try {
+      await removeAgentMdDefinition(selected.id);
+      setSelectedId(null);
+      toast.success('agent.md 已删除');
+    } catch (err) {
+      toast.error(getErrorMessage(err, '删除 agent.md 失败'));
+    }
+  };
+
+  return (
+    <div className="rounded-2xl border border-border bg-background/80 p-4">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <h4 className="text-sm font-semibold text-foreground">agent.md 管理</h4>
+          <p className="mt-1 text-xs text-muted-foreground">
+            用户可以自行定义 agent.md。现有 agent.md 简介会在生成 Team 时提供给模型，用于辅助拆分角色；不合适时模型可返回新的 agent.md 定义。
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={handleNew}>
+          <Plus className="size-4" />
+          新建
+        </Button>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(220px,0.8fr)_minmax(0,1.2fr)]">
+        <div className="space-y-2">
+          <div className="text-xs font-semibold text-muted-foreground">已有 agent.md</div>
+          {agentMdDefinitions.length === 0 ? (
+            <EmptyText>还没有 agent.md。可以手动创建，或在生成 Team 时由 Agent 自动补充。</EmptyText>
+          ) : (
+            agentMdDefinitions.map((definition) => (
+              <button
+                key={definition.id}
+                type="button"
+                onClick={() => setSelectedId(definition.id)}
+                className={`w-full rounded-xl border p-3 text-left transition ${selected?.id === definition.id ? 'border-primary bg-primary/5' : 'border-border bg-background/80 hover:bg-muted/40'}`}
+              >
+                <div className="truncate text-sm font-medium text-foreground">{definition.name}</div>
+                <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{definition.summary}</div>
+              </button>
+            ))
+          )}
+        </div>
+
+        <div className="space-y-3 rounded-2xl border border-border bg-muted/10 p-4">
+          <label className="grid gap-1.5">
+            <span className="text-xs font-medium text-muted-foreground">名称</span>
+            <input
+              value={draft.name}
+              onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))}
+              className="rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+              placeholder="例如：Frontend Implementer"
+            />
+          </label>
+          <label className="grid gap-1.5">
+            <span className="text-xs font-medium text-muted-foreground">简介（会提供给 Agent Team 生成模型）</span>
+            <textarea
+              value={draft.summary}
+              onChange={(event) => setDraft((prev) => ({ ...prev, summary: event.target.value }))}
+              className="min-h-20 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+              placeholder="简要说明这个 agent.md 擅长什么、适合什么角色。"
+            />
+          </label>
+          <label className="grid gap-1.5">
+            <span className="text-xs font-medium text-muted-foreground">agent.md 内容</span>
+            <textarea
+              value={draft.content}
+              onChange={(event) => setDraft((prev) => ({ ...prev, content: event.target.value }))}
+              className="min-h-64 rounded-xl border border-border bg-background px-3 py-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring"
+            />
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+              保存 agent.md
+            </Button>
+            {selected ? (
+              <Button variant="outline" size="sm" onClick={handleDelete} disabled={saving}>
+                <Trash2 className="size-4" />
+                删除
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function defaultAgentMdContent(agentName: string): string {
+  return `# ${agentName} Role\n\n## Responsibility\n\n描述这个 agent.md 对应角色应该负责的事情。\n\n## Working Style\n\n描述它如何分析问题、产出结果和与其他角色交接。\n\n## Guardrails\n\n- 保持角色边界清晰\n- 不绑定具体 Agent CLI / provider / device\n`;
+}
+
+function toEditableTeam(team: AgentTeam): Omit<AgentTeam, 'id' | 'createdAt' | 'updatedAt'> {
+  return {
+    name: team.name,
+    goal: team.goal,
+    shape: team.shape,
+    description: team.description,
+    roles: team.roles,
+    workflow: team.workflow,
+    successCriteria: team.successCriteria,
+    createdByAgentId: team.createdByAgentId,
+  };
+}
+
+function shapeLabel(shape: AgentTeamShape): string {
+  return TEAM_SHAPES.find((item) => item.value === shape)?.label ?? shape;
+}
+
+function GeneratedTeamPreview({ team, requestedShape }: { team: AgentTeam; requestedShape: AgentTeamShape }) {
+  return (
+    <div className="space-y-4">
+      <ShapeDecisionNotice team={team} requestedShape={requestedShape} />
+      <div className="rounded-2xl border border-green-500/30 bg-green-500/5 p-4">
+        <div className="flex items-center gap-2 text-xs font-semibold text-green-700 dark:text-green-300">
+          <CheckCircle2 className="size-4" />
+          Agent 返回结果
+        </div>
+        <h5 className="mt-2 text-base font-semibold text-foreground">{team.name}</h5>
+        <p className="mt-2 text-xs leading-5 text-muted-foreground">{team.description}</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Pill tone="blue">{shapeLabel(team.shape)}</Pill>
+          <Pill>{team.roles.length} roles</Pill>
+          <Pill>by {team.createdByAgentId}</Pill>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-border bg-muted/20 p-4">
+        <div className="text-xs font-medium text-muted-foreground">目标</div>
+        <p className="mt-2 text-sm leading-6 text-foreground">{team.goal}</p>
+      </div>
+
+      <div>
+        <div className="mb-2 text-xs font-medium text-muted-foreground">角色定义</div>
+        <div className="space-y-2">
+          {team.roles.map((role, index) => (
+            <div key={role.id || `${role.name}-${index}`} className="rounded-xl border border-border bg-muted/10 p-3">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="text-sm font-medium text-foreground">{role.name}</div>
+                  <div className="mt-1 font-mono text-[11px] text-muted-foreground">{role.id}</div>
+                </div>
+                <Pill>Role {index + 1}</Pill>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">{role.responsibility}</p>
+              <RoleList title="Inputs" values={role.inputs} />
+              <RoleList title="Outputs" values={role.outputs} />
+              <RoleList title="Skills / agent.md 建议" values={role.skills} />
+              <RoleList title="Guardrails" values={role.guardrails} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-border bg-muted/20 p-4">
+        <div className="text-xs font-medium text-muted-foreground">Workflow / pipeline</div>
+        <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-foreground">{team.workflow}</p>
+      </div>
+
+      <div className="rounded-2xl border border-border bg-muted/20 p-4">
+        <div className="text-xs font-medium text-muted-foreground">验收标准</div>
+        <ul className="mt-2 space-y-1 text-sm leading-6 text-foreground">
+          {team.successCriteria.map((criterion, index) => (
+            <li key={`${criterion}-${index}`} className="flex gap-2">
+              <span className="text-muted-foreground">{index + 1}.</span>
+              <span>{criterion}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function ShapeDecisionNotice({ team, requestedShape }: { team: AgentTeam; requestedShape: AgentTeamShape }) {
+  const actualShape = shapeLabel(team.shape);
+  if (requestedShape === 'auto') {
+    return (
+      <div className="rounded-2xl border border-blue-500/30 bg-blue-500/5 p-4">
+        <div className="text-xs font-medium text-muted-foreground">AI 选择的 Interaction shape</div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Pill tone="blue">{actualShape}</Pill>
+          <span className="text-sm text-foreground">这次 Let AI decide 生成的是 {actualShape} Team。</span>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-2xl border border-border bg-muted/20 p-4">
+      <div className="text-xs font-medium text-muted-foreground">Interaction shape</div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Pill tone="blue">{actualShape}</Pill>
+        {team.shape !== requestedShape ? (
+          <span className="text-sm text-foreground">Agent 返回的实际形态与请求不同：请求 {shapeLabel(requestedShape)}，返回 {actualShape}。</span>
+        ) : (
+          <span className="text-sm text-foreground">Agent 按请求生成了 {actualShape} Team。</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RoleList({ title, values }: { title: string; values?: string[] }) {
+  if (!values?.length) return null;
+  return (
+    <div className="mt-2">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</div>
+      <div className="mt-1 flex flex-wrap gap-1.5">
+        {values.map((value, index) => (
+          <span key={`${value}-${index}`} className="rounded-full border border-border bg-background/80 px-2 py-1 text-[11px] text-muted-foreground">
+            {value}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -905,6 +1565,9 @@ function AgentSkillsPanel({
 }
 
 function SkillGroup({ title, skills, empty }: { title: string; skills: AgentSkillInfo[]; empty: string }) {
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const packageGroups = groupSkillsByPackage(skills);
+
   return (
     <section className="space-y-2">
       <div className="flex items-center justify-between gap-2">
@@ -912,19 +1575,48 @@ function SkillGroup({ title, skills, empty }: { title: string; skills: AgentSkil
         <Pill tone="blue">{skills.length}</Pill>
       </div>
       {skills.length ? (
-        <div className="grid gap-2">
-          {skills.map((skill) => (
-            <div key={`${skill.source}:${skill.id}`} className="rounded-xl border border-border bg-background/80 p-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium text-foreground">{skill.name || skill.id}</div>
-                  <div className="truncate font-mono text-[11px] text-muted-foreground">{skill.id}</div>
-                </div>
-                {skill.enabled === false ? <Pill>disabled</Pill> : <Pill tone="green">enabled</Pill>}
+        <div className="space-y-3">
+          {packageGroups.map((group) => (
+            <div key={group.packageName} className="rounded-2xl border border-border/80 bg-background/60 p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="truncate font-mono text-xs font-semibold text-foreground">{group.packageName}</div>
+                <Pill>{group.skills.length}</Pill>
               </div>
-              {skill.description ? (
-                <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">{skill.description}</p>
-              ) : null}
+              <div className="grid gap-2">
+                {group.skills.map((skill) => {
+                  const key = `${skill.source}:${skill.id}:${group.packageName}`;
+                  const expanded = expandedKey === key;
+                  return (
+                    <div key={key} className="rounded-xl border border-border bg-background/80 p-3">
+                      <button
+                        type="button"
+                        onClick={() => setExpandedKey(expanded ? null : key)}
+                        className="w-full text-left"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-medium text-foreground">{skill.name || skill.id}</div>
+                            <div className="truncate font-mono text-[11px] text-muted-foreground">{skill.id}</div>
+                          </div>
+                          {skill.enabled === false ? <Pill>disabled</Pill> : <Pill tone="green">enabled</Pill>}
+                        </div>
+                        {skill.description ? (
+                          <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">{skill.description}</p>
+                        ) : null}
+                      </button>
+                      {expanded ? (
+                        <div className="mt-3 rounded-lg border border-border/70 bg-muted/20 p-3">
+                          {skill.content ? (
+                            <MarkdownRenderer content={skill.content} variant="docs" />
+                          ) : (
+                            <p className="text-xs text-muted-foreground">该 skill 未上报 SKILL.md 详情内容。</p>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           ))}
         </div>

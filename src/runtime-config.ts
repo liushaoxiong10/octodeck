@@ -76,10 +76,10 @@ const DANGEROUS_ENV_VARS = new Set([
   'TMPDIR',
   'TEMP',
   'TMP',
-  // HappyClaw 内部路径映射
-  'HAPPYCLAW_WORKSPACE_GROUP',
-  'HAPPYCLAW_WORKSPACE_GLOBAL',
-  'HAPPYCLAW_WORKSPACE_IPC',
+  // OctoDeck 内部路径映射
+  'OCTODECK_WORKSPACE_GROUP',
+  'OCTODECK_WORKSPACE_GLOBAL',
+  'OCTODECK_WORKSPACE_IPC',
   'CLAUDE_CONFIG_DIR',
 ]);
 const MAX_CUSTOM_ENV_ENTRIES = 50;
@@ -764,7 +764,7 @@ function fromStoredProfile(
     anthropicBaseUrl: normalizeBaseUrl(stored.anthropicBaseUrl),
     anthropicAuthToken: secrets.anthropicAuthToken,
     anthropicModel: normalizeModel(
-      stored.anthropicModel ?? (stored as any).happyclawModel ?? '',
+      stored.anthropicModel ?? (stored as any).octodeckModel ?? '',
     ),
     updatedAt: stored.updatedAt || null,
     customEnv: sanitizeCustomEnvMap(stored.customEnv || {}, {
@@ -1587,7 +1587,7 @@ export function providerToConfig(
   options?: { proxyBaseUrl?: string },
 ): ClaudeProviderConfig {
   const apiType = provider.apiType || 'claude';
-  const proxyBaseUrl = (options?.proxyBaseUrl || process.env.HAPPYCLAW_MODEL_PROXY_BASE_URL || `http://127.0.0.1:${WEB_PORT}`).replace(/\/+$/, '');
+  const proxyBaseUrl = (options?.proxyBaseUrl || process.env.OCTODECK_MODEL_PROXY_BASE_URL || `http://127.0.0.1:${WEB_PORT}`).replace(/\/+$/, '');
   const useProxy = apiType !== 'claude';
   return {
     apiType,
@@ -2681,14 +2681,14 @@ export function getContainerEnvConfig(folder: string): ContainerEnvConfig {
     if (fs.existsSync(filePath)) {
       const stored = JSON.parse(
         fs.readFileSync(filePath, 'utf-8'),
-      ) as ContainerEnvConfig & { happyclawModel?: string };
+      ) as ContainerEnvConfig & { octodeckModel?: string };
       // Backward compat: migrate old field name
       if (
         stored.anthropicModel === undefined &&
-        stored.happyclawModel !== undefined
+        stored.octodeckModel !== undefined
       ) {
-        stored.anthropicModel = stored.happyclawModel;
-        delete stored.happyclawModel;
+        stored.anthropicModel = stored.octodeckModel;
+        delete stored.octodeckModel;
       }
       return stored;
     }
@@ -3758,7 +3758,7 @@ export interface SystemSettings {
   externalClaudeDir: string;
   // Claude Agent SDK 自动对话压缩触发点（tokens）。0 = 保留 SDK 默认（约 1M）
   autoCompactWindow: number;
-  // 关闭 admin host 模式下 HappyClaw 自带的 memory 注入层（MCP 工具、模板 CLAUDE.md、WORKSPACE_GLOBAL/MEMORY env）
+  // 关闭 admin host 模式下 OctoDeck 自带的 memory 注入层（MCP 工具、模板 CLAUDE.md、WORKSPACE_GLOBAL/MEMORY env）
   // 启用后 admin 可以在 host 模式下完全按原生 Claude Code 的 Playbook 使用 ~/.claude/ 下的 memory/skills/rules
   disableMemoryLayerForAdminHost: boolean;
   // Plugin catalog 自动扫描：true（默认）= 启动 5s 后扫一次 + 每小时一次；

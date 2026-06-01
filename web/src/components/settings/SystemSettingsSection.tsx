@@ -476,23 +476,23 @@ export function SystemSettingsSection() {
         </div>
       </div>
 
-      {/* 禁用 HappyClaw 记忆层（admin 主容器专用） */}
+      {/* 禁用 OctoDeck 记忆层（admin 主容器专用） */}
       <div className="border-t border-border pt-6 space-y-5">
-        <h3 className="text-sm font-semibold text-foreground">禁用 HappyClaw 记忆层（admin 主容器）</h3>
+        <h3 className="text-sm font-semibold text-foreground">禁用 OctoDeck 记忆层（admin 主容器）</h3>
 
         <div className="flex items-center justify-between">
           <div className="flex-1 pr-4">
             <Label>禁用后按本机 ~/.claude/ Playbook 运行</Label>
             <p className="text-xs text-muted-foreground mt-0.5">
               启用后 admin 主容器（folder=main）不再注入 memory_append/search/get MCP 工具、
-              不注入 WORKSPACE_GLOBAL/MEMORY 环境变量、不注入 HappyClaw 记忆系统提示、
+              不注入 WORKSPACE_GLOBAL/MEMORY 环境变量、不注入 OctoDeck 记忆系统提示、
               PreCompact 钩子不触发 memory flush，让 Agent 完全按本机
               ~/.claude/ 下的 Playbook（CLAUDE.md + rules/ + memory/）行事。
             </p>
             <p className="text-xs text-destructive mt-2">
               <strong>前置要求</strong>：必须先在 admin 主容器配置 customCwd
               指向真实项目目录。未配置时 CLAUDE_CONFIG_DIR 仍会指向 data/sessions/main/.claude，
-              SDK 既读不到 HappyClaw 记忆层也读不到 ~/.claude/，Agent 会变成空白沙箱。
+              SDK 既读不到 OctoDeck 记忆层也读不到 ~/.claude/，Agent 会变成空白沙箱。
               后端会在保存时校验，未配置则拒绝启用。
             </p>
             <p className="text-xs text-muted-foreground mt-2">
@@ -507,14 +507,14 @@ export function SystemSettingsSection() {
             <p className="text-xs text-muted-foreground mt-2">
               <strong>Auto-memory 共享</strong>：启用后 SDK auto-memory 会写入
               ~/.claude/projects/{'{cwd-slug}'}/memory/，与本机原生 Claude Code 共享。
-              如果 HappyClaw Agent 和你本人的风格/语言偏好不同，两边会互相污染 —
+              如果 OctoDeck Agent 和你本人的风格/语言偏好不同，两边会互相污染 —
               介意就不要开这个开关。
             </p>
           </div>
           <Switch
             checked={disableMemoryLayerForAdminHost}
             onCheckedChange={setDisableMemoryLayerForAdminHost}
-            aria-label="禁用 HappyClaw 记忆层"
+            aria-label="禁用 OctoDeck 记忆层"
           />
         </div>
       </div>

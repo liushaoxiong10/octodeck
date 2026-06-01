@@ -76,43 +76,43 @@ export function createRemoteMcpTools(opts: RemoteMcpToolOptions): SdkMcpToolDefi
   };
 
   return [
-    tool('remote_bash', 'Run a shell command on the connected hcagent client machine.', {
+    tool('remote_bash', 'Run a shell command on the connected octodeck-daemon client machine.', {
       command: z.string(),
       timeout_ms: z.number().int().positive().optional(),
     }, (args) => callRemote('Bash', args)),
-    tool('remote_read', 'Read a file from the connected hcagent client workspace.', {
+    tool('remote_read', 'Read a file from the connected octodeck-daemon client workspace.', {
       file_path: z.string(),
       offset: z.number().int().nonnegative().optional(),
       limit: z.number().int().positive().optional(),
     }, (args) => callRemote('Read', args)),
-    tool('remote_write', 'Write a file on the connected hcagent client workspace.', {
+    tool('remote_write', 'Write a file on the connected octodeck-daemon client workspace.', {
       file_path: z.string(),
       content: z.string(),
     }, (args) => callRemote('Write', args)),
-    tool('remote_edit', 'Edit a file on the connected hcagent client workspace by replacing text.', {
+    tool('remote_edit', 'Edit a file on the connected octodeck-daemon client workspace by replacing text.', {
       file_path: z.string(),
       old_string: z.string(),
       new_string: z.string(),
       replace_all: z.boolean().optional(),
     }, (args) => callRemote('Edit', args)),
-    tool('remote_glob', 'Find files by glob pattern on the connected hcagent client workspace.', {
+    tool('remote_glob', 'Find files by glob pattern on the connected octodeck-daemon client workspace.', {
       pattern: z.string(),
       path: z.string().optional(),
     }, (args) => callRemote('Glob', args)),
-    tool('remote_grep', 'Search file contents on the connected hcagent client workspace.', {
+    tool('remote_grep', 'Search file contents on the connected octodeck-daemon client workspace.', {
       pattern: z.string(),
       path: z.string().optional(),
       glob: z.string().optional(),
       head_limit: z.number().int().positive().optional(),
     }, (args) => callRemote('Grep', args)),
-    tool('remote_ls', 'List a directory on the connected hcagent client workspace.', {
+    tool('remote_ls', 'List a directory on the connected octodeck-daemon client workspace.', {
       path: z.string(),
     }, (args) => callRemote('LS', args)),
-    tool('remote_web_fetch', 'Fetch a URL from the connected hcagent client network.', {
+    tool('remote_web_fetch', 'Fetch a URL from the connected octodeck-daemon client network.', {
       url: z.string(),
       raw: z.boolean().optional(),
     }, (args) => callRemote('WebFetch', args)),
-    tool('remote_web_search', 'Search the web from the connected hcagent client network.', {
+    tool('remote_web_search', 'Search the web from the connected octodeck-daemon client network.', {
       query: z.string(),
     }, (args) => callRemote('WebSearch', args)),
   ];

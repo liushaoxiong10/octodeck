@@ -170,9 +170,11 @@ export async function runHostCli(
 
   const settings = getSystemSettings();
   const timeoutMs =
-    (cfg.timeoutMs && cfg.timeoutMs > 0
-      ? cfg.timeoutMs
-      : group.containerConfig?.timeout) || settings.containerTimeout;
+    (group.containerConfig?.timeout && group.containerConfig.timeout > 0
+      ? group.containerConfig.timeout
+      : cfg.timeoutMs && cfg.timeoutMs > 0
+        ? cfg.timeoutMs
+        : undefined) || settings.containerTimeout;
   const maxOutputBytes =
     (cfg.maxOutputBytes && cfg.maxOutputBytes > 0
       ? cfg.maxOutputBytes

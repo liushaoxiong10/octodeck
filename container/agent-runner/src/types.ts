@@ -1,5 +1,5 @@
 /**
- * Shared types for HappyClaw Agent Runner.
+ * Shared types for OctoDeck Agent Runner.
  *
  * These types are used across index.ts, stream-processor.ts, and mcp-tools.ts.
  */
@@ -39,7 +39,7 @@ export interface ContainerInput {
    * host absolute path for host mode).
    */
   plugins?: Array<{ type: 'local'; path: string }>;
-  /** AgentLink ID used by remote MCP tools when local operations run on hcagent. */
+  /** AgentLink ID used by remote MCP tools when local operations run on octodeck-daemon. */
   remoteExecutionLinkId?: string;
   /** Server base URL used by remote MCP tools to call /api/agent-link/tool. */
   remoteToolServerUrl?: string;

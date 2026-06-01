@@ -426,7 +426,7 @@ describe('buildAgentReplyCard', () => {
 
   test('long single-line reply → no header and keeps full text in body', () => {
     const text =
-      'HappyClaw: 脚本 Updated slot: Token usage 明细很长，需要在卡片正文完整展示，不能只剩截断标题';
+      'OctoDeck: 脚本 Updated slot: Token usage 明细很长，需要在卡片正文完整展示，不能只剩截断标题';
     const card = buildAgentReplyCard({ status: 'done', text });
     expect(card.header).toBeUndefined();
     const body = card.body as { elements: Array<Record<string, unknown>> };

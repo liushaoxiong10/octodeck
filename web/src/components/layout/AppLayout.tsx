@@ -80,7 +80,7 @@ export function AppLayout() {
   const totalUnread = useChatStore((s) => Object.values(s.unreadReplies).reduce((sum, n) => sum + n, 0));
   const appearance = useAuthStore((s) => s.appearance);
   useEffect(() => {
-    const appName = appearance?.appName || 'HappyClaw';
+    const appName = appearance?.appName || 'OctoDeck';
     document.title = totalUnread > 0 ? `(${totalUnread}) ${appName}` : appName;
   }, [totalUnread, appearance?.appName]);
 

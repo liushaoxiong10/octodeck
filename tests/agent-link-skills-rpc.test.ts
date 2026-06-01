@@ -26,6 +26,77 @@ describe('agent-link skills rpc', () => {
     expect(inbound).toMatchObject({ type: 'skills.result', workspaceSkills: [{ id: 'project-skill' }] });
   });
 
+  test('protocol tolerates legacy skills.result null skill lists as empty arrays', () => {
+    const inbound = InboundFrame.parse({
+      type: 'skills.result',
+      requestId: 'req_legacy_empty',
+      ok: true,
+      workspaceSkills: null,
+      cliSkills: null,
+      error: null,
+      durationMs: 3,
+    });
+
+    expect(inbound).toMatchObject({
+      type: 'skills.result',
+      workspaceSkills: [],
+      cliSkills: [],
+    });
+  });
+
+  test('protocol accepts skills.result package metadata and skill content', () => {
+    const inbound = InboundFrame.parse({
+      type: 'skills.result',
+      requestId: 'req_detail',
+      ok: true,
+      workspaceSkills: [
+        {
+          id: 'project-skill',
+          name: 'Project Skill',
+          source: 'workspace',
+          enabled: true,
+          content: '---\nname: Project Skill\n---\n# Project Skill\n',
+        },
+      ],
+      cliSkills: [
+        {
+          id: 'cli-skill',
+          name: 'CLI Skill',
+          source: 'cli',
+          enabled: true,
+          packageName: 'owner/repo@cli-skill',
+          content: '---\nname: CLI Skill\n---\n# CLI Skill\n',
+        },
+      ],
+      error: null,
+      durationMs: 5,
+    });
+
+    expect(inbound).toMatchObject({
+      type: 'skills.result',
+      workspaceSkills: [{ id: 'project-skill', content: expect.stringContaining('# Project Skill') }],
+      cliSkills: [
+        {
+          id: 'cli-skill',
+          packageName: 'owner/repo@cli-skill',
+          content: expect.stringContaining('# CLI Skill'),
+        },
+      ],
+    });
+  });
+
+  test('protocol still requires skills.result skill list fields', () => {
+    expect(() =>
+      InboundFrame.parse({
+        type: 'skills.result',
+        requestId: 'req_missing_lists',
+        ok: true,
+        error: null,
+        durationMs: 3,
+      }),
+    ).toThrow();
+  });
+
   test('sends skills.request and resolves from matching skills.result', async () => {
     const sent: unknown[] = [];
     const session = {

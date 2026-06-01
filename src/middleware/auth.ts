@@ -20,6 +20,9 @@ import {
 } from '../config.js';
 import { logger } from '../logger.js';
 
+const LEGACY_SESSION_COOKIE_NAME_SECURE = '__Host-happyclaw_session';
+const LEGACY_SESSION_COOKIE_NAME_PLAIN = 'happyclaw_session';
+
 /**
  * Extract ALL values for a given cookie name from the raw Cookie header.
  * Browsers may send duplicate cookies (same name, different attributes)
@@ -52,13 +55,18 @@ export function tryVerifyAny(values: string[]): { token: string; legacy: boolean
   return null;
 }
 
+export function getSessionCookieValues(cookieHeader: string | undefined): string[] {
+  return [
+    ...getAllCookieValues(cookieHeader, SESSION_COOKIE_NAME_SECURE),
+    ...getAllCookieValues(cookieHeader, SESSION_COOKIE_NAME_PLAIN),
+    ...getAllCookieValues(cookieHeader, LEGACY_SESSION_COOKIE_NAME_SECURE),
+    ...getAllCookieValues(cookieHeader, LEGACY_SESSION_COOKIE_NAME_PLAIN),
+  ];
+}
+
 export const authMiddleware = async (c: any, next: any) => {
   const cookieHeader: string | undefined = c.req.header('cookie');
-  // Try both cookie names, preferring the secure variant
-  let allValues = getAllCookieValues(cookieHeader, SESSION_COOKIE_NAME_SECURE);
-  if (allValues.length === 0) {
-    allValues = getAllCookieValues(cookieHeader, SESSION_COOKIE_NAME_PLAIN);
-  }
+  const allValues = getSessionCookieValues(cookieHeader);
 
   if (allValues.length === 0) {
     return c.json({ error: 'Unauthorized' }, 401);

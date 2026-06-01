@@ -9,11 +9,11 @@ import (
 
 // validateRunRequest enforces client-side safety rules.
 //
-// 1. binary must be in cfg.AllowedBinaries (exact match, absolute path).
-// 2. cwd must be absolute.
-// 3. env keys must not include LD_PRELOAD, NODE_OPTIONS, DYLD_INSERT_LIBRARIES,
-//    LD_LIBRARY_PATH, PATH (we don't let server override $PATH wholesale).
-// 4. argv entries must not contain NUL bytes.
+//  1. binary must be in cfg.AllowedBinaries (exact match, absolute path).
+//  2. cwd must be absolute.
+//  3. env keys must not include LD_PRELOAD, NODE_OPTIONS, DYLD_INSERT_LIBRARIES,
+//     LD_LIBRARY_PATH, PATH (we don't let server override $PATH wholesale).
+//  4. argv entries must not contain NUL bytes.
 func validateRunRequest(cfg *Config, req *RunRequestFrame) error {
 	if !filepath.IsAbs(req.Binary) {
 		return fmt.Errorf("binary must be absolute: %q", req.Binary)
@@ -75,12 +75,12 @@ func isAllowedBinary(cfg *Config, bin string) bool {
 }
 
 var dangerousEnvKeys = map[string]struct{}{
-	"LD_PRELOAD":             {},
-	"LD_LIBRARY_PATH":        {},
-	"DYLD_INSERT_LIBRARIES":  {},
-	"DYLD_LIBRARY_PATH":      {},
-	"NODE_OPTIONS":           {},
-	"PATH":                   {},
+	"LD_PRELOAD":            {},
+	"LD_LIBRARY_PATH":       {},
+	"DYLD_INSERT_LIBRARIES": {},
+	"DYLD_LIBRARY_PATH":     {},
+	"NODE_OPTIONS":          {},
+	"PATH":                  {},
 }
 
 func isDangerousEnvKey(k string) bool {

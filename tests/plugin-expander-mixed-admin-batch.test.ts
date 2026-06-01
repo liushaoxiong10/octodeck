@@ -139,7 +139,7 @@ function enable(opts: {
 }
 
 beforeEach(() => {
-  tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-r15-'));
+  tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'octodeck-r15-'));
   _resetCommandIndexCacheForTests();
 });
 
@@ -170,7 +170,7 @@ const ctxHostFor = (userId: string) => ({
 describe('plugin-expander-store: persistPluginExpansion — #23 round-15 P1-1', () => {
   test('round-trip: persist a sentinel and read it back via getMessageAttachments', async () => {
     // Use a separate temp dir to avoid colliding with the plugin runtime dir.
-    const dbTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-r15-db-'));
+    const dbTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'octodeck-r15-db-'));
     try {
       // Lazy-import so vi.mock for ../src/config.js applies before db.ts loads.
       const cfg = await import('../src/config.js');
@@ -520,7 +520,7 @@ describe('resolvePerMessageRuntimeOwner — #23 round-15 P2-2', () => {
         chatJid: 'web:main',
         isHome: true,
         fallbackOwner: 'admin-a',
-        message: { sender: 'happyclaw-agent' },
+        message: { sender: 'octodeck-agent' },
         getUserById: lookup,
       }),
     ).toBe('admin-a');

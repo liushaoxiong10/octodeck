@@ -663,7 +663,7 @@ export function ProviderEditor({
                   <option value="openai-responses">OpenAI Responses API</option>
                 </select>
                 <p className="text-xs text-muted-foreground mt-1">
-                  非 Claude API 在云端访问时会先经由 HappyClaw 本地模型代理转换为 Claude Messages 兼容响应。
+                  非 Claude API 在云端访问时会先经由 OctoDeck 本地模型代理转换为 Claude Messages 兼容响应。
                 </p>
               </div>
 

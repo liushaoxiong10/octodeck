@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,14 @@ type skillsDiscoveryResult struct {
 	WorkspaceSkills []SkillInfo
 	CLISkills       []SkillInfo
 }
+
+type skillsManifest struct {
+	Skills map[string]struct {
+		PackageName string `json:"packageName"`
+	} `json:"skills"`
+}
+
+const maxSkillContentBytes = 200_000
 
 func newSkillDiscoverer(send func(any) error) *skillDiscoverer {
 	return &skillDiscoverer{send: send}
@@ -84,12 +93,16 @@ func scanSkillDirectory(root string, source string) []SkillInfo {
 	if err != nil {
 		return nil
 	}
+	manifest := readSkillsManifest(root)
 	skills := make([]SkillInfo, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() || !isSafeSkillID(entry.Name()) {
+		if !isSafeSkillID(entry.Name()) {
 			continue
 		}
 		skillDir := filepath.Join(root, entry.Name())
+		if !isSkillDirectory(entry, skillDir) {
+			continue
+		}
 		enabledPath := filepath.Join(skillDir, "SKILL.md")
 		disabledPath := filepath.Join(skillDir, "SKILL.md.disabled")
 		path := enabledPath
@@ -105,6 +118,7 @@ func scanSkillDirectory(root string, source string) []SkillInfo {
 		if err != nil {
 			continue
 		}
+		content = truncateSkillContent(content)
 		name, description := parseSkillFrontmatter(string(content))
 		if name == "" {
 			name = entry.Name()
@@ -115,10 +129,49 @@ func scanSkillDirectory(root string, source string) []SkillInfo {
 			Description: description,
 			Source:      source,
 			Enabled:     enabled,
+			PackageName: manifest.packageNameFor(entry.Name()),
+			Content:     string(content),
 		})
 	}
 	sort.Slice(skills, func(i, j int) bool { return skills[i].ID < skills[j].ID })
 	return skills
+}
+
+func truncateSkillContent(content []byte) []byte {
+	if len(content) <= maxSkillContentBytes {
+		return content
+	}
+	return content[:maxSkillContentBytes]
+}
+
+func readSkillsManifest(root string) skillsManifest {
+	data, err := os.ReadFile(filepath.Join(root, ".skills-manifest.json"))
+	if err != nil {
+		return skillsManifest{}
+	}
+	var manifest skillsManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return skillsManifest{}
+	}
+	return manifest
+}
+
+func (m skillsManifest) packageNameFor(skillID string) string {
+	if m.Skills == nil {
+		return ""
+	}
+	return m.Skills[skillID].PackageName
+}
+
+func isSkillDirectory(entry os.DirEntry, path string) bool {
+	if entry.IsDir() {
+		return true
+	}
+	if entry.Type()&os.ModeSymlink == 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func isSafeSkillID(id string) bool {
@@ -140,7 +193,9 @@ func parseSkillFrontmatter(content string) (string, string) {
 	}
 	var name string
 	var description string
-	for _, line := range strings.Split(rest[:end], "\n") {
+	lines := strings.Split(rest[:end], "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
 		key, value, ok := strings.Cut(line, ":")
 		if !ok {
 			continue
@@ -150,8 +205,54 @@ func parseSkillFrontmatter(content string) (string, string) {
 		case "name":
 			name = value
 		case "description":
+			if folded, ok := parseBlockScalarHeader(value); ok {
+				block, next := collectFrontmatterBlock(lines, i+1, folded)
+				description = block
+				i = next - 1
+				continue
+			}
 			description = value
 		}
 	}
 	return name, description
+}
+
+func parseBlockScalarHeader(value string) (bool, bool) {
+	if value == "" {
+		return false, false
+	}
+	switch value[0] {
+	case '|', '>':
+		for _, r := range value[1:] {
+			if r != '-' && r != '+' && (r < '0' || r > '9') {
+				return false, false
+			}
+		}
+		return value[0] == '>', true
+	default:
+		return false, false
+	}
+}
+
+func collectFrontmatterBlock(lines []string, start int, folded bool) (string, int) {
+	block := make([]string, 0)
+	for i := start; i < len(lines); i++ {
+		line := lines[i]
+		if strings.TrimSpace(line) == "" {
+			block = append(block, "")
+			continue
+		}
+		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			return strings.TrimSpace(joinFrontmatterBlock(block, folded)), i
+		}
+		block = append(block, strings.TrimSpace(line))
+	}
+	return strings.TrimSpace(joinFrontmatterBlock(block, folded)), len(lines)
+}
+
+func joinFrontmatterBlock(lines []string, folded bool) string {
+	if folded {
+		return strings.Join(lines, " ")
+	}
+	return strings.Join(lines, "\n")
 }

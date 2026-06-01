@@ -1,6 +1,6 @@
 # Agent Link Protocol (v1)
 
-Server ↔ hcagent client 之间的 WebSocket 协议规范。
+Server ↔ octodeck-daemon client 之间的 WebSocket 协议规范。
 
 每帧 = 单行 UTF-8 JSON（不允许内嵌换行），通过 ws text frame 传输。
 连接路径：`/api/agent-link/ws`，client 出站连接，握手 header `X-Link-Token: <plain token>`。
@@ -27,7 +27,7 @@ Client 在 ws 建立后第一帧发送（5 秒内必须发，否则 server 关�
 ```
 
 字段：
-- `version` — client 二进制版本（hcagent 自报）
+- `version` — client 二进制版本（octodeck-daemon 自报）
 - `os` / `arch` — runtime 平台
 - `hostname` — 主机名（仅展示用途，不参与鉴权）
 - `capabilities[]` — client 能力声明。`link.v1` 必填（基础协议）；后续可加 `host-cli`、`container`、`sdk-runner`

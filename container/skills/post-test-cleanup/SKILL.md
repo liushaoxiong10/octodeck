@@ -19,7 +19,7 @@ description: 测试完成后的扫尾清理流程。在向某个工作区发送�
 # 查看当前运行的容器
 docker ps --format "table {{.Names}}\t{{.Status}}\t{{.RunningFor}}"
 
-# 确认目标容器的 folder（容器名格式：happyclaw-{folder}-{timestamp}）
+# 确认目标容器的 folder（容器名格式：octodeck-{folder}-{timestamp}）
 ls data/ipc/
 
 # 发送中断信号（优雅停止）
@@ -109,7 +109,7 @@ git diff --stat
 ## 注意事项
 
 - **必须重置 session**：仅删除 DB 消息不够，Claude session 文件中仍保存着历史上下文，下次激活时依然消耗 token
-- **容器名与 folder 的对应关系**：容器名格式为 `happyclaw-{folder}-{timestamp}`，可通过 `ls data/ipc/` 查看所有 folder
+- **容器名与 folder 的对应关系**：容器名格式为 `octodeck-{folder}-{timestamp}`，可通过 `ls data/ipc/` 查看所有 folder
 - **删除消息前仔细核对**：通过 `is_from_me` 和内容确认，避免误删正常业务消息
 - **data/ 目录的修改不影响 git**：SQLite 和 IPC 文件均在 `data/` 下，不纳入版本控制
 

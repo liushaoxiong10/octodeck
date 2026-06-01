@@ -19,7 +19,7 @@ export function DevicesPage() {
                 设备管理
               </h1>
               <p className="mt-2 text-sm text-muted-foreground leading-6">
-                将 hcagent 客户端注册为可信设备。Claude 后端会把本地工具调用转发到设备执行；
+                将 octodeck-daemon 客户端注册为可信设备。Claude 后端会把本地工具调用转发到设备执行；
                 非 Claude 后端会把完整运行上下文交给设备上的本地 agent。
               </p>
             </div>

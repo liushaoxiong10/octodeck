@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR } from '../config.js';
+import { getMetadataValue, setMetadataValue } from '../db.js';
 import { logger } from '../logger.js';
 import { normalizeAgentClientBackendDef } from './agent-client-adapter.js';
 import { buildDynamicBackend, type CustomBackendDef } from './dynamic.js';
@@ -39,6 +40,7 @@ const CUSTOM_BACKENDS_AUDIT_FILE = path.join(
   'config',
   'custom-backends.audit.log',
 );
+const CUSTOM_BACKENDS_METADATA_KEY = 'custom_backends';
 
 interface StoredCustomBackendsFile {
   version: 1;
@@ -53,6 +55,20 @@ function ensureConfigDir(): void {
 }
 
 function readFromDisk(): CustomBackendDef[] {
+  const stored = getMetadataValue(CUSTOM_BACKENDS_METADATA_KEY);
+  if (stored) {
+    try {
+      const parsed = JSON.parse(stored) as Record<string, unknown>;
+      if (parsed.version === 1 && Array.isArray(parsed.backends)) {
+        return (parsed.backends as CustomBackendDef[]).filter((b) => {
+          if (!b || typeof b.id !== 'string') return false;
+          return true;
+        });
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to parse custom backend metadata store value');
+    }
+  }
   if (!fs.existsSync(CUSTOM_BACKENDS_FILE)) return [];
   try {
     const raw = fs.readFileSync(CUSTOM_BACKENDS_FILE, 'utf-8');
@@ -64,10 +80,16 @@ function readFromDisk(): CustomBackendDef[] {
       );
       return [];
     }
-    return (parsed.backends as CustomBackendDef[]).filter((b) => {
+    const backends = (parsed.backends as CustomBackendDef[]).filter((b) => {
       if (!b || typeof b.id !== 'string') return false;
       return true;
     });
+    setMetadataValue(CUSTOM_BACKENDS_METADATA_KEY, JSON.stringify({
+      version: 1,
+      backends,
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
+    }));
+    return backends;
   } catch (err) {
     logger.error(
       { err, file: CUSTOM_BACKENDS_FILE },
@@ -84,6 +106,7 @@ function writeToDisk(defs: CustomBackendDef[]): void {
     backends: defs,
     updatedAt: new Date().toISOString(),
   };
+  setMetadataValue(CUSTOM_BACKENDS_METADATA_KEY, JSON.stringify(payload));
   const tmp = `${CUSTOM_BACKENDS_FILE}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', {
     mode: 0o600,

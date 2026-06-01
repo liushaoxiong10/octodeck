@@ -1,10 +1,10 @@
-# HappyClaw — AI 协作者指南
+# OctoDeck — AI 协作者指南
 
 本文档帮助 AI 和工程协作者快速理解项目架构、关键机制与修改边界。
 
 ## 1. 项目定位
 
-HappyClaw 是一个自托管的多用户 AI Agent 系统：
+OctoDeck 是一个自托管的多用户 AI Agent 系统：
 
 - **输入**：飞书 / Telegram / QQ / 钉钉 / WhatsApp（基于 Baileys）/ Web 界面消息（每个用户可独立配置 IM 通道）
 - **执行**：Docker 容器或宿主机进程中运行 Claude Agent（基于 Claude Agent SDK），每个用户拥有独立主容器
@@ -49,7 +49,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/task-scheduler.ts` | 定时调度：60s 轮询、cron / interval / once 三种模式、group / isolated 上下文 |
 | `src/file-manager.ts` | 文件安全：路径遍历防护、符号链接检测、系统路径保护（`logs/`、`CLAUDE.md`、`.claude/`、`conversations/`） |
 | `src/mount-security.ts` | 挂载安全：白名单校验、黑名单模式匹配（`.ssh`、`.gnupg` 等）、非主会话只读强制 |
-| `src/db.ts` | 数据层：SQLite WAL 模式、Schema 版本校验（v1→v24）、核心表定义 |
+| `src/db.ts` | SQLite 表数据层：本地 SQLite 默认存储，支持将所有写入 `data/db/messages.db` 的表数据快照持久化到 MySQL/MongoDB，含 Schema 版本校验和核心表定义 |
 | `src/auth.ts` | 密码工具：bcrypt 哈希/验证、Session Token 生成、用户名/密码校验 |
 | `src/permissions.ts` | 权限常量和模板定义（`ALL_PERMISSIONS`、`PERMISSION_TEMPLATES`） |
 | `src/schemas.ts` | Zod v4 校验 schema：API 请求体校验 |
@@ -324,7 +324,7 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 
 ## 5. 数据库表
 
-SQLite WAL 模式，Schema 经历 v1→v24 演进（`db.ts` 中的 `SCHEMA_VERSION`）。
+SQLite 表数据默认使用本地 `data/db/messages.db`；设置 `OCTODECK_DB_BACKEND=mysql|mongodb` 后，所有写入该 SQLite 文件的表数据会以数据库快照形式持久化到 MySQL/MongoDB，包括 Device/AgentLink 注册信息、Sub-Agent/会话 Agent 记录，以及 `metadata_store` 中的自定义 Agent 后端配置、Agent Team、Agent.md 定义。Device 在线连接状态属于进程内存状态，重启后由 daemon 重连恢复；skills/plugins/MCP 配置仍是文件存储。Schema 版本由 `db.ts` 中的 `SCHEMA_VERSION` 控制。
 
 | 表 | 主键 | 用途 |
 |-----|------|------|
@@ -353,7 +353,7 @@ SQLite WAL 模式，Schema 经历 v1→v24 演进（`db.ts` 中的 `SCHEMA_VERSI
 
 ```
 data/
-  db/messages.db                           # SQLite 数据库（WAL 模式）
+  db/messages.db                           # SQLite 表数据库（默认 WAL；MySQL/MongoDB 模式下作为本地工作副本）
   groups/{folder}/                         # 会话工作目录（Agent 可读写）
   groups/{folder}/CLAUDE.md                # 会话私有记忆（Agent 自动维护）
   groups/{folder}/logs/                    # Agent 容器日志
@@ -572,12 +572,12 @@ WebSocket：`/ws`（协议详见 §3.6）。
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `ASSISTANT_NAME` | `HappyClaw` | 助手名称 |
+| `ASSISTANT_NAME` | `OctoDeck` | 助手名称 |
 | `WEB_PORT` | `3000` | 后端端口 |
 | `WEB_SESSION_SECRET` | 自动生成 | 会话签名密钥 |
 | `FEISHU_APP_ID` | - | 飞书应用 ID |
 | `FEISHU_APP_SECRET` | - | 飞书应用密钥 |
-| `CONTAINER_IMAGE` | `happyclaw-agent:latest` | Docker 镜像名称 |
+| `CONTAINER_IMAGE` | `octodeck-agent:latest` | Docker 镜像名称 |
 | `CONTAINER_TIMEOUT` | `1800000`（30min） | 容器最大运行时间（可通过设置页覆盖） |
 | `CONTAINER_MAX_OUTPUT_SIZE` | `10485760`（10MB） | 单次输出最大字节（可通过设置页覆盖） |
 | `IDLE_TIMEOUT` | `1800000`（30min） | 容器空闲超时（可通过设置页覆盖） |
@@ -613,7 +613,7 @@ WebSocket：`/ws`（协议详见 §3.6）。
   - 依赖检测是 **best-effort 警告**，不作为启用门槛。修正扫描遗漏请改 `config/plugin-deps-override.json` 覆盖表
   - 删除 marketplace（`DELETE /api/plugins/marketplaces/:name`）只清除**调用者自己**的 enabled refs，**不删** catalog（catalog 是 admin 共享导入的全局只读集合）
   - 运行中 agent 进程**不热加载** plugin 变化——启用/禁用后 UI 必须提示"下次新会话生效"。第一版仅支持 plugin 内的 commands/agents/hooks/skills/scripts；插件持久数据（`~/.claude/plugins/data/`）与凭据不自动迁移
-  - **Catalog snapshot immutable**：catalog 按内容 hash 寻址（`versions/{contentHash}/`），同一 plugin 的不同版本独立留存；rollback 自动跟随用户 enable refs 命中的实际 hash，不需要"反向复制"。Materialize 通过 `copyTreeIsolated`（`fs.copyFileSync(..., COPYFILE_FICLONE)`）：macOS APFS / Linux btrfs/xfs 上初始接近零拷贝，写入时 COW 分裂分配新块；其他文件系统退化为字节拷贝。无论何种文件系统，runtime 与 catalog **始终独立 inode**——host 模式 bypass-permissions agent 写穿透不会污染 catalog。每个 materialize 出的 plugin 带 `@happyclaw-runtime-markers/{mp}/{plugin}.json` 兄弟节点 marker（放在 snapshot 根下、plugin root 之外），下次 materialize 据此识别并通过 rename + backup rollback 迁移老 hard-link runtime（rename 之间仍有极短 ENOENT 窗口，但远短于 rmSync）
+  - **Catalog snapshot immutable**：catalog 按内容 hash 寻址（`versions/{contentHash}/`），同一 plugin 的不同版本独立留存；rollback 自动跟随用户 enable refs 命中的实际 hash，不需要"反向复制"。Materialize 通过 `copyTreeIsolated`（`fs.copyFileSync(..., COPYFILE_FICLONE)`）：macOS APFS / Linux btrfs/xfs 上初始接近零拷贝，写入时 COW 分裂分配新块；其他文件系统退化为字节拷贝。无论何种文件系统，runtime 与 catalog **始终独立 inode**——host 模式 bypass-permissions agent 写穿透不会污染 catalog。每个 materialize 出的 plugin 带 `@octodeck-runtime-markers/{mp}/{plugin}.json` 兄弟节点 marker（放在 snapshot 根下、plugin root 之外），下次 materialize 据此识别并通过 rename + backup rollback 迁移老 hard-link runtime（rename 之间仍有极短 ENOENT 窗口，但远短于 rmSync）
   - **Runtime versioned snapshot**：`runtime/{userId}/snapshots/{snapshotId}/...` 是用户视角的版本化只读视图。启用新版本只切用户配置（`users/{userId}/plugins.json`），旧会话继续读旧 snapshot 直到 GC，避免运行中读到半写入目录
   - **`PATCH /enabled` 走 mcp 范式**：read-modify-write 单 schema，无 v1→v2 接管路径（v1 cache 布局已删除，存量用户首次访问 enabled 列表为空属预期）
   - **container-runner 双路径预构建**：host / docker spawn 之前都先 `materializeUserRuntime(ownerId)`；`prepareHostPlugins` helper 与 `buildVolumeMounts` 内联 materialize **必须对称**，否则两条路径会出现 runtime 不一致
@@ -703,7 +703,7 @@ make stop           # 停止占用 3000 端口的服务（前台运行时请直�
 | 改完代码重启 | Ctrl+C 停止后再 `make start` | 前台阻塞运行 |
 | 改完前端热更新 | `make dev-web`（另开终端） | Vite 热更新 |
 | 改完后端快速验证 | `make dev-backend`（另开终端） | tsx watch |
-| 生产环境运行 | `make start` | 前台阻塞运行；如需后台化请自行 `make start > /tmp/happyclaw.log 2>&1 &` |
+| 生产环境运行 | `make start` | 前台阻塞运行；如需后台化请自行 `make start > /tmp/octodeck.log 2>&1 &` |
 
 ```bash
 make typecheck     # TypeScript 全量类型检查（后端 + 前端 + agent-runner）
@@ -714,7 +714,7 @@ make clean         # 清理构建产物（dist/）
 make sync-types    # 同步 shared/ 下的类型定义到各子项目
 make update-sdk    # 更新 agent-runner 的 Claude Agent SDK 到最新版本
 make reset-init    # 重置为首装状态（清空数据库和配置，用于测试设置向导）
-make backup        # 备份运行时数据到 happyclaw-backup-{date}.tar.gz
+make backup        # 备份运行时数据到 octodeck-backup-{date}.tar.gz
 make restore       # 从备份恢复数据（make restore 或 make restore FILE=xxx.tar.gz）
 make help          # 列出所有可用的 make 命令
 ```

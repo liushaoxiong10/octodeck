@@ -16,7 +16,7 @@
  */
 
 export interface RuntimeOwnerCandidateMessage {
-  /** Message sender id — system messages (e.g. `__system__`, `happyclaw-agent`) are skipped. */
+  /** Message sender id — system messages (e.g. `__system__`, `octodeck-agent`) are skipped. */
   sender: string;
 }
 
@@ -29,7 +29,7 @@ export interface RuntimeOwnerCandidateUser {
 /**
  * Walk `messages` from end to start and return the id of the most recent
  * `active admin` sender, or `null` if none qualifies. System / agent senders
- * (`__system__`, `happyclaw-agent`) are skipped without breaking the walk.
+ * (`__system__`, `octodeck-agent`) are skipped without breaking the walk.
  *
  * Callers compose this with their own fallback (typically `group.created_by`)
  * — we deliberately don't accept a fallback parameter here because the
@@ -42,7 +42,7 @@ export function resolveLatestAdminSenderOverride(
 ): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const sender = messages[i]?.sender;
-    if (!sender || sender === 'happyclaw-agent' || sender === '__system__') {
+    if (!sender || sender === 'octodeck-agent' || sender === '__system__') {
       continue;
     }
     const user = getUserById(sender);
@@ -111,7 +111,7 @@ export function resolvePerMessageRuntimeOwner(args: {
     return args.fallbackOwner;
   }
   const sender = args.message?.sender;
-  if (!sender || sender === 'happyclaw-agent' || sender === '__system__') {
+  if (!sender || sender === 'octodeck-agent' || sender === '__system__') {
     return args.fallbackOwner;
   }
   const user = args.getUserById(sender);

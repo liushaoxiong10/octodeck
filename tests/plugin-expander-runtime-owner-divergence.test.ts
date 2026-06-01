@@ -254,7 +254,7 @@ describe('resolveLatestAdminSenderOverride — direct helper unit', () => {
   test('only system / agent senders → null', () => {
     expect(
       resolveLatestAdminSenderOverride(
-        [{ sender: '__system__' }, { sender: 'happyclaw-agent' }],
+        [{ sender: '__system__' }, { sender: 'octodeck-agent' }],
         lookup,
       ),
     ).toBe(null);

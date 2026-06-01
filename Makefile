@@ -22,15 +22,15 @@ endif
 
 # ─── Development ─────────────────────────────────────────────
 
-# 单行 shell 片段：运行 dev 命令前暂停 pm2 中的 happyclaw，退出（正常/中断/终止）时恢复。
+# 单行 shell 片段：运行 dev 命令前暂停 pm2 中的 octodeck，退出（正常/中断/终止）时恢复。
 # 用法示例：@$(PM2_GUARD); <command>
 PM2_GUARD = PM2_WAS_RUNNING=0; \
-	if command -v pm2 >/dev/null 2>&1 && pm2 show happyclaw 2>/dev/null | grep -q 'online'; then \
+	if command -v pm2 >/dev/null 2>&1 && pm2 show octodeck 2>/dev/null | grep -q 'online'; then \
 	  PM2_WAS_RUNNING=1; \
-	  echo "⏸  暂停 pm2 happyclaw..."; \
-	  pm2 stop happyclaw; \
+	  echo "⏸  暂停 pm2 octodeck..."; \
+	  pm2 stop octodeck; \
 	fi; \
-	trap "if [ \"$$PM2_WAS_RUNNING\" = '1' ]; then echo '▶  恢复 pm2 happyclaw...'; pm2 start happyclaw; fi" EXIT INT TERM
+	trap "if [ \"$$PM2_WAS_RUNNING\" = '1' ]; then echo '▶  恢复 pm2 octodeck...'; pm2 start octodeck; fi" EXIT INT TERM
 
 dev: ## 启动前后端（首次自动安装依赖和构建容器镜像）；自动暂停 pm2，退出后恢复
 	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
@@ -61,20 +61,20 @@ build-web: ## 仅编译前端
 # ─── Production ──────────────────────────────────────────────
 
 start: ensure-latest-sdk ## 一键启动生产环境（pm2 托管时自动走 pm2 restart；否则前台阻塞）
-	@# pm2 注册过 happyclaw 就路由到 pm2，避免裸跑和 pm2 抢端口
-	@if command -v pm2 >/dev/null 2>&1 && pm2 describe happyclaw >/dev/null 2>&1; then \
+	@# pm2 注册过 octodeck 就路由到 pm2，避免裸跑和 pm2 抢端口
+	@if command -v pm2 >/dev/null 2>&1 && pm2 describe octodeck >/dev/null 2>&1; then \
 	  $(MAKE) --no-print-directory _start-pm2; \
 	else \
 	  $(MAKE) --no-print-directory _start-direct; \
 	fi
 
 _start-pm2: ## (内部) pm2 托管模式：build 后 pm2 restart
-	@echo "🔄 检测到 pm2 托管 happyclaw，改走 pm2 restart"
+	@echo "🔄 检测到 pm2 托管 octodeck，改走 pm2 restart"
 	@$(MAKE) _check-sync _build-web-if-stale _build-ar-if-stale _build-backend-if-stale
-	@pm2 restart happyclaw --update-env
+	@pm2 restart octodeck --update-env
 	@sleep 2
-	@pm2 logs happyclaw --lines 20 --nostream || true
-	@echo "✅ 启动完成，查看实时日志：pm2 logs happyclaw"
+	@pm2 logs octodeck --lines 20 --nostream || true
+	@echo "✅ 启动完成，查看实时日志：pm2 logs octodeck"
 
 _start-direct: ## (内部) 裸跑模式（无 pm2 或未注册）
 	@# 检查端口是否被占用
@@ -140,21 +140,21 @@ _build-backend-if-stale: ## (内部) 后端变更时重新编译（Node 模式�
 	fi; \
 	if [ "$$NEED_BACKEND" = "1" ]; then echo "🔨 检测到后端源码变更，重新编译后端..."; $(PKG) run build; else echo "✅ 后端无变更，跳过编译"; fi
 
-logs: ## 实时查看日志（需配合手动后台运行：make start > /tmp/happyclaw.log 2>&1 &）
-	@tail -f /tmp/happyclaw.log
+logs: ## 实时查看日志（需配合手动后台运行：make start > /tmp/octodeck.log 2>&1 &）
+	@tail -f /tmp/octodeck.log
 
 stop: ## 停止服务（pm2 托管时走 pm2 stop，否则杀端口监听进程）
-	@if command -v pm2 >/dev/null 2>&1 && pm2 describe happyclaw >/dev/null 2>&1; then \
-	  pm2 stop happyclaw >/dev/null && echo "✅ 已 pm2 stop happyclaw（需再起用 pm2 start happyclaw）"; \
+	@if command -v pm2 >/dev/null 2>&1 && pm2 describe octodeck >/dev/null 2>&1; then \
+	  pm2 stop octodeck >/dev/null && echo "✅ 已 pm2 stop octodeck（需再起用 pm2 start octodeck）"; \
 	else \
-	  lsof -ti:$(PORT) -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null && echo "✅ 已停止 HappyClaw (端口 $(PORT))" || echo "⚠️  端口 $(PORT) 未被占用，无需停止"; \
+	  lsof -ti:$(PORT) -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null && echo "✅ 已停止 OctoDeck (端口 $(PORT))" || echo "⚠️  端口 $(PORT) 未被占用，无需停止"; \
 	fi
 
 status: ## 查看服务运行状态
-	@echo "=== HappyClaw 服务状态 ==="
-	@if command -v pm2 >/dev/null 2>&1 && pm2 describe happyclaw >/dev/null 2>&1; then \
-	  echo "🔧 pm2 托管模式（重启请用 pm2 restart happyclaw，勿混用 make start/stop）"; \
-	  pm2 describe happyclaw 2>/dev/null | grep -E "status|pid|uptime|restarts" | head -4 | sed 's/^/   /'; \
+	@echo "=== OctoDeck 服务状态 ==="
+	@if command -v pm2 >/dev/null 2>&1 && pm2 describe octodeck >/dev/null 2>&1; then \
+	  echo "🔧 pm2 托管模式（重启请用 pm2 restart octodeck，勿混用 make start/stop）"; \
+	  pm2 describe octodeck 2>/dev/null | grep -E "status|pid|uptime|restarts" | head -4 | sed 's/^/   /'; \
 	fi
 	@if lsof -ti:$(PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 	  echo "✅ 后端进程: 运行中 (端口 $(PORT))"; \
@@ -164,16 +164,16 @@ status: ## 查看服务运行状态
 	fi
 	@echo ""
 	@echo "=== 日志文件 ==="
-	@if [ -f /tmp/happyclaw.log ]; then \
-	  echo "✅ /tmp/happyclaw.log 存在 ($(wc -l < /tmp/happyclaw.log) 行)"; \
+	@if [ -f /tmp/octodeck.log ]; then \
+	  echo "✅ /tmp/octodeck.log 存在 ($(wc -l < /tmp/octodeck.log) 行)"; \
 	  echo "   最近 3 行:"; \
-	  tail -3 /tmp/happyclaw.log | sed 's/^/   /'; \
+	  tail -3 /tmp/octodeck.log | sed 's/^/   /'; \
 	else \
-	  echo "⚠️  /tmp/happyclaw.log 不存在（未用后台模式启动）"; \
+	  echo "⚠️  /tmp/octodeck.log 不存在（未用后台模式启动）"; \
 	fi
 	@echo ""
 	@echo "=== Docker 容器 ==="
-	@docker ps --filter "name=happyclaw" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "   Docker 未运行或无 HappyClaw 容器"
+	@docker ps --filter "name=octodeck" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "   Docker 未运行或无 OctoDeck 容器"
 
 # ─── Quality ─────────────────────────────────────────────────
 
@@ -210,7 +210,7 @@ DOCKER_SRC := container/Dockerfile container/entrypoint.sh $(wildcard container/
 
 _ensure-docker-image: ## (内部) 检测 Docker 镜像是否需要构建/重建
 	@if command -v docker >/dev/null 2>&1; then \
-	  if ! docker image inspect happyclaw-agent:latest >/dev/null 2>&1; then \
+	  if ! docker image inspect octodeck-agent:latest >/dev/null 2>&1; then \
 	    echo "🐳 Docker 镜像不存在，正在构建..."; \
 	    ./container/build.sh; \
 	  elif [ ! -f .docker-build-sentinel ]; then \
@@ -282,14 +282,14 @@ reset-init: ## 完全重置为首装状态（清空所有运行时数据）
 
 # ─── Backup / Restore ────────────────────────────────────────
 
-backup: ## 备份运行时数据到 happyclaw-backup-{date}.tar.gz
+backup: ## 备份运行时数据到 octodeck-backup-{date}.tar.gz
 	@DATE=$$(date +%Y%m%d-%H%M%S); \
-	FILE="happyclaw-backup-$$DATE.tar.gz"; \
+	FILE="octodeck-backup-$$DATE.tar.gz"; \
 	echo "📦 正在打包备份到 $$FILE ..."; \
 	tar -czf "$$FILE" \
 	  --exclude='data/ipc' \
 	  --exclude='data/env' \
-	  --exclude='data/happyclaw.log' \
+	  --exclude='data/octodeck.log' \
 	  --exclude='data/db/messages.db-shm' \
 	  --exclude='data/db/messages.db-wal' \
 	  --exclude='data/groups/*/logs' \
@@ -301,17 +301,17 @@ backup: ## 备份运行时数据到 happyclaw-backup-{date}.tar.gz
 	  2>/dev/null; \
 	echo "✅ 备份完成：$$FILE ($$(du -sh $$FILE | cut -f1))"
 
-restore: ## 从 happyclaw-backup-*.tar.gz 恢复数据（用法：make restore 或 make restore FILE=xxx.tar.gz）
+restore: ## 从 octodeck-backup-*.tar.gz 恢复数据（用法：make restore 或 make restore FILE=xxx.tar.gz）
 	@if [ -n "$(FILE)" ]; then \
 	  BACKUP="$(FILE)"; \
-	elif [ $$(ls happyclaw-backup-*.tar.gz 2>/dev/null | wc -l) -eq 1 ]; then \
-	  BACKUP=$$(ls happyclaw-backup-*.tar.gz); \
-	elif [ $$(ls happyclaw-backup-*.tar.gz 2>/dev/null | wc -l) -gt 1 ]; then \
+	elif [ $$(ls octodeck-backup-*.tar.gz 2>/dev/null | wc -l) -eq 1 ]; then \
+	  BACKUP=$$(ls octodeck-backup-*.tar.gz); \
+	elif [ $$(ls octodeck-backup-*.tar.gz 2>/dev/null | wc -l) -gt 1 ]; then \
 	  echo "❌ 发现多个备份文件，请用 make restore FILE=xxx.tar.gz 指定："; \
-	  ls happyclaw-backup-*.tar.gz; \
+	  ls octodeck-backup-*.tar.gz; \
 	  exit 1; \
 	else \
-	  echo "❌ 未找到备份文件，请将 happyclaw-backup-*.tar.gz 放到当前目录"; \
+	  echo "❌ 未找到备份文件，请将 octodeck-backup-*.tar.gz 放到当前目录"; \
 	  exit 1; \
 	fi; \
 	echo "📂 正在从 $$BACKUP 恢复..."; \

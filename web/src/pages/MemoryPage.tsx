@@ -139,7 +139,7 @@ export function MemoryPage() {
   const [keyword, setKeyword] = useState('');
   const [searchHits, setSearchHits] = useState<Record<string, MemorySearchHit>>({});
 
-  // 宿主机 ~/.claude 资源（admin only）
+  // 本地/系统 ~/.claude 资源（admin only）
   const isAdmin = useAuthStore((s) => s.user?.role === 'admin');
   const [extResources, setExtResources] = useState<{
     dir: string;
@@ -270,7 +270,7 @@ export function MemoryPage() {
     loadSources();
   }, [loadSources]);
 
-  // 宿主机外部资源单独加载（不随 selectedPath 变化重复请求）
+  // 本地/系统外部资源单独加载（不随 selectedPath 变化重复请求）
   useEffect(() => {
     if (!isAdmin) return;
     api.get<{ dir: string; rules: Array<{ name: string; size: number }>; claudeMd: string | null }>('/api/config/external-resources')
@@ -444,7 +444,7 @@ export function MemoryPage() {
             </div>
 
             <div className="space-y-2 max-h-[calc(100dvh-280px)] lg:max-h-[560px] overflow-auto pr-1">
-              {/* 宿主机配置（admin only） */}
+              {/* 本地/系统配置（admin only） */}
               {isAdmin && extResources && (extResources.rules.length > 0 || extResources.claudeMd) && (
                 <div>
                   <button
@@ -453,7 +453,7 @@ export function MemoryPage() {
                   >
                     {extCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                     <Monitor className="w-3.5 h-3.5" />
-                    宿主机配置 ({extResources.rules.length + (extResources.claudeMd ? 1 : 0)})
+                    本地/系统配置 ({extResources.rules.length + (extResources.claudeMd ? 1 : 0)})
                   </button>
                   {!extCollapsed && (
                     <div className="space-y-1 ml-1">

@@ -6,5 +6,5 @@ declare module '*.css' {
 }
 
 interface Window {
-  __HAPPYCLAW_HASH_ROUTER__?: boolean;
+  __OCTODECK_HASH_ROUTER__?: boolean;
 }

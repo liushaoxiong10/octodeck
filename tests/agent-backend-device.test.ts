@@ -2,6 +2,18 @@ import { describe, expect, test, vi } from 'vitest';
 
 const runHostCliMock = vi.hoisted(() => vi.fn(async () => ({ status: 'success', result: 'host' })));
 const runViaAgentLinkMock = vi.hoisted(() => vi.fn(async () => ({ status: 'success', result: 'device' })));
+const runHostAgentMock = vi.hoisted(() => vi.fn(async () => ({ status: 'success', result: 'host-agent' })));
+const runContainerAgentMock = vi.hoisted(() => vi.fn(async () => ({ status: 'success', result: 'container-agent' })));
+const sdkQueryMock = vi.hoisted(() => vi.fn(async () => '{"ok":true}'));
+
+vi.mock('../src/container-runner.js', () => ({
+  runHostAgent: runHostAgentMock,
+  runContainerAgent: runContainerAgentMock,
+}));
+
+vi.mock('../src/sdk-query.js', () => ({
+  sdkQuery: sdkQueryMock,
+}));
 
 vi.mock('../src/backends/host-cli-driver.js', () => ({
   runHostCli: runHostCliMock,
@@ -12,6 +24,34 @@ vi.mock('../src/backends/agent-link-driver.js', () => ({
 }));
 
 describe('device-backed agent backend', () => {
+  test('uses lightweight SDK query for single-turn json cloud SDK runs', async () => {
+    runHostAgentMock.mockClear();
+    runContainerAgentMock.mockClear();
+    sdkQueryMock.mockClear();
+    sdkQueryMock.mockResolvedValueOnce('{"team":{"name":"Demo"}}');
+
+    const { claudeSdkBackend } = await import('../src/backends/claude-sdk.js');
+    const result = await claudeSdkBackend.run({
+      group: {
+        name: 'Agent Team Generator',
+        folder: 'agent-team-generator',
+        containerConfig: { timeout: 12345 },
+      } as any,
+      input: {
+        prompt: 'return json',
+        executionProfile: 'single-turn-json',
+      } as any,
+      executionMode: 'host',
+      onProcess: vi.fn(),
+      onOutput: vi.fn(),
+    });
+
+    expect(result).toEqual({ status: 'success', result: '{"team":{"name":"Demo"}}' });
+    expect(sdkQueryMock).toHaveBeenCalledWith('return json', { timeout: 12345 });
+    expect(runHostAgentMock).not.toHaveBeenCalled();
+    expect(runContainerAgentMock).not.toHaveBeenCalled();
+  });
+
   test('does not expose TraeCLI/coco as a builtin backend', async () => {
     const { listBackends, isBuiltinBackend } = await import('../src/backends/registry.js');
     const backendIds = listBackends().map((backend) => backend.id);
@@ -32,13 +72,13 @@ describe('device-backed agent backend', () => {
       agentClientId: 'codex',
       model: 'gpt-5',
       workdirMode: 'custom',
-      workdir: '/Users/lsx/code/app/happyclaw',
+      workdir: '/Users/lsx/code/app/octodeck',
     });
 
     expect(parsed.runtime).toBe('local-device');
     expect(parsed.model).toBe('gpt-5');
     expect(parsed.workdirMode).toBe('custom');
-    expect(parsed.workdir).toBe('/Users/lsx/code/app/happyclaw');
+    expect(parsed.workdir).toBe('/Users/lsx/code/app/octodeck');
   });
 
   test('rejects custom workdir unless it is an absolute path', async () => {

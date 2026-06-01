@@ -1,5 +1,5 @@
 /**
- * Single hcagent ws connection wrapper.
+ * Single octodeck-daemon ws connection wrapper.
  *
  * 职责：
  *   - 帧编解码（透传给 protocol.ts）

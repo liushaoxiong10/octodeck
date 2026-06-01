@@ -1354,16 +1354,16 @@ configRoutes.put(
       );
     }
 
-    // 启用「禁用 HappyClaw 记忆层」开关前必须给 admin 主容器配 customCwd，
+    // 启用「禁用 OctoDeck 记忆层」开关前必须给 admin 主容器配 customCwd，
     // 否则 CLAUDE_CONFIG_DIR 仍指向 data/sessions/main/.claude，SDK 读不到 ~/.claude/
-    // 又没有 HappyClaw 记忆层注入，agent 会变成空白沙箱。
+    // 又没有 OctoDeck 记忆层注入，agent 会变成空白沙箱。
     if (validation.data.disableMemoryLayerForAdminHost === true) {
       const adminMain = getRegisteredGroup('web:main');
       if (!adminMain || !adminMain.customCwd) {
         return c.json(
           {
             error:
-              '启用前请先给 admin 主容器（web:main）配置 customCwd，否则 SDK 既读不到 HappyClaw 记忆层也读不到 ~/.claude/，会是空白沙箱。',
+              '启用前请先给 admin 主容器（web:main）配置 customCwd，否则 SDK 既读不到 OctoDeck 记忆层也读不到 ~/.claude/，会是空白沙箱。',
           },
           400,
         );

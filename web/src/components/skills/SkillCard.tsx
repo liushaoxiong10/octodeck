@@ -1,6 +1,7 @@
 import { Lock } from 'lucide-react';
 import type { Skill } from '../../stores/skills';
 import { useSkillsStore } from '../../stores/skills';
+import { normalizeSkillDisplayText } from '../../utils/skillsGrouping';
 
 interface SkillCardProps {
   skill: Skill;
@@ -11,12 +12,15 @@ interface SkillCardProps {
 const SOURCE_LABELS: Record<Skill['source'], string> = {
   user: '用户级',
   project: '项目级',
-  external: '宿主机',
+  external: '本地/系统',
+  cli: 'Device CLI',
+  workspace: 'Workspace',
 };
 
 export function SkillCard({ skill, selected, onSelect }: SkillCardProps) {
   const toggleSkill = useSkillsStore((s) => s.toggleSkill);
-  const isReadonly = skill.source === 'project';
+  const isReadonly = skill.source !== 'user';
+  const packageName = normalizeSkillDisplayText(skill.packageName).trim();
 
   return (
     <button
@@ -47,8 +51,8 @@ export function SkillCard({ skill, selected, onSelect }: SkillCardProps) {
             )}
           </div>
           <p className="text-sm text-muted-foreground line-clamp-2">{skill.description}</p>
-          {skill.packageName && (
-            <p className="text-xs text-muted-foreground mt-1 font-mono truncate">{skill.packageName}</p>
+          {packageName && (
+            <p className="text-xs text-muted-foreground mt-1 font-mono truncate">{packageName}</p>
           )}
         </div>
 

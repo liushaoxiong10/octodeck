@@ -8,7 +8,7 @@ import {
 } from './db.js';
 
 async function main(): Promise<void> {
-  initDatabase();
+  await initDatabase();
 
   const username = (process.argv[2] || 'admin').trim();
   const nextPassword = process.argv[3];

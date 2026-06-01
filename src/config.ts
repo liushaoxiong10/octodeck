@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'HappyClaw';
+export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'OctoDeck';
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
@@ -23,7 +23,7 @@ export const GROUPS_DIR = path.join(DATA_DIR, 'groups');
 export const MAIN_GROUP_FOLDER = 'main';
 
 export const CONTAINER_IMAGE =
-  process.env.CONTAINER_IMAGE || 'happyclaw-agent:latest';
+  process.env.CONTAINER_IMAGE || 'octodeck-agent:latest';
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses TZ env var with Asia/Shanghai fallback
 export const TIMEZONE =
@@ -36,8 +36,8 @@ export const WEB_PORT = parseInt(process.env.WEB_PORT || '3000', 10);
 // When accessed over HTTPS: use __Host- prefix (requires Secure; Path=/; no Domain)
 // When accessed over HTTP (localhost dev or no TLS): use plain name
 // Determined per-request via isSecureRequest(), not at startup
-export const SESSION_COOKIE_NAME_SECURE = '__Host-happyclaw_session';
-export const SESSION_COOKIE_NAME_PLAIN = 'happyclaw_session';
+export const SESSION_COOKIE_NAME_SECURE = '__Host-octodeck_session';
+export const SESSION_COOKIE_NAME_PLAIN = 'octodeck_session';
 const SESSION_SECRET_FILE = path.join(DATA_DIR, 'config', 'session-secret.key');
 
 function getOrCreateSessionSecret(): string {
@@ -72,8 +72,8 @@ function getOrCreateSessionSecret(): string {
 
 export const WEB_SESSION_SECRET = getOrCreateSessionSecret();
 
-export const AGENT_RUNNER_SECRET = process.env.HAPPYCLAW_AGENT_RUNNER_SECRET || WEB_SESSION_SECRET;
-process.env.HAPPYCLAW_AGENT_RUNNER_SECRET = AGENT_RUNNER_SECRET;
+export const AGENT_RUNNER_SECRET = process.env.OCTODECK_AGENT_RUNNER_SECRET || WEB_SESSION_SECRET;
+process.env.OCTODECK_AGENT_RUNNER_SECRET = AGENT_RUNNER_SECRET;
 
 // Ensure WeChat iLink API domains bypass HTTP proxy.
 // These Chinese domestic services are unreachable through most overseas proxies.

@@ -227,7 +227,7 @@ function DeviceDetails({
                 <CircleDot className={`size-3 ${link.online ? 'fill-emerald-500 text-emerald-500' : 'fill-muted-foreground/40 text-muted-foreground/40'}`} />
                 {link.online ? 'online' : 'offline'}
               </span>
-              {link.clientVersion ? <Pill>hcagent v{link.clientVersion}</Pill> : null}
+              {link.clientVersion ? <Pill>octodeck-daemon v{link.clientVersion}</Pill> : null}
             </div>
             <h3 className="truncate text-2xl font-semibold tracking-tight text-foreground">
               {link.displayName}
@@ -286,7 +286,7 @@ function DeviceDetails({
 
         <DeviceInfoSection icon={Cpu} title="Runtimes">
           <div className="space-y-2 text-xs text-muted-foreground">
-            <DetailRow label="hcagent runtime" value={`${link.os ?? '?'} / ${link.arch ?? '?'}`} />
+            <DetailRow label="octodeck-daemon runtime" value={`${link.os ?? '?'} / ${link.arch ?? '?'}`} />
             <DetailRow label="client binary count" value={link.agentClients.length} />
           </div>
         </DeviceInfoSection>
@@ -531,7 +531,7 @@ export function DevicesSection() {
         <div>
           <h3 className="text-sm font-semibold text-foreground">Devices</h3>
           <p className="text-xs text-muted-foreground mt-0.5">
-            管理接入 HappyClaw 的本地设备。设备在线后可以承接工作区执行节点，
+            管理接入 OctoDeck 的本地设备。设备在线后可以承接工作区执行节点，
             让服务端 Agent 把命令与本地工具安全转发到你的机器执行。
           </p>
         </div>
@@ -547,7 +547,7 @@ export function DevicesSection() {
         </div>
       ) : links.length === 0 ? (
         <div className="text-xs text-muted-foreground border border-dashed border-border rounded-md py-6 text-center">
-          还没有设备。点右上角「新增设备」创建第一个 hcagent 客户端。
+          还没有设备。点右上角「新增设备」创建第一个 octodeck-daemon 客户端。
         </div>
       ) : (
         <div className="grid gap-4 lg:grid-cols-3">
@@ -621,7 +621,7 @@ export function DevicesSection() {
           <DialogHeader>
             <DialogTitle>新建设备</DialogTitle>
             <DialogDescription>
-              为你的 hcagent 客户端起一个易识别的名字（例如 "MacBook Pro"）。创建后会生成一次性接入 token。
+              为你的 octodeck-daemon 客户端起一个易识别的名字（例如 "MacBook Pro"）。创建后会生成一次性接入 token。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
@@ -662,7 +662,7 @@ export function DevicesSection() {
           <DialogHeader>
             <DialogTitle>{tokenDialog?.title}</DialogTitle>
             <DialogDescription>
-              复制下面的一键安装命令，在需要接入的机器上执行即可安装并启动 hcagent。
+              复制下面的一键安装命令，在需要接入的机器上执行即可安装并启动 octodeck-daemon。
               接入 token 只会在本窗口展示一次。
             </DialogDescription>
           </DialogHeader>

@@ -17,10 +17,10 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 // (which is hoisted above this file's body and runs before our `await
 // import(...)` lines) can read a stable value.
 const SHARED_TMP =
-  process.env.HAPPYCLAW_TEST_DATA_DIR ??
+  process.env.OCTODECK_TEST_DATA_DIR ??
   (() => {
-    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-cr-mount-'));
-    process.env.HAPPYCLAW_TEST_DATA_DIR = d;
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'octodeck-cr-mount-'));
+    process.env.OCTODECK_TEST_DATA_DIR = d;
     return d;
   })();
 
@@ -31,13 +31,13 @@ vi.mock('../src/config.js', async (importOriginal) => {
   // The captured fs/path bindings inside this factory must use the SAME
   // shared tmp dir. We can't reach `tmpDataDir` here (hoisted above its
   // initializer), so route through env.
-  const dataDir = process.env.HAPPYCLAW_TEST_DATA_DIR!;
+  const dataDir = process.env.OCTODECK_TEST_DATA_DIR!;
   return {
     ...real,
     DATA_DIR: dataDir,
     GROUPS_DIR: path.join(dataDir, 'groups'),
     STORE_DIR: path.join(dataDir, 'db'),
-    CONTAINER_IMAGE: 'happyclaw-agent:test',
+    CONTAINER_IMAGE: 'octodeck-agent:test',
     TIMEZONE: 'UTC',
     MAIN_GROUP_FOLDER: 'main',
   };

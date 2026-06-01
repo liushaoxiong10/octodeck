@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { baseNavItems } from '../web/src/components/layout/nav-items.js';
+import { getSkillPackageName, normalizeSkillDisplayText } from '../web/src/utils/skillsGrouping.js';
 
 const repoRoot = process.cwd();
 
@@ -112,5 +113,79 @@ describe('frontend agents module', () => {
     expect(agentsPage).toContain('CLI Skills');
     expect(agentsPage).toContain('loadAgentSkills');
     expect(agentsPage).toContain('AgentSkillInfo');
+  });
+
+  test('skills UI groups skills by package and exposes device workspace filters', () => {
+    const grouping = readFileSync(join(repoRoot, 'web/src/utils/skillsGrouping.ts'), 'utf8');
+    const agentsPage = readFileSync(join(repoRoot, 'web/src/pages/AgentsPage.tsx'), 'utf8');
+    const skillsPage = readFileSync(join(repoRoot, 'web/src/pages/SkillsPage.tsx'), 'utf8');
+    const skillsStore = readFileSync(join(repoRoot, 'web/src/stores/skills.ts'), 'utf8');
+
+    expect(grouping).toContain("UNKNOWN_SKILL_PACKAGE = '本地/未知来源'");
+    expect(grouping).toContain('groupSkillsByPackage');
+    expect(agentsPage).toContain('groupSkillsByPackage(skills)');
+    expect(agentsPage).toContain('MarkdownRenderer content={skill.content}');
+    expect(skillsPage).toContain('groupSkillsByPackage(filtered)');
+    expect(skillsPage).toContain('全部 Device');
+    expect(skillsPage).toContain('全部 Workspace');
+    expect(skillsStore).toContain("source: 'user' | 'project' | 'external' | 'cli' | 'workspace'");
+    expect(skillsStore).toContain('deviceId?: string');
+    expect(skillsStore).toContain('workspacePath?: string');
+  });
+
+  test('skills UI normalizes legacy host wording in package badges', () => {
+    expect(normalizeSkillDisplayText('宿主机')).toBe('本地/系统');
+    expect(getSkillPackageName({ packageName: '宿主机' })).toBe('本地/系统');
+  });
+
+  test('agents page exposes agent team generation and management tab', () => {
+    const agentsPage = readFileSync(join(repoRoot, 'web/src/pages/AgentsPage.tsx'), 'utf8');
+    const teamStore = readFileSync(join(repoRoot, 'web/src/stores/agentTeams.ts'), 'utf8');
+    const teamRoutes = readFileSync(join(repoRoot, 'src/routes/agent-teams.ts'), 'utf8');
+
+    expect(agentsPage).toContain("const AGENT_SECTIONS = ['Agent 管理', 'Agent.md', 'Agent Team']");
+    expect(agentsPage).toContain('activeSection');
+    expect(agentsPage).toContain('AgentManagementSection');
+    expect(agentsPage).toContain('AgentTeamWorkspace');
+    expect(agentsPage).toContain('AgentTeamCreateDialog');
+    expect(agentsPage).toContain('lg:grid-cols-[minmax(260px,1fr)_minmax(0,2fr)]');
+    expect(agentsPage).toContain('lg:grid-cols-[minmax(0,1fr)_minmax(320px,1fr)]');
+    expect(agentsPage).toContain('左侧填写生成参数，右侧展示 Agent 返回后的 Team 结果。');
+    expect(agentsPage).toContain('Team 预览');
+    expect(agentsPage).toContain('generatedPreviewTeam');
+    expect(agentsPage).toContain('生成完成后这里会展示真实的 Team pipeline、角色、工作流和验收标准。');
+    expect(agentsPage).toContain('AI 选择的 Interaction shape');
+    expect(agentsPage).toContain('ShapeDecisionNotice');
+    expect(agentsPage).toContain('requestedShape');
+    expect(agentsPage).toContain('Agent 返回结果');
+    expect(agentsPage).not.toContain('createPreviewRoles');
+    expect(agentsPage).not.toContain('预计角色轮廓');
+    expect(agentsPage).not.toContain('生成器响应超时，已使用本地草稿创建 Agent Team');
+    expect(agentsPage).toContain('创建 Team');
+    expect(agentsPage).toContain('Team 详情');
+    expect(agentsPage).toContain('openCreateDialog');
+    expect(agentsPage).not.toContain("const MODULES = ['Instructions', 'Skills', 'Tasks', 'Args', 'ENV', 'Settings', 'Agent.md'");
+    expect(agentsPage).not.toContain("const MODULES = ['Instructions', 'Skills', 'Tasks', 'Args', 'ENV', 'Settings', 'Agent Team'");
+    expect(agentsPage).toContain("'Agent.md'");
+    expect(agentsPage).toContain("'Agent Team'");
+    expect(agentsPage).toContain('AgentTeamPanel');
+    expect(agentsPage).not.toContain("case 'Agent.md'");
+    expect(agentsPage).toContain('Interaction shape');
+    expect(agentsPage).toContain('Let AI decide');
+    expect(agentsPage).toContain('Leader-worker');
+    expect(agentsPage).toContain('Judge route');
+    expect(agentsPage).toContain('agent.md 管理');
+    expect(agentsPage).toContain('AgentMdPanel');
+    expect(agentsPage).toContain('现有 agent.md 简介会在生成 Team 时提供给模型');
+    expect(teamStore).toContain('/api/agent-teams/generate');
+    expect(teamStore).toContain('600_000');
+    expect(teamStore).not.toContain('fallbackUsed');
+    expect(teamRoutes).toContain('AGENT_TEAM_GENERATION_TIMEOUT_MS = 600_000');
+    expect(teamRoutes).toContain('containerConfig: { timeout: AGENT_TEAM_GENERATION_TIMEOUT_MS }');
+    expect(teamRoutes).toContain('earlyGenerated');
+    expect(teamRoutes).toContain('agentTeamGeneratorProc');
+    expect(teamRoutes).toContain('agentTeamGeneratorProc.kill');
+    expect(teamStore).toContain('/api/agent-teams/agent-md');
+    expect(teamStore).toContain('/api/agent-teams');
   });
 });

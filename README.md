@@ -1,22 +1,22 @@
 <p align="center">
-  <img src="web/public/icons/logo-1024.png" alt="HappyClaw Logo" width="120" />
+  <img src="web/public/icons/logo-1024.png" alt="OctoDeck Logo" width="120" />
 </p>
 
-<h1 align="center">HappyClaw</h1>
+<h1 align="center">OctoDeck</h1>
 
 <p align="center">
-  自托管的多用户本地 AI Agent 系统 — Powered By Claude Code.
+  自托管的多用户 AI Agent 驾驶舱 — Powered By Claude Code.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-teal.svg?style=for-the-badge" alt="License" /></a>
   <a href="https://nodejs.org"><img src="https://img.shields.io/badge/Node.js-%3E%3D20-339933?style=for-the-badge&logo=nodedotjs&logoColor=white" alt="Node.js" /></a>
   <img src="https://img.shields.io/badge/TypeScript-5.9-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
-  <a href="https://github.com/riba2534/happyclaw/stargazers"><img src="https://img.shields.io/github/stars/riba2534/happyclaw?style=for-the-badge&color=f5a623" alt="GitHub Stars" /></a>
+  <a href="https://github.com/liushaoxiong10/octodeck/stargazers"><img src="https://img.shields.io/github/stars/liushaoxiong10/octodeck?style=for-the-badge&color=f5a623" alt="GitHub Stars" /></a>
 </p>
 
 <p align="center">
-  <a href="#happyclaw-是什么">介绍</a> · <a href="#核心能力">核心能力</a> · <a href="#快速开始">快速开始</a> · <a href="#技术架构">技术架构</a> · <a href="#贡献">贡献</a>
+  <a href="#octodeck-是什么">介绍</a> · <a href="#核心能力">核心能力</a> · <a href="#快速开始">快速开始</a> · <a href="#技术架构">技术架构</a> · <a href="#贡献">贡献</a>
 </p>
 
 ---
@@ -49,11 +49,11 @@
 
 </details>
 
-## HappyClaw 是什么
+## OctoDeck 是什么
 
-HappyClaw 是一个基于 [Claude Agent SDK](https://github.com/anthropics/claude-code/tree/main/packages/claude-agent-sdk) 构建的自托管多用户 AI Agent 系统。它将完整的 Claude Code 运行时封装为可通过飞书、Telegram、QQ、钉钉、微信和 Web 界面访问的服务，支持文件读写、终端操作、浏览器自动化、多轮推理及 MCP 工具生态。
+OctoDeck 是一个基于 [Claude Agent SDK](https://github.com/anthropics/claude-code/tree/main/packages/claude-agent-sdk) 构建的自托管多用户 AI Agent 驾驶舱。它像一只拥有多条触手的 AI 控制台，将完整的 Claude Code 运行时封装为可通过飞书、Telegram、QQ、钉钉、微信、本机 daemon 和 Web 界面访问的服务，支持文件读写、终端操作、浏览器自动化、多轮推理及 MCP 工具生态。
 
-核心设计原则：**不重新实现 Agent 能力，直接复用 Claude Code**。底层调用的是完整的 Claude Code CLI 运行时，而非 API Wrapper 或 Prompt Chain。Claude Code 的每次升级——新工具、更强的推理、更多的 MCP 支持——HappyClaw 零适配自动受益。
+核心设计原则：**不重新实现 Agent 能力，直接复用 Claude Code**。底层调用的是完整的 Claude Code CLI 运行时，而非 API Wrapper 或 Prompt Chain。Claude Code 的每次升级——新工具、更强的推理、更多的 MCP 支持——OctoDeck 零适配自动受益。
 
 ### 关键特性
 
@@ -300,8 +300,8 @@ Agent 自主维护跨会话的持久记忆：
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/riba2534/happyclaw.git
-cd happyclaw
+git clone https://github.com/liushaoxiong10/octodeck.git
+cd octodeck
 
 # 2. 一键启动（首次自动安装依赖 + 编译）
 make start
@@ -372,7 +372,7 @@ admin 用户默认使用宿主机模式（无需 Docker），开箱即用。如�
    </details>
 
 4. 发布应用版本并等待审批通过
-5. 在 HappyClaw Web 界面的「设置 → IM 通道 → 飞书」中填入 App ID 和 App Secret
+5. 在 OctoDeck Web 界面的「设置 → IM 通道 → 飞书」中填入 App ID 和 App Secret
 
 每个用户可在个人设置中独立配置飞书应用凭据，实现 per-user 的飞书 Bot。
 
@@ -385,7 +385,7 @@ admin 用户默认使用宿主机模式（无需 Docker），开箱即用。如�
 
 1. 在 Telegram 中搜索 [@BotFather](https://t.me/BotFather)，发送 `/newbot` 创建 Bot
 2. 记录返回的 Bot Token
-3. 在 HappyClaw Web 界面的「设置 → IM 通道 → Telegram」中填入 Bot Token
+3. 在 OctoDeck Web 界面的「设置 → IM 通道 → Telegram」中填入 Bot Token
 4. **群聊使用**：如需在 Telegram 群中使用 Bot，需在 BotFather 中发送 `/mybots` → 选择 Bot → Bot Settings → Group Privacy → Turn off，否则 Bot 只能接收 `/` 命令消息
 
 
@@ -394,7 +394,7 @@ admin 用户默认使用宿主机模式（无需 Docker），开箱即用。如�
 1. 前往 [QQ 开放平台](https://q.qq.com/qqbot/openclaw/index.html)，使用手机 QQ 扫码注册登录
 2. 创建机器人，设置名称和头像
 3. 在机器人管理页面获取 **App ID** 和 **App Secret**
-4. 在 HappyClaw Web 界面的「设置 → IM 通道 → QQ」中填入 App ID 和 App Secret
+4. 在 OctoDeck Web 界面的「设置 → IM 通道 → QQ」中填入 App ID 和 App Secret
 5. **配对绑定**：在设置页生成配对码，然后在 QQ 中向 Bot 发送 `/pair <配对码>` 完成绑定
 
 > QQ Bot 使用官方 API v2 协议，支持 C2C 私聊和群聊 @Bot 消息。群聊中 Bot 仅接收 @Bot 的消息。
@@ -406,14 +406,14 @@ admin 用户默认使用宿主机模式（无需 Docker），开箱即用。如�
 2. 在应用管理 → 机器人与消息推送 中，开启「机器人配置」
 3. 选择 **Stream 模式**（非 HTTP 回调模式）接收消息
 4. 获取应用的 **Client ID**（AppKey）和 **Client Secret**（AppSecret）
-5. 在 HappyClaw Web 界面的「设置 → IM 通道 → 钉钉」中填入 Client ID 和 Client Secret
+5. 在 OctoDeck Web 界面的「设置 → IM 通道 → 钉钉」中填入 Client ID 和 Client Secret
 
 > 钉钉 Bot 支持单聊和群聊。群聊中需要 @机器人 才会响应。支持 AI Card 流式打字机效果。
 
 
 ### 配置微信集成
 
-1. 在 HappyClaw Web 界面的「设置 → IM 通道 → 微信」中开启微信通道
+1. 在 OctoDeck Web 界面的「设置 → IM 通道 → 微信」中开启微信通道
 2. 填入 iLink Bot Token
 3. 点击「扫码配对」生成 QR 码
 4. 使用微信扫描 QR 码完成绑定
@@ -503,7 +503,7 @@ flowchart TD
         Stream["流式事件<br/>(14 种类型)"]
     end
 
-    DB[("SQLite<br/>(WAL 模式)")]
+    DB[("SQLite 表数据<br/>SQLite 默认<br/>可选 MySQL/MongoDB 快照")]
     IPC["IPC 文件通道<br/>(原子读写)"]
     Memory["记忆系统<br/>(CLAUDE.md + memory/)"]
 
@@ -552,7 +552,7 @@ flowchart TD
 
 | 层次 | 技术 |
 |------|------|
-| **后端** | Node.js 22 · TypeScript 5.9 · Hono · better-sqlite3 (WAL) · ws · node-pty · Pino · Zod 4 |
+| **后端** | Node.js 22 · TypeScript 5.9 · Hono · SQLite/better-sqlite3（默认）· 可选 MySQL/MongoDB 远程存储 · ws · node-pty · Pino · Zod 4 |
 | **前端** | React 19 · Vite 6 · Zustand 5 · Tailwind CSS 4 · shadcn/ui · Radix UI · Lucide Icons · react-markdown · mermaid · recharts · @dnd-kit · xterm.js · @tanstack/react-virtual · PWA |
 | **Agent** | Claude Agent SDK · Claude Code CLI · MCP SDK · IPC 文件通道 |
 | **容器** | Docker (node:22-slim) · Chromium · agent-browser · Python · 40+ 预装工具 |
@@ -564,7 +564,7 @@ flowchart TD
 所有运行时数据统一在 `data/` 目录下，启动时自动创建，无需手动初始化。
 
 ```
-happyclaw/
+octodeck/
 ├── src/                          # 后端源码
 │   ├── index.ts                  #   入口：消息轮询、IPC 监听、容器生命周期
 │   ├── web.ts                    #   Hono 应用、WebSocket、静态文件
@@ -590,7 +590,7 @@ happyclaw/
 │   ├── script-runner.ts          #   脚本任务执行器
 │   ├── file-manager.ts           #   文件安全（路径遍历防护）
 │   ├── mount-security.ts         #   挂载白名单 / 黑名单
-│   └── db.ts                     #   SQLite 数据层（Schema v1→v33）
+│   └── db.ts                     #   SQLite 表数据层（默认本地 SQLite，可配置 MySQL/MongoDB 远程快照）
 │
 ├── web/                          # 前端 (React + Vite)
 │   └── src/
@@ -623,7 +623,7 @@ happyclaw/
 │   └── global-claude-md.template.md # 全局 CLAUDE.md 模板
 │
 ├── data/                         # 运行时数据（启动时自动创建）
-│   ├── db/messages.db            #   SQLite 数据库（WAL 模式）
+│   ├── db/messages.db            #   SQLite 表数据库（默认 WAL；MySQL/MongoDB 模式下作为本地工作副本）
 │   ├── groups/{folder}/          #   会话工作目录（Agent 可读写）
 │   │   ├── downloads/{channel}/  #     IM 文件下载（feishu/telegram/qq/dingtalk，按日期分子目录）
 │   │   └── CLAUDE.md             #     会话私有记忆
@@ -652,7 +652,7 @@ make sync-types       # 同步 shared/ 类型定义到各子项目
 make update-sdk       # 更新 agent-runner 的 Claude Agent SDK 到最新版本
 make clean            # 清理构建产物
 make reset-init       # 重置为首装状态（清空数据库、配置、工作区、记忆、会话）
-make backup           # 备份运行时数据到 happyclaw-backup-{date}.tar.gz
+make backup           # 备份运行时数据到 octodeck-backup-{date}.tar.gz
 make restore          # 从备份恢复数据（make restore 或 make restore FILE=xxx.tar.gz）
 ```
 
@@ -695,14 +695,33 @@ cd web && npx vite --port 3001
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `WEB_PORT` | `3000` | Web 服务端口 |
-| `ASSISTANT_NAME` | `HappyClaw` | 助手显示名称 |
-| `CONTAINER_IMAGE` | `happyclaw-agent:latest` | Agent 容器镜像 |
+| `ASSISTANT_NAME` | `OctoDeck` | 助手显示名称 |
+| `CONTAINER_IMAGE` | `octodeck-agent:latest` | Agent 容器镜像 |
 | `CONTAINER_TIMEOUT` | `1800000`（30min） | 容器硬超时（可通过 Web 设置覆盖） |
 | `IDLE_TIMEOUT` | `1800000`（30min） | 容器空闲保活时长（可通过 Web 设置覆盖） |
 | `MAX_CONCURRENT_CONTAINERS` | `20` | 最大并发容器数（可通过 Web 设置覆盖） |
 | `MAX_CONCURRENT_HOST_PROCESSES` | `5` | 宿主机进程并发上限（可通过 Web 设置覆盖） |
 | `TRUST_PROXY` | `false` | 信任反向代理的 `X-Forwarded-For` 头 |
 | `TZ` | 系统时区 | 定时任务时区 |
+| `OCTODECK_DB_BACKEND` | `sqlite` | 数据库存储后端：`sqlite`、`mysql` 或 `mongodb` |
+| `OCTODECK_DATABASE_URL` | 无 | MySQL/MongoDB 连接串；当 `OCTODECK_DB_BACKEND=mysql` 或 `mongodb` 时必填 |
+| `OCTODECK_DB_FALLBACK_TO_SQLITE` | `false` | 远程数据库连接失败时是否显式回退到本地 SQLite |
+
+数据库默认使用 `data/db/messages.db`，无需额外配置。若设置为 MySQL 或 MongoDB，OctoDeck 会把 **所有写入 `src/db.ts` / `data/db/messages.db` 的 SQLite 表数据** 作为快照保存到远程数据库中；远程连接失败默认会中止启动，避免生产环境误写本地库。只有显式设置 `OCTODECK_DB_FALLBACK_TO_SQLITE=true` 时才会回退到本地 SQLite。
+
+注意：MySQL/MongoDB 覆盖范围是服务端 SQLite 表数据（消息、用户、会话、群组、任务、计费、用量、Device/AgentLink 注册信息、Sub-Agent/会话 Agent 记录等）以及写入 `metadata_store` 的元数据（自定义 Agent 后端配置、Agent Team、Agent.md 定义等）。Device 的在线 WebSocket 连接状态仍是进程内存状态，重启后由 daemon 重连恢复。工作区文件、下载附件、Claude 会话目录、IPC、日志、用户 skills/plugins/MCP 配置等仍按文件系统保存，因为这些数据需要被容器、Claude CLI、下载接口直接按路径访问。浏览器 localStorage/sessionStorage/IndexedDB/CacheStorage 属于前端本地缓存，不纳入后端数据库切换范围。
+
+```bash
+# MySQL
+OCTODECK_DB_BACKEND=mysql \
+OCTODECK_DATABASE_URL=mysql://user:password@host:3306/octodeck \
+make start
+
+# MongoDB
+OCTODECK_DB_BACKEND=mongodb \
+OCTODECK_DATABASE_URL=mongodb://user:password@host:27017/octodeck \
+make start
+```
 
 > 更多运行参数（容器超时、并发限制、登录保护、计费设置等）可在 Web 界面「设置 → 系统设置」中配置，无需设置环境变量。
 
@@ -757,7 +776,7 @@ Commit message 使用简体中文，格式：`类型: 描述`
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=riba2534/happyclaw&type=date&legend=top-left)](https://www.star-history.com/#riba2534/happyclaw&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=liushaoxiong10/octodeck&type=date&legend=top-left)](https://www.star-history.com/#liushaoxiong10/octodeck&type=date&legend=top-left)
 
 ## 许可证
 

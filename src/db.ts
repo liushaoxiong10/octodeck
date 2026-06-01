@@ -4,6 +4,12 @@ import fs from 'fs';
 import path from 'path';
 
 import { STORE_DIR, GROUPS_DIR } from './config.js';
+import { getDatabaseBackendConfig } from './db-backend-config.js';
+import {
+  NoopPersistenceController,
+  prepareSqlitePathForBackend,
+  RemotePersistenceController,
+} from './db-remote-store.js';
 import { logger } from './logger.js';
 import {
   AgentKind,
@@ -49,6 +55,8 @@ import {
 import { getDefaultPermissions, normalizePermissions } from './permissions.js';
 
 let db: InstanceType<typeof Database>;
+let persistenceController: RemotePersistenceController = new NoopPersistenceController();
+let persistenceExitHookRegistered = false;
 
 // Prepared statement cache — lazy-initialized on first use after initDatabase()
 let _stmts: {
@@ -216,14 +224,76 @@ function getRouterStateInternal(key: string): string | undefined {
   }
 }
 
-export function initDatabase(): void {
-  const dbPath = path.join(STORE_DIR, 'messages.db');
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+function attachDatabasePersistenceHooks(
+  database: InstanceType<typeof Database>,
+  controller: RemotePersistenceController,
+): void {
+  const originalExec = database.exec.bind(database);
+  database.exec = ((sql: string) => {
+    const result = originalExec(sql);
+    controller.schedulePersist();
+    return result;
+  }) as typeof database.exec;
 
+  const originalPrepare = database.prepare.bind(database);
+  database.prepare = ((sql: string) => {
+    const statement = originalPrepare(sql);
+    return new Proxy(statement, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop === 'run' && typeof value === 'function') {
+          return (...args: unknown[]) => {
+            const result = value.apply(target, args);
+            controller.schedulePersist();
+            return result;
+          };
+        }
+        if (typeof value === 'function') return value.bind(target);
+        return value;
+      },
+    });
+  }) as typeof database.prepare;
+
+  const originalTransaction = database.transaction.bind(database);
+  database.transaction = ((fn: (...args: any[]) => any) => {
+    const tx = originalTransaction(fn);
+    return ((...args: unknown[]) => {
+      const result = tx(...args);
+      controller.schedulePersist();
+      return result;
+    }) as ReturnType<typeof database.transaction>;
+  }) as typeof database.transaction;
+}
+
+function registerPersistenceExitHook(): void {
+  if (persistenceExitHookRegistered) return;
+  persistenceExitHookRegistered = true;
+  process.once('beforeExit', () => {
+    void persistenceController.flush().catch((err) => {
+      logger.error({ err }, 'Failed to flush database persistence before exit');
+    });
+  });
+}
+
+function initializeSqliteDatabase(
+  dbPath: string,
+  controller: RemotePersistenceController,
+): void {
+  persistenceController = controller;
+  _stmts = null;
+  _newMsgStmtCache.clear();
+
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   db = new Database(dbPath);
+  attachDatabasePersistenceHooks(db, controller);
+  registerPersistenceExitHook();
 
   // Enable WAL mode for better concurrency and performance
-  db.exec('PRAGMA journal_mode = WAL');
+  db.exec(
+    controller.backend === 'sqlite'
+      ? 'PRAGMA journal_mode = WAL'
+      : 'PRAGMA journal_mode = DELETE',
+  );
   db.exec('PRAGMA busy_timeout = 5000');
   db.exec(`
     CREATE TABLE IF NOT EXISTS chats (
@@ -292,6 +362,11 @@ export function initDatabase(): void {
     CREATE TABLE IF NOT EXISTS router_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS metadata_store (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
       group_folder TEXT NOT NULL,
@@ -630,7 +705,7 @@ export function initDatabase(): void {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
-    -- Phase 5.1: hcagent client links. Online state lives only in
+    -- Phase 5.1: octodeck-daemon client links. Online state lives only in
     -- AgentLinkRegistry memory; this table tracks identity, token hash,
     -- capabilities and last-seen heartbeat.
     CREATE TABLE IF NOT EXISTS agent_links (
@@ -1302,6 +1377,53 @@ export function initDatabase(): void {
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
+}
+
+async function initializeRemoteBackedDatabase(
+  dbPath: string,
+): Promise<void> {
+  const config = getDatabaseBackendConfig();
+  const controller = await prepareSqlitePathForBackend(config, dbPath);
+  initializeSqliteDatabase(dbPath, controller);
+}
+
+export function initDatabase(): void | Promise<void> {
+  const dbPath = path.join(STORE_DIR, 'messages.db');
+  const config = getDatabaseBackendConfig();
+
+  if (config.backend === 'sqlite') {
+    initializeSqliteDatabase(dbPath, new NoopPersistenceController());
+    return;
+  }
+
+  return initializeRemoteBackedDatabase(dbPath);
+}
+
+export async function flushDatabasePersistence(): Promise<void> {
+  await persistenceController.flush();
+}
+
+export function getMetadataValue(key: string): string | undefined {
+  if (!db) return undefined;
+  try {
+    const row = db
+      .prepare('SELECT value FROM metadata_store WHERE key = ?')
+      .get(key) as { value: string } | undefined;
+    return row?.value;
+  } catch {
+    return undefined;
+  }
+}
+
+export function setMetadataValue(key: string, value: string): void {
+  if (!db) return;
+  db.prepare(
+    `INSERT INTO metadata_store (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET
+       value = excluded.value,
+       updated_at = excluded.updated_at`,
+  ).run(key, value, new Date().toISOString());
 }
 
 /**
@@ -5927,7 +6049,8 @@ export function tryIncrementRedeemCodeUsage(
  * Close the database connection.
  * Should be called during graceful shutdown.
  */
-export function closeDatabase(): void {
+export async function closeDatabase(): Promise<void> {
+  await persistenceController.close();
   _stmts = null;
   _newMsgStmtCache.clear();
   if (db) {

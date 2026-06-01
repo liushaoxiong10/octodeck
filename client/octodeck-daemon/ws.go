@@ -95,7 +95,7 @@ func (c *wsClient) sendHello(ctx context.Context) error {
 	frame := &HelloFrame{
 		Type:         tHello,
 		ID:           1,
-		Version:      ifEmpty(c.cfg.Version, "hcagent/0.1.0"),
+		Version:      ifEmpty(c.cfg.Version, "octodeck-daemon/0.1.0"),
 		OS:           goos(),
 		Arch:         goarch(),
 		Hostname:     hostname(),

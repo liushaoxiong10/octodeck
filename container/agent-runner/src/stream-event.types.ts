@@ -69,7 +69,7 @@ export interface ClaudeContextAudit {
   claudeMd: ClaudeContextFileAudit;
   rules: ClaudeContextRulesAudit;
   skills: ClaudeContextSkillsAudit;
-  happyclawPrompt: ClaudeContextPromptAudit;
+  octodeckPrompt: ClaudeContextPromptAudit;
   warnings: string[];
 }
 

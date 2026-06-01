@@ -13,7 +13,6 @@ import { SystemSettingsSection } from '../components/settings/SystemSettingsSect
 import { UserChannelsSection } from '../components/settings/UserChannelsSection';
 import { GroupsPage } from './GroupsPage';
 import { MemoryPage } from './MemoryPage';
-import { SkillsPage } from './SkillsPage';
 import { McpServersPage } from './McpServersPage';
 import { PluginsPage } from './PluginsPage';
 import { AgentDefinitionsPage } from './AgentDefinitionsPage';
@@ -24,9 +23,9 @@ import { MonitorPage } from './MonitorPage';
 import { Card, CardContent } from '@/components/ui/card';
 import type { SettingsTab } from '../components/settings/types';
 
-const VALID_TABS: SettingsTab[] = ['registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'skills', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'about', 'bindings', 'usage', 'monitor'];
+const VALID_TABS: SettingsTab[] = ['registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'about', 'bindings', 'usage', 'monitor'];
 const SYSTEM_TABS: SettingsTab[] = ['registration', 'appearance', 'system'];
-const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'skills', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'bindings', 'usage', 'monitor'];
+const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'bindings', 'usage', 'monitor'];
 
 export function SettingsPage() {
   const { user: currentUser } = useAuthStore();
@@ -75,7 +74,6 @@ export function SettingsPage() {
     }
     tabs.push({ key: 'groups', label: '会话' });
     tabs.push({ key: 'memory', label: '记忆' });
-    tabs.push({ key: 'skills', label: '技能' });
     tabs.push({ key: 'mcp-servers', label: 'MCP' });
     tabs.push({ key: 'agent-definitions', label: 'Agent' });
     tabs.push({ key: 'bindings', label: 'IM 绑定' });
@@ -110,7 +108,6 @@ export function SettingsPage() {
     security: '安全与设备',
     groups: '会话管理',
     memory: '记忆管理',
-    skills: '技能(Skill)管理',
     'mcp-servers': 'MCP 服务器',
     plugins: '插件 (Plugins)',
     'agent-definitions': 'Agent 管理',
@@ -181,7 +178,6 @@ export function SettingsPage() {
           <>
             {activeTab === 'groups' && <GroupsPage />}
             {activeTab === 'memory' && <MemoryPage />}
-            {activeTab === 'skills' && <SkillsPage />}
             {activeTab === 'mcp-servers' && <McpServersPage />}
             {activeTab === 'plugins' && <PluginsPage />}
             {activeTab === 'agent-definitions' && <AgentDefinitionsPage />}

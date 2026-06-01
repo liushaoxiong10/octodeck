@@ -110,7 +110,7 @@ install_uv() {
 
 # ── Main ─────────────────────────────────────────────────────
 
-echo "=== HappyClaw Host Tools Installer ==="
+echo "=== OctoDeck Host Tools Installer ==="
 echo "    OS=$OS  ARCH=$ARCH"
 echo ""
 
@@ -126,4 +126,4 @@ install_uv
 
 echo ""
 echo "=== Done ==="
-echo "Restart HappyClaw to pick up the new tools."
+echo "Restart OctoDeck to pick up the new tools."

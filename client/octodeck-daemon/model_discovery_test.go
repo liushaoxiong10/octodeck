@@ -31,7 +31,7 @@ exit 2
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+"/usr/bin:/bin")
-	t.Setenv("HCAGENT_EXTRA_PATH", "")
+	t.Setenv("OCTODECK_DAEMON_EXTRA_PATH", "")
 
 	models, err := discoverProviderModels(context.Background(), "traecli")
 	if err != nil {

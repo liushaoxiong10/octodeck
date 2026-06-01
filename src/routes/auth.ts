@@ -59,7 +59,7 @@ const authRoutes = new Hono<{ Variables: Variables }>();
 // --- Helper Functions ---
 
 // Cookie helpers live in auth.ts (single source of truth, also used by middleware).
-import { setSessionCookie, clearSessionCookie } from '../auth.js';
+import { setSessionCookie, clearSessionCookie, clearSessionCookies } from '../auth.js';
 export { setSessionCookie, clearSessionCookie };
 
 export function isUsernameConflictError(err: unknown): boolean {
@@ -516,12 +516,14 @@ authRoutes.post('/logout', authMiddleware, (c) => {
     ip_address: getClientIp(c),
   });
 
+  const headers = new Headers({ 'Content-Type': 'application/json' });
+  for (const cookie of clearSessionCookies(c)) {
+    headers.append('Set-Cookie', cookie);
+  }
+
   return new Response(JSON.stringify({ success: true }), {
     status: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'Set-Cookie': clearSessionCookie(c),
-    },
+    headers,
   });
 });
 

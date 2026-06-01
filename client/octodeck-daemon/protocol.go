@@ -11,18 +11,18 @@ import (
 type frameType string
 
 const (
-	tHello       frameType = "hello"
-	tHelloAck    frameType = "hello_ack"
-	tPing        frameType = "ping"
-	tError       frameType = "error"
-	tRunRequest  frameType = "run.request"
-	tRunCancel   frameType = "run.cancel"
-	tRunEvent    frameType = "run.event"
-	tRunResult   frameType = "run.result"
-	tToolRequest frameType = "tool.request"
-	tToolCancel  frameType = "tool.cancel"
-	tToolEvent   frameType = "tool.event"
-	tToolResult  frameType = "tool.result"
+	tHello         frameType = "hello"
+	tHelloAck      frameType = "hello_ack"
+	tPing          frameType = "ping"
+	tError         frameType = "error"
+	tRunRequest    frameType = "run.request"
+	tRunCancel     frameType = "run.cancel"
+	tRunEvent      frameType = "run.event"
+	tRunResult     frameType = "run.result"
+	tToolRequest   frameType = "tool.request"
+	tToolCancel    frameType = "tool.cancel"
+	tToolEvent     frameType = "tool.event"
+	tToolResult    frameType = "tool.result"
 	tModelsRequest frameType = "models.request"
 	tModelsResult  frameType = "models.result"
 	tSkillsRequest frameType = "skills.request"
@@ -101,6 +101,8 @@ type SkillInfo struct {
 	Description string `json:"description,omitempty"`
 	Source      string `json:"source"`
 	Enabled     bool   `json:"enabled"`
+	PackageName string `json:"packageName,omitempty"`
+	Content     string `json:"content,omitempty"`
 }
 
 type SkillsResultFrame struct {
@@ -111,6 +113,18 @@ type SkillsResultFrame struct {
 	CLISkills       []SkillInfo `json:"cliSkills"`
 	Error           *string     `json:"error"`
 	DurationMs      int64       `json:"durationMs"`
+}
+
+func (f SkillsResultFrame) MarshalJSON() ([]byte, error) {
+	type alias SkillsResultFrame
+	normalized := alias(f)
+	if normalized.WorkspaceSkills == nil {
+		normalized.WorkspaceSkills = []SkillInfo{}
+	}
+	if normalized.CLISkills == nil {
+		normalized.CLISkills = []SkillInfo{}
+	}
+	return json.Marshal(normalized)
 }
 
 // ─── Inbound (S→C) ───────────────────────────────────────────

@@ -18,7 +18,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 export async function handleAgentLinkToolHttpRequest(request: Request): Promise<Response> {
-  const secret = process.env.HAPPYCLAW_AGENT_RUNNER_SECRET;
+  const secret = process.env.OCTODECK_AGENT_RUNNER_SECRET;
   const auth = request.headers.get('authorization') || '';
   if (!secret || auth !== `Bearer ${secret}`) {
     return jsonResponse({ error: 'unauthorized' }, 401);

@@ -11,7 +11,7 @@ vi.mock('../src/agent-link/run-rpc.js', () => ({
   unregisterRun: unregisterRunMock,
 }));
 vi.mock('../src/runtime-config.js', () => ({ getSystemSettings: getSystemSettingsMock }));
-vi.mock('../src/config.js', () => ({ GROUPS_DIR: '/tmp/happyclaw-test/groups' }));
+vi.mock('../src/config.js', () => ({ GROUPS_DIR: '/tmp/octodeck-test/groups' }));
 
 describe('agent-link run context forwarding', () => {
   test('runViaAgentLink includes full container input context and stdinJson', async () => {

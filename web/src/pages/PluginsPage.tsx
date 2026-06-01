@@ -129,10 +129,10 @@ export function PluginsPage() {
                     variant="outline"
                     onClick={handleScan}
                     disabled={scanning}
-                    title="扫描宿主机 ~/.claude/plugins/marketplaces/ 并导入 catalog"
+                    title="扫描本地/系统 ~/.claude/plugins/marketplaces/ 并导入 catalog"
                   >
                     <RefreshCw size={18} className={scanning ? 'animate-spin' : ''} />
-                    扫描宿主机
+                    扫描本地/系统
                   </Button>
                 )}
                 <Button variant="outline" onClick={loadPlugins} disabled={loading}>
@@ -158,7 +158,7 @@ export function PluginsPage() {
             <div>
               v3 升级用户首次访问看到 0 plugin 是预期。
               {isAdmin
-                ? '请点击右上 "扫描宿主机" 触发 catalog 导入；'
+                ? '请点击右上 "扫描本地/系统" 触发 catalog 导入；'
                 : '等 admin 完成导入后即可启用。'}
             </div>
           </div>
@@ -179,7 +179,7 @@ export function PluginsPage() {
               title="还没有 plugin"
               description={
                 isAdmin
-                  ? '尚未导入任何 marketplace。点击右上 "扫描宿主机" 触发 catalog 导入。'
+                  ? '尚未导入任何 marketplace。点击右上 "扫描本地/系统" 触发 catalog 导入。'
                   : 'admin 还未导入任何 marketplace，请稍后再来。'
               }
             />
@@ -277,7 +277,7 @@ export function PluginsPage() {
                   {' '}会一次性禁用 <strong>{deleteTarget.enabledCount}</strong> 个 plugin。
                 </>
               )}
-              宿主机 marketplace 目录与 catalog 快照不受影响。
+              本地/系统 marketplace 目录与 catalog 快照不受影响。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

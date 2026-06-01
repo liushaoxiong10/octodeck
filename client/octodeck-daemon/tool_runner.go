@@ -139,7 +139,7 @@ func (r *toolRunner) execute(parent context.Context, req *ToolRequestFrame) *Too
 	case "WebFetch":
 		return r.execSimple(parent, req, started, "curl", []string{"-L", "--max-time", "30", strArg(req.Input, "url")})
 	case "WebSearch":
-		return fail(errors.New("WebSearch is not implemented in hcagent; use WebFetch with a search endpoint"))
+		return fail(errors.New("WebSearch is not implemented in octodeck-daemon; use WebFetch with a search endpoint"))
 	default:
 		return fail(fmt.Errorf("unsupported tool: %s", req.ToolName))
 	}

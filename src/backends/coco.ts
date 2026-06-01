@@ -15,7 +15,7 @@ import { runHostCli } from './host-cli-driver.js';
 import type { AgentBackend } from './types.js';
 
 const COCO_BINARY_CANDIDATES = [
-  process.env.HAPPYCLAW_COCO_BIN,
+  process.env.OCTODECK_COCO_BIN,
   path.join(process.env.HOME || '', '.local', 'bin', 'coco'),
   '/usr/local/bin/coco',
   '/opt/homebrew/bin/coco',

@@ -183,8 +183,14 @@ export const SkillInfoSchema = z.object({
   description: z.string().max(2048).optional(),
   source: z.enum(['workspace', 'cli']),
   enabled: z.boolean().optional(),
+  packageName: z.string().max(512).optional(),
+  content: z.string().max(200_000).optional(),
 });
 export type SkillInfo = z.infer<typeof SkillInfoSchema>;
+
+const LegacySkillListSchema = z
+  .union([z.array(SkillInfoSchema).max(256), z.null()])
+  .transform((value) => value ?? []);
 
 export const ModelsResultFrame = z.object({
   type: z.literal('models.result'),
@@ -200,8 +206,8 @@ export const SkillsResultFrame = z.object({
   type: z.literal('skills.result'),
   requestId: z.string(),
   ok: z.boolean(),
-  workspaceSkills: z.array(SkillInfoSchema).max(256),
-  cliSkills: z.array(SkillInfoSchema).max(256),
+  workspaceSkills: LegacySkillListSchema,
+  cliSkills: LegacySkillListSchema,
   error: z.string().nullable(),
   durationMs: z.number().int().nonnegative(),
 });

@@ -272,7 +272,7 @@ function resolveAgentConvColdStartOwner(args: {
   if (args.chatJid === 'web:main' && args.isHome) {
     for (let i = args.missedMessages.length - 1; i >= 0; i--) {
       const sender = args.missedMessages[i]?.sender;
-      if (!sender || sender === 'happyclaw-agent' || sender === '__system__')
+      if (!sender || sender === 'octodeck-agent' || sender === '__system__')
         continue;
       const senderUser = args.getUserById(sender);
       if (senderUser?.status === 'active' && senderUser.role === 'admin') {
@@ -313,7 +313,7 @@ describe('agent conv cold-start runtime owner — #20 P2-2 sender override', () 
       isHome: true,
       createdBy: 'admin-1',
       missedMessages: [
-        { sender: 'happyclaw-agent' },
+        { sender: 'octodeck-agent' },
         { sender: '__system__' },
       ],
       getUserById: lookup,

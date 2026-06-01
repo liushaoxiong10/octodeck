@@ -2,7 +2,7 @@
  * Agent backend abstraction.
  *
  * 一个 backend 知道如何 spawn 一个外部 agent 进程（Claude Agent SDK / coco / ...），
- * 并把它的输出按 happyclaw 的 stdout marker 协议（OUTPUT_START_MARKER /
+ * 并把它的输出按 octodeck 的 stdout marker 协议（OUTPUT_START_MARKER /
  * OUTPUT_END_MARKER 包裹的 ContainerOutput JSON）暴露给上层。
  *
  * Phase 1：仅定义接口 + claude-sdk 实现（直接代理给现有的 runContainerAgent /
@@ -43,11 +43,11 @@ export interface AgentBackend {
   readonly id: string;
   /** 给 admin UI 展示用的人类可读名称。 */
   readonly displayName: string;
-  /** 是否走 happyclaw provider pool（Claude shape API key 池）。 */
+  /** 是否走 octodeck provider pool（Claude shape API key 池）。 */
   readonly usesProviderPool: boolean;
   /**
    * Backend 是否能用自身 CLI/session 机制恢复多轮上下文。
-   * true 时 orchestration 层不再把 HappyClaw 历史包装成 <system_context> 注入 prompt，
+   * true 时 orchestration 层不再把 OctoDeck 历史包装成 <system_context> 注入 prompt，
    * 而是把 sessionId 交给 backend，由 backend 的 argv/env 协议原生 resume。
    */
   readonly supportsNativeSessions?: boolean;

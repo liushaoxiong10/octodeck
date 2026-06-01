@@ -2,7 +2,7 @@
  * Agent-link driver — Phase 5.2.
  *
  * Mirror of host-cli-driver, but instead of `child_process.spawn` we ship the
- * `run.request` frame to a remote hcagent via the AgentLink ws session and
+ * `run.request` frame to a remote octodeck-daemon via the AgentLink ws session and
  * route incoming `run.event` / `run.result` frames back through the same
  * parsing/finalizing pipeline that host-cli-driver uses.
  *
@@ -105,7 +105,7 @@ function buildRunContext(args: BackendRunArgs, cfg: HostCliDriverConfig): Record
 }
 
 /**
- * Run a host-mode CLI on a remote hcagent and return a ContainerOutput.
+ * Run a host-mode CLI on a remote octodeck-daemon and return a ContainerOutput.
  * Returns a synthetic `not online` error result if the link isn't connected,
  * letting the caller decide whether to fall back to server-local.
  */
@@ -171,9 +171,11 @@ export async function runViaAgentLink(
 
   const settings = getSystemSettings();
   const timeoutMs =
-    (cfg.timeoutMs && cfg.timeoutMs > 0
-      ? cfg.timeoutMs
-      : group.containerConfig?.timeout) || settings.containerTimeout;
+    (group.containerConfig?.timeout && group.containerConfig.timeout > 0
+      ? group.containerConfig.timeout
+      : cfg.timeoutMs && cfg.timeoutMs > 0
+        ? cfg.timeoutMs
+        : undefined) || settings.containerTimeout;
   const maxOutputBytes =
     (cfg.maxOutputBytes && cfg.maxOutputBytes > 0
       ? cfg.maxOutputBytes

@@ -1,5 +1,5 @@
 /**
- * HappyClaw Agent Runner
+ * OctoDeck Agent Runner
  * Runs inside a container, receives config via stdin, outputs result to stdout
  *
  * Input protocol:
@@ -45,10 +45,10 @@ import { createMcpTools } from './mcp-tools.js';
 import { REMOTE_LOCAL_TOOL_NAMES, createRemoteMcpTools } from './remote-mcp-tools.js';
 
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
-const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
-const WORKSPACE_GLOBAL = process.env.HAPPYCLAW_WORKSPACE_GLOBAL || '/workspace/global';
-const WORKSPACE_MEMORY = process.env.HAPPYCLAW_WORKSPACE_MEMORY || '/workspace/memory';
-const WORKSPACE_IPC = process.env.HAPPYCLAW_WORKSPACE_IPC || '/workspace/ipc';
+const WORKSPACE_GROUP = process.env.OCTODECK_WORKSPACE_GROUP || '/workspace/group';
+const WORKSPACE_GLOBAL = process.env.OCTODECK_WORKSPACE_GLOBAL || '/workspace/global';
+const WORKSPACE_MEMORY = process.env.OCTODECK_WORKSPACE_MEMORY || '/workspace/memory';
+const WORKSPACE_IPC = process.env.OCTODECK_WORKSPACE_IPC || '/workspace/ipc';
 
 // 模型配置：支持别名（opus/sonnet/haiku）或完整模型 ID
 // 别名自动解析为最新版本，如 opus → Opus 4.6
@@ -74,15 +74,15 @@ const DEFAULT_ALLOWED_TOOLS = [
   'TeamCreate', 'TeamDelete', 'SendMessage',
   'TodoWrite', 'ToolSearch', 'Skill',
   'NotebookEdit',
-  'mcp__happyclaw__*'
+  'mcp__octodeck__*'
 ];
 
-const REMOTE_TOOL_GUIDANCE = `\n\n<remote-execution>\nThis workspace is bound to a connected hcagent client. Do not use native local tools for machine, filesystem, shell, or network operations. Use the mcp__happyclaw__remote_* tools instead: remote_bash, remote_read, remote_write, remote_edit, remote_glob, remote_grep, remote_ls, remote_web_fetch, remote_web_search. Treat their results as the authoritative client workspace state.\n</remote-execution>`;
+const REMOTE_TOOL_GUIDANCE = `\n\n<remote-execution>\nThis workspace is bound to a connected octodeck-daemon client. Do not use native local tools for machine, filesystem, shell, or network operations. Use the mcp__octodeck__remote_* tools instead: remote_bash, remote_read, remote_write, remote_edit, remote_glob, remote_grep, remote_ls, remote_web_fetch, remote_web_search. Treat their results as the authoritative client workspace state.\n</remote-execution>`;
 
 const MEMORY_FLUSH_ALLOWED_TOOLS = [
-  'mcp__happyclaw__memory_search',
-  'mcp__happyclaw__memory_get',
-  'mcp__happyclaw__memory_append',
+  'mcp__octodeck__memory_search',
+  'mcp__octodeck__memory_get',
+  'mcp__octodeck__memory_append',
   'Read',  // 读取全局 CLAUDE.md 当前内容
   'Edit',  // 编辑全局 CLAUDE.md（永久记忆）
 ];
@@ -95,13 +95,13 @@ const MEMORY_FLUSH_DISALLOWED_TOOLS = [
   'Task', 'TaskOutput', 'TaskStop',
   'TeamCreate', 'TeamDelete', 'SendMessage',
   'TodoWrite', 'ToolSearch', 'Skill', 'NotebookEdit',
-  'mcp__happyclaw__send_message',
-  'mcp__happyclaw__schedule_task',
-  'mcp__happyclaw__list_tasks',
-  'mcp__happyclaw__pause_task',
-  'mcp__happyclaw__resume_task',
-  'mcp__happyclaw__cancel_task',
-  'mcp__happyclaw__register_group',
+  'mcp__octodeck__send_message',
+  'mcp__octodeck__schedule_task',
+  'mcp__octodeck__list_tasks',
+  'mcp__octodeck__pause_task',
+  'mcp__octodeck__resume_task',
+  'mcp__octodeck__cancel_task',
+  'mcp__octodeck__register_group',
 ];
 
 const IMAGE_MAX_DIMENSION = 8000; // Anthropic API 限制
@@ -155,7 +155,7 @@ function byteLength(text: string): number {
   return Buffer.byteLength(text, 'utf-8');
 }
 
-function buildPromptAudit(pieces: PromptPiece[]): ClaudeContextAudit['happyclawPrompt'] {
+function buildPromptAudit(pieces: PromptPiece[]): ClaudeContextAudit['octodeckPrompt'] {
   const files = pieces.map((piece) => ({
     name: piece.name,
     bytes: byteLength(piece.text),
@@ -183,7 +183,7 @@ function runtimeContextAuditBase(containerInput: ContainerInput): ClaudeContextA
     claudeMd: containerInput.contextAudit?.claudeMd ?? { status: 'unknown' },
     rules: containerInput.contextAudit?.rules ?? { status: 'unknown', fileCount: 0 },
     skills: containerInput.contextAudit?.skills ?? { sources: [] },
-    happyclawPrompt: containerInput.contextAudit?.happyclawPrompt ?? { totalBytes: 0, files: [] },
+    octodeckPrompt: containerInput.contextAudit?.octodeckPrompt ?? { totalBytes: 0, files: [] },
     warnings: [...(containerInput.contextAudit?.warnings ?? [])],
   };
 }
@@ -204,14 +204,14 @@ function pathMatches(candidate: string, expected?: string): boolean {
 
 function enrichContextAudit(
   baseAudit: ClaudeContextAudit,
-  promptAudit: ClaudeContextAudit['happyclawPrompt'],
+  promptAudit: ClaudeContextAudit['octodeckPrompt'],
   ctxUsage?: SdkContextUsage,
 ): ClaudeContextAudit {
   const audit: ClaudeContextAudit = {
     ...baseAudit,
     cwd: WORKSPACE_GROUP,
     claudeConfigDir: process.env.CLAUDE_CONFIG_DIR,
-    happyclawPrompt: promptAudit,
+    octodeckPrompt: promptAudit,
     warnings: [...baseAudit.warnings],
     claudeMd: { ...baseAudit.claudeMd },
     rules: { ...baseAudit.rules },
@@ -479,8 +479,8 @@ async function readStdin(): Promise<string> {
   });
 }
 
-const OUTPUT_START_MARKER = '---HAPPYCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---HAPPYCLAW_OUTPUT_END---';
+const OUTPUT_START_MARKER = '---OCTODECK_OUTPUT_START---';
+const OUTPUT_END_MARKER = '---OCTODECK_OUTPUT_END---';
 
 function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
@@ -761,7 +761,7 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
   lines.push('');
 
   for (const msg of messages) {
-    const sender = msg.role === 'user' ? 'User' : 'HappyClaw';
+    const sender = msg.role === 'user' ? 'User' : 'OctoDeck';
     const content = msg.content.length > 2000
       ? msg.content.slice(0, 2000) + '...'
       : msg.content;
@@ -1012,16 +1012,16 @@ function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: str
 }
 
 function buildMemoryRecallPrompt(isHome: boolean, disableMemoryLayer: boolean): string {
-  // 禁用记忆层：完全跳过 HappyClaw 的记忆系统提示，让用户本机 ~/.claude/ Playbook 接管
+  // 禁用记忆层：完全跳过 OctoDeck 的记忆系统提示，让用户本机 ~/.claude/ Playbook 接管
   if (disableMemoryLayer) return '';
   return isHome ? MEMORY_SYSTEM_HOME : MEMORY_SYSTEM_GUEST;
 }
 
 /** 读取用户配置的 MCP servers（stdio/http/sse 类型） */
 function loadUserMcpServers(): Record<string, unknown> {
-  // 禁用记忆层模式下 CLAUDE_CONFIG_DIR 指向 ~/.claude/，HappyClaw 管理的 per-user MCP
+  // 禁用记忆层模式下 CLAUDE_CONFIG_DIR 指向 ~/.claude/，OctoDeck 管理的 per-user MCP
   // 不在那份 settings.json 里，container-runner 通过 env 透传。优先读 env。
-  const envJson = process.env.HAPPYCLAW_USER_MCP_SERVERS_JSON;
+  const envJson = process.env.OCTODECK_USER_MCP_SERVERS_JSON;
   if (envJson) {
     try {
       const parsed = JSON.parse(envJson);
@@ -1250,7 +1250,7 @@ async function runQuery(
   const processor = new StreamEventProcessor(emit, log);
 
   const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
-  const disableMemoryLayer = process.env.HAPPYCLAW_DISABLE_MEMORY_LAYER === 'true';
+  const disableMemoryLayer = process.env.OCTODECK_DISABLE_MEMORY_LAYER === 'true';
 
   const channel = getChannelFromJid(containerInput.chatJid);
   const channelGuidelines = CHANNEL_GUIDELINES[channel] ?? '';
@@ -1282,9 +1282,9 @@ async function runQuery(
   const promptAudit = buildPromptAudit(promptPieces);
   const contextAuditBase = runtimeContextAuditBase(containerInput);
 
-  // 调试观察：HAPPYCLAW_DUMP_PROMPT=true 时把最终 system prompt 输出到 stderr
+  // 调试观察：OCTODECK_DUMP_PROMPT=true 时把最终 system prompt 输出到 stderr
   // host 已通过 logs/ 捕获 stderr，方便对比改 prompts/*.md 前后的差异
-  if (process.env.HAPPYCLAW_DUMP_PROMPT === 'true') {
+  if (process.env.OCTODECK_DUMP_PROMPT === 'true') {
     log(`PROMPT DUMP (${systemPromptAppend.length} chars):\n${systemPromptAppend}\n--- END PROMPT DUMP ---`);
   }
 
@@ -1342,7 +1342,7 @@ async function runQuery(
     }
   }
 
-  // Claude Code plugins injected by HappyClaw main process via ContainerInput.
+  // Claude Code plugins injected by OctoDeck main process via ContainerInput.
   // SDK converts this array to `--plugin-dir <path>` args for the spawned
   // claude CLI, which loads each plugin's commands/agents/hooks/skills/mcp.
   // Paths are already runtime-translated upstream (container-internal for
@@ -1382,7 +1382,7 @@ async function runQuery(
         ...(userPlugins && { plugins: userPlugins }),
         mcpServers: {
           ...loadUserMcpServers(),     // 用户配置的 MCP（stdio/http/sse），SDK 原生支持
-          happyclaw: mcpServerConfig,  // 内置 SDK MCP 放最后，确保不被同名覆盖
+          octodeck: mcpServerConfig,  // 内置 SDK MCP 放最后，确保不被同名覆盖
         },
         hooks: {
           PreCompact: [{ hooks: [createPreCompactHook(isHome, isAdminHome, disableMemoryLayer, {
@@ -1787,8 +1787,8 @@ async function main(): Promise<void> {
   latestSessionId = sessionId;
   const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
 
-  // 禁用 HappyClaw 记忆层：不注册 memory MCP 工具，让 Agent 按用户本机 Playbook 行事
-  const disableMemoryLayer = process.env.HAPPYCLAW_DISABLE_MEMORY_LAYER === 'true';
+  // 禁用 OctoDeck 记忆层：不注册 memory MCP 工具，让 Agent 按用户本机 Playbook 行事
+  const disableMemoryLayer = process.env.OCTODECK_DISABLE_MEMORY_LAYER === 'true';
 
   // Create in-process SDK MCP server (replaces the stdio subprocess)
   // NOTE: chatJid and currentTaskId are mutated in-place by the main loop
@@ -1813,7 +1813,7 @@ async function main(): Promise<void> {
     disableMemoryLayer,
   };
   const buildMcpServerConfig = () => createSdkMcpServer({
-    name: 'happyclaw',
+    name: 'octodeck',
     version: '1.0.0',
     tools: [
       ...createMcpTools(mcpToolsConfig),
@@ -1823,9 +1823,9 @@ async function main(): Promise<void> {
             cwd: WORKSPACE_GROUP,
             serverBaseUrl:
               containerInput.remoteToolServerUrl ||
-              process.env.HAPPYCLAW_SERVER_URL ||
+              process.env.OCTODECK_SERVER_URL ||
               'http://127.0.0.1:3000',
-            secret: process.env.HAPPYCLAW_AGENT_RUNNER_SECRET || '',
+            secret: process.env.OCTODECK_AGENT_RUNNER_SECRET || '',
             timeoutMs: 120_000,
             maxOutputBytes: 1_048_576,
           })
@@ -1852,7 +1852,7 @@ async function main(): Promise<void> {
     const scheduledTaskPrefixLines = [
       '[定时任务 - 以下内容由系统自动发送，并非来自用户或群组的直接消息。]',
       '',
-      '重要：你正在定时任务模式下运行。你的最终输出不会自动发送给用户。你必须使用 mcp__happyclaw__send_message 工具来发送消息，否则用户将收不到任何内容。',
+      '重要：你正在定时任务模式下运行。你的最终输出不会自动发送给用户。你必须使用 mcp__octodeck__send_message 工具来发送消息，否则用户将收不到任何内容。',
       '',
       '注意：只在完成任务后调用一次 send_message 发送最终结果，不要发送中间状态或重复消息。',
     ];

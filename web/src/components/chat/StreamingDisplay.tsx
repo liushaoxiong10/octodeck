@@ -97,9 +97,9 @@ function AgentContextPanel({ audit }: { audit: AgentContextAudit }) {
         .join(' · '),
     },
     {
-      label: 'HappyClaw prompt',
-      value: `${audit.happyclawPrompt.files.length} 个补丁 · ${audit.happyclawPrompt.totalBytes.toLocaleString()} bytes`,
-      detail: audit.happyclawPrompt.files.map((file) => file.name).join(', '),
+      label: 'OctoDeck prompt',
+      value: `${audit.octodeckPrompt.files.length} 个补丁 · ${audit.octodeckPrompt.totalBytes.toLocaleString()} bytes`,
+      detail: audit.octodeckPrompt.files.map((file) => file.name).join(', '),
     },
   ];
 

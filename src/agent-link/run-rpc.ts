@@ -1,7 +1,7 @@
 /**
  * Run-RPC controller registry — Phase 5.2.
  *
- * 把 server 发出的一次 run.request 与一组从 hcagent 回流的 run.event/run.result
+ * 把 server 发出的一次 run.request 与一组从 octodeck-daemon 回流的 run.event/run.result
  * 关联起来。生命周期：
  *   start(linkId, cfg) → controller 入注册表
  *   ┌── 服务端 session.send(run.request)

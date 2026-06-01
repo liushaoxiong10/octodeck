@@ -174,7 +174,7 @@ func buildEnv(overrides map[string]string, runContext any) []string {
 	}
 	if runContext != nil {
 		if data, err := json.Marshal(runContext); err == nil {
-			base["HAPPYCLAW_RUN_CONTEXT_JSON"] = string(data)
+			base["OCTODECK_RUN_CONTEXT_JSON"] = string(data)
 		}
 	}
 	out := make([]string, 0, len(base))

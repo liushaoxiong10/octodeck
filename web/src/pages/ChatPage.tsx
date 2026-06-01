@@ -103,7 +103,7 @@ export function ChatPage() {
         <div className="block lg:hidden w-full overflow-y-auto">
           {/* Mobile header: horizontal logo + actions */}
           <div className="flex items-center gap-3 px-4 pt-5 pb-3">
-            <img src={`${import.meta.env.BASE_URL}icons/logo-text.svg`} alt={appearance?.appName || 'HappyClaw'} className="h-8" />
+            <img src={`${import.meta.env.BASE_URL}icons/logo-text.svg`} alt={appearance?.appName || 'OctoDeck'} className="h-8" />
             <div className="flex-1" />
             <button
               onClick={() => setCreateOpen(true)}
@@ -222,7 +222,7 @@ export function ChatPage() {
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center h-64 px-4">
-              <img src={`${import.meta.env.BASE_URL}icons/logo-text.svg`} alt={appearance?.appName || 'HappyClaw'} className="h-12 mb-6" />
+              <img src={`${import.meta.env.BASE_URL}icons/logo-text.svg`} alt={appearance?.appName || 'OctoDeck'} className="h-12 mb-6" />
               <p className="text-muted-foreground text-sm">暂无工作区</p>
             </div>
           )}
@@ -242,10 +242,10 @@ export function ChatPage() {
           <div className="text-center max-w-sm">
             {/* Logo */}
             <div className="w-16 h-16 rounded-2xl overflow-hidden mx-auto mb-6">
-              <img src={`${import.meta.env.BASE_URL}icons/icon-192.png`} alt="HappyClaw" className="w-full h-full object-cover" />
+              <img src={`${import.meta.env.BASE_URL}icons/icon-192.png`} alt="OctoDeck" className="w-full h-full object-cover" />
             </div>
             <h2 className="text-xl font-semibold text-foreground mb-2">
-              欢迎使用 {appearance?.appName || 'HappyClaw'}
+              欢迎使用 {appearance?.appName || 'OctoDeck'}
             </h2>
             <p className="text-muted-foreground text-sm">
               从左侧选择一个工作区开始对话

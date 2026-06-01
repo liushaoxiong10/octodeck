@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-// Config holds hcagent configuration loaded from ~/.hcagent/config.json.
+// Config holds octodeck-daemon configuration loaded from ~/.octodeck-daemon/config.json.
 type Config struct {
 	// Server base URL (https://...). The ws endpoint is derived as
 	// wss://<host>/api/agent-link/ws.
@@ -25,19 +25,19 @@ type Config struct {
 	MaxConcurrentRuns int `json:"maxConcurrentRuns"`
 	// Optional: client display version reported in hello.
 	Version string `json:"version,omitempty"`
-	// Runtime-discovered supported agent clients. Populated by hcagent on startup.
+	// Runtime-discovered supported agent clients. Populated by octodeck-daemon on startup.
 	AgentClients []AgentClientInfo `json:"-"`
 }
 
 func defaultConfigPath() (string, error) {
-	if p := os.Getenv("HCAGENT_CONFIG"); p != "" {
+	if p := os.Getenv("OCTODECK_DAEMON_CONFIG"); p != "" {
 		return p, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".hcagent", "config.json"), nil
+	return filepath.Join(home, ".octodeck-daemon", "config.json"), nil
 }
 
 func loadConfig(path string) (*Config, error) {

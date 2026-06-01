@@ -1,7 +1,7 @@
 import type { AgentBackend } from './types.js';
 
 /**
- * Whether HappyClaw should prepend persisted chat history as a prompt block.
+ * Whether OctoDeck should prepend persisted chat history as a prompt block.
  *
  * Claude SDK sessions sometimes need this fallback when the underlying SDK
  * session is cleared by provider switching or recovery. CLI backends that can

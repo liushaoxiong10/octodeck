@@ -14,7 +14,7 @@ func TestRunnerInjectsContextEnvAndStdin(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "capture.py")
 	out := filepath.Join(dir, "out.txt")
-	if err := os.WriteFile(script, []byte("import os, sys\nopen(sys.argv[1], 'w').write(os.environ.get('HAPPYCLAW_RUN_CONTEXT_JSON', '') + '\\n' + sys.stdin.read())\n"), 0o644); err != nil {
+	if err := os.WriteFile(script, []byte("import os, sys\nopen(sys.argv[1], 'w').write(os.environ.get('OCTODECK_RUN_CONTEXT_JSON', '') + '\\n' + sys.stdin.read())\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

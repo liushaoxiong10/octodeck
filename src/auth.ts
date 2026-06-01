@@ -8,6 +8,8 @@ import {
 import { isSecureRequest } from './utils.js';
 
 const BCRYPT_ROUNDS = 12;
+const LEGACY_SESSION_COOKIE_NAME_SECURE = '__Host-happyclaw_session';
+const LEGACY_SESSION_COOKIE_NAME_PLAIN = 'happyclaw_session';
 
 // --- Password hashing ---
 
@@ -77,10 +79,19 @@ export function setSessionCookie(c: any, token: string): string {
 
 /** Build a Set-Cookie header value that clears the session cookie. */
 export function clearSessionCookie(c: any): string {
+  return clearSessionCookies(c)[0];
+}
+
+/** Build Set-Cookie header values that clear current and legacy session cookies. */
+export function clearSessionCookies(c: any): string[] {
   const secure = isSecureRequest(c);
-  const name = secure ? SESSION_COOKIE_NAME_SECURE : SESSION_COOKIE_NAME_PLAIN;
+  const names = secure
+    ? [SESSION_COOKIE_NAME_SECURE, LEGACY_SESSION_COOKIE_NAME_SECURE]
+    : [SESSION_COOKIE_NAME_PLAIN, LEGACY_SESSION_COOKIE_NAME_PLAIN];
   const secureSuffix = secure ? '; Secure' : '';
-  return `${name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secureSuffix}`;
+  return names.map(
+    (name) => `${name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secureSuffix}`,
+  );
 }
 
 export function generateUserId(): string {

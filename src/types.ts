@@ -76,14 +76,14 @@ export interface RegisteredGroup {
   /**
    * 命令执行节点。
    *   - undefined / 'server-local' → server 进程内 spawn（沿用旧逻辑）
-   *   - 其他值 → AgentLink ID（cl_xxxx），通过 ws 转发给已注册的 hcagent 客户端执行
+   *   - 其他值 → AgentLink ID（cl_xxxx），通过 ws 转发给已注册的 octodeck-daemon 客户端执行
    * 不在线的 link 会降级回 'server-local' 并打 warn。
    */
   executionNode?: string;
 }
 
 /**
- * AgentLink — 用户自有的 hcagent 客户端注册记录。
+ * AgentLink — 用户自有的 octodeck-daemon 客户端注册记录。
  * Server 持有 token 的 bcrypt hash，明文 token 仅在创建时一次性返回给前端。
  * 在线状态不入库，由 AgentLinkRegistry 内存维护。
  */
