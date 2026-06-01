@@ -27,6 +27,7 @@ const SCHEME_OPTIONS: { value: ColorScheme; label: string; preview: { bg: string
   { value: 'default', label: '经典绿', preview: { bg: '#ffffff', accent: '#0d9488', text: '#0f172a' } },
   { value: 'orange', label: '暖橙', preview: { bg: '#FAF9F5', accent: '#f97316', text: '#141413' } },
   { value: 'neutral', label: '素白', preview: { bg: '#ffffff', accent: '#52525b', text: '#18181b' } },
+  { value: 'dracula', label: 'Dracula', preview: { bg: '#282a36', accent: '#bd93f9', text: '#f8f8f2' } },
 ];
 
 const FONT_OPTIONS: { value: FontStyle; label: string; sample: string; fontFamily: string }[] = [
@@ -305,7 +306,7 @@ export function ProfileSection() {
         {/* Color scheme */}
         <div>
           <Label className="text-xs text-muted-foreground mb-2">配色方案</Label>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             {SCHEME_OPTIONS.map((opt) => (
               <OptionButton key={opt.value} active={colorScheme === opt.value} onClick={() => setColorScheme(opt.value)} className="flex flex-col gap-2 p-2.5">
                 <div

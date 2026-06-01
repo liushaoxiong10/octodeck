@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 
 export type Theme = 'light' | 'dark' | 'system';
-export type ColorScheme = 'default' | 'orange' | 'neutral';
+export const COLOR_SCHEMES = ['default', 'orange', 'neutral', 'dracula'] as const;
+export type ColorScheme = typeof COLOR_SCHEMES[number];
 export type FontStyle = 'default' | 'anthropic';
 
 const THEME_KEY = 'octodeck-theme';
@@ -26,7 +27,7 @@ function readTheme(): Theme {
 function readColorScheme(): ColorScheme {
   if (typeof window === 'undefined') return 'orange';
   const stored = window.localStorage.getItem(SCHEME_KEY);
-  if (stored === 'default' || stored === 'orange' || stored === 'neutral') return stored;
+  if (COLOR_SCHEMES.includes(stored as ColorScheme)) return stored as ColorScheme;
   return 'orange';
 }
 
@@ -37,8 +38,9 @@ function readFontStyle(): FontStyle {
   return 'default';
 }
 
-function resolveTheme(theme: Theme): 'light' | 'dark' {
-  return theme === 'system' ? getSystemTheme() : theme;
+export function resolveEffectiveTheme(theme: Theme, colorScheme: ColorScheme, systemTheme: 'light' | 'dark' = getSystemTheme()): 'light' | 'dark' {
+  if (colorScheme === 'dracula') return 'dark';
+  return theme === 'system' ? systemTheme : theme;
 }
 
 function syncMetaThemeColor() {
@@ -46,10 +48,11 @@ function syncMetaThemeColor() {
   const meta = document.querySelector('meta[name="theme-color"]');
   if (!meta) return;
   const isDark = document.documentElement.classList.contains('dark');
+  const isDracula = document.documentElement.classList.contains('theme-dracula');
   const isNeutral = document.documentElement.classList.contains('theme-neutral');
   const isOrange = document.documentElement.classList.contains('theme-orange');
   if (isDark) {
-    meta.setAttribute('content', isNeutral ? '#09090b' : '#0f172a');
+    meta.setAttribute('content', isDracula ? '#282a36' : isNeutral ? '#09090b' : '#0f172a');
   } else {
     meta.setAttribute('content', isOrange ? '#FAF9F5' : isNeutral ? '#ffffff' : '#ffffff');
   }
@@ -57,7 +60,7 @@ function syncMetaThemeColor() {
 
 export function applyTheme(theme: Theme) {
   if (typeof document === 'undefined') return;
-  document.documentElement.classList.toggle('dark', resolveTheme(theme) === 'dark');
+  document.documentElement.classList.toggle('dark', resolveEffectiveTheme(theme, readColorScheme()) === 'dark');
   syncMetaThemeColor();
 }
 
@@ -65,6 +68,8 @@ function applyColorScheme(scheme: ColorScheme) {
   if (typeof document === 'undefined') return;
   document.documentElement.classList.toggle('theme-orange', scheme === 'orange');
   document.documentElement.classList.toggle('theme-neutral', scheme === 'neutral');
+  document.documentElement.classList.toggle('theme-dracula', scheme === 'dracula');
+  applyTheme(readTheme());
   syncMetaThemeColor();
 }
 
@@ -122,5 +127,5 @@ export function useTheme() {
     setTheme(next);
   }, [theme, setTheme]);
 
-  return { theme, resolvedTheme: resolveTheme(theme), colorScheme, fontStyle, toggle, setTheme, setColorScheme, setFontStyle };
+  return { theme, resolvedTheme: resolveEffectiveTheme(theme, colorScheme), colorScheme, fontStyle, toggle, setTheme, setColorScheme, setFontStyle };
 }

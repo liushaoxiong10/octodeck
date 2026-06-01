@@ -265,6 +265,86 @@ html.dark.theme-neutral {
 }
 
 /* =====================================================
+   Dracula theme — neon violet night palette
+   Base: #282a36 | Accent: #bd93f9
+   Dracula is intentionally dark-only; selecting it forces dark variants.
+   ===================================================== */
+html.theme-dracula {
+  --background: #282a36;
+  --foreground: #f8f8f2;
+  --card: #343746;
+  --card-foreground: #f8f8f2;
+  --popover: #343746;
+  --popover-foreground: #f8f8f2;
+  --primary: #bd93f9;
+  --primary-foreground: #282a36;
+  --secondary: #44475a;
+  --secondary-foreground: #f8f8f2;
+  --muted: #44475a;
+  --muted-foreground: #b6b6c9;
+  --accent: #3f3658;
+  --accent-foreground: #ff79c6;
+  --destructive: #ff5555;
+  --destructive-foreground: #f8f8f2;
+  --border: #4a4d63;
+  --input: #4a4d63;
+  --ring: #bd93f9;
+
+  --brand-50: #2d233f;
+  --brand-100: #3f2e5f;
+  --brand-200: #533d7d;
+  --brand-300: #6d52a3;
+  --brand-400: #8a69c8;
+  --brand-500: #bd93f9;
+  --brand-600: #d6b8ff;
+  --brand-700: #eee0ff;
+
+  --chart-1: #bd93f9;
+  --chart-2: #ff79c6;
+  --chart-3: #8be9fd;
+  --chart-4: #50fa7b;
+  --chart-5: #ffb86c;
+
+  --sidebar-background: #21222c;
+  --sidebar-foreground: #f8f8f2;
+  --sidebar-primary: #bd93f9;
+  --sidebar-primary-foreground: #282a36;
+  --sidebar-accent: #343746;
+  --sidebar-accent-foreground: #f8f8f2;
+  --sidebar-border: #44475a;
+  --sidebar-ring: #bd93f9;
+  --sidebar: #21222c;
+
+  --success: #50fa7b;
+  --success-bg: rgba(80, 250, 123, 0.14);
+  --warning: #ffb86c;
+  --warning-bg: rgba(255, 184, 108, 0.14);
+  --error: #ff5555;
+  --error-bg: rgba(255, 85, 85, 0.14);
+  --surface: #343746;
+
+  --code-block-bg: #21222c;
+  --inline-code-bg: rgba(189, 147, 249, 0.16);
+  --inline-code-text: #ff79c6;
+  --card-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+  --glass-bg: rgba(40, 42, 54, 0.62);
+  --glass-bg-heavy: rgba(52, 55, 70, 0.82);
+  --glass-border: rgba(189, 147, 249, 0.18);
+  --glass-shadow: 0 18px 48px rgba(9, 10, 18, 0.48), 0 0 32px rgba(189, 147, 249, 0.08);
+  --glass-highlight: linear-gradient(135deg, rgba(189,147,249,0.18) 0%, rgba(255,121,198,0.06) 48%, rgba(255,255,255,0) 68%);
+  --glass-inner-shadow: inset 0 1px 1px rgba(248,248,242,0.08);
+}
+
+html.theme-dracula .floating-nav-item.active {
+  background: rgba(189, 147, 249, 0.18);
+  box-shadow: 0 0 18px rgba(189, 147, 249, 0.22),
+              var(--glass-inner-shadow);
+}
+html.theme-dracula .floating-nav-item.active::before {
+  background: radial-gradient(circle, rgba(255, 121, 198, 0.18) 0%, transparent 70%);
+}
+
+/* =====================================================
    Orange theme — warm orange accent
    Primary: Orange | Base: Warm Neutral
    ===================================================== */
