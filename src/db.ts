@@ -370,6 +370,96 @@ function initializeSqliteDatabase(
       value TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS agent_team_runs (
+      id TEXT PRIMARY KEY,
+      team_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      status TEXT NOT NULL,
+      trace_id TEXT NOT NULL,
+      workflow_shape TEXT NOT NULL,
+      role_assignments TEXT NOT NULL DEFAULT '{}',
+      final_result TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS agent_team_tasks (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      role_id TEXT,
+      phase TEXT,
+      actor_id TEXT,
+      status TEXT NOT NULL,
+      attempt INTEGER NOT NULL DEFAULT 1,
+      input TEXT,
+      output TEXT,
+      error TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES agent_team_runs(id)
+    );
+    CREATE TABLE IF NOT EXISTS agent_team_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trace_id TEXT NOT NULL,
+      span_id TEXT NOT NULL,
+      parent_span_id TEXT,
+      session_id TEXT,
+      run_id TEXT NOT NULL,
+      task_id TEXT,
+      actor TEXT NOT NULL,
+      type TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      schema_version INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS agent_team_blackboard (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      task_id TEXT,
+      role_id TEXT,
+      kind TEXT NOT NULL,
+      key TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      value TEXT NOT NULL,
+      visibility TEXT NOT NULL DEFAULT 'run',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES agent_team_runs(id)
+    );
+    CREATE TABLE IF NOT EXISTS agent_team_checkpoints (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      task_id TEXT,
+      node_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      blackboard_cursor INTEGER,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES agent_team_runs(id)
+    );
+    CREATE TABLE IF NOT EXISTS agent_team_approvals (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      task_id TEXT,
+      requested_by TEXT NOT NULL,
+      status TEXT NOT NULL,
+      risk_level TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      resolved_by TEXT,
+      resolved_at TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES agent_team_runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_team_tasks_run ON agent_team_tasks(run_id, id);
+    CREATE INDEX IF NOT EXISTS idx_agent_team_events_run ON agent_team_events(run_id, id);
+    CREATE INDEX IF NOT EXISTS idx_agent_team_events_trace ON agent_team_events(trace_id, id);
+    CREATE INDEX IF NOT EXISTS idx_agent_team_blackboard_run ON agent_team_blackboard(run_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_team_checkpoints_run ON agent_team_checkpoints(run_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_team_approvals_run ON agent_team_approvals(run_id, created_at);
     CREATE TABLE IF NOT EXISTS sessions (
       group_folder TEXT NOT NULL,
       session_id TEXT NOT NULL,
@@ -1479,6 +1569,390 @@ export function setMetadataValue(key: string, value: string): void {
        value = excluded.value,
        updated_at = excluded.updated_at`,
   ).run(key, value, new Date().toISOString());
+}
+
+export interface AgentTeamRunRecord {
+  id: string;
+  teamId: string;
+  userId: string;
+  prompt: string;
+  status: 'running' | 'waiting_approval' | 'paused' | 'success' | 'error' | 'cancelled';
+  traceId: string;
+  workflowShape: string;
+  roleAssignments?: unknown;
+  finalResult?: string;
+  error?: string;
+  createdAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt?: string;
+}
+
+export interface AgentTeamTaskRecord {
+  id: string;
+  runId: string;
+  roleId?: string;
+  phase?: string;
+  actorId?: string;
+  status: 'running' | 'success' | 'error' | 'skipped' | 'cancelled';
+  attempt?: number;
+  input?: string;
+  output?: string;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt?: string;
+}
+
+export interface AgentTeamTraceEventRecord {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  sessionId?: string;
+  runId: string;
+  taskId?: string;
+  actor: string;
+  type: string;
+  payload: unknown;
+  timestamp: string;
+  schemaVersion: number;
+}
+
+export interface AgentTeamBlackboardRecord {
+  id: string;
+  runId: string;
+  taskId?: string;
+  roleId?: string;
+  kind: 'input' | 'role_output' | 'artifact' | 'route_decision' | 'verifier_report' | 'approval_note' | 'checkpoint';
+  key: string;
+  contentType: string;
+  value: string;
+  visibility?: 'run' | 'role' | 'system';
+  createdAt?: string;
+}
+
+export interface AgentTeamRunView {
+  id: string;
+  teamId: string;
+  userId: string;
+  prompt: string;
+  status: string;
+  traceId: string;
+  workflowShape: string;
+  roleAssignments: unknown;
+  finalResult?: string;
+  error?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt: string;
+}
+
+export interface AgentTeamCheckpointRecord {
+  id: string;
+  runId: string;
+  taskId?: string;
+  nodeId: string;
+  state: unknown;
+  blackboardCursor?: number;
+  createdAt?: string;
+}
+
+export interface AgentTeamApprovalRecord {
+  id: string;
+  runId: string;
+  taskId?: string;
+  requestedBy: string;
+  status: 'pending' | 'approved' | 'rejected';
+  riskLevel: string;
+  title: string;
+  description: string;
+  payload: unknown;
+  resolvedBy?: string;
+  resolvedAt?: string;
+  createdAt?: string;
+}
+
+export function recordAgentTeamRun(record: AgentTeamRunRecord): void {
+  if (!db) return;
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO agent_team_runs (
+      id, team_id, user_id, prompt, status, trace_id, workflow_shape, role_assignments,
+      final_result, error, created_at, started_at, completed_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      status = excluded.status,
+      role_assignments = excluded.role_assignments,
+      final_result = excluded.final_result,
+      error = excluded.error,
+      completed_at = excluded.completed_at,
+      updated_at = excluded.updated_at`,
+  ).run(
+    record.id,
+    record.teamId,
+    record.userId,
+    record.prompt,
+    record.status,
+    record.traceId,
+    record.workflowShape,
+    JSON.stringify(record.roleAssignments ?? {}),
+    record.finalResult ?? null,
+    record.error ?? null,
+    record.createdAt ?? now,
+    record.startedAt ?? now,
+    record.completedAt ?? null,
+    record.updatedAt ?? now,
+  );
+}
+
+export function recordAgentTeamTask(record: AgentTeamTaskRecord): void {
+  if (!db) return;
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO agent_team_tasks (
+      id, run_id, role_id, phase, actor_id, status, attempt, input, output, error,
+      started_at, completed_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      actor_id = excluded.actor_id,
+      status = excluded.status,
+      output = excluded.output,
+      error = excluded.error,
+      completed_at = excluded.completed_at,
+      updated_at = excluded.updated_at`,
+  ).run(
+    record.id,
+    record.runId,
+    record.roleId ?? null,
+    record.phase ?? null,
+    record.actorId ?? null,
+    record.status,
+    record.attempt ?? 1,
+    record.input ?? null,
+    record.output ?? null,
+    record.error ?? null,
+    record.startedAt ?? now,
+    record.completedAt ?? null,
+    record.updatedAt ?? now,
+  );
+}
+
+export function recordAgentTeamTraceEvent(event: AgentTeamTraceEventRecord): void {
+  if (!db) return;
+  db.prepare(
+    `INSERT INTO agent_team_events (
+      trace_id, span_id, parent_span_id, session_id, run_id, task_id, actor, type,
+      payload, timestamp, schema_version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    event.traceId,
+    event.spanId,
+    event.parentSpanId ?? null,
+    event.sessionId ?? null,
+    event.runId,
+    event.taskId ?? null,
+    event.actor,
+    event.type,
+    JSON.stringify(event.payload ?? null),
+    event.timestamp,
+    event.schemaVersion,
+  );
+}
+
+export function recordAgentTeamBlackboard(record: AgentTeamBlackboardRecord): void {
+  if (!db) return;
+  db.prepare(
+    `INSERT INTO agent_team_blackboard (
+      id, run_id, task_id, role_id, kind, key, content_type, value, visibility, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      value = excluded.value,
+      visibility = excluded.visibility,
+      created_at = excluded.created_at`,
+  ).run(
+    record.id,
+    record.runId,
+    record.taskId ?? null,
+    record.roleId ?? null,
+    record.kind,
+    record.key,
+    record.contentType,
+    record.value,
+    record.visibility ?? 'run',
+    record.createdAt ?? new Date().toISOString(),
+  );
+}
+
+export function recordAgentTeamCheckpoint(record: AgentTeamCheckpointRecord): void {
+  if (!db) return;
+  db.prepare(
+    `INSERT INTO agent_team_checkpoints (id, run_id, task_id, node_id, state, blackboard_cursor, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET state = excluded.state, blackboard_cursor = excluded.blackboard_cursor`,
+  ).run(
+    record.id,
+    record.runId,
+    record.taskId ?? null,
+    record.nodeId,
+    JSON.stringify(record.state ?? null),
+    record.blackboardCursor ?? null,
+    record.createdAt ?? new Date().toISOString(),
+  );
+}
+
+export function recordAgentTeamApproval(record: AgentTeamApprovalRecord): void {
+  if (!db) return;
+  db.prepare(
+    `INSERT INTO agent_team_approvals (
+      id, run_id, task_id, requested_by, status, risk_level, title, description, payload, resolved_by, resolved_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      status = excluded.status,
+      resolved_by = excluded.resolved_by,
+      resolved_at = excluded.resolved_at`,
+  ).run(
+    record.id,
+    record.runId,
+    record.taskId ?? null,
+    record.requestedBy,
+    record.status,
+    record.riskLevel,
+    record.title,
+    record.description,
+    JSON.stringify(record.payload ?? null),
+    record.resolvedBy ?? null,
+    record.resolvedAt ?? null,
+    record.createdAt ?? new Date().toISOString(),
+  );
+}
+
+export function getAgentTeamRun(id: string, userId?: string): AgentTeamRunView | null {
+  if (!db) return null;
+  const row = db.prepare(
+    `SELECT id, team_id, user_id, prompt, status, trace_id, workflow_shape, role_assignments,
+      final_result, error, created_at, started_at, completed_at, updated_at
+     FROM agent_team_runs WHERE id = ? ${userId ? 'AND user_id = ?' : ''}`,
+  ).get(...(userId ? [id, userId] : [id])) as any;
+  if (!row) return null;
+  return {
+    id: row.id,
+    teamId: row.team_id,
+    userId: row.user_id,
+    prompt: row.prompt,
+    status: row.status,
+    traceId: row.trace_id,
+    workflowShape: row.workflow_shape,
+    roleAssignments: JSON.parse(row.role_assignments || '{}'),
+    finalResult: row.final_result ?? undefined,
+    error: row.error ?? undefined,
+    createdAt: row.created_at,
+    startedAt: row.started_at ?? undefined,
+    completedAt: row.completed_at ?? undefined,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function listAgentTeamRuns(options: {
+  userId: string;
+  teamId?: string;
+  status?: string;
+  limit?: number;
+}): AgentTeamRunView[] {
+  if (!db) return [];
+  const clauses = ['user_id = ?'];
+  const params: unknown[] = [options.userId];
+  if (options.teamId) {
+    clauses.push('team_id = ?');
+    params.push(options.teamId);
+  }
+  if (options.status) {
+    clauses.push('status = ?');
+    params.push(options.status);
+  }
+  const limit = Math.max(1, Math.min(100, Math.trunc(options.limit ?? 50)));
+  params.push(limit);
+  const rows = db.prepare(
+    `SELECT id, team_id, user_id, prompt, status, trace_id, workflow_shape, role_assignments,
+      final_result, error, created_at, started_at, completed_at, updated_at
+     FROM agent_team_runs
+     WHERE ${clauses.join(' AND ')}
+     ORDER BY datetime(created_at) DESC, rowid DESC
+     LIMIT ?`,
+  ).all(...params) as any[];
+  return rows.map((row) => ({
+    id: row.id,
+    teamId: row.team_id,
+    userId: row.user_id,
+    prompt: row.prompt,
+    status: row.status,
+    traceId: row.trace_id,
+    workflowShape: row.workflow_shape,
+    roleAssignments: JSON.parse(row.role_assignments || '{}'),
+    finalResult: row.final_result ?? undefined,
+    error: row.error ?? undefined,
+    createdAt: row.created_at,
+    startedAt: row.started_at ?? undefined,
+    completedAt: row.completed_at ?? undefined,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export function listAgentTeamTasks(runId: string): Array<Record<string, unknown>> {
+  if (!db) return [];
+  return db.prepare(
+    `SELECT id, run_id AS runId, role_id AS roleId, phase, actor_id AS actorId, status, attempt, input, output, error,
+      started_at AS startedAt, completed_at AS completedAt, updated_at AS updatedAt
+     FROM agent_team_tasks WHERE run_id = ? ORDER BY started_at, id`,
+  ).all(runId) as Array<Record<string, unknown>>;
+}
+
+export function listAgentTeamTraceEvents(runId: string): Array<Record<string, unknown>> {
+  if (!db) return [];
+  return (db.prepare(
+    `SELECT trace_id AS traceId, span_id AS spanId, parent_span_id AS parentSpanId, session_id AS sessionId,
+      run_id AS runId, task_id AS taskId, actor, type, payload, timestamp, schema_version AS schemaVersion
+     FROM agent_team_events WHERE run_id = ? ORDER BY id`,
+  ).all(runId) as Array<Record<string, unknown>>).map((row) => ({
+    ...row,
+    payload: JSON.parse(String(row.payload ?? 'null')),
+  }));
+}
+
+export function listAgentTeamBlackboard(runId: string): Array<Record<string, unknown>> {
+  if (!db) return [];
+  return db.prepare(
+    `SELECT id, run_id AS runId, task_id AS taskId, role_id AS roleId, kind, key, content_type AS contentType,
+      value, visibility, created_at AS createdAt
+     FROM agent_team_blackboard WHERE run_id = ? ORDER BY created_at, id`,
+  ).all(runId) as Array<Record<string, unknown>>;
+}
+
+export function getAgentTeamApproval(id: string, runId: string): Record<string, unknown> | null {
+  if (!db) return null;
+  const row = db.prepare(
+    `SELECT id, run_id AS runId, task_id AS taskId, requested_by AS requestedBy, status, risk_level AS riskLevel,
+      title, description, payload, resolved_by AS resolvedBy, resolved_at AS resolvedAt, created_at AS createdAt
+     FROM agent_team_approvals WHERE id = ? AND run_id = ?`,
+  ).get(id, runId) as Record<string, unknown> | undefined;
+  return row ? { ...row, payload: JSON.parse(String(row.payload ?? 'null')) } : null;
+}
+
+export function listAgentTeamApprovals(runId: string): Array<Record<string, unknown>> {
+  if (!db) return [];
+  return (db.prepare(
+    `SELECT id, run_id AS runId, task_id AS taskId, requested_by AS requestedBy, status, risk_level AS riskLevel,
+      title, description, payload, resolved_by AS resolvedBy, resolved_at AS resolvedAt, created_at AS createdAt
+     FROM agent_team_approvals WHERE run_id = ? ORDER BY created_at, id`,
+  ).all(runId) as Array<Record<string, unknown>>).map((row) => ({ ...row, payload: JSON.parse(String(row.payload ?? 'null')) }));
+}
+
+export function listAgentTeamCheckpoints(runId: string): Array<Record<string, unknown>> {
+  if (!db) return [];
+  return (db.prepare(
+    `SELECT id, run_id AS runId, task_id AS taskId, node_id AS nodeId, state, blackboard_cursor AS blackboardCursor, created_at AS createdAt
+     FROM agent_team_checkpoints WHERE run_id = ? ORDER BY created_at, id`,
+  ).all(runId) as Array<Record<string, unknown>>).map((row) => ({ ...row, state: JSON.parse(String(row.state ?? 'null')) }));
 }
 
 /**

@@ -6,6 +6,20 @@ import { DATA_DIR } from './config.js';
 import { getMetadataValue, setMetadataValue } from './db.js';
 
 export type AgentTeamShape = 'auto' | 'pipeline' | 'parallel' | 'leader-worker' | 'judge-route';
+export type AgentTeamPermissionLevel = 'L0' | 'L1' | 'L2' | 'L3' | 'L4' | 'L5';
+export type AgentTeamWorkspacePolicy = 'none' | 'read-only' | 'sandbox' | 'worktree' | 'device';
+
+export interface AgentTeamRolePolicy {
+  permissionLevel?: AgentTeamPermissionLevel;
+  workspacePolicy?: AgentTeamWorkspacePolicy;
+  requiresApproval?: boolean;
+}
+
+export interface AgentTeamRoleBudget {
+  maxDurationMs?: number;
+  maxTokens?: number;
+  maxOutputBytes?: number;
+}
 
 export interface AgentTeamRole {
   id: string;
@@ -17,6 +31,10 @@ export interface AgentTeamRole {
   outputs?: string[];
   skills?: string[];
   guardrails?: string[];
+  requiredSkills?: string[];
+  preferredAgentMd?: string[];
+  policy?: AgentTeamRolePolicy;
+  budget?: AgentTeamRoleBudget;
 }
 
 export interface AgentTeam {
@@ -105,6 +123,28 @@ function sanitizeLines(values: unknown): string[] {
   return values.map((value) => String(value).trim()).filter(Boolean).slice(0, 12);
 }
 
+function normalizeRolePolicy(policy: AgentTeamRole['policy']): AgentTeamRolePolicy | undefined {
+  if (!policy || typeof policy !== 'object') return undefined;
+  const normalized: AgentTeamRolePolicy = {};
+  if (['L0', 'L1', 'L2', 'L3', 'L4', 'L5'].includes(String(policy.permissionLevel))) {
+    normalized.permissionLevel = policy.permissionLevel;
+  }
+  if (['none', 'read-only', 'sandbox', 'worktree', 'device'].includes(String(policy.workspacePolicy))) {
+    normalized.workspacePolicy = policy.workspacePolicy;
+  }
+  if (typeof policy.requiresApproval === 'boolean') normalized.requiresApproval = policy.requiresApproval;
+  return Object.keys(normalized).length ? normalized : undefined;
+}
+
+function normalizeRoleBudget(budget: AgentTeamRole['budget']): AgentTeamRoleBudget | undefined {
+  if (!budget || typeof budget !== 'object') return undefined;
+  const normalized: AgentTeamRoleBudget = {};
+  if (Number.isFinite(budget.maxDurationMs) && Number(budget.maxDurationMs) > 0) normalized.maxDurationMs = Math.trunc(Number(budget.maxDurationMs));
+  if (Number.isFinite(budget.maxTokens) && Number(budget.maxTokens) > 0) normalized.maxTokens = Math.trunc(Number(budget.maxTokens));
+  if (Number.isFinite(budget.maxOutputBytes) && Number(budget.maxOutputBytes) > 0) normalized.maxOutputBytes = Math.trunc(Number(budget.maxOutputBytes));
+  return Object.keys(normalized).length ? normalized : undefined;
+}
+
 function normalizeRole(role: AgentTeamRole, index: number): AgentTeamRole {
   return {
     id: role.id?.trim() || `role_${index + 1}`,
@@ -115,6 +155,10 @@ function normalizeRole(role: AgentTeamRole, index: number): AgentTeamRole {
     outputs: sanitizeLines(role.outputs),
     skills: sanitizeLines(role.skills),
     guardrails: sanitizeLines(role.guardrails),
+    requiredSkills: sanitizeLines(role.requiredSkills),
+    preferredAgentMd: sanitizeLines(role.preferredAgentMd),
+    policy: normalizeRolePolicy(role.policy),
+    budget: normalizeRoleBudget(role.budget),
   };
 }
 

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -106,6 +109,151 @@ func TestReplaceArgvPlaceholderUsesResolvedRemoteCwd(t *testing.T) {
 	argv := replaceArgvPlaceholder([]string{"exec", "--cwd=__OCTODECK_REMOTE_CWD__"}, "__OCTODECK_REMOTE_CWD__", "/tmp/worktree")
 	if got := strings.Join(argv, " "); got != "exec --cwd=/tmp/worktree" {
 		t.Fatalf("unexpected argv: %s", got)
+	}
+}
+
+func TestPrepareAgentTeamMCPConfigWritesClaudeConfigAndReplacesPlaceholder(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"server":"https://octodeck.example","token":"link-token","linkId":"cl_123"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OCTODECK_DAEMON_CONFIG", configPath)
+	originalArgs := os.Args
+	os.Args = []string{"octodeck-daemon"}
+	t.Cleanup(func() { os.Args = originalArgs })
+
+	cfg := &Config{Server: "https://octodeck.example", Token: "link-token", LinkID: "cl_123"}
+	argv, err := prepareAgentTeamMCPConfig(cfg, []string{"-p", "hello", "--mcp-config", agentTeamMCPConfigPlaceholder}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(argv) != 4 || argv[3] == agentTeamMCPConfigPlaceholder {
+		t.Fatalf("placeholder was not replaced: %#v", argv)
+	}
+
+	data, err := os.ReadFile(argv[3])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		MCPServers map[string]struct {
+			Type    string            `json:"type"`
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
+			Timeout int               `json:"timeout"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("invalid mcp config json: %v\n%s", err, string(data))
+	}
+	server := parsed.MCPServers["octodeck_agent_team"]
+	if server.Type != "stdio" {
+		t.Fatalf("unexpected MCP transport type: %q", server.Type)
+	}
+	if !filepath.IsAbs(server.Command) {
+		t.Fatalf("MCP server command must be absolute so Claude can spawn it reliably, got %q in %s", server.Command, string(data))
+	}
+	if strings.Join(server.Args, " ") != "mcp-agent-team --config "+configPath {
+		t.Fatalf("unexpected MCP args: %#v", server.Args)
+	}
+	if server.Env["OCTODECK_AGENT_TEAM_MCP"] != "1" {
+		t.Fatalf("missing MCP env marker: %#v", server.Env)
+	}
+	if server.Timeout != 30 {
+		t.Fatalf("unexpected MCP timeout: %d", server.Timeout)
+	}
+}
+
+func TestPrepareAgentTeamMCPConfigWritesTraeProjectConfigAndRemovesMarker(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"server":"https://octodeck.example","token":"link-token","linkId":"cl_123"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OCTODECK_DAEMON_CONFIG", configPath)
+	originalArgs := os.Args
+	os.Args = []string{"octodeck-daemon"}
+	t.Cleanup(func() { os.Args = originalArgs })
+
+	cwd := t.TempDir()
+	cfg := &Config{Server: "https://octodeck.example", Token: "link-token", LinkID: "cl_123"}
+	argv, err := prepareAgentTeamMCPConfig(cfg, []string{"-p", "hello", agentTeamMCPProjectConfigMarker}, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(argv, " "), agentTeamMCPProjectConfigMarker) {
+		t.Fatalf("marker was not removed: %#v", argv)
+	}
+
+	data, err := os.ReadFile(filepath.Join(cwd, ".trae", "mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		MCPServers map[string]struct {
+			Type    string            `json:"type"`
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
+			Timeout int               `json:"timeout"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("invalid Trae MCP config json: %v\n%s", err, string(data))
+	}
+	server := parsed.MCPServers["octodeck_agent_team"]
+	if server.Type != "stdio" {
+		t.Fatalf("unexpected MCP transport type: %q", server.Type)
+	}
+	if strings.Join(server.Args, " ") != "mcp-agent-team --config "+configPath {
+		t.Fatalf("unexpected MCP args: %#v", server.Args)
+	}
+	if server.Timeout != 30 {
+		t.Fatalf("unexpected MCP timeout: %d", server.Timeout)
+	}
+}
+
+func TestReadAndWriteMCPMessageSupportsNDJSON(t *testing.T) {
+	input := `{"jsonrpc":"2.0","id":1,"method":"initialize"}` + "\n"
+	body, framed, err := readMCPMessage(bufio.NewReader(strings.NewReader(input)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if framed {
+		t.Fatal("expected newline-delimited JSON transport")
+	}
+	if !bytes.Equal(body, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`)) {
+		t.Fatalf("unexpected body: %s", body)
+	}
+
+	var out bytes.Buffer
+	if err := writeMCPMessage(&out, map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{}}, framed); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "Content-Length") || !strings.HasSuffix(out.String(), "\n") {
+		t.Fatalf("expected NDJSON response, got %q", out.String())
+	}
+}
+
+func TestReadAndWriteMCPMessageSupportsContentLengthFrames(t *testing.T) {
+	input := "Content-Length: 46\r\n\r\n" + `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`
+	body, framed, err := readMCPMessage(bufio.NewReader(strings.NewReader(input)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !framed {
+		t.Fatal("expected Content-Length framed transport")
+	}
+	if !bytes.Equal(body, []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)) {
+		t.Fatalf("unexpected body: %s", body)
+	}
+
+	var out bytes.Buffer
+	if err := writeMCPMessage(&out, map[string]any{"jsonrpc": "2.0", "id": 2, "result": map[string]any{}}, framed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out.String(), "Content-Length: ") || !strings.Contains(out.String(), "\r\n\r\n") {
+		t.Fatalf("expected Content-Length response, got %q", out.String())
 	}
 }
 

@@ -80,6 +80,7 @@ COPY --from=builder /app/web/dist ./web/dist
 
 # Copy agent-runner built artifacts
 COPY --from=builder /app/container/agent-runner/dist ./container/agent-runner/dist
+COPY --from=builder /app/container/agent-runner/prompts ./container/agent-runner/prompts
 COPY --from=dependencies /app/container/agent-runner/node_modules ./container/agent-runner/node_modules
 COPY --from=builder /app/container/agent-runner/package.json ./container/agent-runner/
 

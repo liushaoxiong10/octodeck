@@ -88,7 +88,17 @@ function templateForAgentClient(
   switch (id) {
     case 'claude-code':
       return {
-        argvTemplate: ['-p', '{prompt}', '--model', '{model}', '--output-format', 'stream-json', '--dangerously-skip-permissions'],
+        argvTemplate: [
+          '-p',
+          '{prompt}',
+          '--model',
+          '{model}',
+          '--output-format',
+          'stream-json',
+          '--dangerously-skip-permissions',
+          '--mcp-config',
+          '__OCTODECK_AGENT_TEAM_MCP_CONFIG__',
+        ],
         outputProtocol: 'jsonline-stream-json',
         supportsNativeSessions: true,
         sessionArgvTemplate: ['--resume={sessionId}'],
@@ -110,6 +120,7 @@ function templateForAgentClient(
           '--output-format=stream-json',
           '--include-partial-messages',
           '-y',
+          '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
         ],
         outputProtocol: 'jsonline-stream-json',
         supportsNativeSessions: true,

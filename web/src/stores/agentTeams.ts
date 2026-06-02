@@ -12,6 +12,24 @@ export interface AgentTeamRole {
   outputs?: string[];
   skills?: string[];
   guardrails?: string[];
+  requiredSkills?: string[];
+  preferredAgentMd?: string[];
+  policy?: {
+    permissionLevel?: 'L0' | 'L1' | 'L2' | 'L3' | 'L4' | 'L5';
+    workspacePolicy?: 'none' | 'read-only' | 'sandbox' | 'worktree' | 'device';
+    requiresApproval?: boolean;
+  };
+  budget?: {
+    maxDurationMs?: number;
+    maxTokens?: number;
+    maxOutputBytes?: number;
+  };
+}
+
+export interface AgentTeamRoleAssignment {
+  runnerAgentId: string;
+  linkId?: string;
+  agentClientId?: string;
 }
 
 export interface AgentTeam {
@@ -41,6 +59,8 @@ export interface AgentMdDefinition {
 export interface AgentTeamExecutionResult {
   status: 'success' | 'error';
   finalResult: string;
+  runId?: string;
+  traceId?: string;
   roleResults: Array<{
     roleId: string;
     roleName: string;
@@ -57,7 +77,98 @@ export interface AgentTeamExecutionResult {
     phase?: string;
     label?: string;
   }>;
+  traceEvents?: Array<{
+    traceId: string;
+    spanId: string;
+    parentSpanId?: string;
+    sessionId?: string;
+    runId: string;
+    taskId?: string;
+    actor: string;
+    type: string;
+    payload: unknown;
+    timestamp: string;
+    schemaVersion: 1;
+  }>;
   error?: string;
+}
+
+export interface AgentTeamRun {
+  id: string;
+  teamId: string;
+  userId: string;
+  prompt: string;
+  status: 'running' | 'waiting_approval' | 'paused' | 'success' | 'error' | 'cancelled';
+  traceId: string;
+  workflowShape: string;
+  roleAssignments: unknown;
+  finalResult?: string;
+  error?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt: string;
+}
+
+export interface AgentTeamApproval {
+  id: string;
+  runId: string;
+  taskId?: string;
+  requestedBy: string;
+  status: 'pending' | 'approved' | 'rejected';
+  riskLevel: string;
+  title: string;
+  description: string;
+  payload: unknown;
+  resolvedBy?: string;
+  resolvedAt?: string;
+  createdAt: string;
+}
+
+export interface AgentTeamCheckpoint {
+  id: string;
+  runId: string;
+  taskId?: string;
+  nodeId: string;
+  state: unknown;
+  blackboardCursor?: number;
+  createdAt?: string;
+}
+
+export interface AgentTeamRunResponse {
+  run: AgentTeamRun;
+  execution?: AgentTeamExecutionResult;
+  approval?: AgentTeamApproval;
+  checkpoint?: AgentTeamCheckpoint;
+}
+
+export interface AgentTeamTaskView {
+  id: string;
+  runId: string;
+  roleId?: string;
+  phase?: string;
+  actorId?: string;
+  status: string;
+  attempt: number;
+  input?: string;
+  output?: string;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt?: string;
+}
+
+export interface AgentTeamBlackboardEntry {
+  id: string;
+  runId: string;
+  taskId?: string;
+  roleId?: string;
+  kind: string;
+  key: string;
+  contentType: string;
+  value: string;
+  visibility: string;
+  createdAt: string;
 }
 
 export type AgentTeamInput = Omit<AgentTeam, 'id' | 'createdAt' | 'updatedAt'>;
@@ -73,7 +184,17 @@ interface AgentTeamsState {
   error: string | null;
   load: () => Promise<void>;
   generate: (input: { generatorAgentId: string; goal: string; shape: AgentTeamShape }) => Promise<AgentTeam>;
-  execute: (id: string, prompt: string, runnerAgentId?: string) => Promise<AgentTeamExecutionResult>;
+  execute: (id: string, prompt: string, runnerAgentId?: string, roleAssignments?: Record<string, AgentTeamRoleAssignment>) => Promise<AgentTeamExecutionResult>;
+  createRun: (id: string, prompt: string, runnerAgentId?: string, roleAssignments?: Record<string, AgentTeamRoleAssignment>) => Promise<AgentTeamRunResponse>;
+  listRuns: (filters?: { teamId?: string; status?: AgentTeamRun['status']; limit?: number }) => Promise<AgentTeamRun[]>;
+  loadRun: (runId: string) => Promise<AgentTeamRun>;
+  loadRunTasks: (runId: string) => Promise<AgentTeamTaskView[]>;
+  loadRunEvents: (runId: string) => Promise<NonNullable<AgentTeamExecutionResult['traceEvents']>>;
+  loadRunBlackboard: (runId: string) => Promise<AgentTeamBlackboardEntry[]>;
+  loadRunApprovals: (runId: string) => Promise<AgentTeamApproval[]>;
+  loadRunCheckpoints: (runId: string) => Promise<AgentTeamCheckpoint[]>;
+  decideRunApproval: (runId: string, approvalId: string, decision: 'approved' | 'rejected') => Promise<AgentTeamRunResponse>;
+  cancelRun: (runId: string) => Promise<{ run: AgentTeamRun }>;
   update: (id: string, patch: AgentTeamPatch) => Promise<AgentTeam>;
   remove: (id: string) => Promise<void>;
   loadAgentMdDefinitions: () => Promise<void>;
@@ -114,11 +235,87 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
     }
   },
 
-  execute: async (id, prompt, runnerAgentId) => {
+  execute: async (id, prompt, runnerAgentId, roleAssignments) => {
     set({ saving: true, error: null });
     try {
-      const data = await api.post<{ execution: AgentTeamExecutionResult }>(`/api/agent-teams/${encodeURIComponent(id)}/execute`, { prompt, runnerAgentId }, 600_000);
+      const data = await api.post<{ execution: AgentTeamExecutionResult }>(`/api/agent-teams/${encodeURIComponent(id)}/execute`, { prompt, runnerAgentId, roleAssignments }, 600_000);
       return data.execution;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    } finally {
+      set({ saving: false });
+    }
+  },
+
+  createRun: async (id, prompt, runnerAgentId, roleAssignments) => {
+    set({ saving: true, error: null });
+    try {
+      return await api.post<AgentTeamRunResponse>(`/api/agent-teams/${encodeURIComponent(id)}/runs`, { prompt, runnerAgentId, roleAssignments }, 600_000);
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    } finally {
+      set({ saving: false });
+    }
+  },
+
+  listRuns: async (filters = {}) => {
+    const params = new URLSearchParams();
+    if (filters.teamId) params.set('teamId', filters.teamId);
+    if (filters.status) params.set('status', filters.status);
+    if (filters.limit) params.set('limit', String(filters.limit));
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    const data = await api.get<{ runs: AgentTeamRun[] }>(`/api/agent-teams/runs${suffix}`);
+    return data.runs ?? [];
+  },
+
+  loadRun: async (runId) => {
+    const data = await api.get<{ run: AgentTeamRun }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}`);
+    return data.run;
+  },
+
+  loadRunTasks: async (runId) => {
+    const data = await api.get<{ tasks: AgentTeamTaskView[] }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/tasks`);
+    return data.tasks ?? [];
+  },
+
+  loadRunEvents: async (runId) => {
+    const data = await api.get<{ events: NonNullable<AgentTeamExecutionResult['traceEvents']> }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/events`);
+    return data.events ?? [];
+  },
+
+  loadRunBlackboard: async (runId) => {
+    const data = await api.get<{ entries: AgentTeamBlackboardEntry[] }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/blackboard`);
+    return data.entries ?? [];
+  },
+
+  loadRunApprovals: async (runId) => {
+    const data = await api.get<{ approvals: AgentTeamApproval[] }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/approvals`);
+    return data.approvals ?? [];
+  },
+
+  loadRunCheckpoints: async (runId) => {
+    const data = await api.get<{ checkpoints: AgentTeamCheckpoint[] }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/checkpoints`);
+    return data.checkpoints ?? [];
+  },
+
+  decideRunApproval: async (runId, approvalId, decision) => {
+    set({ saving: true, error: null });
+    try {
+      return await api.post<AgentTeamRunResponse>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`, { decision }, 600_000);
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    } finally {
+      set({ saving: false });
+    }
+  },
+
+  cancelRun: async (runId) => {
+    set({ saving: true, error: null });
+    try {
+      return await api.post<{ run: AgentTeamRun }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/cancel`);
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
       throw err;

@@ -48,6 +48,7 @@ import { requestProviderModels } from '../agent-link/model-rpc.js';
 import { requestProviderSkills } from '../agent-link/skills-rpc.js';
 import type { AuthUser } from '../types.js';
 import { listCustomBackends } from '../backends/custom-loader.js';
+import { handleAgentTeamLinkToolRequest } from './agent-teams.js';
 
 const BCRYPT_ROUNDS = 10;
 const TOKEN_BYTES = 32; // 64 hex chars
@@ -166,6 +167,32 @@ agentLinkRoutes.delete('/:id', authMiddleware, (c) => {
   disconnectLink(id, 'revoked');
   logger.info({ userId: user.id, linkId: id }, 'agent-link revoked');
   return c.json({ ok: true });
+});
+
+agentLinkRoutes.post('/agent-team-tool', async (c) => {
+  const tokenHeader = c.req.header('x-link-token') || '';
+  if (!tokenHeader || tokenHeader.length < 16 || tokenHeader.length > 256) {
+    return c.json({ error: 'missing_token' }, 401);
+  }
+
+  let matchedUserId: string | null = null;
+  for (const candidate of listAgentLinkAuthCandidates()) {
+    try {
+      if (await bcrypt.compare(tokenHeader, candidate.tokenHash)) {
+        matchedUserId = candidate.userId;
+        break;
+      }
+    } catch (err) {
+      logger.warn(
+        { linkId: candidate.id, err: (err as Error).message },
+        'agent-link agent team tool bcrypt compare failed',
+      );
+    }
+  }
+  if (!matchedUserId) return c.json({ error: 'invalid_token' }, 401);
+
+  const body = await c.req.json().catch(() => ({}));
+  return handleAgentTeamLinkToolRequest(c, matchedUserId, body);
 });
 
 agentLinkRoutes.get('/:id/providers/:providerId/models', authMiddleware, async (c) => {

@@ -227,11 +227,12 @@ export function unregisterSession(session: AgentLinkSession): void {
     sessions.delete(session.linkId);
     sessionMeta.delete(session.linkId);
     lastSeenWrite.delete(session.linkId);
+
+    failRunsForLink(session.linkId, 'link_offline');
+    failToolRequestsForLink(session.linkId, 'link_offline');
+    failModelRequestsForLink(session.linkId, 'link_offline');
+    failSkillsRequestsForLink(session.linkId, 'link_offline');
   }
-  failRunsForLink(session.linkId, 'link_offline');
-  failToolRequestsForLink(session.linkId, 'link_offline');
-  failModelRequestsForLink(session.linkId, 'link_offline');
-  failSkillsRequestsForLink(session.linkId, 'link_offline');
 }
 
 export function isOnline(linkId: string): boolean {

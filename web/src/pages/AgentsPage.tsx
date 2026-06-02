@@ -29,7 +29,7 @@ import {
   type CustomBackendDef,
 } from '../stores/customBackends';
 import { useTasksStore, type ScheduledTask } from '../stores/tasks';
-import { useAgentTeamsStore, type AgentTeam, type AgentTeamExecutionResult, type AgentTeamRole, type AgentTeamShape } from '../stores/agentTeams';
+import { useAgentTeamsStore, type AgentTeam, type AgentTeamApproval, type AgentTeamCheckpoint, type AgentTeamExecutionResult, type AgentTeamRole, type AgentTeamRoleAssignment, type AgentTeamRun, type AgentTeamShape } from '../stores/agentTeams';
 import CustomBackendFormDialog from '../components/settings/CustomBackendFormDialog';
 import type { BackendInfo, SystemSettings } from '../components/settings/types';
 import { getErrorMessage } from '../components/settings/types';
@@ -391,6 +391,11 @@ export function AgentsPage() {
     scrollAgentsAnchorSection(activeSection);
   }, [activeSection, hashAnchor.agentMdId, hashAnchor.teamId, selectedAgentId]);
 
+  const handleSelectAgent = (agentId: string) => {
+    setSelectedAgentId(agentId);
+    setHashAnchor((prev) => ({ ...prev, agentId }));
+  };
+
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? agents[0] ?? null;
   const selectedDevice = selectedAgent?.custom?.deviceLinkId
     ? devices.find((device) => device.id === selectedAgent.custom?.deviceLinkId)
@@ -581,7 +586,7 @@ export function AgentsPage() {
                         <button
                           type="button"
                           key={agent.id}
-                          onClick={() => setSelectedAgentId(agent.id)}
+                          onClick={() => handleSelectAgent(agent.id)}
                           className={`group w-full px-4 py-3 text-left transition ${
                             selectedAgent?.id === agent.id
                               ? 'bg-primary/10'
@@ -1122,13 +1127,35 @@ function AgentTeamWorkspace({
   initialSelectedTeamId?: string;
   onSelectedTeamIdChange: (teamId?: string) => void;
 }) {
-  const { teams, loading, saving, error, load, loadAgentMdDefinitions, update, remove, execute } = useAgentTeamsStore();
+  const {
+    teams,
+    loading,
+    saving,
+    error,
+    load,
+    loadAgentMdDefinitions,
+    update,
+    remove,
+    createRun,
+    listRuns,
+    loadRun,
+    loadRunEvents,
+    loadRunApprovals,
+    loadRunCheckpoints,
+    decideRunApproval,
+    cancelRun,
+  } = useAgentTeamsStore();
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(initialSelectedTeamId ?? null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editingJson, setEditingJson] = useState('');
   const [executionPrompt, setExecutionPrompt] = useState('');
   const [selectedExecutionAgentId, setSelectedExecutionAgentId] = useState(defaultGeneratorId);
   const [executionResult, setExecutionResult] = useState<AgentTeamExecutionResult | null>(null);
+  const [activeRun, setActiveRun] = useState<AgentTeamRun | null>(null);
+  const [approvalCard, setApprovalCard] = useState<AgentTeamApproval | null>(null);
+  const [runCheckpoints, setRunCheckpoints] = useState<AgentTeamCheckpoint[]>([]);
+  const [runHistory, setRunHistory] = useState<AgentTeamRun[]>([]);
+  const [roleAssignments, setRoleAssignments] = useState<Record<string, AgentTeamRoleAssignment>>({});
   const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? teams[0] ?? null;
   const defaultGenerator = agents.find((agent) => agent.id === defaultGeneratorId) ?? agents[0] ?? null;
   const executionAgents = agents.filter((agent) => agent.status !== 'disabled');
@@ -1167,6 +1194,39 @@ function AgentTeamWorkspace({
     setSelectedExecutionAgentId(executionAgents.some((agent) => agent.id === preferred) ? preferred : executionAgents[0]?.id ?? preferred);
   }, [defaultGenerator?.id, defaultGeneratorId, executionAgents, selectedExecutionAgentId, selectedTeam?.createdByAgentId]);
 
+  useEffect(() => {
+    if (!selectedTeam) {
+      setRunHistory([]);
+      setRoleAssignments({});
+      return;
+    }
+    void listRuns({ teamId: selectedTeam.id }).then(setRunHistory).catch(() => setRunHistory([]));
+    setRoleAssignments((current) => {
+      const roleIds = new Set(selectedTeam.roles.map((role) => role.id));
+      const next = Object.fromEntries(Object.entries(current).filter(([roleId]) => roleIds.has(roleId)));
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+  }, [listRuns, selectedTeam?.id]);
+
+  const refreshRunHistory = async () => {
+    if (!selectedTeam) return;
+    setRunHistory(await listRuns({ teamId: selectedTeam.id }));
+  };
+
+  const updateRoleAssignment = (roleId: string, runnerAgentId: string) => {
+    setRoleAssignments((current) => {
+      const next = { ...current };
+      if (runnerAgentId) {
+        next[roleId] = { runnerAgentId };
+      } else {
+        delete next[roleId];
+      }
+      return next;
+    });
+  };
+
+  const clearRoleAssignments = () => setRoleAssignments({});
+
   const handleSave = async () => {
     if (!selectedTeam) return;
     try {
@@ -1203,11 +1263,84 @@ function AgentTeamWorkspace({
       return;
     }
     try {
-      const result = await execute(selectedTeam.id, prompt, selectedExecutionAgentId);
-      setExecutionResult(result);
-      toast.success(result.status === 'success' ? 'Agent Team 执行完成' : 'Agent Team 执行失败');
+      const response = await createRun(selectedTeam.id, prompt, selectedExecutionAgentId, roleAssignments);
+      const run = response.run;
+      setActiveRun(run);
+      setApprovalCard(response.approval ?? null);
+      setRunCheckpoints(response.checkpoint ? [response.checkpoint] : await loadRunCheckpoints(run.id));
+      if (response.execution) {
+        setExecutionResult(response.execution);
+        toast.success(response.execution.status === 'success' ? 'Agent Team 执行完成' : 'Agent Team 执行失败');
+      } else if (run.status === 'waiting_approval') {
+        const approvals = response.approval ? [response.approval] : await loadRunApprovals(run.id);
+        setApprovalCard(approvals.find((approval) => approval.status === 'pending') ?? approvals[0] ?? null);
+        setExecutionResult(null);
+        toast.info('Agent Team 已暂停，等待审批');
+      }
+      await refreshRunHistory();
     } catch (err) {
       toast.error(getErrorMessage(err, '执行 Agent Team 失败'));
+    }
+  };
+
+  const handleApprovalDecision = async (decision: 'approved' | 'rejected') => {
+    if (!approvalCard) return;
+    try {
+      const response = await decideRunApproval(approvalCard.runId, approvalCard.id, decision);
+      setActiveRun(response.run);
+      setRunCheckpoints(await loadRunCheckpoints(response.run.id));
+      if (response.execution) setExecutionResult(response.execution);
+      const approvals = await loadRunApprovals(response.run.id);
+      setApprovalCard(approvals.find((approval) => approval.status === 'pending') ?? null);
+      await refreshRunHistory();
+      toast.success(decision === 'approved' ? '审批已通过，Run 已继续执行' : '审批已拒绝，Run 已取消');
+    } catch (err) {
+      toast.error(getErrorMessage(err, '处理审批失败'));
+    }
+  };
+
+  const handleCancelRun = async () => {
+    const runId = approvalCard?.runId ?? activeRun?.id;
+    if (!runId) return;
+    try {
+      const response = await cancelRun(runId);
+      setActiveRun(response.run);
+      setApprovalCard(null);
+      setRunCheckpoints(await loadRunCheckpoints(response.run.id));
+      await refreshRunHistory();
+      toast.success('Run 已取消');
+    } catch (err) {
+      toast.error(getErrorMessage(err, '取消 Run 失败'));
+    }
+  };
+
+  const handleSelectRunHistory = async (run: AgentTeamRun) => {
+    try {
+      const [freshRun, approvals, checkpoints, traceEvents] = await Promise.all([
+        loadRun(run.id),
+        loadRunApprovals(run.id),
+        loadRunCheckpoints(run.id),
+        loadRunEvents(run.id),
+      ]);
+      setActiveRun(freshRun);
+      setApprovalCard(approvals.find((approval) => approval.status === 'pending') ?? null);
+      setRunCheckpoints(checkpoints);
+      if (freshRun.finalResult || freshRun.error) {
+        setExecutionResult({
+          status: freshRun.status === 'success' ? 'success' : 'error',
+          finalResult: freshRun.finalResult ?? freshRun.error ?? '',
+          runId: freshRun.id,
+          traceId: freshRun.traceId,
+          roleResults: [],
+          events: [],
+          traceEvents,
+          error: freshRun.error,
+        });
+      } else {
+        setExecutionResult(null);
+      }
+    } catch (err) {
+      toast.error(getErrorMessage(err, '加载 Run 历史失败'));
     }
   };
 
@@ -1257,11 +1390,21 @@ function AgentTeamWorkspace({
           selectedExecutionAgentId={selectedExecutionAgentId}
           executionAgents={executionAgents}
           executionResult={executionResult}
+          activeRun={activeRun}
+          approvalCard={approvalCard}
+          runCheckpoints={runCheckpoints}
+          runHistory={runHistory}
+          roleAssignments={roleAssignments}
           saving={saving}
           onEditingJsonChange={setEditingJson}
           onExecutionPromptChange={setExecutionPrompt}
           onSelectedExecutionAgentIdChange={setSelectedExecutionAgentId}
+          onRoleAssignmentChange={updateRoleAssignment}
+          onClearRoleAssignments={clearRoleAssignments}
           onExecute={handleExecute}
+          onApprovalDecision={handleApprovalDecision}
+          onCancelRun={handleCancelRun}
+          onSelectRunHistory={handleSelectRunHistory}
           onSave={handleSave}
           onDelete={handleDelete}
         />
@@ -1285,11 +1428,21 @@ function AgentTeamPanel({
   selectedExecutionAgentId,
   executionAgents,
   executionResult,
+  activeRun,
+  approvalCard,
+  runCheckpoints,
+  runHistory,
+  roleAssignments,
   saving,
   onEditingJsonChange,
   onExecutionPromptChange,
   onSelectedExecutionAgentIdChange,
+  onRoleAssignmentChange,
+  onClearRoleAssignments,
   onExecute,
+  onApprovalDecision,
+  onCancelRun,
+  onSelectRunHistory,
   onSave,
   onDelete,
 }: {
@@ -1299,11 +1452,21 @@ function AgentTeamPanel({
   selectedExecutionAgentId: string;
   executionAgents: AgentListItem[];
   executionResult: AgentTeamExecutionResult | null;
+  activeRun: AgentTeamRun | null;
+  approvalCard: AgentTeamApproval | null;
+  runCheckpoints: AgentTeamCheckpoint[];
+  runHistory: AgentTeamRun[];
+  roleAssignments: Record<string, AgentTeamRoleAssignment>;
   saving: boolean;
   onEditingJsonChange: (value: string) => void;
   onExecutionPromptChange: (value: string) => void;
   onSelectedExecutionAgentIdChange: (value: string) => void;
+  onRoleAssignmentChange: (roleId: string, runnerAgentId: string) => void;
+  onClearRoleAssignments: () => void;
   onExecute: () => void;
+  onApprovalDecision: (decision: 'approved' | 'rejected') => void;
+  onCancelRun: () => void;
+  onSelectRunHistory: (run: AgentTeamRun) => void;
   onSave: () => void;
   onDelete: () => void;
 }) {
@@ -1475,20 +1638,163 @@ function AgentTeamPanel({
                   placeholder="描述希望这个 Agent Team 实际执行的任务，例如：根据需求实现登录页并完成测试 review。"
                 />
               </label>
-              <Button onClick={onExecute} disabled={saving} className="lg:mb-1">
-                {saving ? <Loader2 className="size-4 animate-spin" /> : <Workflow className="size-4" />}
-                执行 Team
+            <Button onClick={onExecute} disabled={saving} className="lg:mb-1">
+              {saving ? <Loader2 className="size-4 animate-spin" /> : <Workflow className="size-4" />}
+              执行 Team
+            </Button>
+          </div>
+          <div className="mt-4 rounded-2xl border border-border bg-muted/20 p-4">
+            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-xs font-semibold text-foreground">Role Runner 分配</div>
+                <p className="mt-1 text-xs text-muted-foreground">默认继承上方后端 / Device，可为高风险或专长角色指定不同 Runner。</p>
+              </div>
+              <Button variant="outline" size="sm" onClick={onClearRoleAssignments} disabled={saving || Object.keys(roleAssignments).length === 0}>
+                清空分配
               </Button>
             </div>
-            {executionResult ? (
-              <div className="mt-4 rounded-2xl border border-border bg-muted/20 p-4">
+            <div className="grid gap-3 lg:grid-cols-2">
+              {selectedTeam.roles.map((role, index) => (
+                <div key={role.id || `${role.name}-${index}`} className="rounded-xl border border-border bg-background/80 p-3">
+                  <div className="mb-3 flex items-start justify-between gap-2">
+                    <div>
+                      <div className="text-sm font-medium text-foreground">{role.name}</div>
+                      <div className="mt-1 font-mono text-[11px] text-muted-foreground">{role.id}</div>
+                    </div>
+                    <Pill>Role {index + 1}</Pill>
+                  </div>
+                  <label className="grid gap-1.5">
+                    <span className="text-[11px] font-medium text-muted-foreground">Runner / Device</span>
+                    <select
+                      value={roleAssignments[role.id]?.runnerAgentId ?? ''}
+                      onChange={(event) => onRoleAssignmentChange(role.id, event.target.value)}
+                      className="rounded-lg border border-border bg-background px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-ring"
+                    >
+                      <option value="">继承默认：{selectedExecutionAgentId || '未选择'}</option>
+                      {executionAgents.map((agent) => (
+                        <option key={agent.id} value={agent.id}>{agentExecutionLabel(agent)}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <RolePolicyBudgetBadges role={role} />
+                </div>
+              ))}
+            </div>
+          </div>
+          {executionResult ? (
+            <div className="mt-4 rounded-2xl border border-border bg-muted/20 p-4">
                 <div className="mb-2 flex items-center justify-between gap-2">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">executionResult</div>
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">executionResult</div>
+                    {executionResult.runId || executionResult.traceId ? (
+                      <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                        {executionResult.runId ? `run: ${executionResult.runId}` : ''}
+                        {executionResult.runId && executionResult.traceId ? ' · ' : ''}
+                        {executionResult.traceId ? `trace: ${executionResult.traceId}` : ''}
+                      </div>
+                    ) : null}
+                  </div>
                   <Pill tone={executionResult.status === 'success' ? 'green' : 'red'}>{executionResult.status}</Pill>
                 </div>
                 <pre className="max-h-64 overflow-auto whitespace-pre-wrap text-xs leading-5 text-foreground">{executionResult.finalResult}</pre>
+                {executionResult.traceEvents?.length ? (
+                  <div className="mt-4 rounded-xl border border-border bg-background/70 p-3">
+                    <div className="mb-2 text-xs font-semibold text-muted-foreground">执行轨迹</div>
+                    <div className="max-h-52 space-y-2 overflow-auto">
+                      {executionResult.traceEvents.map((event) => (
+                        <div key={event.spanId} className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-xs">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Pill>{event.type}</Pill>
+                            <span className="font-mono text-muted-foreground">{event.actor}</span>
+                            {event.taskId ? <span className="font-mono text-muted-foreground">{event.taskId}</span> : null}
+                          </div>
+                          <div className="mt-1 text-[11px] text-muted-foreground">{new Date(event.timestamp).toLocaleString()}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : null}
+            {approvalCard ? (
+              <div className="mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
+                <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">等待审批</div>
+                    <div className="mt-1 text-sm font-semibold text-foreground">{approvalCard.title}</div>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">{approvalCard.description}</p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <Pill tone="blue">risk: {approvalCard.riskLevel}</Pill>
+                      <Pill>{approvalCard.status}</Pill>
+                      <span className="font-mono text-[11px] text-muted-foreground">run: {approvalCard.runId}</span>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" onClick={() => onApprovalDecision('approved')} disabled={saving}>
+                      {saving ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
+                      批准并继续
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => onApprovalDecision('rejected')} disabled={saving}>
+                      拒绝审批
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={onCancelRun} disabled={saving}>
+                      取消 Run
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ) : activeRun?.status === 'cancelled' ? (
+              <div className="mt-4 rounded-2xl border border-border bg-muted/20 p-4 text-xs text-muted-foreground">
+                Run 已取消：<span className="font-mono">{activeRun.id}</span>
+              </div>
+            ) : null}
+            {runCheckpoints.length ? (
+              <div className="mt-4 rounded-xl border border-border bg-background/70 p-3">
+                <div className="mb-2 text-xs font-semibold text-muted-foreground">检查点</div>
+                <div className="space-y-2">
+                  {runCheckpoints.map((checkpoint) => (
+                    <div key={checkpoint.id} className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-xs">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Pill>{checkpoint.nodeId}</Pill>
+                        <span className="font-mono text-muted-foreground">{checkpoint.id}</span>
+                      </div>
+                      <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap text-[11px] text-muted-foreground">{JSON.stringify(checkpoint.state, null, 2)}</pre>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <div className="mt-4 rounded-xl border border-border bg-background/70 p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="text-xs font-semibold text-muted-foreground">Run 历史</div>
+                <Pill>{runHistory.length}</Pill>
+              </div>
+              {runHistory.length ? (
+                <div className="max-h-56 space-y-2 overflow-auto">
+                  {runHistory.map((run) => (
+                    <button
+                      key={run.id}
+                      type="button"
+                      onClick={() => onSelectRunHistory(run)}
+                      className={`w-full rounded-lg border px-3 py-2 text-left text-xs transition ${activeRun?.id === run.id ? 'border-primary bg-primary/5' : 'border-border/70 bg-muted/20 hover:bg-muted/40'}`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="truncate font-medium text-foreground">{run.prompt}</span>
+                        <Pill tone={run.status === 'success' ? 'green' : run.status === 'error' || run.status === 'cancelled' ? 'red' : 'blue'}>{run.status}</Pill>
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-2 font-mono text-[11px] text-muted-foreground">
+                        <span>{run.id}</span>
+                        <span>{formatDateTime(run.createdAt)}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-lg border border-dashed border-border bg-muted/20 px-3 py-4 text-center text-xs text-muted-foreground">
+                  暂无 Run 历史。
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
@@ -2214,6 +2520,26 @@ function RoleList({ title, values }: { title: string; values?: string[] }) {
           </span>
         ))}
       </div>
+    </div>
+  );
+}
+
+function RolePolicyBudgetBadges({ role }: { role: AgentTeamRole }) {
+  const policy = role.policy;
+  const budget = role.budget ?? {};
+  const workspacePolicy = policy?.workspacePolicy ?? '默认工作区策略';
+  const requiresApproval = policy?.requiresApproval ?? false;
+
+  return (
+    <div className="mt-3 flex flex-wrap gap-1.5">
+      <Pill tone={policy?.permissionLevel && ['L4', 'L5'].includes(policy.permissionLevel) ? 'red' : 'blue'}>
+        permission: {policy?.permissionLevel ?? '默认'}
+      </Pill>
+      <Pill>workspacePolicy: {workspacePolicy}</Pill>
+      <Pill tone={requiresApproval ? 'red' : 'green'}>{requiresApproval ? 'requiresApproval' : '无需审批'}</Pill>
+      <Pill>duration: {formatDuration(budget.maxDurationMs)}</Pill>
+      <Pill>tokens: {budget.maxTokens ?? '系统默认'}</Pill>
+      <Pill>output: {formatBytes(budget.maxOutputBytes)}</Pill>
     </div>
   );
 }

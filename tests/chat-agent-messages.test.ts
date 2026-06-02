@@ -7,6 +7,7 @@ const {
   apiPostMock,
   apiPatchMock,
   apiDeleteMock,
+  wsSendMock,
   deleteAgentMessageSnapshotMock,
   deleteGroupMessageSnapshotsMock,
   loadAgentMessageSnapshotMock,
@@ -16,6 +17,7 @@ const {
   apiPostMock: vi.fn(),
   apiPatchMock: vi.fn(),
   apiDeleteMock: vi.fn(),
+  wsSendMock: vi.fn(() => true),
   deleteAgentMessageSnapshotMock: vi.fn(),
   deleteGroupMessageSnapshotsMock: vi.fn(),
   loadAgentMessageSnapshotMock: vi.fn(),
@@ -33,7 +35,7 @@ vi.mock('../web/src/api/client', () => ({
 
 vi.mock('../web/src/api/ws', () => ({
   wsManager: {
-    send: vi.fn(() => true),
+    send: wsSendMock,
     on: vi.fn(() => vi.fn()),
     connect: vi.fn(),
     disconnect: vi.fn(),
@@ -90,6 +92,23 @@ function message(id: string, timestamp: string): Message {
   };
 }
 
+function mainMessage(
+  id: string,
+  timestamp: string,
+  overrides: Partial<Message> = {},
+): Message {
+  return {
+    id,
+    chat_jid: 'web:main',
+    sender: 'user',
+    sender_name: 'User',
+    content: id,
+    timestamp,
+    is_from_me: false,
+    ...overrides,
+  };
+}
+
 function resetChatStore(): void {
   useChatStore.setState({
     ...initialState,
@@ -122,7 +141,9 @@ function resetChatStore(): void {
 describe('loadAgentMessages', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.useRealTimers();
     apiGetMock.mockReset();
+    wsSendMock.mockReturnValue(true);
     saveAgentMessageSnapshotMock.mockResolvedValue(undefined);
     deleteAgentMessageSnapshotMock.mockResolvedValue(undefined);
     loadAgentMessageSnapshotMock.mockResolvedValue(null);
@@ -217,5 +238,152 @@ describe('loadAgentMessages', () => {
     expect(useChatStore.getState().agentHasMore[agentId]).toBe(false);
     expect(saveAgentMessageSnapshotMock).not.toHaveBeenCalled();
     expect(deleteAgentMessageSnapshotMock).toHaveBeenCalledWith(jid, agentId);
+  });
+});
+
+describe('sendAgentMessage', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    apiGetMock.mockReset();
+    wsSendMock.mockReturnValue(true);
+    saveAgentMessageSnapshotMock.mockResolvedValue(undefined);
+    deleteAgentMessageSnapshotMock.mockResolvedValue(undefined);
+    loadAgentMessageSnapshotMock.mockResolvedValue(null);
+    resetChatStore();
+  });
+
+  it('refreshes agent messages after a WebSocket send so missed broadcasts do not make the message disappear', async () => {
+    vi.useFakeTimers();
+    const jid = 'web:main';
+    const agentId = 'agent-1';
+    const persistedUserMessage = message('persisted-user-message', '2026-01-02T10:00:00.000Z');
+    apiGetMock.mockResolvedValueOnce({ messages: [persistedUserMessage] });
+
+    const ok = useChatStore.getState().sendAgentMessage(jid, agentId, 'hello');
+
+    expect(ok).toBe(true);
+    expect(apiGetMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(apiGetMock).toHaveBeenCalledWith(
+      `/api/groups/${encodeURIComponent(jid)}/messages?limit=50&agentId=${agentId}`,
+    );
+    expect(useChatStore.getState().agentMessages[agentId]).toEqual([
+      persistedUserMessage,
+    ]);
+
+    vi.useRealTimers();
+  });
+});
+
+describe('handleAgentStatus', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    apiGetMock.mockReset();
+    saveAgentMessageSnapshotMock.mockResolvedValue(undefined);
+    deleteAgentMessageSnapshotMock.mockResolvedValue(undefined);
+    loadAgentMessageSnapshotMock.mockResolvedValue(null);
+    resetChatStore();
+  });
+
+  it('refreshes conversation agent messages when the run ends so a missed final broadcast still appears', async () => {
+    const jid = 'web:main';
+    const agentId = 'agent-1';
+    const userMessage = message('user-message', '2026-01-02T10:00:00.000Z');
+    const assistantMessage: Message = {
+      ...message('assistant-message', '2026-01-02T10:01:00.000Z'),
+      sender: 'octodeck-agent',
+      sender_name: 'OctoDeck',
+      content: 'done',
+      is_from_me: true,
+      source_kind: 'sdk_final',
+    };
+
+    useChatStore.setState({
+      agents: {
+        [jid]: [{
+          id: agentId,
+          name: 'Agent',
+          prompt: 'prompt',
+          status: 'running',
+          kind: 'conversation',
+          created_at: '2026-01-02T09:59:00.000Z',
+        }],
+      },
+      agentMessages: { [agentId]: [userMessage] },
+      agentWaiting: { [agentId]: true },
+      agentStreaming: { [agentId]: { text: 'streamed but broadcast missed' } },
+    });
+    apiGetMock.mockResolvedValueOnce({ messages: [assistantMessage] });
+
+    useChatStore.getState().handleAgentStatus(
+      jid,
+      agentId,
+      'idle',
+      'Agent',
+      'prompt',
+      undefined,
+      'conversation',
+    );
+
+    await Promise.resolve();
+
+    expect(apiGetMock).toHaveBeenCalledWith(
+      `/api/groups/${encodeURIComponent(jid)}/messages?limit=50&agentId=${agentId}&after=${encodeURIComponent(userMessage.timestamp)}`,
+    );
+    expect(useChatStore.getState().agentMessages[agentId]).toEqual([
+      userMessage,
+      assistantMessage,
+    ]);
+    expect(useChatStore.getState().agentWaiting[agentId]).toBe(false);
+    expect(useChatStore.getState().agentStreaming[agentId]).toBeUndefined();
+  });
+});
+
+describe('handleRunnerState', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    apiGetMock.mockReset();
+    saveAgentMessageSnapshotMock.mockResolvedValue(undefined);
+    deleteAgentMessageSnapshotMock.mockResolvedValue(undefined);
+    loadAgentMessageSnapshotMock.mockResolvedValue(null);
+    resetChatStore();
+  });
+
+  it('refreshes main chat messages when the runner becomes idle so a missed final broadcast still appears', async () => {
+    const jid = 'web:main';
+    const userMessage = mainMessage('user-message', '2026-01-02T10:00:00.000Z');
+    const assistantMessage = mainMessage('assistant-message', '2026-01-02T10:04:00.000Z', {
+      sender: 'octodeck-agent',
+      sender_name: 'OctoDeck',
+      content: 'done',
+      is_from_me: true,
+      source_kind: 'sdk_final',
+    });
+
+    useChatStore.setState({
+      messages: { [jid]: [userMessage] },
+      waiting: { [jid]: true },
+      streaming: { [jid]: { text: 'streamed but final broadcast missed' } },
+    });
+    apiGetMock.mockResolvedValueOnce({ messages: [assistantMessage] });
+
+    useChatStore.getState().handleRunnerState(jid, 'idle');
+
+    await Promise.resolve();
+
+    expect(apiGetMock).toHaveBeenCalledWith(
+      `/api/groups/${encodeURIComponent(jid)}/messages?limit=50&after=${encodeURIComponent(userMessage.timestamp)}`,
+    );
+    expect(useChatStore.getState().messages[jid]).toEqual([
+      userMessage,
+      assistantMessage,
+    ]);
+    expect(useChatStore.getState().waiting[jid]).toBe(false);
+    expect(useChatStore.getState().streaming[jid]).toBeUndefined();
   });
 });

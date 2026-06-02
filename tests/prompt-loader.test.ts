@@ -39,6 +39,14 @@ function listMarkdownFiles(dir: string): string[] {
 }
 
 describe('prompts/ files', () => {
+  test('main production image copies agent-runner prompts for host server agents', () => {
+    const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'Dockerfile'), 'utf-8');
+
+    expect(dockerfile).toContain(
+      'COPY --from=builder /app/container/agent-runner/prompts ./container/agent-runner/prompts',
+    );
+  });
+
   test('all required top-level prompt files exist and are non-empty', () => {
     for (const file of REQUIRED_FILES) {
       const fullPath = path.join(PROMPTS_DIR, file);

@@ -20,6 +20,7 @@ import { LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS, getSystemSettings } from '../runtime
 import type { ContainerOutput } from '../container-runner.js';
 import { runViaAgentLink } from './agent-link-driver.js';
 import type { BackendRunArgs } from './types.js';
+import { shouldDisableAgentTeamMcp, stripAgentTeamMcpConfigArgs } from './validation.js';
 
 export type OutputProtocol = 'jsonline-stream-json' | 'plain-text';
 
@@ -159,6 +160,9 @@ export async function runHostCli(
       folder: group.folder,
       backendId: cfg.backendId,
     });
+    if (shouldDisableAgentTeamMcp(input, group.folder)) {
+      argv = stripAgentTeamMcpConfigArgs(argv);
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {

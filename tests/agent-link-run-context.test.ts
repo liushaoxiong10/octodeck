@@ -140,6 +140,113 @@ describe('agent-link run context forwarding', () => {
     await promise;
   });
 
+  test('runViaAgentLink strips Agent Team MCP config from nested team role runs', async () => {
+    const sent: any[] = [];
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } = await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Agent Team Demo',
+          folder: 'agent-team-team_123-builder',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'cl_1234567890abcdef',
+          backend: 'claude-device',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: 'build role output',
+          chatJid: 'system:agent-team:team_123',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: 'claude-device',
+        resolveBinary: () => '/usr/local/bin/claude',
+        buildArgv: ({ prompt }) => [
+          '-p',
+          prompt,
+          '--mcp-config',
+          '__OCTODECK_AGENT_TEAM_MCP_CONFIG__',
+        ],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'cl_1234567890abcdef',
+    );
+
+    expect(sent[0].argv).toEqual(['-p', 'build role output']);
+
+    registerRunMock.mock.calls.at(-1)?.[0].finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await promise;
+  });
+
+  test('runViaAgentLink forwards TraeCLI Agent Team MCP setup marker to daemon client sessions', async () => {
+    const sent: any[] = [];
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } = await import('../src/backends/agent-link-driver.js');
+    const { normalizeAgentClientBackendDef } = await import('../src/backends/agent-client-adapter.js');
+    const backendDef = normalizeAgentClientBackendDef({
+      id: 'mac-coco-gpt',
+      displayName: 'Mac Coco GPT',
+      binary: '/Users/me/.local/bin/traecli',
+      argvTemplate: ['-p', '{prompt}', '-c', 'model.name={model}'],
+      outputProtocol: 'plain-text',
+      supportsHost: true,
+      supportsContainer: false,
+      usesProviderPool: false,
+      runtime: 'local-device',
+      model: 'GPT-5.5',
+      deviceLinkId: 'cl_1234567890abcdef',
+      agentClientId: 'traecli',
+    });
+
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Home',
+          folder: 'main',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'cl_1234567890abcdef',
+        } as any,
+        input: { prompt: '看看工具', chatJid: 'web:main' } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: backendDef.id,
+        resolveBinary: () => backendDef.binary,
+        buildArgv: ({ prompt, cwd }) => backendDef.argvTemplate.map((arg) => arg
+          .replace('{prompt}', prompt)
+          .replace('{cwd}', cwd)
+          .replace('{model}', backendDef.model ?? '')),
+        outputProtocol: backendDef.outputProtocol,
+      },
+      'cl_1234567890abcdef',
+    );
+
+    expect(sent[0].argv).toContain('__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__');
+
+    registerRunMock.mock.calls.at(-1)?.[0].finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await promise;
+  });
+
   test('runViaAgentLink gives scheduled background jobs a long default timeout', async () => {
     const sent: any[] = [];
     getSessionMock.mockReturnValue({

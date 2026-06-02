@@ -32,6 +32,7 @@ import {
 } from '../agent-link/run-rpc.js';
 import type { BackendRunArgs } from './types.js';
 import type { HostCliDriverConfig } from './host-cli-driver.js';
+import { shouldDisableAgentTeamMcp, stripAgentTeamMcpConfigArgs } from './validation.js';
 
 interface CocoEvent {
   type?: string;
@@ -180,6 +181,9 @@ export async function runViaAgentLink(
       folder: group.folder,
       backendId: cfg.backendId,
     });
+    if (shouldDisableAgentTeamMcp(input, group.folder)) {
+      argv = stripAgentTeamMcpConfigArgs(argv);
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {

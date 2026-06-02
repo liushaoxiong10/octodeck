@@ -166,6 +166,53 @@ describe('agent team definitions', () => {
     expect(agentTeams.listAgentTeams()).toEqual([created]);
   });
 
+  test('persists abstract role policy and budget hints without concrete runtime bindings', () => {
+    const created = agentTeams.createAgentTeam({
+      name: 'Governed Delivery Team',
+      goal: '在预算和权限边界内交付功能',
+      shape: 'pipeline',
+      description: '包含权限和预算提示的抽象团队。',
+      roles: [
+        {
+          id: 'builder',
+          name: 'Builder',
+          responsibility: '实现功能。',
+          requiredSkills: ['typescript', 'testing'],
+          preferredAgentMd: ['Frontend Implementer'],
+          policy: {
+            permissionLevel: 'L3',
+            workspacePolicy: 'worktree',
+            requiresApproval: false,
+          },
+          budget: {
+            maxDurationMs: 120_000,
+            maxTokens: 20_000,
+            maxOutputBytes: 200_000,
+          },
+        },
+      ],
+      workflow: 'Builder 在受控工作区内实现并输出结果。',
+      successCriteria: ['不绑定具体设备或模型'],
+      createdByAgentId: 'claude-sdk',
+    });
+
+    expect(agentTeams.isAbstractAgentTeamDefinition(created)).toBe(true);
+    expect(created.roles[0].requiredSkills).toEqual(['typescript', 'testing']);
+    expect(created.roles[0].preferredAgentMd).toEqual(['Frontend Implementer']);
+    expect(created.roles[0].policy).toEqual({
+      permissionLevel: 'L3',
+      workspacePolicy: 'worktree',
+      requiresApproval: false,
+    });
+    expect(created.roles[0].budget).toEqual({
+      maxDurationMs: 120_000,
+      maxTokens: 20_000,
+      maxOutputBytes: 200_000,
+    });
+    expect(JSON.stringify(created)).not.toContain('agentClientId');
+    expect(JSON.stringify(created)).not.toContain('deviceLinkId');
+  });
+
   test('builds an editable team draft from user goal and selected shape', () => {
     const draft = agentTeams.buildAgentTeamDraft({
       generatorAgentId: 'planner-agent',

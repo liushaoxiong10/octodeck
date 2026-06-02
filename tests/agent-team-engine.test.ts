@@ -124,4 +124,49 @@ describe('agent team execution engine', () => {
     expect(calls).toEqual(['judge', 'code', 'review']);
     expect(result.events.some((event) => event.kind === 'route' && event.toRoleId === 'code')).toBe(true);
   });
+
+  test('executes judge-route from a structured route decision and records trace metadata', async () => {
+    const team = makeTeam('judge-route', [
+      { id: 'judge', name: 'Judge', responsibility: '判断路径' },
+      { id: 'docs', name: 'Docs', responsibility: '文档路线' },
+      { id: 'code', name: 'Code', responsibility: '代码路线' },
+      { id: 'review', name: 'Review', responsibility: '复核' },
+    ]);
+    const calls: string[] = [];
+    const runner: AgentTeamRoleRunner = vi.fn(async ({ role }) => {
+      calls.push(role.id);
+      if (role.id === 'judge') {
+        return {
+          status: 'success',
+          result: JSON.stringify({
+            action: 'run_role',
+            target: 'docs',
+            reason: '用户只需要文档方案',
+            confidence: 0.91,
+          }),
+        };
+      }
+      return { status: 'success', result: `${role.id} ok` };
+    });
+
+    const result = await executeAgentTeam(team, {
+      prompt: '输出接入文档',
+      runId: 'run_test',
+      traceId: 'trace_test',
+      sessionId: 'session_test',
+    }, runner);
+
+    expect(result.status).toBe('success');
+    expect(result.runId).toBe('run_test');
+    expect(result.traceId).toBe('trace_test');
+    expect(calls).toEqual(['judge', 'docs', 'review']);
+    expect(result.events.some((event) => event.kind === 'route' && event.toRoleId === 'docs' && event.label?.includes('0.91'))).toBe(true);
+    expect(result.traceEvents?.some((event) => event.type === 'route.decided' && event.payload && (event.payload as { target?: string }).target === 'docs')).toBe(true);
+    for (const event of result.traceEvents ?? []) {
+      expect(event.traceId).toBe('trace_test');
+      expect(event.runId).toBe('run_test');
+      expect(event.schemaVersion).toBe(1);
+      expect(event.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    }
+  });
 });

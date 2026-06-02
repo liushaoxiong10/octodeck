@@ -24,6 +24,8 @@ export const ALLOWED_PLACEHOLDER_KEYS: ReadonlySet<PlaceholderKey> = new Set(
 const PLACEHOLDER_RE = /\{([a-zA-Z]+)\}/g;
 const BAD_BINARY_CHARS = /[\s;|&><`$"'\\]/;
 const PURE_COMMAND_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+const AGENT_TEAM_MCP_CONFIG_PLACEHOLDER = '__OCTODECK_AGENT_TEAM_MCP_CONFIG__';
+const AGENT_TEAM_MCP_PROJECT_CONFIG_MARKER = '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__';
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 const RESERVED_CLAUDE_ENV_KEYS = new Set([
@@ -158,6 +160,35 @@ export function validateArgvTemplate(template: unknown): ValidationResult {
     };
   }
   return { ok: true };
+}
+
+export function shouldDisableAgentTeamMcp(input: { chatJid?: string } | undefined, folder?: string): boolean {
+  return (
+    typeof input?.chatJid === 'string' && input.chatJid.startsWith('system:agent-team:')
+  ) || (
+    typeof folder === 'string' && folder.startsWith('agent-team-')
+  );
+}
+
+export function stripAgentTeamMcpConfigArgs(argv: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const current = argv[i];
+    const next = argv[i + 1];
+    if (current === AGENT_TEAM_MCP_PROJECT_CONFIG_MARKER) {
+      continue;
+    }
+    if (
+      current === '--mcp-config' &&
+      typeof next === 'string' &&
+      next.includes(AGENT_TEAM_MCP_CONFIG_PLACEHOLDER)
+    ) {
+      i += 1;
+      continue;
+    }
+    out.push(current);
+  }
+  return out;
 }
 
 export function validateSessionArgvTemplate(template: unknown): ValidationResult {

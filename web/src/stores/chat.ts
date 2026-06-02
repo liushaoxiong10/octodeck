@@ -2246,6 +2246,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // 处理子 Agent 状态变更事件
   handleAgentStatus: (chatJid, agentId, status, name, prompt, resultSummary?, kind?, titleGenerating?) => {
+    let shouldRefreshAgentMessages = false;
     set((s) => {
       const existing = s.agents[chatJid] || [];
 
@@ -2341,10 +2342,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // after the reply has already finalized.
       const nextAgentWaiting =
         (resolvedKind === 'conversation' || resolvedKind === 'spawn') &&
-        status === 'running' &&
         typeof titleGenerating !== 'boolean'
-          ? { ...s.agentWaiting, [agentId]: true }
+          ? status === 'running'
+            ? { ...s.agentWaiting, [agentId]: true }
+            : { ...s.agentWaiting, [agentId]: false }
           : s.agentWaiting;
+
+      // Agent 会话的最终回复依赖 WebSocket new_message 推送进入
+      // agentMessages。长时间运行期间前端可能重连/后台休眠而漏掉最终推送；
+      // runner 结束后的 agent_status 是另一条独立推送，收到它时用 DB 消息接口
+      // 做一次校准，确保已入库的最终回复一定出现在 Agent tab 中。
+      shouldRefreshAgentMessages =
+        (resolvedKind === 'conversation' || resolvedKind === 'spawn') &&
+        status !== 'running' &&
+        typeof titleGenerating !== 'boolean';
 
       return {
         agents: { ...s.agents, [chatJid]: updated },
@@ -2354,6 +2365,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sdkTaskAliases: nextSdkTaskAliases,
       };
     });
+    if (shouldRefreshAgentMessages) {
+      void get().refreshAgentMessages(chatJid, agentId);
+    }
   },
 
   // 加载子 Agent 列表
@@ -2626,6 +2640,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         agentWaiting: { ...s.agentWaiting, [agentId]: true },
       };
     });
+    // Agent tab sends are WebSocket-only and do not receive an HTTP ack with
+    // the persisted message id. If the server-side new_message broadcast is
+    // missed during a reconnect/race, the input appears to vanish until the
+    // user manually reloads the tab. Do a short delayed calibration against
+    // the DB-backed message API so the agent tab converges even when the push
+    // event is lost.
+    setTimeout(() => {
+      void get().refreshAgentMessages(jid, agentId);
+    }, 1_000);
     return true;
   },
 
@@ -2869,6 +2892,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 冻结的中断状态不清除：等 new_message 或 fallback 定时器处理
       if (get().streaming[chatJid]?.interrupted) return;
       get().clearStreaming(chatJid);
+      // 主会话最终回复同样依赖 WebSocket new_message 推送。长耗时运行期间
+      // 前端可能重连/后台休眠而漏掉最终推送；runner_state:idle 表示查询
+      // 已结束，此时用 DB 消息接口校准一次，确保已入库回复不会消失。
+      void get().refreshMessages(chatJid);
 
       // Runner idle → query 已结束，所有 SDK Task 应已完成。
       // 直接从 agents 数组中移除所有 task agent（不管状态），清理残留。

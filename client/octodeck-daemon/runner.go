@@ -21,6 +21,9 @@ import (
 
 var repoLocks sync.Map
 
+const agentTeamMCPConfigPlaceholder = "__OCTODECK_AGENT_TEAM_MCP_CONFIG__"
+const agentTeamMCPProjectConfigMarker = "__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__"
+
 // runner spawns a child process per run.request and pumps its stdout/stderr
 // back to the server as run.event frames.
 type runner struct {
@@ -66,6 +69,12 @@ func (r *runner) spawn(parent context.Context, req *RunRequestFrame) {
 			req.Argv = replaceArgvPlaceholder(req.Argv, req.RemoteCwdPlaceholder, cwd)
 		}
 	}
+	argv, err := prepareAgentTeamMCPConfig(r.cfg, req.Argv, req.Cwd)
+	if err != nil {
+		r.sendErr(req.RunID, fmt.Errorf("agent team mcp config: %w", err))
+		return
+	}
+	req.Argv = argv
 
 	cmd := exec.CommandContext(ctx, req.Binary, req.Argv...)
 	cmd.Dir = req.Cwd
@@ -256,6 +265,138 @@ func replaceArgvPlaceholder(argv []string, placeholder, cwd string) []string {
 		out[i] = replacer.Replace(arg)
 	}
 	return out
+}
+
+func prepareAgentTeamMCPConfig(cfg *Config, argv []string, cwd string) ([]string, error) {
+	hasPlaceholder := false
+	hasProjectConfigMarker := false
+	for _, arg := range argv {
+		if strings.Contains(arg, agentTeamMCPConfigPlaceholder) {
+			hasPlaceholder = true
+		}
+		if arg == agentTeamMCPProjectConfigMarker {
+			hasProjectConfigMarker = true
+		}
+	}
+	if !hasPlaceholder && !hasProjectConfigMarker {
+		return argv, nil
+	}
+	out := argv
+	if hasPlaceholder {
+		path, err := writeAgentTeamMCPConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		out = replaceArgvPlaceholder(out, agentTeamMCPConfigPlaceholder, path)
+	}
+	if hasProjectConfigMarker {
+		if err := writeAgentTeamMCPProjectConfig(cfg, cwd); err != nil {
+			return nil, err
+		}
+		filtered := make([]string, 0, len(out))
+		for _, arg := range out {
+			if arg == agentTeamMCPProjectConfigMarker {
+				continue
+			}
+			filtered = append(filtered, arg)
+		}
+		out = filtered
+	}
+	return out, nil
+}
+
+func writeAgentTeamMCPConfig(cfg *Config) (string, error) {
+	dir := filepath.Join(workspaceDir(cfg), "mcp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "agent-team-mcp.json")
+	data, err := buildAgentTeamMCPConfigJSON(cfg)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func writeAgentTeamMCPProjectConfig(cfg *Config, cwd string) error {
+	if strings.TrimSpace(cwd) == "" {
+		return errors.New("cwd is required")
+	}
+	if !filepath.IsAbs(cwd) {
+		return fmt.Errorf("cwd must be absolute: %q", cwd)
+	}
+	path := filepath.Join(cwd, ".trae", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	payload := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &payload); err != nil {
+			return fmt.Errorf("parse existing Trae MCP config: %w", err)
+		}
+	}
+	server, err := buildAgentTeamMCPServerConfig(cfg)
+	if err != nil {
+		return err
+	}
+	mcpServers, ok := payload["mcpServers"].(map[string]any)
+	if !ok {
+		mcpServers = map[string]any{}
+	}
+	mcpServers["octodeck_agent_team"] = server
+	payload["mcpServers"] = mcpServers
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func buildAgentTeamMCPConfigJSON(cfg *Config) ([]byte, error) {
+	server, err := buildAgentTeamMCPServerConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{
+		"mcpServers": map[string]any{
+			"octodeck_agent_team": server,
+		},
+	}
+	return json.MarshalIndent(payload, "", "  ")
+}
+
+func buildAgentTeamMCPServerConfig(cfg *Config) (map[string]any, error) {
+	if cfg == nil {
+		return nil, errors.New("config is required")
+	}
+	if strings.TrimSpace(cfg.Server) == "" || strings.TrimSpace(cfg.Token) == "" {
+		return nil, errors.New("server and token are required")
+	}
+	configPath, err := defaultConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	command, err := os.Executable()
+	if err != nil || command == "" {
+		command = os.Args[0]
+	}
+	if !filepath.IsAbs(command) {
+		if abs, absErr := filepath.Abs(command); absErr == nil {
+			command = abs
+		}
+	}
+	return map[string]any{
+		"type":    "stdio",
+		"command": command,
+		"args":    []string{"mcp-agent-team", "--config", configPath},
+		"env": map[string]string{
+			"OCTODECK_AGENT_TEAM_MCP": "1",
+		},
+		"timeout": 30,
+	}, nil
 }
 
 func workspaceDir(cfg *Config) string {

@@ -29,6 +29,35 @@ describe('agent client adapter', () => {
     expect(def.argvTemplate.join('\n')).toContain('{prompt}');
   });
 
+  test('injects daemon Agent Team MCP config for Claude Code clients', () => {
+    const def = buildAgentBackendFromClient({
+      id: 'mac-claude',
+      displayName: 'Mac Claude',
+      deviceLinkId: 'cl_1234567890abcdef',
+      agentClientId: 'claude-code',
+      discoveredClient: {
+        id: 'claude-code',
+        displayName: 'Claude Code',
+        binary: '/opt/homebrew/bin/claude',
+        capabilities: ['mcp'],
+      },
+      model: 'sonnet',
+    });
+
+    expect(def.argvTemplate).toEqual([
+      '-p',
+      '{prompt}',
+      '--model',
+      '{model}',
+      '--output-format',
+      'stream-json',
+      '--dangerously-skip-permissions',
+      '--mcp-config',
+      '__OCTODECK_AGENT_TEAM_MCP_CONFIG__',
+    ]);
+    expect(def.sessionArgvTemplate).toEqual(['--resume={sessionId}']);
+  });
+
   test('passes selected model through discovered client argv template', () => {
     const def = buildAgentBackendFromClient({
       id: 'mac-codex',
@@ -110,6 +139,7 @@ describe('agent client adapter', () => {
       '--output-format=stream-json',
       '--include-partial-messages',
       '-y',
+      '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
     ]);
   });
 
@@ -137,6 +167,7 @@ describe('agent client adapter', () => {
       '--output-format=stream-json',
       '--include-partial-messages',
       '-y',
+      '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
     ]);
     expect(def.outputProtocol).toBe('jsonline-stream-json');
     expect(def.supportsNativeSessions).toBe(true);

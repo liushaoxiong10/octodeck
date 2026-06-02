@@ -40,6 +40,12 @@ export interface McpContext {
   disableMemoryLayer?: boolean;
 }
 
+const RoleAssignmentsSchema = z.record(z.string(), z.object({
+  runnerAgentId: z.string(),
+  linkId: z.string().optional(),
+  agentClientId: z.string().optional(),
+}));
+
 async function invokeCloudMemory(ctx: McpContext, payload: Record<string, unknown>): Promise<any> {
   if (!ctx.ownerUserId) throw new Error('ownerUserId is required for cloud memory tools');
   const baseUrl = ctx.serverBaseUrl || process.env.OCTODECK_SERVER_URL || 'http://127.0.0.1:3000';
@@ -55,6 +61,35 @@ async function invokeCloudMemory(ctx: McpContext, payload: Record<string, unknow
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `cloud_memory_http_${res.status}`);
   return data;
+}
+
+async function invokeAgentTeamTool(ctx: McpContext, payload: Record<string, unknown>): Promise<any> {
+  if (!ctx.ownerUserId) throw new Error('ownerUserId is required for agent team tools');
+  const baseUrl = ctx.serverBaseUrl || process.env.OCTODECK_SERVER_URL || 'http://127.0.0.1:3000';
+  const secret = ctx.agentRunnerSecret || process.env.OCTODECK_AGENT_RUNNER_SECRET || '';
+  const res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/agent-teams/tool`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${secret}`,
+    },
+    body: JSON.stringify({ userId: ctx.ownerUserId, ...payload }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `agent_team_http_${res.status}`);
+  return data;
+}
+
+function toolJson(data: unknown) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+function toolError(err: unknown) {
+  return { content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }], isError: true };
+}
+
+function isNestedAgentTeamContext(ctx: McpContext): boolean {
+  return ctx.chatJid.startsWith('system:agent-team:') || ctx.groupFolder.startsWith('agent-team-');
 }
 
 function writeIpcFile(dir: string, data: object): string {
@@ -223,6 +258,100 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
   const toRelativePath = createToRelativePath(ctx);
 
   const tools: SdkMcpToolDefinition<any>[] = [
+    tool(
+      'agent_team_list',
+      '列出当前用户可用的 OctoDeck Agent Team。用于先发现 team_id，再调用 agent_team_run。',
+      {},
+      async () => {
+        try {
+          return toolJson(await invokeAgentTeamTool(ctx, { operation: 'list_teams' }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'agent_team_get',
+      '读取指定 OctoDeck Agent Team 的结构、角色、策略和预算。',
+      { team_id: z.string().describe('Agent Team ID') },
+      async (args) => {
+        try {
+          return toolJson(await invokeAgentTeamTool(ctx, { operation: 'get_team', teamId: args.team_id }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'agent_team_run',
+      '启动一个 OctoDeck Agent Team 运行。可指定默认 runner_agent_id，也可通过 role_assignments 为每个角色指定 runner。若返回 waiting_approval，请用 agent_team_decide_approval 继续。',
+      {
+        team_id: z.string().describe('要运行的 Agent Team ID'),
+        prompt: z.string().describe('交给 Agent Team 的任务目标'),
+        runner_agent_id: z.string().optional().describe('默认 Runner / Agent 后端 ID；不传则使用 Team 创建时的默认后端'),
+        role_assignments: RoleAssignmentsSchema.optional().describe('按 roleId 覆盖 Runner，如 {"builder":{"runnerAgentId":"claude-sdk"}}'),
+        max_feedback_iterations: z.number().int().min(0).max(5).optional().describe('测试/评审反馈返工最多轮数'),
+      },
+      async (args) => {
+        try {
+          return toolJson(await invokeAgentTeamTool(ctx, {
+            operation: 'run_team',
+            teamId: args.team_id,
+            prompt: args.prompt,
+            runnerAgentId: args.runner_agent_id,
+            roleAssignments: args.role_assignments,
+            maxFeedbackIterations: args.max_feedback_iterations,
+          }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'agent_team_get_run',
+      '读取 Agent Team Run 的状态、任务、trace events、blackboard、approvals 和 checkpoints。',
+      { run_id: z.string().describe('Agent Team Run ID') },
+      async (args) => {
+        try {
+          return toolJson(await invokeAgentTeamTool(ctx, { operation: 'get_run', runId: args.run_id }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'agent_team_decide_approval',
+      '批准或拒绝一个等待审批的 Agent Team Run。批准后会继续执行；拒绝后会取消 Run。',
+      {
+        run_id: z.string().describe('Agent Team Run ID'),
+        approval_id: z.string().describe('Approval ID'),
+        decision: z.enum(['approved', 'rejected']).describe('审批决策'),
+      },
+      async (args) => {
+        try {
+          return toolJson(await invokeAgentTeamTool(ctx, {
+            operation: 'decide_approval',
+            runId: args.run_id,
+            approvalId: args.approval_id,
+            decision: args.decision,
+          }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'agent_team_cancel_run',
+      '取消一个 Agent Team Run。',
+      { run_id: z.string().describe('Agent Team Run ID') },
+      async (args) => {
+        try {
+          return toolJson(await invokeAgentTeamTool(ctx, { operation: 'cancel_run', runId: args.run_id }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
     tool(
       'cloud_memory_search',
       '搜索云端数据库记忆。云端模式使用此工具读取全局记忆、会话记忆和只读的 client agent 记忆镜像。',
@@ -1663,5 +1792,8 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
   );
   }
 
+  if (isNestedAgentTeamContext(ctx)) {
+    return tools.filter((t: any) => !String(t.name ?? '').startsWith('agent_team_'));
+  }
   return tools;
 }
