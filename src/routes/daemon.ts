@@ -14,7 +14,9 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-export function buildDaemonInstallScript(opts: DaemonInstallScriptOptions): string {
+export function buildDaemonInstallScript(
+  opts: DaemonInstallScriptOptions,
+): string {
   const server = new URL(opts.server).origin;
   const configJson = JSON.stringify(
     {
@@ -33,7 +35,6 @@ export function buildDaemonInstallScript(opts: DaemonInstallScriptOptions): stri
         '/usr/local/bin/claude',
         '/opt/homebrew/bin/claude',
       ],
-      allowedRoots: [],
       maxConcurrentRuns: 4,
       version: 'octodeck-daemon/0.1.0',
     },
@@ -47,8 +48,13 @@ set -euo pipefail
 SERVER=${shellQuote(server)}
 LINK_ID=${shellQuote(opts.deviceId)}
 TOKEN=${shellQuote(opts.token)}
-INSTALL_DIR="${'${HOME}'}/.octodeck-daemon"
+OCTODECK_HOME="${'${HOME}'}/.octodeck"
+INSTALL_DIR="${'${OCTODECK_HOME}'}/daemon"
+WORKSPACE_DIR="${'${OCTODECK_HOME}'}/workspace"
+TASK_DIR="${'${OCTODECK_HOME}'}/task"
+REPOS_DIR="${'${OCTODECK_HOME}'}/repos"
 LEGACY_INSTALL_DIR="${'${HOME}'}/.hcagent"
+LEGACY_OCTODECK_INSTALL_DIR="${'${HOME}'}/.octodeck-daemon"
 CONFIG_FILE="${'${INSTALL_DIR}'}/config.json"
 BIN_URL="${'${SERVER}'}/api/daemon/octodeck-daemon-bin"
 OS="$(uname -s)"
@@ -63,7 +69,7 @@ need() { command -v "$1" >/dev/null 2>&1 || { printf 'missing required command: 
 
 need curl
 
-mkdir -p "${'${INSTALL_DIR}'}/bin"
+mkdir -p "${'${INSTALL_DIR}'}/bin" "${'${WORKSPACE_DIR}'}" "${'${TASK_DIR}'}" "${'${REPOS_DIR}'}"
 
 if [ "${'${OS}'}" = "Darwin" ]; then
   log "stopping existing octodeck-daemon launch agent if present"
@@ -81,6 +87,8 @@ elif command -v systemctl >/dev/null 2>&1; then
   rm -f "${'${SYSTEMD_DIR}'}/hcagent.service"
   systemctl --user daemon-reload >/dev/null 2>&1 || true
 fi
+
+rm -rf "${'${LEGACY_OCTODECK_INSTALL_DIR}'}"
 
 log "downloading octodeck-daemon binary"
 curl -fsSL "${'${BIN_URL}'}" -o "${'${INSTALL_DIR}'}/bin/octodeck-daemon"
@@ -107,6 +115,7 @@ if [ "${'${OS}'}" = "Darwin" ]; then
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>WorkingDirectory</key><string>${'${OCTODECK_HOME}'}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>${'${OCTODECK_DAEMON_PATH}'}</string>
@@ -127,6 +136,7 @@ elif command -v systemctl >/dev/null 2>&1; then
 Description=OctoDeck Daemon
 
 [Service]
+WorkingDirectory=${'${OCTODECK_HOME}'}
 Environment=PATH=${'${OCTODECK_DAEMON_PATH}'}
 Environment=OCTODECK_DAEMON_EXTRA_PATH=${'${OCTODECK_DAEMON_PATH}'}
 ExecStart=${'${INSTALL_DIR}'}/bin/octodeck-daemon -config ${'${CONFIG_FILE}'}
@@ -141,6 +151,7 @@ SERVICE
   log "octodeck-daemon installed and started via systemd user service"
 else
   log "no supported service manager found; starting octodeck-daemon in background"
+  cd "${'${OCTODECK_HOME}'}"
   nohup "${'${INSTALL_DIR}'}/bin/octodeck-daemon" -config "${'${CONFIG_FILE}'}" >"${'${INSTALL_DIR}'}/octodeck-daemon.log" 2>"${'${INSTALL_DIR}'}/octodeck-daemon.err.log" &
 fi
 
@@ -151,15 +162,21 @@ log "device ${'${LINK_ID}'} configured for ${'${SERVER}'}"
 const daemonRoutes = new Hono<{ Variables: Variables }>();
 
 daemonRoutes.get('/octodeck-daemon-bin', async () => {
-  const binaryPath = path.resolve(process.cwd(), 'client/octodeck-daemon/octodeck-daemon');
+  const binaryPath = path.resolve(
+    process.cwd(),
+    'client/octodeck-daemon/octodeck-daemon',
+  );
   let data: Buffer;
   try {
     data = await readFile(binaryPath);
   } catch {
-    return new Response('octodeck-daemon binary not found; build client/octodeck-daemon/octodeck-daemon first\n', {
-      status: 404,
-      headers: { 'content-type': 'text/plain; charset=utf-8' },
-    });
+    return new Response(
+      'octodeck-daemon binary not found; build client/octodeck-daemon/octodeck-daemon first\n',
+      {
+        status: 404,
+        headers: { 'content-type': 'text/plain; charset=utf-8' },
+      },
+    );
   }
 
   return new Response(data, {

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-// Config holds octodeck-daemon configuration loaded from ~/.octodeck-daemon/config.json.
+// Config holds octodeck-daemon configuration loaded from ~/.octodeck/daemon/config.json.
 type Config struct {
 	// Server base URL (https://...). The ws endpoint is derived as
 	// wss://<host>/api/agent-link/ws.
@@ -19,10 +19,14 @@ type Config struct {
 	LinkID string `json:"linkId"`
 	// Absolute paths to binaries the daemon is allowed to spawn.
 	AllowedBinaries []string `json:"allowedBinaries"`
-	// Absolute workspace roots that remote tools may access. Empty means cwd only.
+	// Absolute workspace roots that remote tools may access. Empty defaults to ~/.octodeck.
 	AllowedRoots []string `json:"allowedRoots,omitempty"`
-	// WorkspaceDir stores git repo caches and per-group worktrees for device execution.
+	// WorkspaceDir is the parent directory for per-run agent workspaces.
 	WorkspaceDir string `json:"workspaceDir,omitempty"`
+	// TaskDir is the parent directory for one-off task workspaces.
+	TaskDir string `json:"taskDir,omitempty"`
+	// ReposDir stores shared git checkouts used to create per-run worktrees.
+	ReposDir string `json:"reposDir,omitempty"`
 	// Optional: cap concurrent runs (default 4).
 	MaxConcurrentRuns int `json:"maxConcurrentRuns"`
 	// Optional: client display version reported in hello.
@@ -35,11 +39,51 @@ func defaultConfigPath() (string, error) {
 	if p := os.Getenv("OCTODECK_DAEMON_CONFIG"); p != "" {
 		return p, nil
 	}
+	home, err := octodeckHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "daemon", "config.json"), nil
+}
+
+func octodeckHomeDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".octodeck-daemon", "config.json"), nil
+	return filepath.Join(home, ".octodeck"), nil
+}
+
+func defaultWorkspaceDir() (string, error) {
+	home, err := octodeckHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "workspace"), nil
+}
+
+func defaultTaskDir() (string, error) {
+	home, err := octodeckHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "task"), nil
+}
+
+func defaultReposDir() (string, error) {
+	home, err := octodeckHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "repos"), nil
+}
+
+func defaultAllowedRoots() ([]string, error) {
+	home, err := octodeckHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	return []string{home}, nil
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -65,11 +109,32 @@ func loadConfig(path string) (*Config, error) {
 		cfg.MaxConcurrentRuns = 4
 	}
 	if cfg.WorkspaceDir == "" {
-		home, err := os.UserHomeDir()
+		workspace, err := defaultWorkspaceDir()
 		if err != nil {
 			return nil, err
 		}
-		cfg.WorkspaceDir = filepath.Join(home, ".octodeck-daemon", "workspace")
+		cfg.WorkspaceDir = workspace
+	}
+	if cfg.TaskDir == "" {
+		task, err := defaultTaskDir()
+		if err != nil {
+			return nil, err
+		}
+		cfg.TaskDir = task
+	}
+	if cfg.ReposDir == "" {
+		repos, err := defaultReposDir()
+		if err != nil {
+			return nil, err
+		}
+		cfg.ReposDir = repos
+	}
+	if len(cfg.AllowedRoots) == 0 {
+		roots, err := defaultAllowedRoots()
+		if err != nil {
+			return nil, err
+		}
+		cfg.AllowedRoots = roots
 	}
 	return &cfg, nil
 }
@@ -96,6 +161,12 @@ func (c *Config) validate() error {
 	}
 	if c.WorkspaceDir != "" && !filepath.IsAbs(c.WorkspaceDir) {
 		return fmt.Errorf("workspaceDir must be absolute: %q", c.WorkspaceDir)
+	}
+	if c.TaskDir != "" && !filepath.IsAbs(c.TaskDir) {
+		return fmt.Errorf("taskDir must be absolute: %q", c.TaskDir)
+	}
+	if c.ReposDir != "" && !filepath.IsAbs(c.ReposDir) {
+		return fmt.Errorf("reposDir must be absolute: %q", c.ReposDir)
 	}
 	return nil
 }

@@ -3,9 +3,13 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 const getSessionMock = vi.hoisted(() => vi.fn());
 const registerRunMock = vi.hoisted(() => vi.fn());
 const unregisterRunMock = vi.hoisted(() => vi.fn());
-const getSystemSettingsMock = vi.hoisted(() => vi.fn(() => ({ containerTimeout: 1000, containerMaxOutputSize: 4096 })));
+const getSystemSettingsMock = vi.hoisted(() =>
+  vi.fn(() => ({ containerTimeout: 1000, containerMaxOutputSize: 4096 })),
+);
 
-vi.mock('../src/agent-link/registry.js', () => ({ getSession: getSessionMock }));
+vi.mock('../src/agent-link/registry.js', () => ({
+  getSession: getSessionMock,
+}));
 vi.mock('../src/agent-link/run-rpc.js', () => ({
   registerRun: registerRunMock,
   unregisterRun: unregisterRunMock,
@@ -14,7 +18,9 @@ vi.mock('../src/runtime-config.js', () => ({
   LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS: 7_200_000,
   getSystemSettings: getSystemSettingsMock,
 }));
-vi.mock('../src/config.js', () => ({ GROUPS_DIR: '/tmp/octodeck-test/groups' }));
+vi.mock('../src/config.js', () => ({
+  GROUPS_DIR: '/tmp/octodeck-test/groups',
+}));
 
 describe('agent-link run context forwarding', () => {
   beforeEach(() => {
@@ -33,7 +39,8 @@ describe('agent-link run context forwarding', () => {
       },
     });
 
-    const { runViaAgentLink } = await import('../src/backends/agent-link-driver.js');
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
     const promise = runViaAgentLink(
       {
         group: {
@@ -66,12 +73,20 @@ describe('agent-link run context forwarding', () => {
       },
       remoteCwdPlaceholder: '__OCTODECK_REMOTE_CWD__',
       context: {
+        cwd: '__OCTODECK_REMOTE_CWD__',
+        repo: {
+          gitUrl: 'https://github.com/acme/project.git',
+          kind: 'git',
+          cwd: '__OCTODECK_REMOTE_CWD__',
+        },
         group: { repoGitUrl: 'https://github.com/acme/project.git' },
       },
     });
     expect(sent[0].argv).toContain('--cwd=__OCTODECK_REMOTE_CWD__');
 
-    registerRunMock.mock.calls.at(-1)?.[0].finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
     await promise;
   });
 
@@ -85,7 +100,8 @@ describe('agent-link run context forwarding', () => {
       },
     });
 
-    const { runViaAgentLink } = await import('../src/backends/agent-link-driver.js');
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
     const promise = runViaAgentLink(
       {
         group: {
@@ -131,12 +147,18 @@ describe('agent-link run context forwarding', () => {
         backendId: 'coco',
         executionMode: 'host',
         input: { prompt: 'hello', sessionId: 'sess-1', agentId: 'agent-1' },
-        group: { folder: 'demo', backend: 'coco', executionNode: 'cl_1234567890abcdef' },
+        group: {
+          folder: 'demo',
+          backend: 'coco',
+          executionNode: 'cl_1234567890abcdef',
+        },
       },
     });
     expect(sent[0].stdinJson).toContain('"prompt":"hello"');
 
-    registerRunMock.mock.calls.at(-1)?.[0].finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
     await promise;
   });
 
@@ -150,7 +172,8 @@ describe('agent-link run context forwarding', () => {
       },
     });
 
-    const { runViaAgentLink } = await import('../src/backends/agent-link-driver.js');
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
     const promise = runViaAgentLink(
       {
         group: {
@@ -185,7 +208,9 @@ describe('agent-link run context forwarding', () => {
 
     expect(sent[0].argv).toEqual(['-p', 'build role output']);
 
-    registerRunMock.mock.calls.at(-1)?.[0].finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
     await promise;
   });
 
@@ -199,8 +224,10 @@ describe('agent-link run context forwarding', () => {
       },
     });
 
-    const { runViaAgentLink } = await import('../src/backends/agent-link-driver.js');
-    const { normalizeAgentClientBackendDef } = await import('../src/backends/agent-client-adapter.js');
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const { normalizeAgentClientBackendDef } =
+      await import('../src/backends/agent-client-adapter.js');
     const backendDef = normalizeAgentClientBackendDef({
       id: 'mac-coco-gpt',
       displayName: 'Mac Coco GPT',
@@ -232,18 +259,25 @@ describe('agent-link run context forwarding', () => {
       {
         backendId: backendDef.id,
         resolveBinary: () => backendDef.binary,
-        buildArgv: ({ prompt, cwd }) => backendDef.argvTemplate.map((arg) => arg
-          .replace('{prompt}', prompt)
-          .replace('{cwd}', cwd)
-          .replace('{model}', backendDef.model ?? '')),
+        buildArgv: ({ prompt, cwd }) =>
+          backendDef.argvTemplate.map((arg) =>
+            arg
+              .replace('{prompt}', prompt)
+              .replace('{cwd}', cwd)
+              .replace('{model}', backendDef.model ?? ''),
+          ),
         outputProtocol: backendDef.outputProtocol,
       },
       'cl_1234567890abcdef',
     );
 
-    expect(sent[0].argv).toContain('__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__');
+    expect(sent[0].argv).toContain(
+      '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
+    );
 
-    registerRunMock.mock.calls.at(-1)?.[0].finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
     await promise;
   });
 
@@ -257,7 +291,8 @@ describe('agent-link run context forwarding', () => {
       },
     });
 
-    const { runViaAgentLink } = await import('../src/backends/agent-link-driver.js');
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
     const promise = runViaAgentLink(
       {
         group: {
@@ -285,7 +320,9 @@ describe('agent-link run context forwarding', () => {
 
     expect(sent[0].timeoutMs).toBe(7_200_000);
 
-    registerRunMock.mock.calls.at(-1)?.[0].finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
     await promise;
   });
 });

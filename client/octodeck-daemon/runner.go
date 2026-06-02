@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -65,9 +66,21 @@ func (r *runner) spawn(parent context.Context, req *RunRequestFrame) {
 			return
 		}
 		req.Cwd = cwd
-		if req.RemoteCwdPlaceholder != "" {
-			req.Argv = replaceArgvPlaceholder(req.Argv, req.RemoteCwdPlaceholder, cwd)
+	} else {
+		cwd, err := defaultRunCwd(r.cfg, req.Cwd)
+		if err != nil {
+			r.sendErr(req.RunID, fmt.Errorf("default cwd: %w", err))
+			return
 		}
+		req.Cwd = cwd
+	}
+	if req.RemoteCwdPlaceholder != "" {
+		req.Argv = replaceArgvPlaceholder(req.Argv, req.RemoteCwdPlaceholder, req.Cwd)
+		req.Context = replaceContextPlaceholder(req.Context, req.RemoteCwdPlaceholder, req.Cwd)
+	}
+	if !isPathAllowedByRoots(req.Cwd, r.cfg.AllowedRoots, req.Cwd) {
+		r.sendErr(req.RunID, fmt.Errorf("cwd outside allowed roots: %s", req.Cwd))
+		return
 	}
 	argv, err := prepareAgentTeamMCPConfig(r.cfg, req.Argv, req.Cwd)
 	if err != nil {
@@ -183,7 +196,7 @@ func resolveWorkspaceRepo(ctx context.Context, cfg *Config, spec *WorkspaceRepoS
 		if spec.GitURL == "" {
 			return "", errors.New("gitUrl is required")
 		}
-		cacheDir := filepath.Join(workspaceDir(cfg), "repos", repoCacheName(spec.GitURL))
+		cacheDir := filepath.Join(reposDir(cfg), repoCacheName(spec.GitURL))
 		if !isGitDir(cacheDir) {
 			if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
 				return "", err
@@ -199,17 +212,19 @@ func resolveWorkspaceRepo(ctx context.Context, cfg *Config, spec *WorkspaceRepoS
 				return "", err
 			}
 		} else {
-			_ = runGit(ctx, cacheDir, "fetch", "--all", "--prune")
+			if err := runGit(ctx, cacheDir, "fetch", "--all", "--prune"); err != nil {
+				return "", err
+			}
 		}
-		worktreeDir := filepath.Join(workspaceDir(cfg), "worktrees", safeGroupFolder(spec.GroupFolder))
-		if isGitDir(worktreeDir) {
-			return worktreeDir, nil
-		}
-		_ = os.RemoveAll(worktreeDir)
-		if err := os.MkdirAll(filepath.Dir(worktreeDir), 0o755); err != nil {
+		ref, err := syncRepoDefaultBranch(ctx, cacheDir)
+		if err != nil {
 			return "", err
 		}
-		if err := runGit(ctx, cacheDir, "worktree", "add", worktreeDir, "HEAD"); err != nil {
+		worktreeDir, err := createWorkspaceDir(cfg, spec.GroupFolder)
+		if err != nil {
+			return "", err
+		}
+		if err := runGit(ctx, cacheDir, "worktree", "add", worktreeDir, ref); err != nil {
 			_ = os.RemoveAll(worktreeDir)
 			return "", err
 		}
@@ -232,12 +247,8 @@ func resolveWorkspaceRepo(ctx context.Context, cfg *Config, spec *WorkspaceRepoS
 		if !isGitDir(devicePath) {
 			return devicePath, nil
 		}
-		worktreeDir := filepath.Join(workspaceDir(cfg), "worktrees", safeGroupFolder(spec.GroupFolder))
-		if isGitDir(worktreeDir) {
-			return worktreeDir, nil
-		}
-		_ = os.RemoveAll(worktreeDir)
-		if err := os.MkdirAll(filepath.Dir(worktreeDir), 0o755); err != nil {
+		worktreeDir, err := createWorkspaceDir(cfg, spec.GroupFolder)
+		if err != nil {
 			return "", err
 		}
 		if err := runGit(ctx, devicePath, "worktree", "add", worktreeDir, "HEAD"); err != nil {
@@ -265,6 +276,84 @@ func replaceArgvPlaceholder(argv []string, placeholder, cwd string) []string {
 		out[i] = replacer.Replace(arg)
 	}
 	return out
+}
+
+func replaceContextPlaceholder(ctx any, placeholder, cwd string) any {
+	if ctx == nil || placeholder == "" {
+		return ctx
+	}
+	data, err := json.Marshal(ctx)
+	if err != nil {
+		return ctx
+	}
+	replaced := strings.ReplaceAll(string(data), placeholder, cwd)
+	var out any
+	if err := json.Unmarshal([]byte(replaced), &out); err != nil {
+		return ctx
+	}
+	return out
+}
+
+func defaultRunCwd(cfg *Config, requestedCwd string) (string, error) {
+	base := filepath.Base(filepath.Clean(requestedCwd))
+	return createRandomDir(taskDir(cfg), safeGroupFolder(base))
+}
+
+func createWorkspaceDir(cfg *Config, groupFolder string) (string, error) {
+	return createRandomDir(workspaceDir(cfg), safeGroupFolder(groupFolder))
+}
+
+func createRandomDir(parent, prefix string) (string, error) {
+	if prefix == "" {
+		prefix = "run"
+	}
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", err
+	}
+	for i := 0; i < 16; i++ {
+		dir := filepath.Join(parent, prefix+"-"+randomHex(8))
+		if err := os.Mkdir(dir, 0o755); err == nil {
+			return dir, nil
+		} else if !os.IsExist(err) {
+			return "", err
+		}
+	}
+	return "", errors.New("failed to allocate random run directory")
+}
+
+func randomHex(n int) string {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
+}
+
+func syncRepoDefaultBranch(ctx context.Context, repoDir string) (string, error) {
+	if err := runGit(ctx, repoDir, "remote", "set-head", "origin", "--auto"); err != nil {
+		// Some test/local remotes do not advertise a symbolic HEAD; fall back below.
+		_ = err
+	}
+	defaultRef, err := gitOutput(ctx, repoDir, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+	if err != nil || strings.TrimSpace(defaultRef) == "" {
+		if err := runGit(ctx, repoDir, "rev-parse", "--verify", "origin/main"); err == nil {
+			defaultRef = "origin/main"
+		} else {
+			defaultRef = "HEAD"
+		}
+	}
+	defaultRef = strings.TrimSpace(defaultRef)
+	branch := strings.TrimPrefix(defaultRef, "origin/")
+	if defaultRef != "HEAD" {
+		if err := runGit(ctx, repoDir, "checkout", "-B", branch, defaultRef); err != nil {
+			return "", err
+		}
+		if err := runGit(ctx, repoDir, "reset", "--hard", defaultRef); err != nil {
+			return "", err
+		}
+		return defaultRef, nil
+	}
+	return "HEAD", nil
 }
 
 func prepareAgentTeamMCPConfig(cfg *Config, argv []string, cwd string) ([]string, error) {
@@ -403,11 +492,39 @@ func workspaceDir(cfg *Config) string {
 	if cfg != nil && cfg.WorkspaceDir != "" {
 		return cfg.WorkspaceDir
 	}
-	home, err := os.UserHomeDir()
+	workspace, err := defaultWorkspaceDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "octodeck-daemon-workspace")
+		return filepath.Join(os.TempDir(), "octodeck", "workspace")
 	}
-	return filepath.Join(home, ".octodeck-daemon", "workspace")
+	return workspace
+}
+
+func taskDir(cfg *Config) string {
+	if cfg != nil && cfg.TaskDir != "" {
+		return cfg.TaskDir
+	}
+	if cfg != nil && cfg.WorkspaceDir != "" {
+		return filepath.Join(filepath.Dir(cfg.WorkspaceDir), "task")
+	}
+	task, err := defaultTaskDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "octodeck", "task")
+	}
+	return task
+}
+
+func reposDir(cfg *Config) string {
+	if cfg != nil && cfg.ReposDir != "" {
+		return cfg.ReposDir
+	}
+	if cfg != nil && cfg.WorkspaceDir != "" {
+		return filepath.Join(filepath.Dir(cfg.WorkspaceDir), "repos")
+	}
+	repos, err := defaultReposDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "octodeck", "repos")
+	}
+	return repos
 }
 
 func repoCacheName(gitURL string) string {
@@ -459,6 +576,18 @@ func runGit(ctx context.Context, cwd string, args ...string) error {
 	return nil
 }
 
+func gitOutput(ctx context.Context, cwd string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
 func (r *runner) sendErr(runID string, err error) {
 	exit := -1
 	_ = r.send(&RunResultFrame{
@@ -491,10 +620,30 @@ func buildEnv(overrides map[string]string, runContext any) []string {
 		if data, err := json.Marshal(runContext); err == nil {
 			base["OCTODECK_RUN_CONTEXT_JSON"] = string(data)
 		}
+		if repo := repoContextFromRunContext(runContext); repo != nil {
+			if data, err := json.Marshal(repo); err == nil {
+				base["OCTODECK_REPO_CONTEXT_JSON"] = string(data)
+			}
+		}
 	}
 	out := make([]string, 0, len(base))
 	for k, v := range base {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+func repoContextFromRunContext(runContext any) any {
+	if m, ok := runContext.(map[string]any); ok {
+		return m["repo"]
+	}
+	data, err := json.Marshal(runContext)
+	if err != nil {
+		return nil
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil
+	}
+	return parsed["repo"]
 }

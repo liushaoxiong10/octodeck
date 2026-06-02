@@ -16,11 +16,17 @@ import path from 'path';
 
 import { GROUPS_DIR } from '../config.js';
 import { logger } from '../logger.js';
-import { LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS, getSystemSettings } from '../runtime-config.js';
+import {
+  LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS,
+  getSystemSettings,
+} from '../runtime-config.js';
 import type { ContainerOutput } from '../container-runner.js';
 import { runViaAgentLink } from './agent-link-driver.js';
 import type { BackendRunArgs } from './types.js';
-import { shouldDisableAgentTeamMcp, stripAgentTeamMcpConfigArgs } from './validation.js';
+import {
+  shouldDisableAgentTeamMcp,
+  stripAgentTeamMcpConfigArgs,
+} from './validation.js';
 
 export type OutputProtocol = 'jsonline-stream-json' | 'plain-text';
 
@@ -78,7 +84,9 @@ function extractAssistantText(evt: CocoEvent): string | null {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     const text = content
-      .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+      .filter(
+        (block) => block?.type === 'text' && typeof block.text === 'string',
+      )
       .map((block) => block.text)
       .join('');
     return text || null;
@@ -103,6 +111,69 @@ interface ParseState {
   lastAssistantText: string | null;
 }
 
+function buildRunContext(
+  args: BackendRunArgs,
+  cfg: HostCliDriverConfig,
+  cwd: string,
+): Record<string, unknown> {
+  const { group, input, executionMode } = args;
+  const repo = buildRepoContext(group, cwd);
+  return {
+    backendId: cfg.backendId,
+    executionMode,
+    input,
+    cwd,
+    ...(repo ? { repo } : {}),
+    group: {
+      name: group.name,
+      folder: group.folder,
+      backend: group.backend,
+      executionMode: group.executionMode,
+      executionNode: group.executionNode,
+      customCwd: group.customCwd,
+      repoId: group.repoId,
+      repoGitUrl: group.repoGitUrl,
+      repoDevicePath: group.repoDevicePath,
+      created_by: group.created_by,
+      is_home: group.is_home,
+    },
+  };
+}
+
+function buildRepoContext(
+  group: BackendRunArgs['group'],
+  cwd: string,
+): Record<string, unknown> | null {
+  if (!group.repoId && !group.repoGitUrl && !group.repoDevicePath) {
+    return null;
+  }
+  return {
+    id: group.repoId,
+    gitUrl: group.repoGitUrl,
+    devicePath: group.repoDevicePath,
+    kind: group.repoGitUrl
+      ? 'git'
+      : group.repoDevicePath
+        ? 'device_path'
+        : undefined,
+    cwd,
+  };
+}
+
+function buildAgentEnv(
+  baseEnv: NodeJS.ProcessEnv,
+  overrides: Record<string, string> | undefined,
+  runContext: Record<string, unknown>,
+): NodeJS.ProcessEnv {
+  const repo = runContext.repo;
+  return {
+    ...baseEnv,
+    ...(overrides || {}),
+    OCTODECK_RUN_CONTEXT_JSON: JSON.stringify(runContext),
+    ...(repo ? { OCTODECK_REPO_CONTEXT_JSON: JSON.stringify(repo) } : {}),
+  };
+}
+
 export async function runHostCli(
   args: BackendRunArgs,
   cfg: HostCliDriverConfig,
@@ -112,7 +183,11 @@ export async function runHostCli(
   // Phase 5.2 dispatch: if the group is pinned to a remote agent link, run
   // the same host-CLI logic on the daemon instead of spawning locally.
   const execNode = group.executionNode;
-  if (execNode && execNode !== 'server-local' && /^cl_[0-9a-f]{16}$/.test(execNode)) {
+  if (
+    execNode &&
+    execNode !== 'server-local' &&
+    /^cl_[0-9a-f]{16}$/.test(execNode)
+  ) {
     return runViaAgentLink(args, cfg, execNode);
   }
 
@@ -152,6 +227,7 @@ export async function runHostCli(
 
   // 3. argv
   let argv: string[];
+  const runContext = buildRunContext(args, cfg, groupDir);
   try {
     argv = cfg.buildArgv({
       prompt: input.prompt,
@@ -179,13 +255,14 @@ export async function runHostCli(
       : cfg.timeoutMs && cfg.timeoutMs > 0
         ? cfg.timeoutMs
         : undefined;
-  const timeoutMs = configuredTimeoutMs || (input.isScheduledTask
-    ? Math.max(settings.containerTimeout, LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS)
-    : settings.containerTimeout);
+  const timeoutMs =
+    configuredTimeoutMs ||
+    (input.isScheduledTask
+      ? Math.max(settings.containerTimeout, LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS)
+      : settings.containerTimeout);
   const maxOutputBytes =
-    (cfg.maxOutputBytes && cfg.maxOutputBytes > 0
-      ? cfg.maxOutputBytes
-      : 0) || settings.containerMaxOutputSize;
+    (cfg.maxOutputBytes && cfg.maxOutputBytes > 0 ? cfg.maxOutputBytes : 0) ||
+    settings.containerMaxOutputSize;
 
   const startTime = Date.now();
 
@@ -199,7 +276,7 @@ export async function runHostCli(
 
     const proc = spawn(binary, argv, {
       cwd: groupDir,
-      env: { ...process.env, ...(cfg.envOverrides || {}) },
+      env: buildAgentEnv(process.env, cfg.envOverrides, runContext),
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
     });
@@ -384,9 +461,7 @@ export async function runHostCli(
         ? {
             status: 'error',
             result: text || `${cfg.backendId} 返回错误`,
-            error:
-              text ||
-              `${cfg.backendId} reported failure (code=${code})`,
+            error: text || `${cfg.backendId} reported failure (code=${code})`,
             newSessionId: state.lastSessionId,
           }
         : {

@@ -22,7 +22,10 @@ import type { ChildProcess } from 'child_process';
 
 import { GROUPS_DIR } from '../config.js';
 import { logger } from '../logger.js';
-import { LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS, getSystemSettings } from '../runtime-config.js';
+import {
+  LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS,
+  getSystemSettings,
+} from '../runtime-config.js';
 import type { ContainerOutput } from '../container-runner.js';
 import { getSession } from '../agent-link/registry.js';
 import {
@@ -32,7 +35,10 @@ import {
 } from '../agent-link/run-rpc.js';
 import type { BackendRunArgs } from './types.js';
 import type { HostCliDriverConfig } from './host-cli-driver.js';
-import { shouldDisableAgentTeamMcp, stripAgentTeamMcpConfigArgs } from './validation.js';
+import {
+  shouldDisableAgentTeamMcp,
+  stripAgentTeamMcpConfigArgs,
+} from './validation.js';
 
 interface CocoEvent {
   type?: string;
@@ -41,7 +47,10 @@ interface CocoEvent {
   result?: string;
   is_error?: boolean;
   delta?: { role?: string; content?: string };
-  message?: { role?: string; content?: string | Array<{ type?: string; text?: string }> };
+  message?: {
+    role?: string;
+    content?: string | Array<{ type?: string; text?: string }>;
+  };
 }
 
 function extractAssistantText(evt: CocoEvent): string | null {
@@ -57,7 +66,9 @@ function extractAssistantText(evt: CocoEvent): string | null {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     const text = content
-      .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+      .filter(
+        (block) => block?.type === 'text' && typeof block.text === 'string',
+      )
       .map((block) => block.text)
       .join('');
     return text || null;
@@ -88,12 +99,19 @@ function newRunId(): string {
   return crypto.randomUUID();
 }
 
-function buildRunContext(args: BackendRunArgs, cfg: HostCliDriverConfig): Record<string, unknown> {
+function buildRunContext(
+  args: BackendRunArgs,
+  cfg: HostCliDriverConfig,
+  cwd: string,
+): Record<string, unknown> {
   const { group, input, executionMode } = args;
+  const repo = buildRepoContext(group, cwd);
   return {
     backendId: cfg.backendId,
     executionMode,
     input,
+    cwd,
+    ...(repo ? { repo } : {}),
     group: {
       name: group.name,
       folder: group.folder,
@@ -110,7 +128,29 @@ function buildRunContext(args: BackendRunArgs, cfg: HostCliDriverConfig): Record
   };
 }
 
-function buildWorkspaceRepo(group: BackendRunArgs['group']):
+function buildRepoContext(
+  group: BackendRunArgs['group'],
+  cwd: string,
+): Record<string, unknown> | null {
+  if (!group.repoId && !group.repoGitUrl && !group.repoDevicePath) {
+    return null;
+  }
+  return {
+    id: group.repoId,
+    gitUrl: group.repoGitUrl,
+    devicePath: group.repoDevicePath,
+    kind: group.repoGitUrl
+      ? 'git'
+      : group.repoDevicePath
+        ? 'device_path'
+        : undefined,
+    cwd,
+  };
+}
+
+function buildWorkspaceRepo(
+  group: BackendRunArgs['group'],
+):
   | { kind: 'git'; gitUrl: string; groupFolder: string }
   | { kind: 'device_path'; devicePath: string; groupFolder: string }
   | undefined {
@@ -118,7 +158,11 @@ function buildWorkspaceRepo(group: BackendRunArgs['group']):
     return { kind: 'git', gitUrl: group.repoGitUrl, groupFolder: group.folder };
   }
   if (group.repoDevicePath) {
-    return { kind: 'device_path', devicePath: group.repoDevicePath, groupFolder: group.folder };
+    return {
+      kind: 'device_path',
+      devicePath: group.repoDevicePath,
+      groupFolder: group.folder,
+    };
   }
   return undefined;
 }
@@ -170,6 +214,8 @@ export async function runViaAgentLink(
   }
 
   const workspaceRepo = buildWorkspaceRepo(group);
+  const contextCwd = workspaceRepo ? REMOTE_CWD_PLACEHOLDER : groupDir;
+  const runContext = buildRunContext(args, cfg, contextCwd);
 
   // 3. argv
   let argv: string[];
@@ -177,7 +223,7 @@ export async function runViaAgentLink(
     argv = cfg.buildArgv({
       prompt: input.prompt,
       sessionId: input.sessionId,
-      cwd: workspaceRepo ? REMOTE_CWD_PLACEHOLDER : groupDir,
+      cwd: REMOTE_CWD_PLACEHOLDER,
       folder: group.folder,
       backendId: cfg.backendId,
     });
@@ -200,13 +246,14 @@ export async function runViaAgentLink(
       : cfg.timeoutMs && cfg.timeoutMs > 0
         ? cfg.timeoutMs
         : undefined;
-  const timeoutMs = configuredTimeoutMs || (input.isScheduledTask
-    ? Math.max(settings.containerTimeout, LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS)
-    : settings.containerTimeout);
+  const timeoutMs =
+    configuredTimeoutMs ||
+    (input.isScheduledTask
+      ? Math.max(settings.containerTimeout, LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS)
+      : settings.containerTimeout);
   const maxOutputBytes =
-    (cfg.maxOutputBytes && cfg.maxOutputBytes > 0
-      ? cfg.maxOutputBytes
-      : 0) || settings.containerMaxOutputSize;
+    (cfg.maxOutputBytes && cfg.maxOutputBytes > 0 ? cfg.maxOutputBytes : 0) ||
+    settings.containerMaxOutputSize;
 
   const startTime = Date.now();
   const runId = newRunId();
@@ -302,7 +349,13 @@ export async function runViaAgentLink(
 
     const finalize = async (
       info:
-        | { kind: 'result'; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number }
+        | {
+            kind: 'result';
+            exitCode: number | null;
+            signal: string | null;
+            timedOut: boolean;
+            durationMs: number;
+          }
         | { kind: 'fail'; reason: string },
     ): Promise<void> => {
       // Persist run log
@@ -396,8 +449,7 @@ export async function runViaAgentLink(
             status: 'error',
             result: text || `${cfg.backendId} 返回错误`,
             error:
-              text ||
-              `${cfg.backendId} reported failure (code=${exitCode})`,
+              text || `${cfg.backendId} reported failure (code=${exitCode})`,
             newSessionId: state.lastSessionId,
           }
         : {
@@ -463,9 +515,9 @@ export async function runViaAgentLink(
       outputProtocol: cfg.outputProtocol,
       timeoutMs,
       maxOutputBytes,
-      context: buildRunContext(args, cfg),
+      context: runContext,
       stdinJson: JSON.stringify(input),
-      remoteCwdPlaceholder: workspaceRepo ? REMOTE_CWD_PLACEHOLDER : undefined,
+      remoteCwdPlaceholder: REMOTE_CWD_PLACEHOLDER,
       workspaceRepo,
     });
     if (!ok) {

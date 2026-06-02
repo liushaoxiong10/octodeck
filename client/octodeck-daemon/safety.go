@@ -13,7 +13,8 @@ import (
 //  2. cwd must be absolute.
 //  3. env keys must not include LD_PRELOAD, NODE_OPTIONS, DYLD_INSERT_LIBRARIES,
 //     LD_LIBRARY_PATH, PATH (we don't let server override $PATH wholesale).
-//  4. argv entries must not contain NUL bytes.
+//  4. cwd must be under ~/.octodeck or the configured allowed roots.
+//  5. argv entries must not contain NUL bytes.
 func validateRunRequest(cfg *Config, req *RunRequestFrame) error {
 	if !filepath.IsAbs(req.Binary) {
 		return fmt.Errorf("binary must be absolute: %q", req.Binary)

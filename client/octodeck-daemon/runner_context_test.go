@@ -24,7 +24,7 @@ func TestRunnerInjectsContextEnvAndStdin(t *testing.T) {
 
 	frames := make([]any, 0)
 	pool := newRunnerPool(1)
-	r := newRunner(&Config{AllowedBinaries: []string{"/usr/bin/python3"}}, pool, func(frame any) error {
+	r := newRunner(&Config{AllowedBinaries: []string{"/usr/bin/python3"}, TaskDir: filepath.Join(dir, "task")}, pool, func(frame any) error {
 		frames = append(frames, frame)
 		return nil
 	})
@@ -56,6 +56,78 @@ func TestRunnerInjectsContextEnvAndStdin(t *testing.T) {
 	}
 }
 
+func TestRunnerReplacesRemoteCwdPlaceholderInRepoContextEnv(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "capture_repo.py")
+	out := filepath.Join(dir, "out.txt")
+	if err := os.WriteFile(script, []byte("import os, sys\nopen(sys.argv[1], 'w').write(os.environ.get('OCTODECK_RUN_CONTEXT_JSON', '') + '\\n' + os.environ.get('OCTODECK_REPO_CONTEXT_JSON', ''))\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	frames := make([]any, 0)
+	pool := newRunnerPool(1)
+	taskDir := filepath.Join(dir, "task")
+	r := newRunner(&Config{AllowedBinaries: []string{"/usr/bin/python3"}, TaskDir: taskDir}, pool, func(frame any) error {
+		frames = append(frames, frame)
+		return nil
+	})
+	if !pool.reserve("run-repo-env") {
+		t.Fatal("failed to reserve run")
+	}
+	r.spawn(context.Background(), &RunRequestFrame{
+		RunID:                "run-repo-env",
+		Binary:               "/usr/bin/python3",
+		Argv:                 []string{script, out},
+		Cwd:                  "/server/groups/repo-demo",
+		OutputProtocol:       "plain-text",
+		TimeoutMs:            int64(5 * time.Second / time.Millisecond),
+		MaxOutputBytes:       4096,
+		RemoteCwdPlaceholder: "__OCTODECK_REMOTE_CWD__",
+		Context: map[string]any{
+			"cwd": "__OCTODECK_REMOTE_CWD__",
+			"repo": map[string]any{
+				"kind":   "git",
+				"gitUrl": "https://github.com/acme/project.git",
+				"cwd":    "__OCTODECK_REMOTE_CWD__",
+			},
+		},
+	})
+
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("%v; frames=%s", err, stringifyFrames(frames))
+	}
+	parts := strings.SplitN(string(data), "\n", 2)
+	if len(parts) != 2 {
+		t.Fatalf("expected two env json lines, got %q", string(data))
+	}
+	var runCtx struct {
+		Cwd  string `json:"cwd"`
+		Repo struct {
+			Kind   string `json:"kind"`
+			GitURL string `json:"gitUrl"`
+			Cwd    string `json:"cwd"`
+		} `json:"repo"`
+	}
+	if err := json.Unmarshal([]byte(parts[0]), &runCtx); err != nil {
+		t.Fatal(err)
+	}
+	var repoCtx struct {
+		Kind   string `json:"kind"`
+		GitURL string `json:"gitUrl"`
+		Cwd    string `json:"cwd"`
+	}
+	if err := json.Unmarshal([]byte(parts[1]), &repoCtx); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(runCtx.Cwd, taskDir) || runCtx.Repo.Cwd != runCtx.Cwd || repoCtx.Cwd != runCtx.Cwd {
+		t.Fatalf("expected placeholders replaced with task cwd, run=%#v repo=%#v", runCtx, repoCtx)
+	}
+	if runCtx.Repo.GitURL != "https://github.com/acme/project.git" || repoCtx.GitURL != runCtx.Repo.GitURL {
+		t.Fatalf("repo metadata missing: run=%#v repo=%#v", runCtx, repoCtx)
+	}
+}
+
 func TestResolveWorkspaceRepoUsesWorktreeForGitDirectory(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "source")
@@ -76,8 +148,58 @@ func TestResolveWorkspaceRepoUsesWorktreeForGitDirectory(t *testing.T) {
 	if cwd == repo {
 		t.Fatalf("expected git directory to use an isolated worktree, got source repo: %s", cwd)
 	}
+	if filepath.Dir(cwd) != cfg.WorkspaceDir {
+		t.Fatalf("expected worktree under workspace root %q, got %s", cfg.WorkspaceDir, cwd)
+	}
 	if _, err := os.Stat(filepath.Join(cwd, "README.md")); err != nil {
 		t.Fatalf("expected worktree to contain repository files: %v", err)
+	}
+}
+
+func TestResolveWorkspaceRepoUsesSharedReposAndFreshWorkspace(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	mustRun(t, root, "git", "init", source)
+	mustRun(t, source, "git", "branch", "-M", "main")
+	mustRun(t, source, "git", "config", "user.email", "test@example.com")
+	mustRun(t, source, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, source, "git", "add", "README.md")
+	mustRun(t, source, "git", "commit", "-m", "v1")
+
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	first, err := resolveWorkspaceRepo(context.Background(), cfg, &WorkspaceRepoSpec{Kind: "git", GitURL: source, GroupFolder: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(first) != cfg.WorkspaceDir {
+		t.Fatalf("expected worktree under workspace root %q, got %s", cfg.WorkspaceDir, first)
+	}
+	reposRoot := filepath.Join(root, "repos")
+	entries, err := os.ReadDir(reposRoot)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected one shared repo under %s, entries=%v err=%v", reposRoot, entries, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, source, "git", "commit", "-am", "v2")
+	second, err := resolveWorkspaceRepo(context.Background(), cfg, &WorkspaceRepoSpec{Kind: "git", GitURL: source, GroupFolder: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatalf("expected a fresh random workspace, got reused path %s", second)
+	}
+	data, err := os.ReadFile(filepath.Join(second, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "v2" {
+		t.Fatalf("expected synced main content v2, got %q", string(data))
 	}
 }
 
@@ -93,6 +215,24 @@ func TestResolveWorkspaceRepoUsesDeviceDirectoryWhenNotGit(t *testing.T) {
 	}
 	if cwd != realDir {
 		t.Fatalf("expected non-git device directory to be used directly, got %s", cwd)
+	}
+}
+
+func TestDefaultRunCwdUsesOctodeckTaskDir(t *testing.T) {
+	root := t.TempDir()
+	cwd, err := defaultRunCwd(&Config{WorkspaceDir: filepath.Join(root, "workspace")}, "/server/groups/demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedParent := filepath.Join(root, "task")
+	if filepath.Dir(cwd) != expectedParent {
+		t.Fatalf("expected default cwd under %q, got %q", expectedParent, cwd)
+	}
+	if !strings.HasPrefix(filepath.Base(cwd), "demo-") {
+		t.Fatalf("expected random task directory to keep safe prefix demo-, got %q", filepath.Base(cwd))
+	}
+	if _, err := os.Stat(cwd); err != nil {
+		t.Fatalf("expected default cwd to be created: %v", err)
 	}
 }
 

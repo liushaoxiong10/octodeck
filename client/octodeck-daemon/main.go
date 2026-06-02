@@ -39,7 +39,7 @@ func main() {
 	}
 
 	var configPath string
-	flag.StringVar(&configPath, "config", "", "path to config.json (default ~/.octodeck-daemon/config.json)")
+	flag.StringVar(&configPath, "config", "", "path to config.json (default ~/.octodeck/daemon/config.json)")
 	flag.Parse()
 
 	cfg, err := loadConfig(configPath)

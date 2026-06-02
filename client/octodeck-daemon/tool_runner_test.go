@@ -63,6 +63,48 @@ func TestToolRunnerRejectsPathOutsideAllowedRoot(t *testing.T) {
 	}
 }
 
+func TestToolRunnerDefaultsToOctodeckAllowedRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	octoHome := filepath.Join(home, ".octodeck")
+	if err := os.MkdirAll(octoHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(home, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(writeTestConfig(t, filepath.Join(t.TempDir(), "config.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := newToolRunner(cfg, nil)
+
+	allowedRes := tr.execute(context.Background(), &ToolRequestFrame{
+		RequestID:      "tool-allowed",
+		ToolName:       "LS",
+		Cwd:            octoHome,
+		Input:          map[string]any{"path": octoHome},
+		TimeoutMs:      1000,
+		MaxOutputBytes: 4096,
+	})
+	if !allowedRes.OK {
+		t.Fatalf("expected ~/.octodeck path to be allowed: %s", valueOrEmpty(allowedRes.Error))
+	}
+
+	outsideRes := tr.execute(context.Background(), &ToolRequestFrame{
+		RequestID:      "tool-outside",
+		ToolName:       "LS",
+		Cwd:            outside,
+		Input:          map[string]any{"path": outside},
+		TimeoutMs:      1000,
+		MaxOutputBytes: 4096,
+	})
+	if outsideRes.OK {
+		t.Fatalf("expected path outside ~/.octodeck to be rejected")
+	}
+}
+
 func TestToolRunnerListDirectoriesForDevicePathPicker(t *testing.T) {
 	dir := t.TempDir()
 	project := filepath.Join(dir, "project")
@@ -115,4 +157,12 @@ func valueOrEmpty(p *string) string {
 		return ""
 	}
 	return *p
+}
+
+func writeTestConfig(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(`{"server":"https://octodeck.example","token":"link-token","linkId":"cl_123"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
