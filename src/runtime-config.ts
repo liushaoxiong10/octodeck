@@ -3738,6 +3738,8 @@ const SYSTEM_SETTINGS_FILE = path.join(
   'system-settings.json',
 );
 
+export const LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS = 7_200_000;
+
 export interface SystemSettings {
   containerTimeout: number;
   idleTimeout: number;
@@ -3779,8 +3781,8 @@ export interface SystemSettings {
 }
 
 const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
-  containerTimeout: 1800000,
-  idleTimeout: 1800000,
+  containerTimeout: LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS,
+  idleTimeout: LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS,
   containerMaxOutputSize: 10485760,
   maxConcurrentContainers: 20,
   maxConcurrentHostProcesses: 5,

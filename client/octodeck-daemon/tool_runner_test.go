@@ -63,6 +63,53 @@ func TestToolRunnerRejectsPathOutsideAllowedRoot(t *testing.T) {
 	}
 }
 
+func TestToolRunnerListDirectoriesForDevicePathPicker(t *testing.T) {
+	dir := t.TempDir()
+	project := filepath.Join(dir, "project")
+	nested := filepath.Join(project, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(project, ".hidden"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "file.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := newToolRunner(&Config{AllowedRoots: []string{dir}}, nil)
+	realProject, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realNested, err := filepath.EvalSymlinks(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res := tr.execute(context.Background(), &ToolRequestFrame{
+		RequestID:      "tool-list",
+		ToolName:       "ListDirectories",
+		Cwd:            "/",
+		Input:          map[string]any{"path": project},
+		TimeoutMs:      1000,
+		MaxOutputBytes: 4096,
+	})
+	if !res.OK {
+		t.Fatalf("list directories failed: %s", valueOrEmpty(res.Error))
+	}
+	payload := res.Result.(map[string]any)
+	if payload["currentPath"].(string) != realProject {
+		t.Fatalf("expected currentPath %q, got %#v", realProject, payload["currentPath"])
+	}
+	dirs := payload["directories"].([]map[string]any)
+	if len(dirs) != 1 {
+		t.Fatalf("expected only visible subdirectory, got %#v", dirs)
+	}
+	if dirs[0]["name"] != "nested" || dirs[0]["path"] != realNested {
+		t.Fatalf("unexpected directory entry: %#v", dirs[0])
+	}
+}
+
 func valueOrEmpty(p *string) string {
 	if p == nil {
 		return ""

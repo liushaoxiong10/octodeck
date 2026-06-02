@@ -22,7 +22,7 @@ import type { ChildProcess } from 'child_process';
 
 import { GROUPS_DIR } from '../config.js';
 import { logger } from '../logger.js';
-import { getSystemSettings } from '../runtime-config.js';
+import { LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS, getSystemSettings } from '../runtime-config.js';
 import type { ContainerOutput } from '../container-runner.js';
 import { getSession } from '../agent-link/registry.js';
 import {
@@ -81,6 +81,8 @@ interface ParseState {
   lastAssistantText: string | null;
 }
 
+const REMOTE_CWD_PLACEHOLDER = '__OCTODECK_REMOTE_CWD__';
+
 function newRunId(): string {
   return crypto.randomUUID();
 }
@@ -98,10 +100,26 @@ function buildRunContext(args: BackendRunArgs, cfg: HostCliDriverConfig): Record
       executionMode: group.executionMode,
       executionNode: group.executionNode,
       customCwd: group.customCwd,
+      repoId: group.repoId,
+      repoGitUrl: group.repoGitUrl,
+      repoDevicePath: group.repoDevicePath,
       created_by: group.created_by,
       is_home: group.is_home,
     },
   };
+}
+
+function buildWorkspaceRepo(group: BackendRunArgs['group']):
+  | { kind: 'git'; gitUrl: string; groupFolder: string }
+  | { kind: 'device_path'; devicePath: string; groupFolder: string }
+  | undefined {
+  if (group.repoGitUrl) {
+    return { kind: 'git', gitUrl: group.repoGitUrl, groupFolder: group.folder };
+  }
+  if (group.repoDevicePath) {
+    return { kind: 'device_path', devicePath: group.repoDevicePath, groupFolder: group.folder };
+  }
+  return undefined;
 }
 
 /**
@@ -150,13 +168,15 @@ export async function runViaAgentLink(
     };
   }
 
+  const workspaceRepo = buildWorkspaceRepo(group);
+
   // 3. argv
   let argv: string[];
   try {
     argv = cfg.buildArgv({
       prompt: input.prompt,
       sessionId: input.sessionId,
-      cwd: groupDir,
+      cwd: workspaceRepo ? REMOTE_CWD_PLACEHOLDER : groupDir,
       folder: group.folder,
       backendId: cfg.backendId,
     });
@@ -170,12 +190,15 @@ export async function runViaAgentLink(
   }
 
   const settings = getSystemSettings();
-  const timeoutMs =
-    (group.containerConfig?.timeout && group.containerConfig.timeout > 0
+  const configuredTimeoutMs =
+    group.containerConfig?.timeout && group.containerConfig.timeout > 0
       ? group.containerConfig.timeout
       : cfg.timeoutMs && cfg.timeoutMs > 0
         ? cfg.timeoutMs
-        : undefined) || settings.containerTimeout;
+        : undefined;
+  const timeoutMs = configuredTimeoutMs || (input.isScheduledTask
+    ? Math.max(settings.containerTimeout, LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS)
+    : settings.containerTimeout);
   const maxOutputBytes =
     (cfg.maxOutputBytes && cfg.maxOutputBytes > 0
       ? cfg.maxOutputBytes
@@ -438,6 +461,8 @@ export async function runViaAgentLink(
       maxOutputBytes,
       context: buildRunContext(args, cfg),
       stdinJson: JSON.stringify(input),
+      remoteCwdPlaceholder: workspaceRepo ? REMOTE_CWD_PLACEHOLDER : undefined,
+      workspaceRepo,
     });
     if (!ok) {
       clearTimeout(timer);

@@ -21,6 +21,12 @@ describe('daemon install script', () => {
     expect(bootoutIndex).toBeGreaterThanOrEqual(0);
     expect(downloadIndex).toBeGreaterThanOrEqual(0);
     expect(bootoutIndex).toBeLessThan(downloadIndex);
+    expect(script).toContain('LEGACY_INSTALL_DIR="${HOME}/.hcagent"');
+    expect(script).toContain('LEGACY_PLIST="${HOME}/Library/LaunchAgents/com.happyclaw.hcagent.plist"');
+    expect(script).toContain('launchctl bootout "gui/$(id -u)/com.happyclaw.hcagent"');
+    expect(script).toContain('rm -f "${LEGACY_PLIST}"');
+    expect(script).toContain('systemctl --user disable --now hcagent.service');
+    expect(script).toContain('rm -f "${SYSTEMD_DIR}/hcagent.service"');
     expect(script).toContain('curl -fsSL "${BIN_URL}" -o "${INSTALL_DIR}/bin/octodeck-daemon"');
     expect(script).toContain('chmod +x "${INSTALL_DIR}/bin/octodeck-daemon"');
     expect(script).toContain('"linkId": "cl_1234567890abcdef"');

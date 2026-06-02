@@ -35,9 +35,22 @@ export const claudeSdkBackend: AgentBackend = {
       }
       return { status: 'success', result };
     }
+    const runtimeProfile = group.runtimeProfile ?? (executionMode === 'host' ? 'server-agent' : undefined);
+    const sdkInput = {
+      ...input,
+      ...(runtimeProfile === 'server-agent'
+        ? { localToolPolicy: 'none' as const, remoteExecutionLinkId: undefined }
+        : {}),
+      ...(runtimeProfile === 'server-agent-device-tools'
+        ? {
+            localToolPolicy: 'device-remote' as const,
+            remoteExecutionLinkId: group.deviceLinkId || group.executionNode,
+          }
+        : {}),
+    };
     if (executionMode === 'host') {
-      return runHostAgent(group, input, onProcess, onOutput, ownerHomeFolder);
+      return runHostAgent(group, sdkInput, onProcess, onOutput, ownerHomeFolder);
     }
-    return runContainerAgent(group, input, onProcess, onOutput, ownerHomeFolder);
+    return runContainerAgent(group, sdkInput, onProcess, onOutput, ownerHomeFolder);
   },
 };

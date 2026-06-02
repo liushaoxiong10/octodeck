@@ -143,7 +143,14 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const markChatRead = useChatStore(s => s.markChatRead);
 
   const currentUser = useAuthStore(s => s.user);
-  const canUseTerminal = group?.execution_mode !== 'host';
+  const runtimeProfileLabel = group?.runtime_profile === 'server-agent'
+    ? 'Server'
+    : group?.runtime_profile === 'server-agent-device-tools'
+      ? 'Server+Device'
+      : group?.runtime_profile === 'device-cli-agent'
+        ? 'Device CLI'
+        : undefined;
+  const canUseTerminal = !group?.runtime_profile && group?.execution_mode === 'container';
   const pollRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Sidebar: members tab visibility
@@ -572,11 +579,11 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 </span>
               </>
             )}
-            {!isWaiting && group.execution_mode && (
+            {!isWaiting && (runtimeProfileLabel || group.execution_mode) && (
               <>
                 <span className="text-muted-foreground/40">·</span>
-                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-medium border ${group.execution_mode === 'host' ? 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-800' : 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/30 dark:text-sky-300 dark:border-sky-800'}`}>
-                  {group.execution_mode === 'host' ? 'Device' : 'Docker'}
+                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-medium border ${group.runtime_profile && group.runtime_profile !== 'server-agent' ? 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-800' : 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/30 dark:text-sky-300 dark:border-sky-800'}`}>
+                  {runtimeProfileLabel ?? (group.execution_mode === 'host' ? 'Device' : 'Docker')}
                 </span>
               </>
             )}

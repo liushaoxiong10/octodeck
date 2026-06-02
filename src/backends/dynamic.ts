@@ -106,7 +106,12 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
         maxOutputBytes: def.maxOutputBytes,
         envOverrides: env,
       };
-      const deviceLinkId = def.deviceLinkId?.trim();
+      const configuredDeviceLinkId = def.deviceLinkId?.trim();
+      const groupDeviceLinkId =
+        args.group.executionNode && args.group.executionNode !== 'server-local'
+          ? args.group.executionNode
+          : undefined;
+      const deviceLinkId = groupDeviceLinkId || configuredDeviceLinkId;
       const runtime = def.runtime ?? (deviceLinkId ? 'local-device' : 'server-side');
       const runArgs =
         (def.workdirMode === 'custom' && def.workdir) || runtime === 'server-side'

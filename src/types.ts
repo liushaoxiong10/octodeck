@@ -34,6 +34,10 @@ export interface ContainerConfig {
 }
 
 export type ExecutionMode = 'container' | 'host';
+export type AgentRuntimeProfile =
+  | 'server-agent'
+  | 'server-agent-device-tools'
+  | 'device-cli-agent';
 export type ConversationSource = 'manual' | 'feishu_thread';
 export type ConversationNavMode = 'horizontal' | 'vertical_threads';
 export type ImBindingMode = 'single_context' | 'thread_map';
@@ -52,8 +56,13 @@ export interface RegisteredGroup {
   folder: string;
   added_at: string;
   containerConfig?: ContainerConfig;
+  /** Product-level runtime shape. Supersedes ambiguous executionMode/executionNode UI semantics. */
+  runtimeProfile?: AgentRuntimeProfile;
   executionMode?: ExecutionMode; // 默认 'container'
   customCwd?: string; // 宿主机模式的自定义工作目录（绝对路径）
+  repoId?: string; // 引用统一管理的 Repo（优先于 repoGitUrl/repoDevicePath 展示与选择）
+  repoGitUrl?: string; // Device 原生执行：远端 Git 仓库地址，在 device workspace/repo 下缓存并基于 worktree 执行
+  repoDevicePath?: string; // Device 原生执行：指定当前 device 上的项目目录；若支持 git 则基于 worktree，否则直接操作目录
   initSourcePath?: string; // 容器模式下复制来源的宿主机绝对路径
   initGitUrl?: string; // 容器模式下 clone 来源的 Git URL
   created_by?: string;
@@ -73,6 +82,10 @@ export interface RegisteredGroup {
   feishu_chat_mode?: string; // 飞书群模式：group/topic/p2p 等
   feishu_group_message_type?: string; // 飞书群消息形式：chat/thread
   backend?: string; // Agent 后端选择（默认走 SystemSettings.defaultBackend，最终回退 'claude-sdk'）
+  /** Device used by server-agent-device-tools or device-cli-agent. */
+  deviceLinkId?: string;
+  /** Agent client to launch on device-cli-agent, e.g. claude-code/codex/traecli. */
+  agentClientId?: string;
   /**
    * 命令执行节点。
    *   - undefined / 'server-local' → server 进程内 spawn（沿用旧逻辑）
@@ -80,6 +93,20 @@ export interface RegisteredGroup {
    * 不在线的 link 会降级回 'server-local' 并打 warn。
    */
   executionNode?: string;
+}
+
+export type ManagedRepoKind = 'git' | 'device_path';
+
+export interface ManagedRepo {
+  id: string;
+  name: string;
+  kind: ManagedRepoKind;
+  gitUrl?: string;
+  devicePath?: string;
+  deviceLinkId?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /**

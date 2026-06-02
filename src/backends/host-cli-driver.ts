@@ -16,7 +16,7 @@ import path from 'path';
 
 import { GROUPS_DIR } from '../config.js';
 import { logger } from '../logger.js';
-import { getSystemSettings } from '../runtime-config.js';
+import { LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS, getSystemSettings } from '../runtime-config.js';
 import type { ContainerOutput } from '../container-runner.js';
 import { runViaAgentLink } from './agent-link-driver.js';
 import type { BackendRunArgs } from './types.js';
@@ -169,12 +169,15 @@ export async function runHostCli(
   }
 
   const settings = getSystemSettings();
-  const timeoutMs =
-    (group.containerConfig?.timeout && group.containerConfig.timeout > 0
+  const configuredTimeoutMs =
+    group.containerConfig?.timeout && group.containerConfig.timeout > 0
       ? group.containerConfig.timeout
       : cfg.timeoutMs && cfg.timeoutMs > 0
         ? cfg.timeoutMs
-        : undefined) || settings.containerTimeout;
+        : undefined;
+  const timeoutMs = configuredTimeoutMs || (input.isScheduledTask
+    ? Math.max(settings.containerTimeout, LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS)
+    : settings.containerTimeout);
   const maxOutputBytes =
     (cfg.maxOutputBytes && cfg.maxOutputBytes > 0
       ? cfg.maxOutputBytes

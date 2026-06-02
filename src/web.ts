@@ -54,6 +54,7 @@ import browseRoutes from './routes/browse.js';
 import agentRoutes from './routes/agents.js';
 import mcpServersRoutes from './routes/mcp-servers.js';
 import pluginsRoutes from './routes/plugins.js';
+import repoRoutes from './routes/repos.js';
 import workspaceConfigRoutes from './routes/workspace-config.js';
 import agentDefinitionsRoutes from './routes/agent-definitions.js';
 import agentTeamsRoutes from './routes/agent-teams.js';
@@ -255,6 +256,7 @@ app.route('/api/admin', adminRoutes);
 app.route('/api/browse', browseRoutes);
 app.route('/api/mcp-servers', mcpServersRoutes);
 app.route('/api/plugins', pluginsRoutes);
+app.route('/api/repos', repoRoutes);
 app.route('/api/agent-definitions', agentDefinitionsRoutes);
 app.route('/api/agent-teams', agentTeamsRoutes);
 app.route('/api/groups', agentRoutes); // Agent routes under /api/groups/:jid/agents

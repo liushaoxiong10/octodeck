@@ -52,6 +52,57 @@ describe('device-backed agent backend', () => {
     expect(runContainerAgentMock).not.toHaveBeenCalled();
   });
 
+  test('server-agent cloud SDK runs on server runner with local execution disabled', async () => {
+    runHostAgentMock.mockClear();
+    runContainerAgentMock.mockClear();
+
+    const { claudeSdkBackend } = await import('../src/backends/claude-sdk.js');
+    await claudeSdkBackend.run({
+      group: {
+        name: 'Server Agent',
+        folder: 'server-agent',
+        runtimeProfile: 'server-agent',
+      } as any,
+      input: { prompt: 'hello' } as any,
+      executionMode: 'host',
+      onProcess: vi.fn(),
+      onOutput: vi.fn(),
+    });
+
+    expect(runHostAgentMock).toHaveBeenCalledTimes(1);
+    expect(runHostAgentMock.mock.calls[0][1]).toMatchObject({
+      localToolPolicy: 'none',
+      remoteExecutionLinkId: undefined,
+    });
+    expect(runContainerAgentMock).not.toHaveBeenCalled();
+  });
+
+  test('server-agent-device-tools keeps SDK runner on server and routes tools to device', async () => {
+    runHostAgentMock.mockClear();
+    runContainerAgentMock.mockClear();
+
+    const { claudeSdkBackend } = await import('../src/backends/claude-sdk.js');
+    await claudeSdkBackend.run({
+      group: {
+        name: 'Server With Device',
+        folder: 'server-with-device',
+        runtimeProfile: 'server-agent-device-tools',
+        deviceLinkId: 'cl_1234567890abcdef',
+      } as any,
+      input: { prompt: 'hello' } as any,
+      executionMode: 'host',
+      onProcess: vi.fn(),
+      onOutput: vi.fn(),
+    });
+
+    expect(runHostAgentMock).toHaveBeenCalledTimes(1);
+    expect(runHostAgentMock.mock.calls[0][1]).toMatchObject({
+      localToolPolicy: 'device-remote',
+      remoteExecutionLinkId: 'cl_1234567890abcdef',
+    });
+    expect(runContainerAgentMock).not.toHaveBeenCalled();
+  });
+
   test('does not expose TraeCLI/coco as a builtin backend', async () => {
     const { listBackends, isBuiltinBackend } = await import('../src/backends/registry.js');
     const backendIds = listBackends().map((backend) => backend.id);
@@ -122,6 +173,36 @@ describe('device-backed agent backend', () => {
 
     expect(runViaAgentLinkMock).toHaveBeenCalledTimes(1);
     expect(runViaAgentLinkMock.mock.calls[0][2]).toBe('cl_1234567890abcdef');
+    expect(runHostCliMock).not.toHaveBeenCalled();
+  });
+
+  test('uses workspace execution device instead of custom backend default device', async () => {
+    const { buildDynamicBackend } = await import('../src/backends/dynamic.js');
+    runHostCliMock.mockClear();
+    runViaAgentLinkMock.mockClear();
+
+    const backend = buildDynamicBackend({
+      id: 'mac-coco',
+      displayName: 'Mac Coco',
+      binary: 'coco',
+      argvTemplate: ['-p', '{prompt}'],
+      outputProtocol: 'plain-text',
+      supportsHost: true,
+      supportsContainer: false,
+      usesProviderPool: false,
+      runtime: 'local-device',
+      deviceLinkId: 'cl_backend_default',
+    });
+
+    await backend.run({
+      group: { name: 'Demo', folder: 'demo', executionNode: 'cl_workspace_repo_device', repoDevicePath: '/Users/me/code/project' } as any,
+      input: { prompt: 'hello' } as any,
+      executionMode: 'host',
+      onProcess: vi.fn(),
+    });
+
+    expect(runViaAgentLinkMock).toHaveBeenCalledTimes(1);
+    expect(runViaAgentLinkMock.mock.calls[0][2]).toBe('cl_workspace_repo_device');
     expect(runHostCliMock).not.toHaveBeenCalled();
   });
 

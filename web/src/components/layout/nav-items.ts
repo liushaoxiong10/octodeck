@@ -1,9 +1,10 @@
-import { Bot, MessageCircle, Clock4, Puzzle, Wallet, User, MonitorSmartphone, Cable } from 'lucide-react';
+import { Bot, MessageCircle, Clock4, Puzzle, Wallet, User, MonitorSmartphone, Cable, FolderGit2 } from 'lucide-react';
 
 export const baseNavItems = [
   { path: '/chat', icon: MessageCircle, label: '工作台' },
   { path: '/skills', icon: Puzzle, label: 'Skill' },
   { path: '/tasks', icon: Clock4, label: '任务' },
+  { path: '/repos', icon: FolderGit2, label: 'Repo' },
   { path: '/devices', icon: MonitorSmartphone, label: '设备' },
   { path: '/agents', icon: Bot, label: 'Agent' },
   { path: '/model-endpoints', icon: Cable, label: '模型端点' },

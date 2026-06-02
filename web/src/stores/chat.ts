@@ -256,7 +256,7 @@ interface ChatState {
   resetSession: (jid: string, agentId?: string) => Promise<boolean>;
   clearHistory: (jid: string) => Promise<boolean>;
   deleteMessage: (jid: string, messageId: string) => Promise<boolean>;
-  createFlow: (name: string, options?: { execution_mode?: 'container' | 'host'; custom_cwd?: string; init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
+  createFlow: (name: string, options?: { runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent'; device_link_id?: string; agent_client_id?: string; execution_mode?: 'container' | 'host'; execution_node?: string; custom_cwd?: string; repo_id?: string; repo_git_url?: string; repo_device_path?: string; init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
   renameFlow: (jid: string, name: string) => Promise<void>;
   togglePin: (jid: string) => Promise<void>;
   deleteFlow: (jid: string) => Promise<void>;
@@ -1557,11 +1557,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  createFlow: async (name: string, options?: { execution_mode?: 'container' | 'host'; custom_cwd?: string; init_source_path?: string; init_git_url?: string }) => {
+  createFlow: async (name: string, options?: { runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent'; device_link_id?: string; agent_client_id?: string; execution_mode?: 'container' | 'host'; execution_node?: string; custom_cwd?: string; repo_id?: string; repo_git_url?: string; repo_device_path?: string; init_source_path?: string; init_git_url?: string }) => {
     try {
       const body: Record<string, string> = { name };
+      if (options?.runtime_profile) body.runtime_profile = options.runtime_profile;
+      if (options?.device_link_id) body.device_link_id = options.device_link_id;
+      if (options?.agent_client_id) body.agent_client_id = options.agent_client_id;
       if (options?.execution_mode) body.execution_mode = options.execution_mode;
+      if (options?.execution_node) body.execution_node = options.execution_node;
       if (options?.custom_cwd) body.custom_cwd = options.custom_cwd;
+      if (options?.repo_id) body.repo_id = options.repo_id;
+      if (options?.repo_git_url) body.repo_git_url = options.repo_git_url;
+      if (options?.repo_device_path) body.repo_device_path = options.repo_device_path;
       if (options?.init_source_path) body.init_source_path = options.init_source_path;
       if (options?.init_git_url) body.init_git_url = options.init_git_url;
 

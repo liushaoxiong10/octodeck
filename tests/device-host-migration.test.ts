@@ -5,17 +5,41 @@ import { join } from 'node:path';
 const repoRoot = process.cwd();
 
 describe('device-first host migration', () => {
-  test('group create schema accepts execution_node so native execution is tied to a device', async () => {
+  test('group create schema accepts explicit agent runtime profiles', async () => {
+    const { GroupCreateSchema } = await import('../src/schemas.js');
+
+    const serverOnly = GroupCreateSchema.parse({
+      name: 'Server Agent',
+      runtime_profile: 'server-agent',
+    });
+    const serverWithDevice = GroupCreateSchema.parse({
+      name: 'Server Agent With Device',
+      runtime_profile: 'server-agent-device-tools',
+      device_link_id: 'cl_1234567890abcdef',
+    });
+    const deviceCli = GroupCreateSchema.parse({
+      name: 'Device CLI Agent',
+      runtime_profile: 'device-cli-agent',
+      device_link_id: 'cl_1234567890abcdef',
+      agent_client_id: 'claude-code',
+    });
+
+    expect(serverOnly.runtime_profile).toBe('server-agent');
+    expect(serverWithDevice.device_link_id).toBe('cl_1234567890abcdef');
+    expect(deviceCli.agent_client_id).toBe('claude-code');
+  });
+
+  test('group create schema accepts device_link_id so device runtime profiles are tied to a device', async () => {
     const { GroupCreateSchema } = await import('../src/schemas.js');
 
     const parsed = GroupCreateSchema.parse({
       name: 'Device Workspace',
-      execution_mode: 'host',
-      execution_node: 'cl_1234567890abcdef',
+      runtime_profile: 'server-agent-device-tools',
+      device_link_id: 'cl_1234567890abcdef',
       custom_cwd: '/Users/lsx/code/app/octodeck',
     });
 
-    expect(parsed.execution_node).toBe('cl_1234567890abcdef');
+    expect(parsed.device_link_id).toBe('cl_1234567890abcdef');
   });
 
   test('device routes do not expose an implicit Server Device target', () => {
@@ -29,9 +53,12 @@ describe('device-first host migration', () => {
   test('workspace creation is device-first instead of host-first', () => {
     const source = readFileSync(join(repoRoot, 'web/src/components/chat/CreateContainerDialog.tsx'), 'utf8');
 
-    expect(source).toContain('Device 原生执行');
-    expect(source).toContain('execution_node');
+    expect(source).toContain('服务端 Agent + Device 执行');
+    expect(source).toContain('Device CLI Agent');
+    expect(source).toContain('device_link_id');
+    expect(source).toContain('runtime_profile');
     expect(source).toContain('useAgentLinksStore');
+    expect(source).not.toContain('Docker 模式');
     expect(source).not.toContain('宿主机模式');
     expect(source).not.toContain('直接在服务器上执行');
   });

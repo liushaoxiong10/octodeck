@@ -21,6 +21,8 @@ type Config struct {
 	AllowedBinaries []string `json:"allowedBinaries"`
 	// Absolute workspace roots that remote tools may access. Empty means cwd only.
 	AllowedRoots []string `json:"allowedRoots,omitempty"`
+	// WorkspaceDir stores git repo caches and per-group worktrees for device execution.
+	WorkspaceDir string `json:"workspaceDir,omitempty"`
 	// Optional: cap concurrent runs (default 4).
 	MaxConcurrentRuns int `json:"maxConcurrentRuns"`
 	// Optional: client display version reported in hello.
@@ -62,6 +64,13 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.MaxConcurrentRuns <= 0 {
 		cfg.MaxConcurrentRuns = 4
 	}
+	if cfg.WorkspaceDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		cfg.WorkspaceDir = filepath.Join(home, ".octodeck-daemon", "workspace")
+	}
 	return &cfg, nil
 }
 
@@ -84,6 +93,9 @@ func (c *Config) validate() error {
 		if !filepath.IsAbs(r) {
 			return fmt.Errorf("allowedRoots entry must be absolute: %q", r)
 		}
+	}
+	if c.WorkspaceDir != "" && !filepath.IsAbs(c.WorkspaceDir) {
+		return fmt.Errorf("workspaceDir must be absolute: %q", c.WorkspaceDir)
 	}
 	return nil
 }

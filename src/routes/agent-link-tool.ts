@@ -1,5 +1,6 @@
 import { getSession } from '../agent-link/registry.js';
 import { invokeRemoteTool } from '../agent-link/tool-rpc.js';
+import { LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS } from '../runtime-config.js';
 
 interface ToolHttpBody {
   linkId?: string;
@@ -49,7 +50,7 @@ export async function handleAgentLinkToolHttpRequest(request: Request): Promise<
       toolName: body.toolName,
       input: body.input ?? {},
       cwd: body.cwd,
-      timeoutMs: body.timeoutMs && body.timeoutMs > 0 ? body.timeoutMs : 120_000,
+      timeoutMs: body.timeoutMs && body.timeoutMs > 0 ? body.timeoutMs : LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS,
       maxOutputBytes: body.maxOutputBytes && body.maxOutputBytes > 0 ? body.maxOutputBytes : 1_048_576,
     });
     return jsonResponse(result);

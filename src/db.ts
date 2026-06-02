@@ -35,6 +35,8 @@ import {
   NewMessage,
   MessageCursor,
   MessageSourceKind,
+  ManagedRepo,
+  ManagedRepoKind,
   ImContextBinding,
   RedeemCode,
   RegisteredGroup,
@@ -729,6 +731,19 @@ function initializeSqliteDatabase(
     CREATE INDEX IF NOT EXISTS idx_agent_links_user ON agent_links(user_id);
     CREATE INDEX IF NOT EXISTS idx_agent_links_active
       ON agent_links(user_id) WHERE revoked_at IS NULL;
+
+    CREATE TABLE IF NOT EXISTS repos (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      git_url TEXT,
+      device_path TEXT,
+      device_link_id TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_repos_created_by ON repos(created_by);
   `);
 
   // Lightweight migrations for existing DBs
@@ -747,6 +762,9 @@ function initializeSqliteDatabase(
     "TEXT DEFAULT 'container'",
   );
   ensureColumn('registered_groups', 'custom_cwd', 'TEXT');
+  ensureColumn('registered_groups', 'repo_id', 'TEXT');
+  ensureColumn('registered_groups', 'repo_git_url', 'TEXT');
+  ensureColumn('registered_groups', 'repo_device_path', 'TEXT');
   ensureColumn('registered_groups', 'init_source_path', 'TEXT');
   ensureColumn('registered_groups', 'init_git_url', 'TEXT');
   ensureColumn('messages', 'attachments', 'TEXT');
@@ -805,6 +823,9 @@ function initializeSqliteDatabase(
   ensureColumn('registered_groups', 'feishu_group_message_type', 'TEXT');
   ensureColumn('registered_groups', 'sender_allowlist', 'TEXT');
   ensureColumn('registered_groups', 'backend', 'TEXT');
+  ensureColumn('registered_groups', 'runtime_profile', 'TEXT');
+  ensureColumn('registered_groups', 'device_link_id', 'TEXT');
+  ensureColumn('registered_groups', 'agent_client_id', 'TEXT');
   // Phase 5.1: per-group execution node (server-local | <agent_link_id>)
   ensureColumn('registered_groups', 'execution_node', 'TEXT');
   ensureColumn('agent_links', 'agent_clients', "TEXT NOT NULL DEFAULT '[]'");
@@ -855,12 +876,15 @@ function initializeSqliteDatabase(
           container_config TEXT,
           execution_mode TEXT DEFAULT 'container',
           custom_cwd TEXT,
+          repo_id TEXT,
+          repo_git_url TEXT,
+          repo_device_path TEXT,
           init_source_path TEXT,
           init_git_url TEXT,
           created_by TEXT,
           is_home INTEGER DEFAULT 0
         );
-        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL, 0 FROM registered_groups;
+        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL, NULL, NULL, NULL, 0 FROM registered_groups;
         DROP TABLE registered_groups;
         ALTER TABLE registered_groups_new RENAME TO registered_groups;
       `);
@@ -911,6 +935,9 @@ function initializeSqliteDatabase(
       'container_config',
       'execution_mode',
       'custom_cwd',
+      'repo_id',
+      'repo_git_url',
+      'repo_device_path',
       'init_source_path',
       'init_git_url',
       'created_by',
@@ -2632,6 +2659,19 @@ function parseExecutionMode(
   return 'container';
 }
 
+function parseRuntimeProfile(
+  raw: string | null,
+): import('./types.js').AgentRuntimeProfile | undefined {
+  if (
+    raw === 'server-agent' ||
+    raw === 'server-agent-device-tools' ||
+    raw === 'device-cli-agent'
+  ) {
+    return raw;
+  }
+  return undefined;
+}
+
 /** Raw row shape from registered_groups table — single source of truth for column mapping. */
 type RegisteredGroupRow = {
   jid: string;
@@ -2641,6 +2681,9 @@ type RegisteredGroupRow = {
   container_config: string | null;
   execution_mode: string | null;
   custom_cwd: string | null;
+  repo_id: string | null;
+  repo_git_url: string | null;
+  repo_device_path: string | null;
   init_source_path: string | null;
   init_git_url: string | null;
   created_by: string | null;
@@ -2660,6 +2703,9 @@ type RegisteredGroupRow = {
   feishu_chat_mode: string | null;
   feishu_group_message_type: string | null;
   sender_allowlist: string | null;
+  runtime_profile: string | null;
+  device_link_id: string | null;
+  agent_client_id: string | null;
   backend: string | null;
   execution_node: string | null;
 };
@@ -2678,6 +2724,9 @@ function parseGroupRow(
       : undefined,
     executionMode: parseExecutionMode(row.execution_mode, `group ${row.jid}`),
     customCwd: row.custom_cwd ?? undefined,
+    repoId: row.repo_id ?? undefined,
+    repoGitUrl: row.repo_git_url ?? undefined,
+    repoDevicePath: row.repo_device_path ?? undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,
     created_by: row.created_by ?? undefined,
@@ -2701,6 +2750,9 @@ function parseGroupRow(
     sender_allowlist: row.sender_allowlist != null
       ? (JSON.parse(row.sender_allowlist) as string[])
       : undefined,
+    runtimeProfile: parseRuntimeProfile(row.runtime_profile),
+    deviceLinkId: row.device_link_id ?? undefined,
+    agentClientId: row.agent_client_id ?? undefined,
     backend: row.backend ?? undefined,
     executionNode: row.execution_node ?? undefined,
   };
@@ -2734,8 +2786,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist, backend, execution_node)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, repo_id, repo_git_url, repo_device_path, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist, runtime_profile, device_link_id, agent_client_id, backend, execution_node)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2744,6 +2796,9 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
     group.executionMode ?? 'container',
     group.customCwd ?? null,
+    group.repoId ?? null,
+    group.repoGitUrl ?? null,
+    group.repoDevicePath ?? null,
     group.initSourcePath ?? null,
     group.initGitUrl ?? null,
     group.created_by ?? null,
@@ -2763,6 +2818,9 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.feishu_chat_mode ?? null,
     group.feishu_group_message_type ?? null,
     group.sender_allowlist != null ? JSON.stringify(group.sender_allowlist) : null,
+    group.runtimeProfile ?? null,
+    group.deviceLinkId ?? null,
+    group.agentClientId ?? null,
     group.backend ?? null,
     group.executionNode ?? null,
   );
@@ -2770,6 +2828,86 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
 
 export function deleteRegisteredGroup(jid: string): void {
   db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
+}
+
+type ManagedRepoRow = {
+  id: string;
+  name: string;
+  kind: string;
+  git_url: string | null;
+  device_path: string | null;
+  device_link_id: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+function parseManagedRepoRow(row: ManagedRepoRow): ManagedRepo {
+  return {
+    id: row.id,
+    name: row.name,
+    kind: row.kind === 'device_path' ? 'device_path' : 'git',
+    gitUrl: row.git_url ?? undefined,
+    devicePath: row.device_path ?? undefined,
+    deviceLinkId: row.device_link_id ?? undefined,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function createManagedRepo(input: {
+  name: string;
+  kind: ManagedRepoKind;
+  gitUrl?: string;
+  devicePath?: string;
+  deviceLinkId?: string;
+  createdBy: string;
+}): ManagedRepo {
+  const now = new Date().toISOString();
+  const repo: ManagedRepo = {
+    id: `repo_${crypto.randomBytes(8).toString('hex')}`,
+    name: input.name,
+    kind: input.kind,
+    gitUrl: input.gitUrl,
+    devicePath: input.devicePath,
+    deviceLinkId: input.deviceLinkId,
+    createdBy: input.createdBy,
+    createdAt: now,
+    updatedAt: now,
+  };
+  db.prepare(
+    `INSERT INTO repos (id, name, kind, git_url, device_path, device_link_id, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    repo.id,
+    repo.name,
+    repo.kind,
+    repo.gitUrl ?? null,
+    repo.devicePath ?? null,
+    repo.deviceLinkId ?? null,
+    repo.createdBy,
+    repo.createdAt,
+    repo.updatedAt,
+  );
+  return repo;
+}
+
+export function listManagedReposByUser(userId: string): ManagedRepo[] {
+  const rows = db
+    .prepare('SELECT * FROM repos WHERE created_by = ? ORDER BY updated_at DESC, created_at DESC')
+    .all(userId) as ManagedRepoRow[];
+  return rows.map(parseManagedRepoRow);
+}
+
+export function getManagedRepoById(id: string): ManagedRepo | undefined {
+  const row = db.prepare('SELECT * FROM repos WHERE id = ?').get(id) as ManagedRepoRow | undefined;
+  return row ? parseManagedRepoRow(row) : undefined;
+}
+
+export function deleteManagedRepo(id: string, userId: string): boolean {
+  const result = db.prepare('DELETE FROM repos WHERE id = ? AND created_by = ?').run(id, userId);
+  return result.changes > 0;
 }
 
 /**
@@ -3371,6 +3509,9 @@ export function getGroupsByOwner(
     container_config: string | null;
     execution_mode: string | null;
     custom_cwd: string | null;
+    repo_id: string | null;
+    repo_git_url: string | null;
+    repo_device_path: string | null;
     init_source_path: string | null;
     init_git_url: string | null;
     created_by: string | null;
@@ -3390,6 +3531,9 @@ export function getGroupsByOwner(
       : undefined,
     executionMode: parseExecutionMode(row.execution_mode, `group ${row.jid}`),
     customCwd: row.custom_cwd ?? undefined,
+    repoId: row.repo_id ?? undefined,
+    repoGitUrl: row.repo_git_url ?? undefined,
+    repoDevicePath: row.repo_device_path ?? undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,
     created_by: row.created_by ?? undefined,

@@ -269,7 +269,9 @@ export function parseCookie(
 
 // Host execution helpers
 export function isHostExecutionGroup(group: RegisteredGroup): boolean {
-  return (group.executionMode || 'container') === 'host';
+  return group.runtimeProfile === 'device-cli-agent' ||
+    group.runtimeProfile === 'server-agent-device-tools' ||
+    ((group.executionMode || 'container') === 'host' && group.runtimeProfile !== 'server-agent');
 }
 
 export function hasHostExecutionPermission(user: AuthUser): boolean {

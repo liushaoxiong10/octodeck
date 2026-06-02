@@ -79,6 +79,8 @@ const DEFAULT_ALLOWED_TOOLS = [
 
 const REMOTE_TOOL_GUIDANCE = `\n\n<remote-execution>\nThis workspace is bound to a connected octodeck-daemon client. Do not use native local tools for machine, filesystem, shell, or network operations. Use the mcp__octodeck__remote_* tools instead: remote_bash, remote_read, remote_write, remote_edit, remote_glob, remote_grep, remote_ls, remote_web_fetch, remote_web_search. Treat their results as the authoritative client workspace state.\n</remote-execution>`;
 
+const SERVER_AGENT_NO_EXECUTION_GUIDANCE = `\n\n<server-agent-no-execution>\nThis workspace is running as a server-side cloud reasoning agent. Native filesystem, shell, and notebook tools are intentionally disabled. You may use cloud reasoning, WebFetch/WebSearch, and OctoDeck MCP tools that do not require local machine execution. Do not claim access to server-local directories or shell execution.\n</server-agent-no-execution>`;
+
 const MEMORY_FLUSH_ALLOWED_TOOLS = [
   'mcp__octodeck__memory_search',
   'mcp__octodeck__memory_get',
@@ -1274,6 +1276,9 @@ async function runQuery(
     ...(containerInput.agentId
       ? [{ name: 'agent-override.md', text: CONVERSATION_AGENT_BLOCK }]
       : []),
+    ...(containerInput.localToolPolicy === 'none'
+      ? [{ name: 'server-agent-no-execution', text: SERVER_AGENT_NO_EXECUTION_GUIDANCE }]
+      : []),
     ...(containerInput.remoteExecutionLinkId
       ? [{ name: 'remote-execution', text: REMOTE_TOOL_GUIDANCE }]
       : []),
@@ -1356,7 +1361,11 @@ async function runQuery(
   }
 
   try {
-    const remoteDisallowedTools = containerInput.remoteExecutionLinkId
+    const shouldDisableNativeLocalTools =
+      containerInput.localToolPolicy === 'none' ||
+      containerInput.localToolPolicy === 'device-remote' ||
+      !!containerInput.remoteExecutionLinkId;
+    const remoteDisallowedTools = shouldDisableNativeLocalTools
       ? Array.from(new Set([...(disallowedTools || []), ...REMOTE_LOCAL_TOOL_NAMES]))
       : disallowedTools;
     const q = query({
@@ -1826,7 +1835,7 @@ async function main(): Promise<void> {
               process.env.OCTODECK_SERVER_URL ||
               'http://127.0.0.1:3000',
             secret: process.env.OCTODECK_AGENT_RUNNER_SECRET || '',
-            timeoutMs: 120_000,
+            timeoutMs: 7_200_000,
             maxOutputBytes: 1_048_576,
           })
         : []),

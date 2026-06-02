@@ -48,10 +48,12 @@ SERVER=${shellQuote(server)}
 LINK_ID=${shellQuote(opts.deviceId)}
 TOKEN=${shellQuote(opts.token)}
 INSTALL_DIR="${'${HOME}'}/.octodeck-daemon"
+LEGACY_INSTALL_DIR="${'${HOME}'}/.hcagent"
 CONFIG_FILE="${'${INSTALL_DIR}'}/config.json"
 BIN_URL="${'${SERVER}'}/api/daemon/octodeck-daemon-bin"
 OS="$(uname -s)"
 PLIST="${'${HOME}'}/Library/LaunchAgents/com.octodeck.octodeck-daemon.plist"
+LEGACY_PLIST="${'${HOME}'}/Library/LaunchAgents/com.happyclaw.hcagent.plist"
 SYSTEMD_DIR="${'${HOME}'}/.config/systemd/user"
 SERVICE="${'${SYSTEMD_DIR}'}/octodeck-daemon.service"
 OCTODECK_DAEMON_PATH="${'${HOME}'}/.local/bin:${'${HOME}'}/bin:${'${HOME}'}/.bun/bin:${'${HOME}'}/.npm-global/bin:${'${HOME}'}/.volta/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Applications/cmux.app/Contents/Resources/bin"
@@ -67,9 +69,17 @@ if [ "${'${OS}'}" = "Darwin" ]; then
   log "stopping existing octodeck-daemon launch agent if present"
   launchctl bootout "gui/$(id -u)/com.octodeck.octodeck-daemon" >/dev/null 2>&1 || true
   launchctl bootout "gui/$(id -u)" "${'${PLIST}'}" >/dev/null 2>&1 || true
+  log "stopping legacy hcagent launch agent if present"
+  launchctl bootout "gui/$(id -u)/com.happyclaw.hcagent" >/dev/null 2>&1 || true
+  launchctl bootout "gui/$(id -u)" "${'${LEGACY_PLIST}'}" >/dev/null 2>&1 || true
+  rm -f "${'${LEGACY_PLIST}'}"
 elif command -v systemctl >/dev/null 2>&1; then
   log "stopping existing octodeck-daemon systemd service if present"
   systemctl --user stop octodeck-daemon.service >/dev/null 2>&1 || true
+  log "stopping legacy hcagent systemd service if present"
+  systemctl --user disable --now hcagent.service >/dev/null 2>&1 || true
+  rm -f "${'${SYSTEMD_DIR}'}/hcagent.service"
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
 fi
 
 log "downloading octodeck-daemon binary"

@@ -12,8 +12,6 @@ export const REMOTE_LOCAL_TOOL_NAMES = [
   'Grep',
   'LS',
   'NotebookEdit',
-  'WebFetch',
-  'WebSearch',
 ];
 
 export interface RemoteMcpToolOptions {
@@ -31,6 +29,14 @@ interface RemoteBridgeResponse {
   result?: unknown;
   error?: string | null;
   durationMs?: number;
+}
+
+function remoteToolTimeoutMs(defaultTimeoutMs: number, input: unknown): number {
+  if (!input || typeof input !== 'object') return defaultTimeoutMs;
+  const timeout = (input as { timeout_ms?: unknown }).timeout_ms;
+  return typeof timeout === 'number' && Number.isFinite(timeout) && timeout > 0
+    ? timeout
+    : defaultTimeoutMs;
 }
 
 function stringifyResult(value: unknown): string {
@@ -61,7 +67,7 @@ export function createRemoteMcpTools(opts: RemoteMcpToolOptions): SdkMcpToolDefi
         toolName,
         input,
         cwd: opts.cwd,
-        timeoutMs: opts.timeoutMs,
+        timeoutMs: remoteToolTimeoutMs(opts.timeoutMs, input),
         maxOutputBytes: opts.maxOutputBytes,
       }),
     });

@@ -44,6 +44,7 @@ import {
   getGroupMemberRole,
   getUserById,
   getAgent,
+  getManagedRepoById,
   listUsers,
   listAgentsByJid,
   getGroupsByTargetAgent,
@@ -152,8 +153,14 @@ interface GroupPayloadItem {
   deletable: boolean;
   lastMessage?: string;
   lastMessageTime?: string;
+  runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent';
+  device_link_id?: string;
+  agent_client_id?: string;
   execution_mode: 'container' | 'host';
   custom_cwd?: string;
+  repo_id?: string;
+  repo_git_url?: string;
+  repo_device_path?: string;
   is_home?: boolean;
   is_my_home?: boolean;
   is_shared?: boolean;
@@ -264,8 +271,14 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
         latest?.timestamp ||
         chats.get(jid)?.last_message_time ||
         group.added_at,
+      runtime_profile: group.runtimeProfile,
+      device_link_id: isAdmin ? group.deviceLinkId : undefined,
+      agent_client_id: isAdmin ? group.agentClientId : undefined,
       execution_mode: group.executionMode || 'container',
       custom_cwd: isAdmin ? group.customCwd : undefined,
+      repo_id: isAdmin ? group.repoId : undefined,
+      repo_git_url: isAdmin ? group.repoGitUrl : undefined,
+      repo_device_path: isAdmin ? group.repoDevicePath : undefined,
       is_home: isHome || undefined,
       is_my_home: (isHome && group.created_by === user.id) || undefined,
       is_shared: isShared || undefined,
@@ -356,13 +369,25 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     return c.json({ error: 'Group name is required' }, 400);
   }
 
-  // If user didn't specify execution mode, pick based on Docker availability
-  const executionMode = validation.data.execution_mode || (await isDockerAvailable() ? 'container' : 'host');
-  const executionNode = validation.data.execution_node;
+  const runtimeProfile = validation.data.runtime_profile ?? 'server-agent';
+  const deviceLinkId = validation.data.device_link_id ?? validation.data.execution_node;
+  const agentClientId = validation.data.agent_client_id;
+  const executionMode = runtimeProfile === 'server-agent' ? 'host' : 'host';
+  const executionNode = deviceLinkId;
   const customCwd = validation.data.custom_cwd; // Schema already trims and converts empty to undefined
+  const repoId = validation.data.repo_id;
+  const repoGitUrl = validation.data.repo_git_url;
+  const repoDevicePath = validation.data.repo_device_path;
   const initSourcePath = validation.data.init_source_path;
   const initGitUrl = validation.data.init_git_url;
   const authUser = c.get('user') as AuthUser;
+  const selectedRepo = repoId ? getManagedRepoById(repoId) : undefined;
+  if (repoId && (!selectedRepo || selectedRepo.createdBy !== authUser.id)) {
+    return c.json({ error: 'repo_id not found' }, 400);
+  }
+  const effectiveRepoGitUrl = selectedRepo?.kind === 'git' ? selectedRepo.gitUrl : repoGitUrl;
+  const effectiveRepoDevicePath = selectedRepo?.kind === 'device_path' ? selectedRepo.devicePath : repoDevicePath;
+  const effectiveExecutionNode = selectedRepo?.kind === 'device_path' ? selectedRepo.deviceLinkId : executionNode;
 
   // Billing: check group limit
   const groupLimit = checkGroupLimit(authUser.id, authUser.role);
@@ -370,12 +395,20 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     return c.json({ error: groupLimit.reason }, 403);
   }
 
-  // 互斥校验：init_source_path 和 init_git_url 不能同时指定
+  // 互斥校验：各类 repo/workspace 来源不能同时指定
   if (initSourcePath && initGitUrl) {
     return c.json(
       { error: 'init_source_path and init_git_url are mutually exclusive' },
       400,
     );
+  }
+
+  if ([repoId, repoGitUrl, repoDevicePath, customCwd].filter(Boolean).length > 1) {
+    return c.json({ error: 'repo_id, repo_git_url, repo_device_path and custom_cwd are mutually exclusive' }, 400);
+  }
+
+  if ((repoId || repoGitUrl || repoDevicePath) && runtimeProfile === 'server-agent') {
+    return c.json({ error: 'repo_id, repo_git_url and repo_device_path require a Device runtime profile' }, 400);
   }
 
   // init_source_path / init_git_url 仅 container 模式可用
@@ -389,20 +422,20 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     );
   }
 
-  if (executionMode === 'host') {
+  if (runtimeProfile !== 'server-agent') {
     if (!hasHostExecutionPermission(authUser)) {
       return c.json(
         { error: 'Insufficient permissions for host execution mode' },
         403,
       );
     }
-    if (!executionNode) {
-      return c.json({ error: 'execution_node is required for Device native execution' }, 400);
+    if (!effectiveExecutionNode) {
+      return c.json({ error: 'device_link_id is required for Device runtime profiles' }, 400);
     }
-    if (!/^cl_[0-9a-f]{16}$/.test(executionNode)) {
+    if (!/^cl_[0-9a-f]{16}$/.test(effectiveExecutionNode)) {
       return c.json({ error: 'Invalid execution_node format' }, 400);
     }
-    const link = getAgentLinkById(executionNode);
+    const link = getAgentLinkById(effectiveExecutionNode);
     if (!link || link.userId !== authUser.id || link.revokedAt) {
       return c.json({ error: 'execution_node not found' }, 400);
     }
@@ -414,8 +447,14 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       // Remote Device workdirs live on the daemon filesystem. The server can
       // only validate syntax here; existence/allowlist are enforced by the device runtime.
     }
+    if (effectiveRepoDevicePath && !path.isAbsolute(effectiveRepoDevicePath)) {
+      return c.json({ error: 'repo_device_path must be an absolute path' }, 400);
+    }
+    if (runtimeProfile === 'device-cli-agent' && !agentClientId) {
+      return c.json({ error: 'agent_client_id is required for device-cli-agent' }, 400);
+    }
   } else if (customCwd) {
-    return c.json({ error: 'custom_cwd is only valid for host mode' }, 400);
+    return c.json({ error: 'custom_cwd is only valid for Device runtime profiles' }, 400);
   }
 
   // 验证 init_source_path
@@ -486,15 +525,16 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     }
   }
 
-  // 验证 init_git_url（SSRF 防护 + admin 权限）
-  if (initGitUrl) {
+  // 验证 Git URL（SSRF 防护 + admin 权限）
+  const gitUrlToValidate = initGitUrl || effectiveRepoGitUrl;
+  if (gitUrlToValidate) {
     if (!hasHostExecutionPermission(authUser)) {
       return c.json(
-        { error: 'Insufficient permissions: init_git_url requires admin' },
+        { error: 'Insufficient permissions: git repo URL requires admin' },
         403,
       );
     }
-    if (initGitUrl.length > 2000) {
+    if (gitUrlToValidate.length > 2000) {
       return c.json(
         { error: 'init_git_url is too long (max 2000 characters)' },
         400,
@@ -503,7 +543,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
 
     let gitUrl: URL;
     try {
-      gitUrl = new URL(initGitUrl);
+      gitUrl = new URL(gitUrlToValidate);
     } catch {
       return c.json({ error: 'init_git_url is not a valid URL' }, 400);
     }
@@ -530,12 +570,18 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     name,
     folder,
     added_at: now,
+    runtimeProfile,
     executionMode: executionMode as ExecutionMode,
-    customCwd: executionMode === 'host' ? customCwd : undefined,
+    customCwd: runtimeProfile !== 'server-agent' ? customCwd : undefined,
+    repoId: runtimeProfile !== 'server-agent' ? repoId : undefined,
+    repoGitUrl: runtimeProfile !== 'server-agent' ? effectiveRepoGitUrl : undefined,
+    repoDevicePath: runtimeProfile !== 'server-agent' ? effectiveRepoDevicePath : undefined,
     initSourcePath: executionMode !== 'host' ? initSourcePath : undefined,
     initGitUrl: executionMode !== 'host' ? initGitUrl : undefined,
     created_by: authUser.id,
-    executionNode: executionMode === 'host' ? executionNode : undefined,
+    deviceLinkId: runtimeProfile !== 'server-agent' ? effectiveExecutionNode : undefined,
+    agentClientId: runtimeProfile === 'device-cli-agent' ? agentClientId : undefined,
+    executionNode: runtimeProfile !== 'server-agent' ? effectiveExecutionNode : undefined,
   };
 
   setRegisteredGroup(jid, group);
@@ -586,11 +632,6 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     return c.json({ error: `Workspace initialization failed: ${errMsg}` }, 500);
   }
 
-  // 容器模式工作区创建后立即启动容器预热，避免用户打开终端时还需等待
-  if (executionMode === 'container') {
-    deps.ensureTerminalContainerStarted(jid);
-  }
-
   return c.json({
     success: true,
     jid,
@@ -598,15 +639,27 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       name: group.name,
       folder: group.folder,
       added_at: group.added_at,
-      execution_mode: group.executionMode || 'container',
       custom_cwd: hasHostExecutionPermission(authUser)
         ? group.customCwd
+        : undefined,
+      repo_id: hasHostExecutionPermission(authUser)
+        ? group.repoId
+        : undefined,
+      repo_git_url: hasHostExecutionPermission(authUser)
+        ? group.repoGitUrl
+        : undefined,
+      repo_device_path: hasHostExecutionPermission(authUser)
+        ? group.repoDevicePath
         : undefined,
       kind: 'web',
       editable: true,
       deletable: true,
       lastMessage: undefined,
       lastMessageTime: now,
+      runtime_profile: group.runtimeProfile,
+      device_link_id: group.deviceLinkId,
+      agent_client_id: group.agentClientId,
+      execution_mode: group.executionMode || 'host',
       member_role: 'owner',
       member_count: 1,
       is_shared: false,
@@ -636,6 +689,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     name: rawName,
     is_pinned,
     activation_mode,
+    runtime_profile,
+    device_link_id,
+    agent_client_id,
     execution_mode,
     backend,
     execution_node,
@@ -647,6 +703,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     !name &&
     is_pinned === undefined &&
     activation_mode === undefined &&
+    runtime_profile === undefined &&
+    device_link_id === undefined &&
+    agent_client_id === undefined &&
     execution_mode === undefined &&
     backend === undefined &&
     execution_node === undefined
@@ -667,14 +726,18 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     }
   }
 
-  // execution_node 校验：必须是当前用户拥有的、未吊销的 AgentLink ID
-  if (execution_node !== undefined) {
-    if (!/^cl_[0-9a-f]{16}$/.test(execution_node)) {
-      return c.json({ error: 'Invalid execution_node format' }, 400);
+  const nextDeviceLinkId = device_link_id ?? execution_node;
+  // device_link_id / execution_node 校验：必须是当前用户拥有的、未吊销的 AgentLink ID
+  if (nextDeviceLinkId !== undefined) {
+    if (!/^cl_[0-9a-f]{16}$/.test(nextDeviceLinkId)) {
+      return c.json({ error: 'Invalid device_link_id format' }, 400);
     }
-    const link = getAgentLinkById(execution_node);
+    const link = getAgentLinkById(nextDeviceLinkId);
     if (!link || link.userId !== authUser.id || link.revokedAt) {
-      return c.json({ error: 'execution_node not found' }, 400);
+      return c.json({ error: 'device_link_id not found' }, 400);
+    }
+    if (existing.repoDevicePath && existing.deviceLinkId && nextDeviceLinkId !== existing.deviceLinkId) {
+      return c.json({ error: 'repo_device_path workspaces can only run on their original Device' }, 400);
     }
   }
 
@@ -699,6 +762,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned !== undefined &&
     !name &&
     activation_mode === undefined &&
+    runtime_profile === undefined &&
+    device_link_id === undefined &&
+    agent_client_id === undefined &&
     execution_mode === undefined &&
     backend === undefined &&
     execution_node === undefined;
@@ -747,6 +813,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   if (
     name ||
     activation_mode !== undefined ||
+    runtime_profile !== undefined ||
+    device_link_id !== undefined ||
+    agent_client_id !== undefined ||
     execution_mode !== undefined ||
     backend !== undefined ||
     execution_node !== undefined
@@ -756,11 +825,18 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
       folder: existing.folder,
       added_at: existing.added_at,
       containerConfig: existing.containerConfig,
+      runtimeProfile:
+        runtime_profile !== undefined
+          ? runtime_profile
+          : existing.runtimeProfile,
       executionMode:
         execution_mode !== undefined
           ? (execution_mode as ExecutionMode)
           : existing.executionMode,
       customCwd: existing.customCwd,
+      repoId: existing.repoId,
+      repoGitUrl: existing.repoGitUrl,
+      repoDevicePath: existing.repoDevicePath,
       initSourcePath: existing.initSourcePath,
       initGitUrl: existing.initGitUrl,
       created_by: existing.created_by,
@@ -773,10 +849,18 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         activation_mode !== undefined
           ? activation_mode
           : existing.activation_mode,
+      deviceLinkId:
+        nextDeviceLinkId !== undefined
+          ? nextDeviceLinkId
+          : existing.deviceLinkId,
+      agentClientId:
+        agent_client_id !== undefined
+          ? agent_client_id
+          : existing.agentClientId,
       backend: backend !== undefined ? backend : existing.backend,
       executionNode:
-        execution_node !== undefined
-          ? execution_node
+        nextDeviceLinkId !== undefined
+          ? nextDeviceLinkId
           : existing.executionNode,
     };
 

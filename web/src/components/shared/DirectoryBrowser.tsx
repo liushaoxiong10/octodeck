@@ -21,9 +21,21 @@ interface DirectoryBrowserProps {
   value: string;
   onChange: (path: string) => void;
   placeholder?: string;
+  label?: string;
+  browseEndpoint?: string;
+  browseParams?: Record<string, string | undefined>;
+  allowCreate?: boolean;
 }
 
-export function DirectoryBrowser({ value, onChange, placeholder }: DirectoryBrowserProps) {
+export function DirectoryBrowser({
+  value,
+  onChange,
+  placeholder,
+  label = '工作目录（可选）',
+  browseEndpoint = '/api/browse/directories',
+  browseParams,
+  allowCreate = true,
+}: DirectoryBrowserProps) {
   const [browsing, setBrowsing] = useState(false);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [parentPath, setParentPath] = useState<string | null>(null);
@@ -38,9 +50,13 @@ export function DirectoryBrowser({ value, onChange, placeholder }: DirectoryBrow
     setLoading(true);
     setError(null);
     try {
-      const url = targetPath
-        ? `/api/browse/directories?path=${encodeURIComponent(targetPath)}`
-        : '/api/browse/directories';
+      const params = new URLSearchParams();
+      if (targetPath) params.set('path', targetPath);
+      for (const [key, val] of Object.entries(browseParams ?? {})) {
+        if (val) params.set(key, val);
+      }
+      const query = params.toString();
+      const url = query ? `${browseEndpoint}?${query}` : browseEndpoint;
       const data = await api.get<BrowseResponse>(url);
       setCurrentPath(data.currentPath);
       setParentPath(data.parentPath);
@@ -50,10 +66,15 @@ export function DirectoryBrowser({ value, onChange, placeholder }: DirectoryBrow
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [browseEndpoint, browseParams]);
 
   const handleToggleBrowse = () => {
     if (browsing) {
+      setBrowsing(false);
+      return;
+    }
+    if (browseParams && Object.values(browseParams).some((val) => val === undefined || val === '')) {
+      setError('请先完成必填选项');
       setBrowsing(false);
       return;
     }
@@ -90,6 +111,7 @@ export function DirectoryBrowser({ value, onChange, placeholder }: DirectoryBrow
 
   const handleCreateFolder = async () => {
     const name = newFolderName.trim();
+    if (!allowCreate) return;
     if (!name || !currentPath) return;
 
     setCreateLoading(true);
@@ -120,7 +142,7 @@ export function DirectoryBrowser({ value, onChange, placeholder }: DirectoryBrow
   return (
     <div>
       <Label className="mb-1">
-        工作目录（可选）
+        {label}
       </Label>
       <div className="flex gap-2">
         <Input
@@ -237,7 +259,7 @@ export function DirectoryBrowser({ value, onChange, placeholder }: DirectoryBrow
           </div>
 
           {/* New folder section */}
-          {currentPath && (
+          {allowCreate && currentPath && (
             <div className="border-t border-border px-3 py-2">
               {creating ? (
                 <div className="flex items-center gap-2">

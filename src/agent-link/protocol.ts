@@ -49,6 +49,15 @@ export const RunRequestFrame = z.object({
   maxOutputBytes: z.number().int().positive(),
   context: z.unknown().optional(),
   stdinJson: z.string().optional(),
+  remoteCwdPlaceholder: z.string().max(128).optional(),
+  workspaceRepo: z
+    .object({
+      kind: z.enum(['git', 'device_path']),
+      gitUrl: z.string().max(2000).optional(),
+      devicePath: z.string().max(4096).optional(),
+      groupFolder: z.string().max(256),
+    })
+    .optional(),
 });
 export type RunRequestFrame = z.infer<typeof RunRequestFrame>;
 

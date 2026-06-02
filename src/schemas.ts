@@ -5,6 +5,12 @@ import { ALL_PERMISSIONS } from './permissions.js';
 import type { Permission } from './types.js';
 import { MAX_GROUP_NAME_LEN } from './web-context.js';
 
+export const AgentRuntimeProfileSchema = z.enum([
+  'server-agent',
+  'server-agent-device-tools',
+  'device-cli-agent',
+]);
+
 export const TaskPatchSchema = z.object({
   chat_jid: z.string().min(1).optional(),
   prompt: z.string().optional(),
@@ -122,10 +128,25 @@ export const MessageCreateSchema = z
 
 export const GroupCreateSchema = z.object({
   name: z.string().min(1).max(MAX_GROUP_NAME_LEN),
+  runtime_profile: AgentRuntimeProfileSchema.optional(),
+  device_link_id: z.string().regex(/^cl_[0-9a-f]{16}$/).optional(),
+  agent_client_id: z.string().min(1).max(64).optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
   // Device target for native execution: built-in server device or connected octodeck-daemon device.
   execution_node: z.string().min(1).max(64).optional(),
   custom_cwd: z
+    .string()
+    .optional()
+    .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  repo_id: z
+    .string()
+    .optional()
+    .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  repo_git_url: z
+    .string()
+    .optional()
+    .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  repo_device_path: z
     .string()
     .optional()
     .transform((val) => (val && val.trim() ? val.trim() : undefined)),
@@ -137,6 +158,14 @@ export const GroupCreateSchema = z.object({
     .string()
     .optional()
     .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+});
+
+export const RepoCreateSchema = z.object({
+  name: z.string().min(1).max(80).transform((val) => val.trim()),
+  kind: z.enum(['git', 'device_path']),
+  git_url: z.string().optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  device_path: z.string().optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  device_link_id: z.string().optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
 });
 
 export const GroupMemberAddSchema = z.object({
@@ -199,6 +228,9 @@ export const GroupPatchSchema = z.object({
   activation_mode: z
     .enum(['auto', 'always', 'when_mentioned', 'owner_mentioned', 'disabled'])
     .optional(),
+  runtime_profile: AgentRuntimeProfileSchema.optional(),
+  device_link_id: z.string().regex(/^cl_[0-9a-f]{16}$/).optional(),
+  agent_client_id: z.string().min(1).max(64).optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
   backend: z.string().min(1).max(64).optional(),
   // Phase 5.1: 'server-local' | <agent_link_id> ('cl_' + 16 hex)

@@ -230,6 +230,8 @@ export interface ContainerInput {
   plugins?: Array<{ type: 'local'; path: string }>;
   /** AgentLink ID used by agent-runner remote MCP tools. */
   remoteExecutionLinkId?: string;
+  /** Controls whether agent-runner may expose native local tools. */
+  localToolPolicy?: 'none' | 'server' | 'device-remote' | 'container';
   /** Base URL for agent-runner -> server tool bridge calls. */
   remoteToolServerUrl?: string;
   /** Runtime context audit bootstrap; agent-runner enriches it with SDK usage. */
@@ -1793,9 +1795,17 @@ export async function runHostAgent(
         ...input,
         plugins: prepareHostPlugins(group.created_by),
         remoteExecutionLinkId:
-          group.executionNode && group.executionNode !== 'server-local'
+          input.remoteExecutionLinkId ||
+          (group.executionNode && group.executionNode !== 'server-local'
             ? group.executionNode
-            : undefined,
+            : undefined),
+        localToolPolicy:
+          input.localToolPolicy ||
+          (group.runtimeProfile === 'server-agent'
+            ? 'none'
+            : group.runtimeProfile === 'server-agent-device-tools'
+              ? 'device-remote'
+              : undefined),
         remoteToolServerUrl: hostEnv['OCTODECK_SERVER_URL'],
         contextAudit: hostClaudeContextPlan.audit,
       };

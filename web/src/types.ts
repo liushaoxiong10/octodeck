@@ -12,8 +12,14 @@ export interface GroupInfo {
   deletable?: boolean;
   lastMessage?: string;
   lastMessageTime?: string;
+  runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent';
+  device_link_id?: string;
+  agent_client_id?: string;
   execution_mode?: 'container' | 'host';
   custom_cwd?: string;
+  repo_id?: string;
+  repo_git_url?: string;
+  repo_device_path?: string;
   created_by?: string;
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';

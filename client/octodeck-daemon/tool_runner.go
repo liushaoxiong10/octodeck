@@ -8,9 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
+
+const maxDirectoryEntries = 200
 
 type toolRunner struct {
 	cfg  *Config
@@ -118,6 +121,12 @@ func (r *toolRunner) execute(parent context.Context, req *ToolRequestFrame) *Too
 			names = append(names, e.Name())
 		}
 		return finish(map[string]any{"content": strings.Join(names, "\n")})
+	case "ListDirectories":
+		payload, err := r.listDirectories(strArg(req.Input, "path"))
+		if err != nil {
+			return fail(err)
+		}
+		return finish(payload)
 	case "Glob":
 		base, err := r.resolvePath(req.Cwd, strArgDefault(req.Input, "path", req.Cwd))
 		if err != nil {
@@ -189,10 +198,146 @@ func (r *toolRunner) validate(req *ToolRequestFrame) error {
 	if req.Cwd == "" || !filepath.IsAbs(req.Cwd) {
 		return fmt.Errorf("cwd must be absolute: %q", req.Cwd)
 	}
+	if req.ToolName == "ListDirectories" {
+		return nil
+	}
 	if !r.isAllowedPathForCwd(req.Cwd, req.Cwd) {
 		return fmt.Errorf("cwd outside allowed roots: %s", req.Cwd)
 	}
 	return nil
+}
+
+func (r *toolRunner) listDirectories(requestedPath string) (map[string]any, error) {
+	roots := r.cfg.AllowedRoots
+	hasAllowlist := len(roots) > 0
+
+	if requestedPath == "" {
+		if hasAllowlist {
+			dirs := make([]map[string]any, 0, len(roots))
+			for _, root := range roots {
+				cleanRoot, err := cleanExistingDirectory(root)
+				if err != nil {
+					continue
+				}
+				dirs = append(dirs, directoryPayload(filepath.Base(cleanRoot), cleanRoot, hasVisibleSubdirectory(cleanRoot)))
+			}
+			sortDirectoryPayloads(dirs)
+			return map[string]any{"currentPath": nil, "parentPath": nil, "directories": dirs, "hasAllowlist": true}, nil
+		}
+
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			home = string(filepath.Separator)
+		}
+		cleanHome, err := cleanExistingDirectory(home)
+		if err != nil {
+			cleanHome = string(filepath.Separator)
+		}
+		return map[string]any{
+			"currentPath":  cleanHome,
+			"parentPath":    parentPathFor(cleanHome, false, nil),
+			"directories":   r.listVisibleSubdirectories(cleanHome),
+			"hasAllowlist": false,
+		}, nil
+	}
+
+	if !filepath.IsAbs(requestedPath) {
+		return nil, fmt.Errorf("path must be absolute: %q", requestedPath)
+	}
+	cleanPath, err := cleanExistingDirectory(requestedPath)
+	if err != nil {
+		return nil, err
+	}
+	if hasAllowlist && !r.isAllowedPathForCwd(cleanPath, cleanPath) {
+		return nil, fmt.Errorf("path outside allowed roots: %s", cleanPath)
+	}
+
+	return map[string]any{
+		"currentPath":  cleanPath,
+		"parentPath":    parentPathFor(cleanPath, hasAllowlist, r),
+		"directories":   r.listVisibleSubdirectories(cleanPath),
+		"hasAllowlist": hasAllowlist,
+	}, nil
+}
+
+func cleanExistingDirectory(p string) (string, error) {
+	clean, err := filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return "", err
+	}
+	realPath, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return "", err
+	}
+	stat, err := os.Stat(realPath)
+	if err != nil {
+		return "", err
+	}
+	if !stat.IsDir() {
+		return "", fmt.Errorf("path is not a directory: %s", realPath)
+	}
+	return realPath, nil
+}
+
+func parentPathFor(p string, hasAllowlist bool, r *toolRunner) any {
+	parent := filepath.Dir(p)
+	if parent == p {
+		return nil
+	}
+	if hasAllowlist && r != nil && !r.isAllowedPathForCwd(parent, parent) {
+		return nil
+	}
+	return parent
+}
+
+func (r *toolRunner) listVisibleSubdirectories(dirPath string) []map[string]any {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return []map[string]any{}
+	}
+	dirs := make([]map[string]any, 0)
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		fullPath := filepath.Join(dirPath, entry.Name())
+		cleanPath, err := cleanExistingDirectory(fullPath)
+		if err != nil {
+			continue
+		}
+		if !r.isAllowedPathForCwd(cleanPath, cleanPath) {
+			continue
+		}
+		dirs = append(dirs, directoryPayload(entry.Name(), cleanPath, hasVisibleSubdirectory(cleanPath)))
+		if len(dirs) >= maxDirectoryEntries {
+			break
+		}
+	}
+	sortDirectoryPayloads(dirs)
+	return dirs
+}
+
+func directoryPayload(name, p string, hasChildren bool) map[string]any {
+	return map[string]any{"name": name, "path": p, "hasChildren": hasChildren}
+}
+
+func hasVisibleSubdirectory(dirPath string) bool {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
+			return true
+		}
+	}
+	return false
+}
+
+func sortDirectoryPayloads(dirs []map[string]any) {
+	sort.Slice(dirs, func(i, j int) bool {
+		return fmt.Sprint(dirs[i]["name"]) < fmt.Sprint(dirs[j]["name"])
+	})
 }
 
 func (r *toolRunner) resolvePath(cwd, p string) (string, error) {
@@ -213,7 +358,10 @@ func (r *toolRunner) resolvePath(cwd, p string) (string, error) {
 }
 
 func (r *toolRunner) isAllowedPathForCwd(p, cwd string) bool {
-	roots := r.cfg.AllowedRoots
+	return isPathAllowedByRoots(p, r.cfg.AllowedRoots, cwd)
+}
+
+func isPathAllowedByRoots(p string, roots []string, cwd string) bool {
 	if len(roots) == 0 {
 		roots = []string{cwd}
 	}
@@ -221,17 +369,37 @@ func (r *toolRunner) isAllowedPathForCwd(p, cwd string) bool {
 	if err != nil {
 		return false
 	}
+	if realPath, err := filepath.EvalSymlinks(clean); err == nil {
+		clean = realPath
+	}
 	for _, root := range roots {
 		r, err := filepath.Abs(filepath.Clean(root))
 		if err != nil {
 			continue
 		}
-		rel, err := filepath.Rel(r, clean)
-		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if isPathWithinRoot(clean, r) {
+			return true
+		}
+		if realRoot, err := filepath.EvalSymlinks(r); err == nil {
+			r = realRoot
+		}
+		if isPathWithinRoot(clean, r) {
 			return true
 		}
 	}
 	return false
+}
+
+func isPathAllowedByConfiguredRoots(p string, roots []string) bool {
+	if len(roots) == 0 {
+		return true
+	}
+	return isPathAllowedByRoots(p, roots, p)
+}
+
+func isPathWithinRoot(p, root string) bool {
+	rel, err := filepath.Rel(root, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func strArg(m map[string]any, key string) string { return strArgDefault(m, key, "") }

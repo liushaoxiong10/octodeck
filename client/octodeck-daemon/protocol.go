@@ -139,19 +139,28 @@ type HelloAckFrame struct {
 }
 
 type RunRequestFrame struct {
-	Type           frameType         `json:"type"`
-	ID             int64             `json:"id"`
-	RunID          string            `json:"runId"`
-	BackendID      string            `json:"backendId"`
-	Binary         string            `json:"binary"`
-	Argv           []string          `json:"argv"`
-	Cwd            string            `json:"cwd"`
-	Env            map[string]string `json:"env,omitempty"`
-	OutputProtocol string            `json:"outputProtocol"`
-	TimeoutMs      int64             `json:"timeoutMs"`
-	MaxOutputBytes int64             `json:"maxOutputBytes"`
-	Context        any               `json:"context,omitempty"`
-	StdinJSON      string            `json:"stdinJson,omitempty"`
+	Type                 frameType          `json:"type"`
+	ID                   int64              `json:"id"`
+	RunID                string             `json:"runId"`
+	BackendID            string             `json:"backendId"`
+	Binary               string             `json:"binary"`
+	Argv                 []string           `json:"argv"`
+	Cwd                  string             `json:"cwd"`
+	Env                  map[string]string  `json:"env,omitempty"`
+	OutputProtocol       string             `json:"outputProtocol"`
+	TimeoutMs            int64              `json:"timeoutMs"`
+	MaxOutputBytes       int64              `json:"maxOutputBytes"`
+	Context              any                `json:"context,omitempty"`
+	StdinJSON            string             `json:"stdinJson,omitempty"`
+	RemoteCwdPlaceholder string             `json:"remoteCwdPlaceholder,omitempty"`
+	WorkspaceRepo        *WorkspaceRepoSpec `json:"workspaceRepo,omitempty"`
+}
+
+type WorkspaceRepoSpec struct {
+	Kind        string `json:"kind"`
+	GitURL      string `json:"gitUrl,omitempty"`
+	DevicePath  string `json:"devicePath,omitempty"`
+	GroupFolder string `json:"groupFolder"`
 }
 
 type RunCancelFrame struct {
