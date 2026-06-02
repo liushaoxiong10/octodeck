@@ -7,7 +7,12 @@
 # -----------------------------------------------------------------------------
 FROM node:22-slim AS dependencies
 
+# Use Tsinghua mirror for apt
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
+
 # Install build dependencies for native modules (better-sqlite3, node-pty)
+# git is required for npm packages installed from Git repos
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     make \
@@ -15,6 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libc6-dev \
     libsqlite3-dev \
+    git \
+    openssh-client \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -23,6 +31,12 @@ WORKDIR /app
 COPY package.json ./
 COPY web/package.json ./web/
 COPY container/agent-runner/package.json ./container/agent-runner/
+
+# Configure npm to use taobao registry
+RUN npm config set registry https://registry.npmmirror.com
+
+# Force git to use HTTPS instead of SSH for GitHub (avoids SSH auth issues)
+RUN git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
 
 # Install all dependencies
 RUN npm install && \
@@ -49,10 +63,21 @@ COPY container/agent-runner/ ./container/agent-runner/
 # Build all projects (backend + web + agent-runner)
 RUN npm run build:all
 
+# Build Go daemon
+COPY client/octodeck-daemon/ ./client/octodeck-daemon/
+RUN apt-get update && apt-get install -y --no-install-recommends golang-go && \
+    cd client/octodeck-daemon && GOPROXY=https://goproxy.cn,direct go build -o octodeck-daemon . && \
+    apt-get remove -y golang-go && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/* /root/go
+
 # -----------------------------------------------------------------------------
 # Stage 3: Production - Minimal runtime image
 # -----------------------------------------------------------------------------
 FROM node:22-slim AS production
+
+# Use Tsinghua mirror for apt
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -86,6 +111,9 @@ COPY --from=builder /app/container/agent-runner/package.json ./container/agent-r
 
 # Copy config directory (mount allowlist etc.)
 COPY --from=builder /app/config ./config
+
+# Copy Go daemon binary
+COPY --from=builder /app/client/octodeck-daemon/octodeck-daemon ./client/octodeck-daemon/octodeck-daemon
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
