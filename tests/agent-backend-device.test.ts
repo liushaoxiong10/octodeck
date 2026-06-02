@@ -35,6 +35,7 @@ describe('device-backed agent backend', () => {
       group: {
         name: 'Agent Team Generator',
         folder: 'agent-team-generator',
+        created_by: 'alice',
         containerConfig: { timeout: 12345 },
       } as any,
       input: {
@@ -47,7 +48,7 @@ describe('device-backed agent backend', () => {
     });
 
     expect(result).toEqual({ status: 'success', result: '{"team":{"name":"Demo"}}' });
-    expect(sdkQueryMock).toHaveBeenCalledWith('return json', { timeout: 12345 });
+    expect(sdkQueryMock).toHaveBeenCalledWith('return json', { timeout: 12345, userId: 'alice' });
     expect(runHostAgentMock).not.toHaveBeenCalled();
     expect(runContainerAgentMock).not.toHaveBeenCalled();
   });

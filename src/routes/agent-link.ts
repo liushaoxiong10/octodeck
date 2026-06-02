@@ -21,9 +21,12 @@ import { WebSocketServer } from 'ws';
 
 import {
   createAgentLink,
+  getAllRegisteredGroups,
+  getAllTasks,
   getAgentLinkById,
   listAgentLinkAuthCandidates,
   listAgentLinksByUser,
+  listManagedReposByUser,
   revokeAgentLink,
   rotateAgentLinkToken,
 } from '../db.js';
@@ -44,6 +47,7 @@ import { AgentLinkSession } from '../agent-link/session.js';
 import { requestProviderModels } from '../agent-link/model-rpc.js';
 import { requestProviderSkills } from '../agent-link/skills-rpc.js';
 import type { AuthUser } from '../types.js';
+import { listCustomBackends } from '../backends/custom-loader.js';
 
 const BCRYPT_ROUNDS = 10;
 const TOKEN_BYTES = 32; // 64 hex chars
@@ -127,6 +131,36 @@ agentLinkRoutes.post('/:id/rotate', authMiddleware, async (c) => {
 agentLinkRoutes.delete('/:id', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const id = c.req.param('id');
+  const link = getAgentLinkById(id);
+  if (!link || link.userId !== user.id || link.revokedAt) {
+    return c.json({ error: '设备不存在或已移除' }, 404);
+  }
+
+  const agents = listCustomBackends()
+    .filter((backend) => backend.deviceLinkId === id)
+    .map((backend) => ({ id: backend.id, displayName: backend.displayName }));
+  const workspaces = Object.entries(getAllRegisteredGroups())
+    .filter(([, group]) => group.deviceLinkId === id || group.executionNode === id)
+    .map(([jid, group]) => ({ jid, name: group.name, folder: group.folder }));
+  const repos = listManagedReposByUser(user.id)
+    .filter((repo) => repo.deviceLinkId === id)
+    .map((repo) => ({ id: repo.id, name: repo.name, kind: repo.kind }));
+  const tasks = getAllTasks()
+    .filter((task) => task.execution_node === id)
+    .map((task) => ({ id: task.id, prompt: task.prompt, status: task.status }));
+
+  if (agents.length > 0 || workspaces.length > 0 || repos.length > 0 || tasks.length > 0) {
+    return c.json(
+      {
+        error: '该设备存在关联的 Agent/工作区/Repo/任务，请先删除或切换这些关联后再删除设备',
+        agents,
+        workspaces,
+        repos,
+        tasks,
+      },
+      409,
+    );
+  }
   const ok = revokeAgentLink(id, user.id);
   if (!ok) return c.json({ error: '设备不存在或已移除' }, 404);
   disconnectLink(id, 'revoked');

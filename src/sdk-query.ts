@@ -5,6 +5,9 @@
  */
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import fs from 'fs';
+import path from 'path';
+import { DATA_DIR } from './config.js';
 import { buildClaudeEnvLines, getClaudeProviderConfig } from './runtime-config.js';
 import { logger } from './logger.js';
 
@@ -23,7 +26,7 @@ let envLock: Promise<void> = Promise.resolve();
  */
 export async function sdkQuery(
   prompt: string,
-  opts?: { model?: string; timeout?: number },
+  opts?: { model?: string; timeout?: number; userId?: string },
 ): Promise<string | null> {
   // Chain on the lock so only one sdkQuery touches process.env at a time
   let release: () => void;
@@ -33,6 +36,9 @@ export async function sdkQuery(
   await prevLock;
 
   const timeout = opts?.timeout ?? 60_000;
+  const cloudSkillConfigDir = opts?.userId
+    ? prepareCloudSkillConfigDir(opts.userId)
+    : null;
 
   // Inject provider credentials into process.env for the SDK
   const config = getClaudeProviderConfig();
@@ -45,6 +51,10 @@ export async function sdkQuery(
     const value = line.slice(eq + 1);
     savedEnv[key] = process.env[key];
     process.env[key] = value;
+  }
+  if (cloudSkillConfigDir) {
+    savedEnv.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = cloudSkillConfigDir;
   }
 
   const abortController = new AbortController();
@@ -59,9 +69,15 @@ export async function sdkQuery(
       options: {
         ...(model && { model }),
         maxTurns: 1,
-        allowedTools: [],
+        allowedTools: cloudSkillConfigDir ? ['Skill'] : [],
         permissionMode: 'bypassPermissions' as const,
         allowDangerouslySkipPermissions: true,
+        ...(cloudSkillConfigDir
+          ? {
+              settingSources: ['project', 'user'] as const,
+              skills: 'all' as const,
+            }
+          : {}),
         abortController,
       },
     });
@@ -88,4 +104,34 @@ export async function sdkQuery(
     }
     release!();
   }
+}
+
+function prepareCloudSkillConfigDir(userId: string): string | null {
+  if (!/^[\w-]+$/.test(userId)) return null;
+  const userSkillsDir = path.join(DATA_DIR, 'skills', userId);
+  if (!fs.existsSync(userSkillsDir)) return null;
+
+  const configDir = path.join(DATA_DIR, 'sdk-query', userId, '.claude');
+  const skillsDir = path.join(configDir, 'skills');
+  fs.mkdirSync(skillsDir, { recursive: true });
+
+  for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+    if (entry.isDirectory() || entry.isSymbolicLink()) {
+      fs.rmSync(path.join(skillsDir, entry.name), { recursive: true, force: true });
+    }
+  }
+
+  for (const entry of fs.readdirSync(userSkillsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+    const source = path.join(userSkillsDir, entry.name);
+    const target = path.join(skillsDir, entry.name);
+    try {
+      fs.symlinkSync(source, target);
+    } catch {
+      // Fallback for filesystems that disallow symlinks.
+      fs.cpSync(source, target, { recursive: true });
+    }
+  }
+
+  return configDir;
 }

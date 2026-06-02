@@ -26,6 +26,8 @@ import {
   type AgentTeamShape,
 } from '../agent-teams.js';
 import type { AgentMdDefinitionInput, AgentTeamInput } from '../agent-teams.js';
+import { executeAgentTeam } from '../agent-team-engine.js';
+import type { AgentTeamRoleResult, AgentTeamExecutionPhase } from '../agent-team-engine.js';
 import type { RegisteredGroup } from '../types.js';
 
 const router = new Hono<{ Variables: Variables }>();
@@ -37,6 +39,7 @@ const RoleSchema = z.object({
   id: z.string().min(1).max(64),
   name: z.string().min(1).max(120),
   responsibility: z.string().min(1).max(2000),
+  parallelGroup: z.string().min(1).max(64).optional(),
   inputs: z.array(z.string().max(500)).max(12).optional(),
   outputs: z.array(z.string().max(500)).max(12).optional(),
   skills: z.array(z.string().max(500)).max(12).optional(),
@@ -77,6 +80,11 @@ const GenerateSchema = z.object({
   generatorAgentId: z.string().min(1).max(128),
   goal: z.string().min(1).max(6000),
   shape: ShapeSchema.default('auto'),
+});
+
+const ExecuteSchema = z.object({
+  prompt: z.string().min(1).max(10000),
+  runnerAgentId: z.string().min(1).max(128).optional(),
 });
 
 router.get('/', authMiddleware, (c) => {
@@ -180,6 +188,54 @@ router.get('/:id', authMiddleware, (c) => {
   const team = getAgentTeam(c.req.param('id'), user.id);
   if (!team) return c.json({ error: 'team not found' }, 404);
   return c.json({ team });
+});
+
+router.post('/:id/execute', authMiddleware, systemConfigMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const team = getAgentTeam(c.req.param('id'), user.id);
+  if (!team) return c.json({ error: 'team not found' }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = ExecuteSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: parsed.error.issues[0]?.message || 'invalid execution request' }, 400);
+  }
+  const settings = getSystemSettings();
+  const runnerAgentId = parsed.data.runnerAgentId ?? team.createdByAgentId;
+  if (!settings.allowedBackends.includes(runnerAgentId)) {
+    return c.json({ error: 'team runner agent is not in allowedBackends' }, 403);
+  }
+  const backend = getBackend(runnerAgentId);
+  if (!backend) return c.json({ error: 'team runner backend not found' }, 404);
+  if (!backend.supportsExecutionMode('host')) {
+    return c.json({ error: 'team runner agent does not support host execution mode' }, 400);
+  }
+  const execution = await executeAgentTeam(team, { prompt: parsed.data.prompt }, async ({ role, prompt, phase, previousResults, feedback }) => {
+    const rolePrompt = buildAgentTeamRolePrompt(team, role, prompt, phase, previousResults, feedback);
+    const output = await backend.run({
+      group: {
+        name: `Agent Team ${team.name}`,
+        folder: `agent-team-${team.id}-${role.id}`,
+        added_at: new Date().toISOString(),
+        containerConfig: { timeout: AGENT_TEAM_GENERATION_TIMEOUT_MS },
+        executionMode: 'host',
+        backend: runnerAgentId,
+        created_by: user.id,
+      },
+      executionMode: 'host',
+      input: {
+        prompt: rolePrompt,
+        groupFolder: `agent-team-${team.id}-${role.id}`,
+        chatJid: `system:agent-team:${team.id}`,
+        isMain: false,
+        isHome: false,
+        isAdminHome: false,
+        executionProfile: 'single-turn-json',
+      },
+      onProcess: () => undefined,
+    });
+    return output;
+  });
+  return c.json({ execution }, execution.status === 'success' ? 200 : 502);
 });
 
 router.patch('/:id', authMiddleware, systemConfigMiddleware, async (c) => {
@@ -306,4 +362,43 @@ function extractJsonObject(text: string): string | null {
   const end = raw.lastIndexOf('}');
   if (start < 0 || end <= start) return null;
   return raw.slice(start, end + 1);
+}
+
+function buildAgentTeamRolePrompt(
+  team: AgentTeamInput,
+  role: AgentTeamInput['roles'][number],
+  userPrompt: string,
+  phase: AgentTeamExecutionPhase,
+  previousResults: AgentTeamRoleResult[],
+  feedback?: string,
+): string {
+  return [
+    '你正在作为 Agent Team 中的一个抽象角色执行任务。',
+    '请只完成当前角色职责范围内的工作，并输出清晰、可交接的结果。',
+    '',
+    `Team: ${team.name}`,
+    `Goal: ${team.goal}`,
+    `Shape: ${team.shape}`,
+    `Workflow: ${team.workflow}`,
+    '',
+    `Current role: ${role.name} (${role.id})`,
+    `Responsibility: ${role.responsibility}`,
+    role.inputs?.length ? `Inputs: ${role.inputs.join('; ')}` : '',
+    role.outputs?.length ? `Expected outputs: ${role.outputs.join('; ')}` : '',
+    role.skills?.length ? `Suggested skills/agent.md: ${role.skills.join('; ')}` : '',
+    role.guardrails?.length ? `Guardrails: ${role.guardrails.join('; ')}` : '',
+    '',
+    `Execution phase: ${phase}`,
+    feedback ? `Feedback or upstream signal: ${feedback}` : '',
+    previousResults.length ? 'Previous role results:' : '',
+    ...previousResults.map((result) => `- ${result.roleName} (${result.phase}, ${result.status}): ${result.result}`),
+    '',
+    `User request: ${userPrompt}`,
+    '',
+    '输出要求：',
+    '- 用中文输出。',
+    '- 如果当前角色是测试/QA，请明确写出“测试通过”或“测试不通过”，并说明原因。',
+    '- 如果当前角色是 Judge，请用 “route: <role_id>” 指明下一步选择的角色。',
+    '- 不要调用工具，不要声明自己无法执行；按角色给出可交付结果。',
+  ].filter(Boolean).join('\n');
 }

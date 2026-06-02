@@ -10,7 +10,6 @@ import type { Variables } from '../web-context.js';
 import type { AuthUser } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { DATA_DIR } from '../config.js';
-import { getEffectiveExternalDir } from '../runtime-config.js';
 import {
   parseFrontmatter,
   validateSkillId,
@@ -137,19 +136,6 @@ function discoverSkills(userId: string, userRole?: string): Skill[] {
   const userSkills = scanDirectory(getUserSkillsDir(userId), 'user');
   const projectSkills = scanDirectory(getProjectSkillsDir(), 'project');
 
-  // 宿主机 ~/.claude/skills（仅 admin 可见）
-  const externalSkills: Skill[] = [];
-  if (userRole === 'admin') {
-    const extSkillsDir = path.join(getEffectiveExternalDir(), 'skills');
-    if (fs.existsSync(extSkillsDir)) {
-      const scanned = scanDirectory(extSkillsDir, 'project');
-      for (const s of scanned) {
-        (s as any).source = 'external';
-      }
-      externalSkills.push(...scanned);
-    }
-  }
-
   // 读取 skills manifest 补充安装元数据
   const skillsManifest = readSkillsManifest(userId);
 
@@ -161,10 +147,11 @@ function discoverSkills(userId: string, userRole?: string): Skill[] {
     }
   }
 
-  // 按优先级去重（user > project > external），同 ID 高优先级覆盖低优先级
+  // 按优先级去重（user > project），同 ID 高优先级覆盖低优先级。
+  // “本地/系统”分类展示云端/设备侧返回的 skill，不再扫描宿主机本地库。
   const seen = new Set<string>();
   const result: Skill[] = [];
-  for (const skill of [...userSkills, ...projectSkills, ...externalSkills]) {
+  for (const skill of [...userSkills, ...projectSkills]) {
     if (!seen.has(skill.id)) {
       seen.add(skill.id);
       result.push(skill);
@@ -180,12 +167,6 @@ function getSkillDetail(skillId: string, userId: string, userRole?: string): Ski
     { rootDir: getUserSkillsDir(userId), source: 'user' },
     { rootDir: getProjectSkillsDir(), source: 'project' },
   ];
-  if (userRole === 'admin') {
-    const extSkillsDir = path.join(getEffectiveExternalDir(), 'skills');
-    if (fs.existsSync(extSkillsDir)) {
-      searchDirs.push({ rootDir: extSkillsDir, source: 'external' });
-    }
-  }
 
   const skillsManifest = readSkillsManifest(userId);
 

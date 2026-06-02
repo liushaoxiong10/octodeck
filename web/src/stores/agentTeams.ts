@@ -7,6 +7,7 @@ export interface AgentTeamRole {
   id: string;
   name: string;
   responsibility: string;
+  parallelGroup?: string;
   inputs?: string[];
   outputs?: string[];
   skills?: string[];
@@ -37,6 +38,28 @@ export interface AgentMdDefinition {
   updatedAt: string;
 }
 
+export interface AgentTeamExecutionResult {
+  status: 'success' | 'error';
+  finalResult: string;
+  roleResults: Array<{
+    roleId: string;
+    roleName: string;
+    phase: string;
+    status: 'success' | 'error';
+    result: string;
+    error?: string;
+  }>;
+  events: Array<{
+    kind: 'role' | 'edge' | 'feedback' | 'route';
+    roleId?: string;
+    fromRoleId?: string;
+    toRoleId?: string;
+    phase?: string;
+    label?: string;
+  }>;
+  error?: string;
+}
+
 export type AgentTeamInput = Omit<AgentTeam, 'id' | 'createdAt' | 'updatedAt'>;
 export type AgentTeamPatch = Partial<AgentTeamInput>;
 export type AgentMdDefinitionInput = Omit<AgentMdDefinition, 'id' | 'createdAt' | 'updatedAt'>;
@@ -50,6 +73,7 @@ interface AgentTeamsState {
   error: string | null;
   load: () => Promise<void>;
   generate: (input: { generatorAgentId: string; goal: string; shape: AgentTeamShape }) => Promise<AgentTeam>;
+  execute: (id: string, prompt: string, runnerAgentId?: string) => Promise<AgentTeamExecutionResult>;
   update: (id: string, patch: AgentTeamPatch) => Promise<AgentTeam>;
   remove: (id: string) => Promise<void>;
   loadAgentMdDefinitions: () => Promise<void>;
@@ -82,6 +106,19 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
       await get().load();
       await get().loadAgentMdDefinitions();
       return data.team;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    } finally {
+      set({ saving: false });
+    }
+  },
+
+  execute: async (id, prompt, runnerAgentId) => {
+    set({ saving: true, error: null });
+    try {
+      const data = await api.post<{ execution: AgentTeamExecutionResult }>(`/api/agent-teams/${encodeURIComponent(id)}/execute`, { prompt, runnerAgentId }, 600_000);
+      return data.execution;
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
       throw err;

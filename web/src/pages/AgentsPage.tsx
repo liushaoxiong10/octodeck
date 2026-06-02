@@ -14,6 +14,7 @@ import {
   Sparkles,
   TerminalSquare,
   Trash2,
+  Workflow,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -28,7 +29,7 @@ import {
   type CustomBackendDef,
 } from '../stores/customBackends';
 import { useTasksStore, type ScheduledTask } from '../stores/tasks';
-import { useAgentTeamsStore, type AgentTeam, type AgentTeamShape } from '../stores/agentTeams';
+import { useAgentTeamsStore, type AgentTeam, type AgentTeamExecutionResult, type AgentTeamRole, type AgentTeamShape } from '../stores/agentTeams';
 import CustomBackendFormDialog from '../components/settings/CustomBackendFormDialog';
 import type { BackendInfo, SystemSettings } from '../components/settings/types';
 import { getErrorMessage } from '../components/settings/types';
@@ -63,6 +64,169 @@ interface AgentSkillsResponse {
 const AGENT_SECTIONS = ['Agent 管理', 'Agent.md', 'Agent Team'] as const;
 type AgentSectionName = (typeof AGENT_SECTIONS)[number];
 
+const SECTION_ANCHORS: Record<AgentSectionName, string> = {
+  'Agent 管理': 'agent',
+  'Agent.md': 'agent-md',
+  'Agent Team': 'agent-team',
+};
+
+const SECTION_BY_ANCHOR = Object.fromEntries(
+  Object.entries(SECTION_ANCHORS).map(([section, anchor]) => [anchor, section as AgentSectionName]),
+) as Record<string, AgentSectionName>;
+
+interface AgentsAnchor {
+  agentId?: string;
+  agentMdId?: string;
+  teamId?: string;
+  section?: AgentSectionName;
+}
+
+interface TeamDagNode {
+  id: string;
+  label: string;
+  subtitle: string;
+  role: AgentTeamRole;
+}
+
+interface TeamDagEdge {
+  from: string;
+  to: string;
+  label: string;
+  kind?: 'primary' | 'feedback' | 'merge';
+}
+
+interface TeamDagModel {
+  nodes: TeamDagNode[];
+  edges: TeamDagEdge[];
+  feedbackEdges: TeamDagEdge[];
+  parallelChains: Array<{ group: string; nodes: TeamDagNode[] }>;
+  summary: string;
+  hint: string;
+}
+
+function parseAgentsAnchor(hash = typeof window === 'undefined' ? '' : window.location.hash): AgentsAnchor {
+  const raw = hash.replace(/^#/, '').trim();
+  if (!raw) return {};
+  if (SECTION_BY_ANCHOR[raw]) return { section: SECTION_BY_ANCHOR[raw] };
+
+  const params = new URLSearchParams(raw);
+  const agentId = params.get('agent')?.trim() || undefined;
+  const agentMdId = params.get('agentMd')?.trim() || undefined;
+  const teamId = params.get('team')?.trim() || undefined;
+  const sectionParam = params.get('section')?.trim() || undefined;
+  const section = sectionParam
+    ? SECTION_BY_ANCHOR[sectionParam] ?? (AGENT_SECTIONS.includes(sectionParam as AgentSectionName) ? sectionParam as AgentSectionName : undefined)
+    : undefined;
+  return { agentId, agentMdId, teamId, section };
+}
+
+function updateAgentsAnchor(anchor: AgentsAnchor): void {
+  if (typeof window === 'undefined') return;
+  const params = new URLSearchParams();
+  if (anchor.agentId) params.set('agent', anchor.agentId);
+  if (anchor.section) params.set('section', SECTION_ANCHORS[anchor.section]);
+  if (anchor.agentMdId) params.set('agentMd', anchor.agentMdId);
+  if (anchor.teamId) params.set('team', anchor.teamId);
+  const nextHash = params.toString() ? `#${params.toString()}` : '';
+  const nextUrl = `${window.location.pathname}${window.location.search}${nextHash}`;
+  if (window.location.hash !== nextHash) {
+    window.history.replaceState(null, '', nextUrl);
+  }
+}
+
+function scrollAgentsAnchorSection(section?: AgentSectionName): void {
+  if (!section || typeof document === 'undefined') return;
+  window.requestAnimationFrame(() => {
+    document.getElementById(SECTION_ANCHORS[section])?.scrollIntoView({ block: 'start' });
+  });
+}
+
+function buildTeamDag(team: AgentTeam): TeamDagModel {
+  const nodes = team.roles.map((role, index) => ({
+    id: role.id || `role_${index + 1}`,
+    label: role.name || `Role ${index + 1}`,
+    subtitle: role.responsibility,
+    role,
+  }));
+  const edges: TeamDagEdge[] = [];
+  const feedbackEdges: TeamDagEdge[] = [];
+  const parallelChains = buildParallelChains(nodes);
+
+  if (parallelChains.length > 0) {
+    const previousNode = nodes.find((node) => !node.role.parallelGroup && nodes.indexOf(node) < nodes.findIndex((candidate) => candidate.role.parallelGroup));
+    for (const chain of parallelChains) {
+      if (chain.nodes[0]) edges.push({ from: previousNode?.id ?? 'Start', to: chain.nodes[0].id, label: `parallel-chain:${chain.group}`, kind: 'primary' });
+      chain.nodes.slice(0, -1).forEach((node, index) => {
+        const next = chain.nodes[index + 1];
+        if (next) edges.push({ from: node.id, to: next.id, label: '链路内顺序交付', kind: 'primary' });
+      });
+    }
+    const mergeTarget = [...nodes].reverse().find((node) => !node.role.parallelGroup);
+    if (mergeTarget) {
+      for (const chain of parallelChains) {
+        const tail = chain.nodes.at(-1);
+        if (tail && tail.id !== mergeTarget.id) edges.push({ from: tail.id, to: mergeTarget.id, label: '并行链路汇总', kind: 'merge' });
+      }
+    }
+  } else if (team.shape === 'parallel') {
+    const mergeNode = nodes[nodes.length - 1];
+    for (const node of nodes.slice(0, -1)) {
+      edges.push({ from: 'Start', to: node.id, label: '并行启动', kind: 'primary' });
+      if (mergeNode) edges.push({ from: node.id, to: mergeNode.id, label: '汇总结果', kind: 'merge' });
+    }
+  } else if (team.shape === 'leader-worker') {
+    const lead = nodes[0];
+    for (const worker of nodes.slice(1)) {
+      edges.push({ from: lead?.id ?? 'Lead', to: worker.id, label: '分派任务', kind: 'primary' });
+      edges.push({ from: worker.id, to: lead?.id ?? 'Lead', label: '回收产出', kind: 'merge' });
+    }
+  } else if (team.shape === 'judge-route') {
+    nodes.slice(0, -1).forEach((node, index) => {
+      const next = nodes[index + 1];
+      if (next) edges.push({ from: node.id, to: next.id, label: index === 0 ? '判断并路由' : '继续推进', kind: 'primary' });
+    });
+  } else {
+    nodes.slice(0, -1).forEach((node, index) => {
+      const next = nodes[index + 1];
+      if (next) edges.push({ from: node.id, to: next.id, label: '交付下游', kind: 'primary' });
+    });
+  }
+
+  const testIndex = nodes.findIndex((node) => /测试|test|qa|quality/i.test(`${node.label} ${node.subtitle}`));
+  if (testIndex > 0) {
+    const target = [...nodes.slice(0, testIndex)].reverse().find((node) => /开发|implement|dev|engineer|编码/i.test(`${node.label} ${node.subtitle}`))
+      ?? nodes[testIndex - 1];
+    feedbackEdges.push({ from: nodes[testIndex].id, to: target.id, label: '测试不通过 → 返工', kind: 'feedback' });
+  }
+
+  const flowNames = nodes.map((node) => node.label).join(' → ');
+  return {
+    nodes,
+    edges,
+    feedbackEdges,
+    parallelChains,
+    summary: flowNames || '等待角色定义',
+    hint: shapeFlowHint(team.shape),
+  };
+}
+
+function buildParallelChains(nodes: TeamDagNode[]): Array<{ group: string; nodes: TeamDagNode[] }> {
+  const groups = new Map<string, TeamDagNode[]>();
+  for (const node of nodes) {
+    const group = node.role.parallelGroup?.trim();
+    if (!group) continue;
+    groups.set(group, [...(groups.get(group) ?? []), node]);
+  }
+  return Array.from(groups.entries()).map(([group, groupNodes]) => ({ group, nodes: groupNodes }));
+}
+
+function shapeFlowHint(shape: AgentTeamShape): string {
+  if (shape === 'parallel') return 'Parallel 最优展示为 fan-out / fan-in：多个角色同时展开，最后汇总为统一产出。';
+  if (shape === 'leader-worker') return 'Leader-worker 最优展示为 Lead 分派、Worker 并行执行、再回收给 Lead 汇总。';
+  if (shape === 'judge-route') return 'Judge route 最优展示为 Judge 选择路径，只激活被选中的分支并进入复核。';
+  return 'Pipeline 最优展示为顺序 DAG：上游角色交付给下游，质量失败时通过 feedback edge 返工。';
+}
+
 const MODULES = ['Instructions', 'Skills', 'Tasks', 'Args', 'ENV', 'Settings'] as const;
 type AgentModuleName = (typeof MODULES)[number];
 
@@ -77,14 +241,15 @@ const TEAM_SHAPES: Array<{ value: AgentTeamShape; label: string; description: st
 export function AgentsPage() {
   const { hasPermission } = useAuthStore();
   const canManage = hasPermission('manage_system_config');
+  const [hashAnchor, setHashAnchor] = useState<AgentsAnchor>(() => parseAgentsAnchor());
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [defaultBackend, setDefaultBackend] = useState('claude-sdk');
   const [allowedBackends, setAllowedBackends] = useState<string[]>(['claude-sdk']);
   const [availableBackends, setAvailableBackends] = useState<BackendInfo[]>([]);
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(hashAnchor.agentId ?? defaultBackend);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [activeSection, setActiveSection] = useState<AgentSectionName>('Agent 管理');
+  const [activeSection, setActiveSection] = useState<AgentSectionName>(hashAnchor.section ?? 'Agent 管理');
   const [activeModule, setActiveModule] = useState<AgentModuleName>('Instructions');
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<CustomBackendDef | null>(null);
@@ -121,6 +286,21 @@ export function AgentsPage() {
 
   useEffect(() => {
     void load();
+  }, []);
+
+  useEffect(() => {
+    const handleHashChange = () => {
+      const next = parseAgentsAnchor();
+      setHashAnchor(next);
+      if (next.section) {
+        setActiveSection(next.section);
+        scrollAgentsAnchorSection(next.section);
+      }
+      if (next.agentId) setSelectedAgentId(next.agentId);
+    };
+    window.addEventListener('hashchange', handleHashChange);
+    handleHashChange();
+    return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
   const backendOptions: BackendInfo[] = availableBackends.length
@@ -188,10 +368,28 @@ export function AgentsPage() {
       setSelectedAgentId(null);
       return;
     }
-    if (!selectedAgentId || !agents.some((agent) => agent.id === selectedAgentId)) {
-      setSelectedAgentId(defaultBackend || agents[0].id);
+    if (!hashAnchor.agentId && selectedAgentId !== defaultBackend && agents.some((agent) => agent.id === defaultBackend)) {
+      setSelectedAgentId(defaultBackend);
+      return;
     }
-  }, [agents, defaultBackend, selectedAgentId]);
+    if (!selectedAgentId || !agents.some((agent) => agent.id === selectedAgentId)) {
+      const preferredAgentId = hashAnchor.agentId ?? defaultBackend;
+      const nextAgentId = agents.some((agent) => agent.id === preferredAgentId)
+        ? preferredAgentId
+        : agents[0].id;
+      setSelectedAgentId(nextAgentId);
+    }
+  }, [agents, defaultBackend, hashAnchor.agentId, selectedAgentId]);
+
+  useEffect(() => {
+    updateAgentsAnchor({
+      agentId: selectedAgentId ?? undefined,
+      agentMdId: hashAnchor.agentMdId,
+      teamId: hashAnchor.teamId,
+      section: activeSection,
+    });
+    scrollAgentsAnchorSection(activeSection);
+  }, [activeSection, hashAnchor.agentMdId, hashAnchor.teamId, selectedAgentId]);
 
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? agents[0] ?? null;
   const selectedDevice = selectedAgent?.custom?.deviceLinkId
@@ -479,9 +677,18 @@ export function AgentsPage() {
           </div>
           </AgentManagementSection>
         ) : activeSection === 'Agent.md' ? (
-          <AgentMdPanel generatorAgent={selectedAgent ?? agents[0] ?? null} />
+          <AgentMdPanel
+            generatorAgent={selectedAgent ?? agents[0] ?? null}
+            initialSelectedId={hashAnchor.agentMdId}
+            onSelectedAgentMdIdChange={(agentMdId) => setHashAnchor((prev) => ({ ...prev, agentMdId }))}
+          />
         ) : (
-          <AgentTeamWorkspace agents={agents} defaultGeneratorId={selectedAgent?.id ?? defaultBackend} />
+          <AgentTeamWorkspace
+            agents={agents}
+            defaultGeneratorId={selectedAgent?.id ?? defaultBackend}
+            initialSelectedTeamId={hashAnchor.teamId}
+            onSelectedTeamIdChange={(teamId) => setHashAnchor((prev) => ({ ...prev, teamId }))}
+          />
         )}
 
         <CustomBackendFormDialog
@@ -859,7 +1066,7 @@ function renderModuleContent(args: {
 }
 
 function AgentManagementSection({ children }: { children: React.ReactNode }) {
-  return <>{children}</>;
+  return <section id="agent">{children}</section>;
 }
 
 function SummaryCell({ label, value }: { label: string; value: string }) {
@@ -904,37 +1111,68 @@ function EmptyText({ children }: { children: React.ReactNode }) {
   );
 }
 
-function AgentTeamWorkspace({ agents, defaultGeneratorId }: { agents: AgentListItem[]; defaultGeneratorId: string }) {
-  const { teams, loading, saving, error, load, loadAgentMdDefinitions, update, remove } = useAgentTeamsStore();
-  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
+function AgentTeamWorkspace({
+  agents,
+  defaultGeneratorId,
+  initialSelectedTeamId,
+  onSelectedTeamIdChange,
+}: {
+  agents: AgentListItem[];
+  defaultGeneratorId: string;
+  initialSelectedTeamId?: string;
+  onSelectedTeamIdChange: (teamId?: string) => void;
+}) {
+  const { teams, loading, saving, error, load, loadAgentMdDefinitions, update, remove, execute } = useAgentTeamsStore();
+  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(initialSelectedTeamId ?? null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editingJson, setEditingJson] = useState('');
+  const [executionPrompt, setExecutionPrompt] = useState('');
+  const [selectedExecutionAgentId, setSelectedExecutionAgentId] = useState(defaultGeneratorId);
+  const [executionResult, setExecutionResult] = useState<AgentTeamExecutionResult | null>(null);
   const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? teams[0] ?? null;
   const defaultGenerator = agents.find((agent) => agent.id === defaultGeneratorId) ?? agents[0] ?? null;
+  const executionAgents = agents.filter((agent) => agent.status !== 'disabled');
   const openCreateDialog = () => setCreateOpen(true);
+  const selectTeam = (teamId: string | null) => {
+    setSelectedTeamId(teamId);
+    onSelectedTeamIdChange(teamId ?? undefined);
+  };
 
   useEffect(() => {
     void load().then(() => loadAgentMdDefinitions());
   }, [load, loadAgentMdDefinitions]);
 
   useEffect(() => {
+    if (initialSelectedTeamId && initialSelectedTeamId !== selectedTeamId && teams.some((team) => team.id === initialSelectedTeamId)) {
+      setSelectedTeamId(initialSelectedTeamId);
+    }
+  }, [initialSelectedTeamId, selectedTeamId, teams]);
+
+  useEffect(() => {
+    if (selectedTeamId && teams.length === 0) return;
     if (!selectedTeam) {
-      setSelectedTeamId(null);
+      selectTeam(null);
       setEditingJson('');
       return;
     }
     if (!selectedTeamId || selectedTeam.id !== selectedTeamId) {
-      setSelectedTeamId(selectedTeam.id);
+      selectTeam(selectedTeam.id);
     }
     setEditingJson(JSON.stringify(toEditableTeam(selectedTeam), null, 2));
   }, [selectedTeam?.id, selectedTeam?.updatedAt]);
+
+  useEffect(() => {
+    const preferred = selectedTeam?.createdByAgentId || defaultGenerator?.id || defaultGeneratorId;
+    if (executionAgents.some((agent) => agent.id === selectedExecutionAgentId)) return;
+    setSelectedExecutionAgentId(executionAgents.some((agent) => agent.id === preferred) ? preferred : executionAgents[0]?.id ?? preferred);
+  }, [defaultGenerator?.id, defaultGeneratorId, executionAgents, selectedExecutionAgentId, selectedTeam?.createdByAgentId]);
 
   const handleSave = async () => {
     if (!selectedTeam) return;
     try {
       const parsed = JSON.parse(editingJson) as Partial<AgentTeam>;
       const team = await update(selectedTeam.id, parsed);
-      setSelectedTeamId(team.id);
+      selectTeam(team.id);
       toast.success('Agent Team 已保存');
     } catch (err) {
       toast.error(err instanceof SyntaxError ? 'JSON 格式不正确' : getErrorMessage(err, '保存 Agent Team 失败'));
@@ -946,15 +1184,35 @@ function AgentTeamWorkspace({ agents, defaultGeneratorId }: { agents: AgentListI
     if (!confirm(`确认删除 Agent Team「${selectedTeam.name}」？`)) return;
     try {
       await remove(selectedTeam.id);
-      setSelectedTeamId(null);
+      selectTeam(null);
       toast.success('Agent Team 已删除');
     } catch (err) {
       toast.error(getErrorMessage(err, '删除 Agent Team 失败'));
     }
   };
 
+  const handleExecute = async () => {
+    if (!selectedTeam) return;
+    const prompt = executionPrompt.trim();
+    if (!prompt) {
+      toast.error('请输入 Team 执行目标');
+      return;
+    }
+    if (!selectedExecutionAgentId) {
+      toast.error('请选择后端 / Device');
+      return;
+    }
+    try {
+      const result = await execute(selectedTeam.id, prompt, selectedExecutionAgentId);
+      setExecutionResult(result);
+      toast.success(result.status === 'success' ? 'Agent Team 执行完成' : 'Agent Team 执行失败');
+    } catch (err) {
+      toast.error(getErrorMessage(err, '执行 Agent Team 失败'));
+    }
+  };
+
   return (
-    <div className="space-y-4">
+    <div id="agent-team" className="space-y-4">
       <div className="grid gap-4 lg:grid-cols-[minmax(260px,1fr)_minmax(0,2fr)]">
         <aside className="rounded-2xl border border-border bg-background/80 p-4">
           <div className="mb-3 flex items-center justify-between gap-3">
@@ -976,7 +1234,7 @@ function AgentTeamWorkspace({ agents, defaultGeneratorId }: { agents: AgentListI
                 <button
                   key={team.id}
                   type="button"
-                  onClick={() => setSelectedTeamId(team.id)}
+                  onClick={() => selectTeam(team.id)}
                   className={`w-full rounded-xl border p-3 text-left transition ${selectedTeam?.id === team.id ? 'border-primary bg-primary/5' : 'border-border bg-background/80 hover:bg-muted/40'}`}
                 >
                   <div className="truncate text-sm font-medium text-foreground">{team.name}</div>
@@ -995,8 +1253,15 @@ function AgentTeamWorkspace({ agents, defaultGeneratorId }: { agents: AgentListI
         <AgentTeamPanel
           selectedTeam={selectedTeam}
           editingJson={editingJson}
+          executionPrompt={executionPrompt}
+          selectedExecutionAgentId={selectedExecutionAgentId}
+          executionAgents={executionAgents}
+          executionResult={executionResult}
           saving={saving}
           onEditingJsonChange={setEditingJson}
+          onExecutionPromptChange={setExecutionPrompt}
+          onSelectedExecutionAgentIdChange={setSelectedExecutionAgentId}
+          onExecute={handleExecute}
           onSave={handleSave}
           onDelete={handleDelete}
         />
@@ -1007,7 +1272,7 @@ function AgentTeamWorkspace({ agents, defaultGeneratorId }: { agents: AgentListI
         onOpenChange={setCreateOpen}
         agents={agents}
         defaultGeneratorId={defaultGenerator?.id ?? defaultGeneratorId}
-        onCreated={(team) => setSelectedTeamId(team.id)}
+        onCreated={(team) => selectTeam(team.id)}
       />
     </div>
   );
@@ -1016,30 +1281,67 @@ function AgentTeamWorkspace({ agents, defaultGeneratorId }: { agents: AgentListI
 function AgentTeamPanel({
   selectedTeam,
   editingJson,
+  executionPrompt,
+  selectedExecutionAgentId,
+  executionAgents,
+  executionResult,
   saving,
   onEditingJsonChange,
+  onExecutionPromptChange,
+  onSelectedExecutionAgentIdChange,
+  onExecute,
   onSave,
   onDelete,
 }: {
   selectedTeam: AgentTeam | null;
   editingJson: string;
+  executionPrompt: string;
+  selectedExecutionAgentId: string;
+  executionAgents: AgentListItem[];
+  executionResult: AgentTeamExecutionResult | null;
   saving: boolean;
   onEditingJsonChange: (value: string) => void;
+  onExecutionPromptChange: (value: string) => void;
+  onSelectedExecutionAgentIdChange: (value: string) => void;
+  onExecute: () => void;
   onSave: () => void;
   onDelete: () => void;
 }) {
+  const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
+  const [teamEditOpen, setTeamEditOpen] = useState(false);
+  const [teamEditMode, setTeamEditMode] = useState<'low-code' | 'json'>('low-code');
+  const [dragRoleId, setDragRoleId] = useState<string | null>(null);
+  const editableTeam = useMemo(() => parseEditableTeamJson(editingJson) ?? selectedTeam, [editingJson, selectedTeam]);
+  const selectedRole = selectedTeam?.roles.find((role) => role.id === selectedRoleId)
+    ?? selectedTeam?.roles[0]
+    ?? null;
+
+  useEffect(() => {
+    if (!selectedTeam) {
+      setSelectedRoleId(null);
+      return;
+    }
+    if (!selectedRoleId || !selectedTeam.roles.some((role) => role.id === selectedRoleId)) {
+      setSelectedRoleId(selectedTeam.roles[0]?.id ?? null);
+    }
+  }, [selectedTeam?.id, selectedTeam?.roles, selectedRoleId]);
+
   return (
-    <section className="rounded-2xl border border-border bg-background/80 p-4">
-      <div className="mb-3 flex items-center justify-between gap-3">
+    <section className="overflow-hidden rounded-2xl border border-border bg-background/80 shadow-sm">
+      <div className="flex items-center justify-between gap-3 border-b border-border/70 bg-[radial-gradient(circle_at_top_right,hsl(var(--primary)/0.10),transparent_32%)] p-4">
         <div>
           <h3 className="text-sm font-semibold text-foreground">Team 详情</h3>
-          <p className="mt-1 text-xs text-muted-foreground">查看角色拆分、编辑 JSON 或删除 Team。</p>
+          <p className="mt-1 text-xs text-muted-foreground">按 Team 属性查看定义，并点击节点查看每个角色的输入、输出、技能和边界。</p>
         </div>
         {selectedTeam ? (
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={onSave} disabled={saving}>
               {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
               保存
+            </Button>
+            <Button size="sm" onClick={onExecute} disabled={saving}>
+              {saving ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+              执行 Team
             </Button>
             <Button variant="outline" size="sm" onClick={onDelete} disabled={saving}>
               <Trash2 className="size-4" />
@@ -1049,33 +1351,358 @@ function AgentTeamPanel({
         ) : null}
       </div>
       {selectedTeam ? (
-        <div className="space-y-3">
-          <div className="rounded-xl border border-border bg-muted/20 p-3">
-            <h4 className="text-base font-semibold text-foreground">{selectedTeam.name}</h4>
-            <p className="mt-1 text-xs text-muted-foreground">由 {selectedTeam.createdByAgentId} 生成 · {shapeLabel(selectedTeam.shape)}</p>
-            <p className="mt-2 text-sm text-muted-foreground">{selectedTeam.description}</p>
+        <div className="space-y-4 p-4">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <AgentTeamPropertyCard label="Team" value={selectedTeam.name} hint={selectedTeam.id} />
+            <AgentTeamPropertyCard label="Shape" value={shapeLabel(selectedTeam.shape)} hint={selectedTeam.shape} />
+            <AgentTeamPropertyCard label="Generator" value={selectedTeam.createdByAgentId} hint="createdByAgentId" />
+            <AgentTeamPropertyCard label="Updated" value={formatDateTime(selectedTeam.updatedAt)} hint={formatDateTime(selectedTeam.createdAt)} />
           </div>
-          <div className="grid gap-2 md:grid-cols-2">
-            {selectedTeam.roles.map((role) => (
-              <div key={role.id} className="rounded-xl border border-border bg-muted/20 p-3">
-                <div className="text-sm font-medium text-foreground">{role.name}</div>
-                <div className="mt-1 text-xs text-muted-foreground">{role.responsibility}</div>
+
+          <div className="rounded-2xl border border-border bg-muted/20 p-4">
+            <div className="text-xs font-medium text-muted-foreground">目标 / Goal</div>
+            <p className="mt-2 text-sm leading-6 text-foreground">{selectedTeam.goal}</p>
+            <div className="mt-4 text-xs font-medium text-muted-foreground">描述 / Description</div>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">{selectedTeam.description}</p>
+          </div>
+
+          <AgentTeamFlowGraph
+            team={selectedTeam}
+            selectedRoleId={selectedRole?.id ?? null}
+            onSelectRole={setSelectedRoleId}
+            onEdit={() => setTeamEditOpen(true)}
+          />
+
+          {teamEditOpen ? (
+            <div className="rounded-2xl border border-primary/20 bg-primary/5 p-4">
+              <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <h4 className="text-sm font-semibold text-foreground">DAG 编辑模式</h4>
+                  <p className="mt-1 text-xs text-muted-foreground">可在低代码拖拽配置与 JSON 编辑模式之间切换，保存后更新 Team DAG。</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button variant={teamEditMode === 'low-code' ? 'default' : 'outline'} size="sm" onClick={() => setTeamEditMode('low-code')}>
+                    低代码拖拽配置
+                  </Button>
+                  <Button variant={teamEditMode === 'json' ? 'default' : 'outline'} size="sm" onClick={() => setTeamEditMode('json')}>
+                    JSON 编辑模式
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setTeamEditOpen(false)}>收起</Button>
+                </div>
               </div>
-            ))}
+              {teamEditMode === 'low-code' ? (
+                <div className="grid gap-3 lg:grid-cols-2">
+                  {(editableTeam?.roles ?? selectedTeam.roles).map((role, index) => (
+                    <div
+                      key={role.id || `${role.name}-${index}`}
+                      draggable
+                      onDragStart={() => setDragRoleId(role.id)}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={() => {
+                        if (!dragRoleId || dragRoleId === role.id) return;
+                        onEditingJsonChange(reorderTeamRoleInJson(editingJson, dragRoleId, role.id));
+                        setDragRoleId(null);
+                      }}
+                      className="rounded-2xl border border-border bg-background/90 p-3 shadow-sm"
+                    >
+                      <div className="mb-3 flex items-center justify-between gap-2">
+                        <div className="text-xs font-semibold text-muted-foreground">拖拽排序 · Role {index + 1}</div>
+                        <Pill>{role.id}</Pill>
+                      </div>
+                      <div className="grid gap-2">
+                        <label className="grid gap-1">
+                          <span className="text-[11px] font-medium text-muted-foreground">角色名称</span>
+                          <input
+                            value={role.name}
+                            onChange={(event) => onEditingJsonChange(updateTeamRoleInJson(editingJson, role.id, { name: event.target.value }))}
+                            className="rounded-lg border border-border bg-background px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-ring"
+                          />
+                        </label>
+                        <label className="grid gap-1">
+                          <span className="text-[11px] font-medium text-muted-foreground">责任说明</span>
+                          <textarea
+                            value={role.responsibility}
+                            onChange={(event) => onEditingJsonChange(updateTeamRoleInJson(editingJson, role.id, { responsibility: event.target.value }))}
+                            className="min-h-20 rounded-lg border border-border bg-background px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-ring"
+                          />
+                        </label>
+                        <label className="grid gap-1">
+                          <span className="text-[11px] font-medium text-muted-foreground">parallelGroup（相同值会形成并行链路）</span>
+                          <input
+                            value={role.parallelGroup ?? ''}
+                            onChange={(event) => onEditingJsonChange(updateTeamRoleInJson(editingJson, role.id, { parallelGroup: event.target.value || undefined }))}
+                            className="rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring"
+                            placeholder="例如 frontend-chain / backend-chain"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <label className="grid gap-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">编辑 Team JSON</span>
+                  <textarea
+                    value={editingJson}
+                    onChange={(event) => onEditingJsonChange(event.target.value)}
+                    className="min-h-96 rounded-xl border border-border bg-background px-3 py-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring"
+                  />
+                </label>
+              )}
+            </div>
+          ) : null}
+
+          <div className="rounded-2xl border border-border bg-background/70 p-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+              <label className="grid gap-1.5 lg:w-72">
+                <span className="text-xs font-medium text-muted-foreground">选择后端 / Device</span>
+                <select
+                  value={selectedExecutionAgentId}
+                  onChange={(event) => onSelectedExecutionAgentIdChange(event.target.value)}
+                  className="rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                >
+                  {executionAgents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>{agentExecutionLabel(agent)}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid flex-1 gap-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Team 执行目标</span>
+                <textarea
+                  value={executionPrompt}
+                  onChange={(event) => onExecutionPromptChange(event.target.value)}
+                  className="min-h-24 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  placeholder="描述希望这个 Agent Team 实际执行的任务，例如：根据需求实现登录页并完成测试 review。"
+                />
+              </label>
+              <Button onClick={onExecute} disabled={saving} className="lg:mb-1">
+                {saving ? <Loader2 className="size-4 animate-spin" /> : <Workflow className="size-4" />}
+                执行 Team
+              </Button>
+            </div>
+            {executionResult ? (
+              <div className="mt-4 rounded-2xl border border-border bg-muted/20 p-4">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">executionResult</div>
+                  <Pill tone={executionResult.status === 'success' ? 'green' : 'red'}>{executionResult.status}</Pill>
+                </div>
+                <pre className="max-h-64 overflow-auto whitespace-pre-wrap text-xs leading-5 text-foreground">{executionResult.finalResult}</pre>
+              </div>
+            ) : null}
           </div>
-          <label className="grid gap-1.5">
-            <span className="text-xs font-medium text-muted-foreground">编辑 Team JSON</span>
-            <textarea
-              value={editingJson}
-              onChange={(event) => onEditingJsonChange(event.target.value)}
-              className="min-h-96 rounded-xl border border-border bg-background px-3 py-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring"
-            />
-          </label>
+
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+            <AgentTeamWorkflowSummary team={selectedTeam} />
+            <AgentTeamNodeDetail role={selectedRole} />
+          </div>
+
+          <AgentTeamSuccessCriteria criteria={selectedTeam.successCriteria} />
         </div>
       ) : (
-        <EmptyText>选择左侧 Agent Team 查看详情，或点击「创建 Team」生成新的 Team。</EmptyText>
+        <div className="p-4">
+          <EmptyText>选择左侧 Agent Team 查看详情，或点击「创建 Team」生成新的 Team。</EmptyText>
+        </div>
       )}
     </section>
+  );
+}
+
+function AgentTeamPropertyCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-2xl border border-border bg-background/70 p-4">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="mt-2 truncate text-sm font-semibold text-foreground">{value}</div>
+      {hint ? <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">{hint}</div> : null}
+    </div>
+  );
+}
+
+function AgentTeamWorkflowSummary({ team }: { team: AgentTeam }) {
+  return (
+    <div className="rounded-2xl border border-border bg-background/70 p-4">
+      <div className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+        <Workflow className="size-4" />
+        Workflow
+      </div>
+      <p className="whitespace-pre-wrap text-sm leading-6 text-foreground">{team.workflow}</p>
+      <div className="mt-4 flex flex-wrap gap-2">
+        {team.roles.map((role, index) => (
+          <button
+            key={role.id || `${role.name}-${index}`}
+            type="button"
+            className="rounded-full border border-border bg-muted/20 px-3 py-1 text-xs text-muted-foreground"
+          >
+            {index + 1}. {role.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AgentTeamSuccessCriteria({ criteria }: { criteria: string[] }) {
+  return (
+    <div className="rounded-2xl border border-border bg-muted/20 p-4">
+      <div className="text-xs font-medium text-muted-foreground">验收标准</div>
+      <ul className="mt-2 space-y-2 text-sm leading-6 text-foreground">
+        {criteria.map((criterion, index) => (
+          <li key={`${criterion}-${index}`} className="flex gap-2">
+            <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[11px] font-medium text-primary">{index + 1}</span>
+            <span>{criterion}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function AgentTeamFlowGraph({
+  team,
+  selectedRoleId,
+  onSelectRole,
+  onEdit,
+}: {
+  team: AgentTeam;
+  selectedRoleId: string | null;
+  onSelectRole: (roleId: string) => void;
+  onEdit: () => void;
+}) {
+  const dag = buildTeamDag(team);
+  const edgeLabelByTarget = new Map(dag.edges.map((edge) => [edge.to, edge.label]));
+
+  return (
+    <section aria-label="Agent Team DAG 流程" className="overflow-hidden rounded-3xl border border-border bg-background/80 shadow-sm">
+      <div className="border-b border-border/70 bg-[linear-gradient(135deg,hsl(var(--primary)/0.10),transparent_36%),repeating-linear-gradient(90deg,transparent,transparent_18px,hsl(var(--border)/0.28)_19px)] p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-[0.24em] text-primary">DAG 流程图</div>
+            <h4 className="mt-2 text-base font-semibold text-foreground">Agent 角色与协作流程</h4>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              整体以 DAG 模式展示角色流转；典型流水线：需求分析师 → 架构设计 → 开发 → 测试 → Review；测试不通过 → 返工。
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Pill tone="blue">{shapeLabel(team.shape)}</Pill>
+            <Pill>{dag.nodes.length} nodes</Pill>
+            <Pill>{dag.edges.length + dag.feedbackEdges.length} edges</Pill>
+            <Button variant="outline" size="sm" onClick={onEdit}>
+              <Pencil className="size-4" />
+              编辑 DAG
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-4 p-4">
+        <div className="rounded-2xl border border-border bg-muted/20 p-3">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Flow summary</div>
+          <div className="mt-2 break-words text-sm font-medium text-foreground">{dag.summary}</div>
+          <div className="mt-2 text-xs leading-5 text-muted-foreground">{dag.hint}</div>
+        </div>
+
+        {dag.parallelChains.length ? (
+          <div className="rounded-2xl border border-primary/20 bg-primary/5 p-4">
+            <div className="text-xs font-semibold text-primary">并行链路 / parallelGroup</div>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              {dag.parallelChains.map((chain) => (
+                <div key={chain.group} className="rounded-xl border border-border bg-background/80 p-3">
+                  <div className="font-mono text-xs font-semibold text-foreground">{chain.group}</div>
+                  <div className="mt-2 text-xs leading-5 text-muted-foreground">
+                    {chain.nodes.map((node) => node.label).join(' → ')}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="overflow-x-auto pb-2">
+          <div className="flex min-w-max items-stretch gap-3">
+            {dag.nodes.map((node, index) => {
+              const active = selectedRoleId === node.id;
+              const inboundLabel = index > 0 ? edgeLabelByTarget.get(node.id) : null;
+              return (
+                <div key={node.id} className="flex items-center gap-3">
+                  {index > 0 ? (
+                    <div className="flex min-w-20 flex-col items-center gap-1 text-primary">
+                      <div className="h-px w-full bg-primary/50" />
+                      <div className="whitespace-nowrap text-[10px] font-medium text-muted-foreground">{inboundLabel ?? '流转'}</div>
+                      <div className="text-lg leading-none">→</div>
+                    </div>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => onSelectRole(node.id)}
+                    className={`group flex w-56 flex-col rounded-2xl border p-4 text-left transition ${active ? 'border-primary bg-primary/10 shadow-sm ring-2 ring-primary/20' : 'border-border bg-background hover:border-primary/50 hover:bg-muted/20'}`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <span className={`flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-bold ${active ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground group-hover:text-foreground'}`}>
+                        {index + 1}
+                      </span>
+                      <Pill>{node.id}</Pill>
+                    </div>
+                    <div className="mt-3 truncate text-sm font-semibold text-foreground">{node.label}</div>
+                    <div className="mt-1 line-clamp-3 text-xs leading-5 text-muted-foreground">{node.subtitle}</div>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {dag.feedbackEdges.length ? (
+          <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
+            <div className="text-xs font-semibold text-amber-700 dark:text-amber-300">返工 / feedback edges</div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {dag.feedbackEdges.map((edge) => (
+                <span key={`${edge.from}-${edge.to}-${edge.label}`} className="rounded-full border border-amber-500/30 bg-background/70 px-3 py-1 text-xs text-foreground">
+                  {labelForDagNode(dag, edge.from)} → {labelForDagNode(dag, edge.to)} · {edge.label}
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="grid gap-2 md:grid-cols-2">
+          {[...dag.edges, ...dag.feedbackEdges].map((edge) => (
+            <div key={`${edge.from}-${edge.to}-${edge.label}`} className="rounded-xl border border-border bg-muted/10 p-3 text-xs">
+              <div className="font-medium text-foreground">{labelForDagNode(dag, edge.from)} → {labelForDagNode(dag, edge.to)}</div>
+              <div className="mt-1 text-muted-foreground">{edge.label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function labelForDagNode(dag: TeamDagModel, id: string): string {
+  return dag.nodes.find((node) => node.id === id)?.label ?? id;
+}
+
+function AgentTeamNodeDetail({ role }: { role: AgentTeamRole | null }) {
+  if (!role) {
+    return <EmptyText>选择一个节点查看详情。</EmptyText>;
+  }
+  return (
+    <aside className="rounded-2xl border border-border bg-background/70 p-4">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-xs font-medium text-muted-foreground">节点详情</div>
+          <h4 className="mt-1 truncate text-base font-semibold text-foreground">{role.name}</h4>
+          <div className="mt-1 font-mono text-[11px] text-muted-foreground">{role.id}</div>
+        </div>
+        <Pill tone="blue">Role node</Pill>
+      </div>
+      <div className="rounded-xl border border-border bg-muted/20 p-3">
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Responsibility</div>
+        <p className="mt-2 text-sm leading-6 text-foreground">{role.responsibility}</p>
+      </div>
+      <RoleList title="Inputs" values={role.inputs} />
+      <RoleList title="Outputs" values={role.outputs} />
+      <RoleList title="Skills / agent.md 建议" values={role.skills} />
+      <RoleList title="Guardrails" values={role.guardrails} />
+    </aside>
   );
 }
 
@@ -1245,7 +1872,15 @@ function AgentTeamCreateDialog({
   );
 }
 
-function AgentMdPanel({ generatorAgent }: { generatorAgent: AgentListItem | null }) {
+function AgentMdPanel({
+  generatorAgent,
+  initialSelectedId,
+  onSelectedAgentMdIdChange,
+}: {
+  generatorAgent: AgentListItem | null;
+  initialSelectedId?: string;
+  onSelectedAgentMdIdChange: (agentMdId?: string) => void;
+}) {
   const {
     agentMdDefinitions,
     saving,
@@ -1253,7 +1888,7 @@ function AgentMdPanel({ generatorAgent }: { generatorAgent: AgentListItem | null
     updateAgentMdDefinition,
     removeAgentMdDefinition,
   } = useAgentTeamsStore();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId ?? null);
   const selected = selectedId ? agentMdDefinitions.find((definition) => definition.id === selectedId) ?? null : null;
   const [draft, setDraft] = useState({
     name: '',
@@ -1262,21 +1897,32 @@ function AgentMdPanel({ generatorAgent }: { generatorAgent: AgentListItem | null
   });
   const generatorName = generatorAgent?.displayName ?? 'Agent';
   const generatorId = generatorAgent?.id ?? 'manual';
+  const selectAgentMd = (agentMdId: string | null) => {
+    setSelectedId(agentMdId);
+    onSelectedAgentMdIdChange(agentMdId ?? undefined);
+  };
 
   useEffect(() => {
+    if (initialSelectedId && initialSelectedId !== selectedId && agentMdDefinitions.some((definition) => definition.id === initialSelectedId)) {
+      setSelectedId(initialSelectedId);
+    }
+  }, [agentMdDefinitions, initialSelectedId, selectedId]);
+
+  useEffect(() => {
+    if (selectedId && agentMdDefinitions.length === 0) return;
     if (!selected) {
-      setSelectedId(null);
+      selectAgentMd(null);
       setDraft({ name: '', summary: '', content: defaultAgentMdContent(generatorName) });
       return;
     }
     if (!selectedId || selected.id !== selectedId) {
-      setSelectedId(selected.id);
+      selectAgentMd(selected.id);
     }
     setDraft({ name: selected.name, summary: selected.summary, content: selected.content });
   }, [selected?.id, selected?.updatedAt, selectedId, generatorName]);
 
   const handleNew = () => {
-    setSelectedId(null);
+    selectAgentMd(null);
     setDraft({ name: '', summary: '', content: defaultAgentMdContent(generatorName) });
   };
 
@@ -1293,7 +1939,7 @@ function AgentMdPanel({ generatorAgent }: { generatorAgent: AgentListItem | null
       const saved = selected
         ? await updateAgentMdDefinition(selected.id, payload)
         : await createAgentMdDefinition(payload);
-      setSelectedId(saved.id);
+      selectAgentMd(saved.id);
       toast.success('agent.md 已保存');
     } catch (err) {
       toast.error(getErrorMessage(err, '保存 agent.md 失败'));
@@ -1305,7 +1951,7 @@ function AgentMdPanel({ generatorAgent }: { generatorAgent: AgentListItem | null
     if (!confirm(`确认删除 agent.md「${selected.name}」？`)) return;
     try {
       await removeAgentMdDefinition(selected.id);
-      setSelectedId(null);
+      selectAgentMd(null);
       toast.success('agent.md 已删除');
     } catch (err) {
       toast.error(getErrorMessage(err, '删除 agent.md 失败'));
@@ -1313,7 +1959,7 @@ function AgentMdPanel({ generatorAgent }: { generatorAgent: AgentListItem | null
   };
 
   return (
-    <div className="rounded-2xl border border-border bg-background/80 p-4">
+    <div id="agent-md" className="rounded-2xl border border-border bg-background/80 p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <h4 className="text-sm font-semibold text-foreground">agent.md 管理</h4>
@@ -1337,7 +1983,7 @@ function AgentMdPanel({ generatorAgent }: { generatorAgent: AgentListItem | null
               <button
                 key={definition.id}
                 type="button"
-                onClick={() => setSelectedId(definition.id)}
+                onClick={() => selectAgentMd(definition.id)}
                 className={`w-full rounded-xl border p-3 text-left transition ${selected?.id === definition.id ? 'border-primary bg-primary/5' : 'border-border bg-background/80 hover:bg-muted/40'}`}
               >
                 <div className="truncate text-sm font-medium text-foreground">{definition.name}</div>
@@ -1409,8 +2055,58 @@ function toEditableTeam(team: AgentTeam): Omit<AgentTeam, 'id' | 'createdAt' | '
   };
 }
 
+function parseEditableTeamJson(editingJson: string): Partial<AgentTeam> | null {
+  try {
+    const parsed = JSON.parse(editingJson) as Partial<AgentTeam>;
+    return Array.isArray(parsed.roles) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function updateTeamRoleInJson(editingJson: string, roleId: string, patch: Partial<AgentTeamRole>): string {
+  try {
+    const draft = JSON.parse(editingJson) as Partial<AgentTeam>;
+    const roles = Array.isArray(draft.roles) ? draft.roles : [];
+    return JSON.stringify({
+      ...draft,
+      roles: roles.map((role) => role.id === roleId ? { ...role, ...patch } : role),
+    }, null, 2);
+  } catch {
+    return editingJson;
+  }
+}
+
+function reorderTeamRoleInJson(editingJson: string, dragRoleId: string, dropRoleId: string): string {
+  try {
+    const draft = JSON.parse(editingJson) as Partial<AgentTeam>;
+    const roles = Array.isArray(draft.roles) ? [...draft.roles] : [];
+    const from = roles.findIndex((role) => role.id === dragRoleId);
+    const to = roles.findIndex((role) => role.id === dropRoleId);
+    if (from < 0 || to < 0) return editingJson;
+    const [moved] = roles.splice(from, 1);
+    if (!moved) return editingJson;
+    roles.splice(to, 0, moved);
+    return JSON.stringify({ ...draft, roles }, null, 2);
+  } catch {
+    return editingJson;
+  }
+}
+
+function agentExecutionLabel(agent: AgentListItem): string {
+  const runtime = runtimeLabel(agent.runtime);
+  const device = agent.custom?.deviceLinkId ? ` · Device ${agent.custom.deviceLinkId}` : '';
+  return `${agent.displayName} (${runtime})${device}`;
+}
+
 function shapeLabel(shape: AgentTeamShape): string {
   return TEAM_SHAPES.find((item) => item.value === shape)?.label ?? shape;
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN');
 }
 
 function GeneratedTeamPreview({ team, requestedShape }: { team: AgentTeam; requestedShape: AgentTeamShape }) {
@@ -1459,7 +2155,7 @@ function GeneratedTeamPreview({ team, requestedShape }: { team: AgentTeam; reque
       </div>
 
       <div className="rounded-2xl border border-border bg-muted/20 p-4">
-        <div className="text-xs font-medium text-muted-foreground">Workflow / pipeline</div>
+        <div className="text-xs font-medium text-muted-foreground">Workflow</div>
         <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-foreground">{team.workflow}</p>
       </div>
 

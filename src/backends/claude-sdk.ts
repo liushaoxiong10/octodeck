@@ -23,9 +23,11 @@ export const claudeSdkBackend: AgentBackend = {
     const { group, input, executionMode, onProcess, onOutput, ownerHomeFolder } =
       args;
     if (input.executionProfile === 'single-turn-json') {
-      const result = await sdkQuery(input.prompt, {
+      const sdkQueryOptions: { timeout?: number; userId?: string } = {
         timeout: group.containerConfig?.timeout,
-      });
+      };
+      if (group.created_by) sdkQueryOptions.userId = group.created_by;
+      const result = await sdkQuery(input.prompt, sdkQueryOptions);
       if (!result) {
         return {
           status: 'error',

@@ -11,6 +11,8 @@ export interface AgentTeamRole {
   id: string;
   name: string;
   responsibility: string;
+  /** Optional lane name. Roles sharing the same lane form an ordered parallel chain. */
+  parallelGroup?: string;
   inputs?: string[];
   outputs?: string[];
   skills?: string[];
@@ -108,6 +110,7 @@ function normalizeRole(role: AgentTeamRole, index: number): AgentTeamRole {
     id: role.id?.trim() || `role_${index + 1}`,
     name: role.name?.trim() || `Role ${index + 1}`,
     responsibility: role.responsibility?.trim() || '负责完成团队中的一个明确子任务。',
+    parallelGroup: role.parallelGroup?.trim() || undefined,
     inputs: sanitizeLines(role.inputs),
     outputs: sanitizeLines(role.outputs),
     skills: sanitizeLines(role.skills),
