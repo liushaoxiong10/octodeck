@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+web/node_modules/
+container/agent-runner/node_modules/
+
+# Build output (will be rebuilt inside Docker)
+dist/
+web/dist/
+container/agent-runner/dist/
+
+# Runtime data (must NOT be included in image)
+data/
+store/
+groups/
+logs/
+log/
+
+# Environment and secrets
+.env
+.env.*
+*.key
+*.pem
+*.keys.json
+
+# Git
+.git/
+.gitignore
+
+# Docker artifacts
+.docker-build-sentinel
+.build-sentinel
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Documentation
+docs/
+README.md
+CLAUDE.md
+LICENSE
+SECURITY.md
+
+# Tests
+tests/
+
+# Misc
+nohup.out
+*.tsbuildinfo
+package-lock.json
+bun.lock
+bun.lockb

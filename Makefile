@@ -3,7 +3,8 @@
        format format-check install install-host-tools clean reset-init update-sdk ensure-latest-sdk sync-types \
        backup restore help _ensure-docker-image logs status stop \
        _check-sync _build-web-if-stale _build-ar-if-stale _build-backend-if-stale \
-       _start-pm2 _start-direct
+       _start-pm2 _start-direct \
+       docker-build docker-run docker-stop docker-logs docker-clean
 
 # ─── Runtime Detection ──────────────────────────────────────
 # 优先使用 bun（跳过编译、启动更快），fallback 到 npm + tsx + node
@@ -337,3 +338,44 @@ help: ## 显示帮助
 	@echo ""
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+
+# ─── Docker Deployment ───────────────────────────────────────
+
+DOCKER_IMAGE ?= octodeck:latest
+DOCKER_CONTAINER ?= octodeck
+
+docker-build: ## 构建 OctoDeck 主服务 Docker 镜像（多阶段构建）
+	@echo "🐳 构建 OctoDeck 主服务镜像..."
+	docker build -t $(DOCKER_IMAGE) .
+	@echo "✅ 镜像构建完成: $(DOCKER_IMAGE)"
+
+docker-run: ## 使用 docker run 启动服务
+	@echo "🚀 启动 OctoDeck 容器..."
+	@# 检查并创建数据卷
+	@docker volume inspect octodeck-data >/dev/null 2>&1 || docker volume create octodeck-data
+	docker run -d \
+	  --name $(DOCKER_CONTAINER) \
+	  --restart unless-stopped \
+	  -p $(PORT):3000 \
+	  -v octodeck-data:/app/data \
+	  -e WEB_PORT=3000 \
+	  -e TZ=Asia/Shanghai \
+	  $(DOCKER_IMAGE)
+	@echo "✅ OctoDeck 已启动，访问 http://localhost:$(PORT)"
+	@echo "📊 查看日志: make docker-logs"
+
+docker-stop: ## 停止并移除 OctoDeck 容器
+	@echo "🛑 停止 OctoDeck 容器..."
+	@docker stop $(DOCKER_CONTAINER) 2>/dev/null || true
+	@docker rm $(DOCKER_CONTAINER) 2>/dev/null || true
+	@echo "✅ 已停止"
+
+docker-logs: ## 查看 OctoDeck 容器日志
+	docker logs -f $(DOCKER_CONTAINER)
+
+docker-clean: ## 清理 OctoDeck 容器和镜像
+	@echo "🧹 清理 Docker 资源..."
+	@docker stop $(DOCKER_CONTAINER) 2>/dev/null || true
+	@docker rm $(DOCKER_CONTAINER) 2>/dev/null || true
+	@docker rmi $(DOCKER_IMAGE) 2>/dev/null || true
+	@echo "✅ 清理完成"
