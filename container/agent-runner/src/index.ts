@@ -1819,6 +1819,9 @@ async function main(): Promise<void> {
     workspaceGroup: WORKSPACE_GROUP,
     workspaceGlobal: WORKSPACE_GLOBAL,
     workspaceMemory: WORKSPACE_MEMORY,
+    ownerUserId: containerInput.ownerUserId,
+    serverBaseUrl: containerInput.remoteToolServerUrl || process.env.OCTODECK_SERVER_URL || 'http://127.0.0.1:3000',
+    agentRunnerSecret: process.env.OCTODECK_AGENT_RUNNER_SECRET || '',
     disableMemoryLayer,
   };
   const buildMcpServerConfig = () => createSdkMcpServer({

@@ -44,6 +44,29 @@ describe('agent-link tool protocol', () => {
     }
   });
 
+  test('accepts memory.sync frames from octodeck-daemon', () => {
+    const parsed = parseInboundFrame(
+      JSON.stringify({
+        type: 'memory.sync',
+        deviceLinkId: 'cl_1234567890abcdef',
+        agentId: 'claude-code',
+        path: 'CLAUDE.md',
+        content: '# Local Agent Memory',
+        mtime: '2026-06-02T00:00:00Z',
+        contentHash: 'sha256:abc123',
+      }),
+    );
+
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.frame.type).toBe('memory.sync');
+      expect(parsed.frame.deviceLinkId).toBe('cl_1234567890abcdef');
+      expect(parsed.frame.agentId).toBe('claude-code');
+      expect(parsed.frame.path).toBe('CLAUDE.md');
+      expect(parsed.frame.content).toBe('# Local Agent Memory');
+    }
+  });
+
   test('encodes tool.request frames sent to octodeck-daemon', () => {
     const encoded = encodeFrame({
       type: 'tool.request',

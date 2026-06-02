@@ -30,9 +30,31 @@ export interface McpContext {
   workspaceGroup: string;
   workspaceGlobal: string;
   workspaceMemory: string;
+  /** Owner user id for 云端模式 cloud memory tools. */
+  ownerUserId?: string;
+  /** Base URL and secret for cloud memory DB bridge. */
+  serverBaseUrl?: string;
+  agentRunnerSecret?: string;
   // 禁用 OctoDeck 的 memory MCP 工具（memory_append/search/get），
   // 让 Agent 完全按用户本机 ~/.claude/ 下的 Playbook 约定管理记忆
   disableMemoryLayer?: boolean;
+}
+
+async function invokeCloudMemory(ctx: McpContext, payload: Record<string, unknown>): Promise<any> {
+  if (!ctx.ownerUserId) throw new Error('ownerUserId is required for cloud memory tools');
+  const baseUrl = ctx.serverBaseUrl || process.env.OCTODECK_SERVER_URL || 'http://127.0.0.1:3000';
+  const secret = ctx.agentRunnerSecret || process.env.OCTODECK_AGENT_RUNNER_SECRET || '';
+  const res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/cloud-memory/tool`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${secret}`,
+    },
+    body: JSON.stringify({ userId: ctx.ownerUserId, ...payload }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `cloud_memory_http_${res.status}`);
+  return data;
 }
 
 function writeIpcFile(dir: string, data: object): string {
@@ -201,6 +223,87 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
   const toRelativePath = createToRelativePath(ctx);
 
   const tools: SdkMcpToolDefinition<any>[] = [
+    tool(
+      'cloud_memory_search',
+      '搜索云端数据库记忆。云端模式使用此工具读取全局记忆、会话记忆和只读的 client agent 记忆镜像。',
+      {
+        query: z.string().describe('搜索关键词'),
+        memory_type: z.enum(['global', 'session', 'agent']).optional().describe('可选过滤：global/session/agent'),
+      },
+      async (args) => {
+        try {
+          const data = await invokeCloudMemory(ctx, { operation: 'search', query: args.query, memoryType: args.memory_type });
+          return { content: [{ type: 'text' as const, text: JSON.stringify(data.memories ?? [], null, 2) }] };
+        } catch (err) {
+          return { content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }], isError: true };
+        }
+      },
+    ),
+    tool(
+      'cloud_memory_get',
+      '读取云端数据库记忆。agent 类型是 client 本地权威的只读镜像，不可用 update 修改。',
+      {
+        memory_type: z.enum(['global', 'session', 'agent']),
+        path: z.string().describe('记忆路径，如 CLAUDE.md 或 memory/YYYY-MM-DD.md'),
+        group_folder: z.string().optional().describe('session 记忆所属 workspace/group folder'),
+        device_link_id: z.string().optional().describe('agent 记忆镜像所属 client device id'),
+        agent_id: z.string().optional().describe('agent 记忆镜像所属 agent id'),
+      },
+      async (args) => {
+        try {
+          const data = await invokeCloudMemory(ctx, {
+            operation: 'get', memoryType: args.memory_type, path: args.path,
+            groupFolder: args.group_folder, deviceLinkId: args.device_link_id, agentId: args.agent_id,
+          });
+          return { content: [{ type: 'text' as const, text: JSON.stringify(data.memory ?? null, null, 2) }] };
+        } catch (err) {
+          return { content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }], isError: true };
+        }
+      },
+    ),
+    tool(
+      'cloud_memory_append',
+      '追加写入云端权威记忆。仅允许 global/session；client agent 记忆由 client 本地权威维护。',
+      {
+        memory_type: z.enum(['global', 'session']),
+        path: z.string().describe('记忆路径，如 CLAUDE.md 或 memory/YYYY-MM-DD.md'),
+        content: z.string().describe('要追加的内容'),
+        group_folder: z.string().optional().describe('session 记忆所属 workspace/group folder'),
+      },
+      async (args) => {
+        try {
+          const data = await invokeCloudMemory(ctx, {
+            operation: 'append', memoryType: args.memory_type, path: args.path,
+            content: args.content, groupFolder: args.group_folder,
+          });
+          return { content: [{ type: 'text' as const, text: JSON.stringify(data.memory, null, 2) }] };
+        } catch (err) {
+          return { content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }], isError: true };
+        }
+      },
+    ),
+    tool(
+      'cloud_memory_update',
+      '覆盖更新云端权威记忆。仅允许 global/session；可传 expected_revision 防止并发覆盖。',
+      {
+        memory_type: z.enum(['global', 'session']),
+        path: z.string().describe('记忆路径，如 CLAUDE.md 或 memory/YYYY-MM-DD.md'),
+        content: z.string().describe('完整的新内容'),
+        group_folder: z.string().optional().describe('session 记忆所属 workspace/group folder'),
+        expected_revision: z.number().optional().describe('期望 revision，若落后则拒绝覆盖'),
+      },
+      async (args) => {
+        try {
+          const data = await invokeCloudMemory(ctx, {
+            operation: 'update', memoryType: args.memory_type, path: args.path,
+            content: args.content, groupFolder: args.group_folder, expectedRevision: args.expected_revision,
+          });
+          return { content: [{ type: 'text' as const, text: JSON.stringify(data.memory, null, 2) }] };
+        } catch (err) {
+          return { content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }], isError: true };
+        }
+      },
+    ),
     // --- send_message ---
     tool(
       'send_message',

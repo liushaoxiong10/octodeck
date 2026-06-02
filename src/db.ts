@@ -400,6 +400,27 @@ function initializeSqliteDatabase(
     );
     CREATE INDEX IF NOT EXISTS idx_icb_workspace ON im_context_bindings(workspace_jid);
     CREATE INDEX IF NOT EXISTS idx_icb_agent ON im_context_bindings(agent_id);
+
+    CREATE TABLE IF NOT EXISTS cloud_memories (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      memory_type TEXT NOT NULL,
+      scope_key TEXT NOT NULL,
+      group_folder TEXT,
+      agent_id TEXT,
+      device_link_id TEXT,
+      path TEXT NOT NULL,
+      content TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 1,
+      authority TEXT NOT NULL,
+      source TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      updated_by TEXT,
+      UNIQUE(user_id, memory_type, scope_key, path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cloud_memories_user_type ON cloud_memories(user_id, memory_type);
+    CREATE INDEX IF NOT EXISTS idx_cloud_memories_scope ON cloud_memories(scope_key);
   `);
 
   // Auth tables
@@ -1424,6 +1445,13 @@ export function initDatabase(): void | Promise<void> {
   }
 
   return initializeRemoteBackedDatabase(dbPath);
+}
+
+export function getDatabaseForInternalUse(): InstanceType<typeof Database> {
+  if (!db) {
+    throw new Error('Database not initialized');
+  }
+  return db;
 }
 
 export async function flushDatabasePersistence(): Promise<void> {

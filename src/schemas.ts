@@ -772,6 +772,7 @@ export const RedeemCodeSchema = z.object({
 export type MemoryType =
   | 'global'
   | 'session'
+  | 'agent'
   | 'date'
   | 'conversation';
 

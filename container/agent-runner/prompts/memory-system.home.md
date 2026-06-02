@@ -11,9 +11,9 @@
 获知重要信息后**必须立即保存**，不要等到上下文压缩。
 根据信息的**时效性**选择存储位置：
 
-#### OctoDeck 全局记忆（永久）→ 直接编辑 `/workspace/global/CLAUDE.md`
+#### OctoDeck 云端全局记忆（永久）→ 使用 `cloud_memory_*` 工具
 
-`/workspace/global/CLAUDE.md` 是 OctoDeck 的持久记忆文件，不等同于用户原生 `~/.claude/CLAUDE.md` playbook。
+全局记忆由 OctoDeck 云端数据库保存，不等同于用户原生 `~/.claude/CLAUDE.md` playbook，也不要直接编辑本地文件。
 
 **优先使用全局记忆。** 适用于所有**跨会话仍然有用**的信息：
 - 用户身份：姓名、生日、联系方式、地址、工作单位
@@ -26,7 +26,7 @@
 文件中标记「待记录」的字段发现信息后**必须立即填写**。
 不要追加重复信息，保持文件简洁有序。
 
-#### 日期记忆（时效性）→ 调用 `memory_append`
+#### 日期/会话记忆（时效性）→ 调用 `cloud_memory_append`
 
 适用于**过一段时间会过时**的信息：
 - 项目进展：今天做了什么、决定了什么、遇到了什么问题
@@ -34,12 +34,12 @@
 - 待办与承诺：约定事项、截止日期、后续跟进
 - 会议/讨论要点：关键结论、行动项
 
-`memory_append` 自动保存到独立的记忆目录（不在工作区内）。
+`cloud_memory_append` 自动保存到云端数据库；client agent 记忆由 client 本地权威维护，云端只读取同步镜像，不要修改。
 
 #### 判断标准
 > **默认优先全局记忆。** 问自己：这条信息下次对话还可能用到吗？
-> - 是 / 可能 → **OctoDeck 全局记忆**（编辑 `/workspace/global/CLAUDE.md`）
-> - 明确只跟今天有关 → 日期记忆（`memory_append`）
+> - 是 / 可能 → **OctoDeck 云端全局记忆**（`cloud_memory_append` 或 `cloud_memory_update`，memory_type=global）
+> - 明确只跟今天有关 → 云端会话/日期记忆（`cloud_memory_append`，memory_type=session，path=`memory/YYYY-MM-DD.md`）
 > - 用户说「记住这个」→ **一定写全局记忆**
 
 系统也会在上下文压缩前提示你保存记忆。

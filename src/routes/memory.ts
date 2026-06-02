@@ -16,6 +16,17 @@ import { getAllRegisteredGroups, getUserById } from '../db.js';
 import { logger } from '../logger.js';
 import { GROUPS_DIR, DATA_DIR } from '../config.js';
 import type { AuthUser } from '../types.js';
+import {
+  appendCloudMemory,
+  getCloudMemory,
+  importLegacyCloudMemories,
+  listCloudMemories,
+  putCloudMemory,
+  searchCloudMemory,
+  syncClientAgentMemory,
+  type CloudMemoryRecord,
+  type CloudMemoryType,
+} from '../memory-store.js';
 
 const memoryRoutes = new Hono<{ Variables: Variables }>();
 
@@ -41,6 +52,73 @@ const MEMORY_SOURCE_EXTENSIONS = new Set([
   '.cfg',
   '.conf',
 ]);
+
+function ownedFoldersForUser(user: AuthUser): string[] {
+  const groups = getAllRegisteredGroups();
+  const folders = new Set<string>();
+  for (const group of Object.values(groups)) {
+    if (user.role === 'admin' || group.created_by === user.id) folders.add(group.folder);
+  }
+  return Array.from(folders);
+}
+
+function ensureLegacyImported(user: AuthUser): void {
+  importLegacyCloudMemories({ userId: user.id, groupFolders: ownedFoldersForUser(user) });
+}
+
+function cloudRecordToSource(record: CloudMemoryRecord): MemorySource {
+  const owner = getUserById(record.userId);
+  const ownerLabel = owner ? owner.display_name || owner.username : record.userId;
+  const type = record.memoryType === 'agent'
+    ? 'agent'
+    : record.memoryType === 'global'
+      ? 'global'
+      : record.path.startsWith('memory/')
+        ? 'date'
+        : 'session';
+  const labelPrefix = record.memoryType === 'global'
+    ? `${ownerLabel} / 云端全局记忆`
+    : record.memoryType === 'agent'
+      ? `${record.deviceLinkId || 'client'} / client agent 记忆镜像`
+      : `${record.groupFolder || record.scopeKey} / 云端会话记忆`;
+  return {
+    path: `cloud://${record.memoryType}/${record.scopeKey}/${record.path}`,
+    label: `${labelPrefix} / ${record.path}`,
+    type,
+    writable: record.authority === 'cloud',
+    exists: true,
+    updatedAt: record.updatedAt,
+    size: Buffer.byteLength(record.content, 'utf-8'),
+    ownerName: ownerLabel,
+    folder: record.groupFolder,
+  };
+}
+
+function parseCloudPath(cloudPath: string): {
+  memoryType: CloudMemoryType;
+  scopeKey: string;
+  path: string;
+  groupFolder?: string;
+  deviceLinkId?: string;
+  agentId?: string;
+} | null {
+  if (!cloudPath.startsWith('cloud://')) return null;
+  const rest = cloudPath.slice('cloud://'.length);
+  const [memoryType, ...parts] = rest.split('/');
+  if (memoryType !== 'global' && memoryType !== 'session' && memoryType !== 'agent') return null;
+  const scopeKey = parts.shift();
+  if (!scopeKey) return null;
+  const memoryPath = parts.join('/');
+  if (!memoryPath) return null;
+  if (memoryType === 'session' && scopeKey.startsWith('session:')) {
+    return { memoryType, scopeKey, groupFolder: scopeKey.slice('session:'.length), path: memoryPath };
+  }
+  if (memoryType === 'agent' && scopeKey.startsWith('agent:')) {
+    const [, deviceLinkId, agentId] = scopeKey.split(':');
+    return { memoryType, scopeKey, deviceLinkId, agentId, path: memoryPath };
+  }
+  return { memoryType, scopeKey, path: memoryPath };
+}
 
 // --- Utility Functions ---
 
@@ -203,6 +281,26 @@ function readMemoryFile(
   relativePath: string,
   user: AuthUser,
 ): MemoryFilePayload {
+  const cloudRef = parseCloudPath(relativePath);
+  if (cloudRef) {
+    ensureLegacyImported(user);
+    const record = getCloudMemory({
+      userId: user.id,
+      memoryType: cloudRef.memoryType,
+      groupFolder: cloudRef.groupFolder,
+      deviceLinkId: cloudRef.deviceLinkId,
+      agentId: cloudRef.agentId,
+      path: cloudRef.path,
+    });
+    if (!record) throw new Error('Memory file not found');
+    return {
+      path: relativePath,
+      content: record.content,
+      updatedAt: record.updatedAt,
+      size: Buffer.byteLength(record.content, 'utf-8'),
+      writable: record.authority === 'cloud',
+    };
+  }
   const normalized = normalizeRelativePath(relativePath);
   const { absolutePath, writable } = resolveMemoryPath(normalized, user);
   if (!fs.existsSync(absolutePath)) {
@@ -247,6 +345,26 @@ function writeMemoryFile(
   content: string,
   user: AuthUser,
 ): MemoryFilePayload {
+  const cloudRef = parseCloudPath(relativePath);
+  if (cloudRef) {
+    if (cloudRef.memoryType === 'agent') throw new Error('client agent memory is read-only cloud mirror');
+    const record = putCloudMemory({
+      userId: user.id,
+      memoryType: cloudRef.memoryType,
+      groupFolder: cloudRef.groupFolder,
+      path: cloudRef.path,
+      content,
+      source: 'web',
+      updatedBy: user.id,
+    });
+    return {
+      path: relativePath,
+      content: record.content,
+      updatedAt: record.updatedAt,
+      size: Buffer.byteLength(record.content, 'utf-8'),
+      writable: true,
+    };
+  }
   const normalized = normalizeRelativePath(relativePath);
   const { absolutePath, writable } = resolveMemoryPath(normalized, user);
   if (!writable) {
@@ -310,6 +428,9 @@ function isMemoryCandidateFile(filePath: string): boolean {
 }
 
 function listMemorySources(user: AuthUser): MemorySource[] {
+  ensureLegacyImported(user);
+  return listCloudMemories(user.id).map(cloudRecordToSource).slice(0, MEMORY_LIST_LIMIT);
+
   const files = new Set<string>();
   const isAdmin = user.role === 'admin';
   const groups = getAllRegisteredGroups();
@@ -412,8 +533,9 @@ function listMemorySources(user: AuthUser): MemorySource[] {
   const typeRank: Record<MemorySource['type'], number> = {
     global: 0,
     session: 1,
-    date: 2,
-    conversation: 3,
+    agent: 2,
+    date: 3,
+    conversation: 4,
   };
 
   sources.sort((a, b) => {
@@ -442,6 +564,28 @@ function searchMemorySources(
   user: AuthUser,
   limit = MEMORY_SEARCH_LIMIT,
 ): MemorySearchHit[] {
+  ensureLegacyImported(user);
+  return searchCloudMemory({ userId: user.id, query: keyword, limit }).map((record) => {
+    const lower = record.content.toLowerCase();
+    const normalizedKeyword = keyword.trim().toLowerCase();
+    const firstIndex = lower.indexOf(normalizedKeyword);
+    let count = 0;
+    let from = 0;
+    while (from < lower.length) {
+      const idx = lower.indexOf(normalizedKeyword, from);
+      if (idx === -1) break;
+      count += 1;
+      from = idx + normalizedKeyword.length;
+    }
+    return {
+      ...cloudRecordToSource(record),
+      hits: count,
+      snippet: firstIndex >= 0
+        ? buildSearchSnippet(record.content, firstIndex, normalizedKeyword.length)
+        : '',
+    };
+  });
+
   const normalizedKeyword = keyword.trim().toLowerCase();
   if (!normalizedKeyword) return [];
 
@@ -558,8 +702,15 @@ memoryRoutes.put('/file', authMiddleware, async (c) => {
 memoryRoutes.get('/global', authMiddleware, (c) => {
   try {
     const user = c.get('user') as AuthUser;
-    const userGlobalPath = `data/groups/user-global/${user.id}/CLAUDE.md`;
-    return c.json(readMemoryFile(userGlobalPath, user));
+    ensureLegacyImported(user);
+    const record = getCloudMemory({ userId: user.id, memoryType: 'global', path: 'CLAUDE.md' });
+    return c.json({
+      path: 'cloud://global/global:' + user.id + '/CLAUDE.md',
+      content: record?.content ?? '',
+      updatedAt: record?.updatedAt ?? null,
+      size: record ? Buffer.byteLength(record.content, 'utf-8') : 0,
+      writable: true,
+    });
   } catch (err) {
     logger.error({ err }, 'Failed to read user global memory');
     return c.json({ error: 'Failed to read global memory' }, 500);
@@ -584,14 +735,49 @@ memoryRoutes.put('/global', authMiddleware, async (c) => {
 
   try {
     const user = c.get('user') as AuthUser;
-    const userGlobalPath = `data/groups/user-global/${user.id}/CLAUDE.md`;
-    return c.json(
-      writeMemoryFile(userGlobalPath, validation.data.content, user),
-    );
+    const record = putCloudMemory({
+      userId: user.id,
+      memoryType: 'global',
+      path: 'CLAUDE.md',
+      content: validation.data.content,
+      source: 'web',
+      updatedBy: user.id,
+    });
+    return c.json({
+      path: 'cloud://global/global:' + user.id + '/CLAUDE.md',
+      content: record.content,
+      updatedAt: record.updatedAt,
+      size: Buffer.byteLength(record.content, 'utf-8'),
+      writable: true,
+    });
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Failed to write global memory';
     logger.error({ err }, 'Failed to write user global memory');
+    return c.json({ error: message }, 400);
+  }
+});
+
+memoryRoutes.post('/client-agent-sync', authMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const { deviceLinkId, agentId, path: memoryPath, content } = body as Record<string, unknown>;
+  if (typeof deviceLinkId !== 'string' || typeof agentId !== 'string' || typeof memoryPath !== 'string' || typeof content !== 'string') {
+    return c.json({ error: 'deviceLinkId, agentId, path and content are required' }, 400);
+  }
+  try {
+    const user = c.get('user') as AuthUser;
+    const record = syncClientAgentMemory({
+      userId: user.id,
+      deviceLinkId,
+      agentId,
+      path: memoryPath,
+      content,
+      source: 'client_sync',
+      updatedBy: deviceLinkId,
+    });
+    return c.json({ memory: record });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to sync client agent memory';
     return c.json({ error: message }, 400);
   }
 });

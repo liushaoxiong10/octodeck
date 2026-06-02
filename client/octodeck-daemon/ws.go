@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"net/url"
 	"strings"
 	"sync"
@@ -178,6 +179,14 @@ func (c *wsClient) run(ctx context.Context) error {
 		}
 	}()
 
+	if home, err := os.UserHomeDir(); err == nil {
+		sources := agentMemorySources(home, c.cfg.AgentClients)
+		if len(sources) > 0 {
+			memoryPoller := newMemorySyncPoller(c.cfg.LinkID, sources, c.sendMemorySync)
+			go memoryPoller.run(hbCtx)
+		}
+	}
+
 	defer c.pool.cancelAll()
 
 	for {
@@ -216,6 +225,10 @@ func (c *wsClient) run(ctx context.Context) error {
 			// duplicate hello_ack — ignore
 		}
 	}
+}
+
+func (c *wsClient) sendMemorySync(frame *MemorySyncFrame) error {
+	return c.send(frame)
 }
 
 func (c *wsClient) close(reason string) {

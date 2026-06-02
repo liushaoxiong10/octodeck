@@ -15,7 +15,9 @@ const queryMock = vi.hoisted(() => vi.fn((args: any) => {
 }));
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
+  createSdkMcpServer: vi.fn((config) => config),
   query: queryMock,
+  tool: vi.fn((name, description, inputSchema, handler) => ({ name, description, inputSchema, handler })),
 }));
 
 vi.mock('../src/config.js', async (importOriginal) => {

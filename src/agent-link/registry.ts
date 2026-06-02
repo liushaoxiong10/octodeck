@@ -18,6 +18,7 @@ import {
   type HelloFrame,
   type InboundFrame,
 } from './protocol.js';
+import { syncClientAgentMemory } from '../memory-store.js';
 import {
   deliverEvent,
   deliverResult,
@@ -171,6 +172,29 @@ export function handleFrame(
       return;
     case 'tool.result':
       deliverToolResult(frame);
+      return;
+    case 'memory.sync':
+      try {
+        syncClientAgentMemory({
+          userId: session.userId,
+          deviceLinkId: frame.deviceLinkId || session.linkId,
+          agentId: frame.agentId,
+          path: frame.path,
+          content: frame.content,
+          source: 'client_sync',
+          updatedBy: frame.deviceLinkId || session.linkId,
+        });
+      } catch (err) {
+        logger.warn(
+          {
+            linkId: session.linkId,
+            agentId: frame.agentId,
+            path: frame.path,
+            err: (err as Error).message,
+          },
+          'agent-link memory sync failed',
+        );
+      }
       return;
     case 'models.result':
       deliverModelResult(frame);

@@ -231,4 +231,13 @@ describe('frontend agents module', () => {
     expect(teamStore).toContain('/api/agent-teams/agent-md');
     expect(teamStore).toContain('/api/agent-teams');
   });
+
+  test('Agent definition form treats agent id as server-generated and read-only', () => {
+    const definitionsPage = readFileSync(join(repoRoot, 'web/src/pages/AgentDefinitionsPage.tsx'), 'utf8');
+
+    expect(definitionsPage).not.toContain('const slug = createName.trim()');
+    expect(definitionsPage).not.toContain('name: ${slug}');
+    expect(definitionsPage).toContain('Agent ID:');
+    expect(definitionsPage).toContain('系统自动生成，作为唯一标识，不可修改');
+  });
 });

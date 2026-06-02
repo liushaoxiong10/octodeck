@@ -236,6 +236,8 @@ export interface ContainerInput {
   remoteToolServerUrl?: string;
   /** Runtime context audit bootstrap; agent-runner enriches it with SDK usage. */
   contextAudit?: ClaudeContextAudit;
+  /** Owner user id used by cloud-memory tools in 云端模式. */
+  ownerUserId?: string;
   /**
    * Lightweight execution hint for one-shot structured output tasks.
    * Backends may use this to skip the full interactive agent runner, tools,
@@ -1035,6 +1037,7 @@ export async function runContainerAgent(
       // the caller's `input` object (queue/log/retry paths reuse the same ref).
       const dockerInput: ContainerInput = {
         ...input,
+        ownerUserId: group.created_by,
         plugins: group.created_by
           ? loadUserPlugins(group.created_by, { runtime: 'docker' })
           : [],
@@ -1793,6 +1796,7 @@ export async function runHostAgent(
       // plugins.
       const hostInput: ContainerInput = {
         ...input,
+        ownerUserId: group.created_by,
         plugins: prepareHostPlugins(group.created_by),
         remoteExecutionLinkId:
           input.remoteExecutionLinkId ||

@@ -5,6 +5,7 @@ import { Hono } from 'hono';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import type { Variables } from '../web-context.js';
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
 import { logger } from '../logger.js';
@@ -33,6 +34,30 @@ function getAgentsDir(): string {
 
 function validateAgentId(id: string): boolean {
   return /^[\w\-]+$/.test(id);
+}
+
+function generateAgentId(): string {
+  return `agent-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+function createUniqueAgentFile(content: string): string {
+  const agentsDir = getAgentsDir();
+  fs.mkdirSync(agentsDir, { recursive: true });
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const id = generateAgentId();
+    const filePath = path.join(agentsDir, `${id}.md`);
+    try {
+      fs.writeFileSync(filePath, content, { encoding: 'utf-8', flag: 'wx' });
+      return id;
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw err;
+      }
+    }
+  }
+
+  throw new Error('Failed to generate unique agent ID');
 }
 
 function extractTools(frontmatter: Record<string, string | string[]>): string[] {
@@ -229,25 +254,13 @@ agentDefinitionsRoutes.post('/', authMiddleware, systemConfigMiddleware, async (
     return c.json({ error: 'content must be a string' }, 400);
   }
 
-  // Derive id from name
-  const id = name.toLowerCase().replace(/[^a-z0-9\-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-  if (!id || !validateAgentId(id)) {
-    return c.json({ error: 'Invalid agent name' }, 400);
-  }
-
-  const agentsDir = getAgentsDir();
-  fs.mkdirSync(agentsDir, { recursive: true });
-
-  const filePath = path.join(agentsDir, `${id}.md`);
   try {
-    fs.writeFileSync(filePath, content, { encoding: 'utf-8', flag: 'wx' });
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      return c.json({ error: 'Agent with this name already exists' }, 409);
-    }
-    throw err;
+    const id = createUniqueAgentFile(content);
+    return c.json({ success: true, id });
+  } catch (err) {
+    logger.warn({ error: err instanceof Error ? err.message : String(err) }, 'Failed to create agent definition');
+    return c.json({ error: 'Failed to generate unique agent ID' }, 500);
   }
-  return c.json({ success: true, id });
 });
 
 // Delete agent

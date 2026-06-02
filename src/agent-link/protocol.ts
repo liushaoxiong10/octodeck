@@ -180,6 +180,17 @@ export const ToolResultFrame = z.object({
 });
 export type ToolResultFrame = z.infer<typeof ToolResultFrame>;
 
+export const MemorySyncFrame = z.object({
+  type: z.literal('memory.sync'),
+  deviceLinkId: z.string().min(1).max(128),
+  agentId: z.string().min(1).max(128),
+  path: z.string().min(1).max(4096),
+  content: z.string().max(1_000_000),
+  mtime: z.string().max(64).optional(),
+  contentHash: z.string().max(256).optional(),
+});
+export type MemorySyncFrame = z.infer<typeof MemorySyncFrame>;
+
 export const ModelInfoSchema = z.object({
   id: z.string().min(1).max(256),
   displayName: z.string().min(1).max(256).optional(),
@@ -242,6 +253,7 @@ export const InboundFrame = z.discriminatedUnion('type', [
   RunResultFrame,
   ToolEventFrame,
   ToolResultFrame,
+  MemorySyncFrame,
   ModelsResultFrame,
   SkillsResultFrame,
   ErrorFrame,

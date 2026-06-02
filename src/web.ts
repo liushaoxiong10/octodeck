@@ -66,7 +66,7 @@ import modelProxyRoutes from './routes/model-proxy.js';
 import agentLinkRoutes, {
   handleAgentLinkUpgrade,
 } from './routes/agent-link.js';
-import { handleAgentLinkToolHttpRequest } from './routes/agent-link-tool.js';
+import { handleAgentLinkToolHttpRequest, handleCloudMemoryToolHttpRequest } from './routes/agent-link-tool.js';
 import {
   checkBillingAccess,
   formatBillingAccessDeniedMessage,
@@ -271,6 +271,9 @@ app.post('/api/devices/tool', async (c) => {
 });
 app.post('/api/agent-link/tool', async (c) => {
   return handleAgentLinkToolHttpRequest(c.req.raw);
+});
+app.post('/api/cloud-memory/tool', async (c) => {
+  return handleCloudMemoryToolHttpRequest(c.req.raw);
 });
 app.route('/api/devices', agentLinkRoutes);
 app.route('/api/agent-link', agentLinkRoutes);

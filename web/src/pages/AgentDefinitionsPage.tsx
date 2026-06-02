@@ -127,9 +127,8 @@ export function AgentDefinitionsPage() {
     if (!createName.trim()) return;
     setCreating(true);
     try {
-      const slug = createName.trim().toLowerCase().replace(/[^a-z0-9\-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
       const defaultContent = `---
-name: ${slug}
+name: ${createName.trim()}
 description:
 tools:
   - WebSearch
@@ -283,7 +282,10 @@ tools:
                   <div className="mb-3">
                     <div className="text-sm font-semibold text-foreground break-all">{detail.name}</div>
                     <div className="text-xs text-muted-foreground mt-1">
-                      最近更新时间: {updatedText} · 字节数: {byteCount}
+                      Agent ID: <span className="font-mono">{detail.id}</span> · 最近更新时间: {updatedText} · 字节数: {byteCount}
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      系统自动生成，作为唯一标识，不可修改
                     </div>
                   </div>
 
@@ -363,7 +365,7 @@ tools:
                   autoFocus
                 />
                 <p className="text-xs text-muted-foreground mt-1">
-                  只允许小写字母、数字和连字符
+                  Agent ID 由系统自动生成，作为唯一标识，不可修改
                 </p>
               </div>
               <div className="flex justify-end gap-2">

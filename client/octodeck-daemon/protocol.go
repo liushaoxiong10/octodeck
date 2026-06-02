@@ -27,6 +27,7 @@ const (
 	tModelsResult  frameType = "models.result"
 	tSkillsRequest frameType = "skills.request"
 	tSkillsResult  frameType = "skills.result"
+	tMemorySync    frameType = "memory.sync"
 )
 
 // ─── Outbound (C→S) ──────────────────────────────────────────
@@ -113,6 +114,17 @@ type SkillsResultFrame struct {
 	CLISkills       []SkillInfo `json:"cliSkills"`
 	Error           *string     `json:"error"`
 	DurationMs      int64       `json:"durationMs"`
+}
+
+type MemorySyncFrame struct {
+	Type         frameType `json:"type"`
+	RequestID    string    `json:"requestId"`
+	DeviceLinkID string    `json:"deviceLinkId,omitempty"`
+	AgentID      string    `json:"agentId"`
+	Path         string    `json:"path"`
+	Content      string    `json:"content"`
+	Mtime        string    `json:"mtime,omitempty"`
+	ContentHash  string    `json:"contentHash,omitempty"`
 }
 
 func (f SkillsResultFrame) MarshalJSON() ([]byte, error) {

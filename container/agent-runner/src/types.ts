@@ -41,6 +41,8 @@ export interface ContainerInput {
   plugins?: Array<{ type: 'local'; path: string }>;
   /** AgentLink ID used by remote MCP tools when local operations run on octodeck-daemon. */
   remoteExecutionLinkId?: string;
+  /** OctoDeck user ID that owns this run, used by cloud memory MCP tools. */
+  ownerUserId?: string;
   /** Native local tool policy for the SDK runner. */
   localToolPolicy?: 'none' | 'server' | 'device-remote' | 'container';
   /** Server base URL used by remote MCP tools to call /api/agent-link/tool. */
