@@ -25,7 +25,9 @@ import { logger } from './logger.js';
 export const NAME_SEGMENT_RE = /^[\w.-]+$/;
 
 export function isValidNameSegment(s: string): boolean {
-  return typeof s === 'string' && NAME_SEGMENT_RE.test(s) && s !== '.' && s !== '..';
+  return (
+    typeof s === 'string' && NAME_SEGMENT_RE.test(s) && s !== '.' && s !== '..'
+  );
 }
 
 /**
@@ -100,12 +102,15 @@ export function readMarketplaceManifest(
   const name = typeof rec.name === 'string' ? rec.name : null;
   if (!name) return null;
 
-  const meta = (rec.metadata && typeof rec.metadata === 'object'
-    ? (rec.metadata as Record<string, unknown>)
-    : {}) as Record<string, unknown>;
-  const owner = (rec.owner && typeof rec.owner === 'object'
-    ? (rec.owner as Record<string, unknown>)
-    : null);
+  const meta = (
+    rec.metadata && typeof rec.metadata === 'object'
+      ? (rec.metadata as Record<string, unknown>)
+      : {}
+  ) as Record<string, unknown>;
+  const owner =
+    rec.owner && typeof rec.owner === 'object'
+      ? (rec.owner as Record<string, unknown>)
+      : null;
 
   // marketplace.json `plugins[]` declares each plugin's source. Inline sources
   // are shipped in the same repo and must have a local `.claude-plugin/plugin

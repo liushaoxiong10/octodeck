@@ -20,7 +20,10 @@ const execFileAsync = promisify(execFile);
 
 // Anchor on this source file rather than process.cwd() — pm2 / host mode may
 // launch from a different working directory.
-const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const PROJECT_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+);
 
 export interface AgentCapability {
   /** Human-readable name */
@@ -227,7 +230,7 @@ export function logCapabilityPreflight(
       : logger.warn.bind(logger);
     logFn(
       { group: groupName, tool: cap.name },
-       `Local native preflight: ${cap.name} not found — some device native execution capabilities will be unavailable. Install: ${cap.installHint}`,
+      `Local native preflight: ${cap.name} not found — some device native execution capabilities will be unavailable. Install: ${cap.installHint}`,
     );
   }
 }

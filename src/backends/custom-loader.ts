@@ -66,7 +66,10 @@ function readFromDisk(): CustomBackendDef[] {
         });
       }
     } catch (err) {
-      logger.warn({ err }, 'Failed to parse custom backend metadata store value');
+      logger.warn(
+        { err },
+        'Failed to parse custom backend metadata store value',
+      );
     }
   }
   if (!fs.existsSync(CUSTOM_BACKENDS_FILE)) return [];
@@ -84,11 +87,17 @@ function readFromDisk(): CustomBackendDef[] {
       if (!b || typeof b.id !== 'string') return false;
       return true;
     });
-    setMetadataValue(CUSTOM_BACKENDS_METADATA_KEY, JSON.stringify({
-      version: 1,
-      backends,
-      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
-    }));
+    setMetadataValue(
+      CUSTOM_BACKENDS_METADATA_KEY,
+      JSON.stringify({
+        version: 1,
+        backends,
+        updatedAt:
+          typeof parsed.updatedAt === 'string'
+            ? parsed.updatedAt
+            : new Date().toISOString(),
+      }),
+    );
     return backends;
   } catch (err) {
     logger.error(
@@ -129,9 +138,11 @@ function validateDef(def: CustomBackendDef): string | null {
   const argvCheck = validateArgvTemplate(def.argvTemplate);
   if (!argvCheck.ok) return argvCheck.error || 'argvTemplate invalid';
   const sessionArgvCheck = validateSessionArgvTemplate(def.sessionArgvTemplate);
-  if (!sessionArgvCheck.ok) return sessionArgvCheck.error || 'sessionArgvTemplate invalid';
+  if (!sessionArgvCheck.ok)
+    return sessionArgvCheck.error || 'sessionArgvTemplate invalid';
   const resumeArgvCheck = validateResumeArgvTemplate(def.resumeArgvTemplate);
-  if (!resumeArgvCheck.ok) return resumeArgvCheck.error || 'resumeArgvTemplate invalid';
+  if (!resumeArgvCheck.ok)
+    return resumeArgvCheck.error || 'resumeArgvTemplate invalid';
   const envCheck = validateBackendEnv(def.env);
   if (!envCheck.ok) return envCheck.error || 'env invalid';
   if (
@@ -149,10 +160,18 @@ function validateDef(def: CustomBackendDef): string | null {
   if (def.deviceLinkId && !/^cl_[0-9a-f]{16}$/.test(def.deviceLinkId)) {
     return `deviceLinkId 非法：${def.deviceLinkId}`;
   }
-  if (def.runtime && def.runtime !== 'local-device' && def.runtime !== 'server-side') {
+  if (
+    def.runtime &&
+    def.runtime !== 'local-device' &&
+    def.runtime !== 'server-side'
+  ) {
     return `runtime 必须是 local-device / server-side`;
   }
-  if (def.workdirMode && def.workdirMode !== 'auto' && def.workdirMode !== 'custom') {
+  if (
+    def.workdirMode &&
+    def.workdirMode !== 'auto' &&
+    def.workdirMode !== 'custom'
+  ) {
     return `workdirMode 必须是 auto / custom`;
   }
   if (def.workdirMode === 'custom') {
@@ -180,10 +199,7 @@ function syncRegistry(defs: CustomBackendDef[]): void {
     try {
       registerBackend(buildDynamicBackend(def));
     } catch (err) {
-      logger.error(
-        { err, id: def.id },
-        'Failed to register custom backend',
-      );
+      logger.error({ err, id: def.id }, 'Failed to register custom backend');
     }
   }
 }
@@ -196,10 +212,7 @@ export function loadCustomBackendsFromDisk(): void {
   }
   cache = new Map(defs.map((d) => [d.id, d]));
   syncRegistry(defs);
-  logger.info(
-    { count: defs.length },
-    'Custom backends loaded from disk',
-  );
+  logger.info({ count: defs.length }, 'Custom backends loaded from disk');
 }
 
 export function reloadCustomBackends(): void {

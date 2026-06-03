@@ -121,11 +121,7 @@ export interface WhatsAppConnection {
     caption?: string,
     fileName?: string,
   ): Promise<void>;
-  sendFile(
-    chatId: string,
-    filePath: string,
-    fileName: string,
-  ): Promise<void>;
+  sendFile(chatId: string, filePath: string, fileName: string): Promise<void>;
   sendTyping(chatId: string, isTyping: boolean): Promise<void>;
   isConnected(): boolean;
   /** Current connection state snapshot (latest seen) */
@@ -385,7 +381,10 @@ export function createWhatsAppConnection(
               groupNameCache.set(update.id, meta.subject);
             }
           } catch (err) {
-            logger.debug({ err, jid: update.id }, 'group meta fetch failed on add');
+            logger.debug(
+              { err, jid: update.id },
+              'group meta fetch failed on add',
+            );
           }
           opts?.onBotAddedToGroup?.(chatJid, chatName);
           logger.info({ chatJid, chatName }, 'WhatsApp bot added to group');
@@ -395,7 +394,10 @@ export function createWhatsAppConnection(
           logger.info({ chatJid }, 'WhatsApp bot removed from group');
         }
       } catch (err) {
-        logger.warn({ err }, 'WhatsApp group-participants.update handler threw');
+        logger.warn(
+          { err },
+          'WhatsApp group-participants.update handler threw',
+        );
       }
     });
   }
@@ -514,7 +516,10 @@ export function createWhatsAppConnection(
     const dedupKey = key.id ? `${remoteJid}|${key.id}` : '';
     if (dedupKey) {
       if (isDuplicate(dedupKey)) {
-        logger.debug({ msgId: key.id, remoteJid }, 'WhatsApp duplicate dropped');
+        logger.debug(
+          { msgId: key.id, remoteJid },
+          'WhatsApp duplicate dropped',
+        );
         return;
       }
       if (!processingLock.acquire(dedupKey)) {
@@ -527,165 +532,167 @@ export function createWhatsAppConnection(
       markSeen(dedupKey);
     }
     try {
-
-    // Filter old messages (heat-up after reconnect, history sync stragglers)
-    if (
-      tsMs > 0 &&
-      opts.ignoreMessagesBefore &&
-      tsMs < opts.ignoreMessagesBefore
-    ) {
-      return;
-    }
-
-    const text = extractMessageText(content);
-    const chatJid = `${CHANNEL_PREFIX}${remoteJid}`;
-    const isGroup = remoteJid.endsWith('@g.us');
-    const senderRaw = isGroup ? key.participant || remoteJid : remoteJid;
-    const senderImId = jidNormalizedUser(senderRaw);
-    const senderId = `${CHANNEL_PREFIX}${senderRaw}`;
-    const senderName = pushName || (isGroup ? '群成员' : remoteJid);
-    const chatName = groupNameCache.get(remoteJid) || (isGroup ? remoteJid : senderName);
-    const timestampISO = new Date(tsMs > 0 ? tsMs : Date.now()).toISOString();
-
-    // ── Group gates: sender allowlist → mention required → owner check ──
-    if (isGroup) {
+      // Filter old messages (heat-up after reconnect, history sync stragglers)
       if (
-        opts.isSenderAllowedInGroup &&
-        !opts.isSenderAllowedInGroup(chatJid, senderImId)
+        tsMs > 0 &&
+        opts.ignoreMessagesBefore &&
+        tsMs < opts.ignoreMessagesBefore
       ) {
-        logger.debug(
-          { chatJid, senderImId },
-          'WhatsApp dropped: sender not allowlisted',
-        );
         return;
       }
 
-      const isBotMentioned = isMentioningBot(content, sock?.user?.id);
-      if (
-        opts.shouldProcessGroupMessage &&
-        !isBotMentioned &&
-        !opts.shouldProcessGroupMessage(chatJid, senderImId)
-      ) {
-        logger.debug(
-          { chatJid, senderImId },
-          'WhatsApp dropped: mention required but bot not @mentioned',
-        );
-        return;
-      }
-      if (
-        isBotMentioned &&
-        opts.isGroupOwnerMessage &&
-        !opts.isGroupOwnerMessage(chatJid, senderImId)
-      ) {
-        logger.debug(
-          { chatJid, senderImId },
-          'WhatsApp dropped: owner_mentioned mode, sender is not group owner',
-        );
-        return;
-      }
+      const text = extractMessageText(content);
+      const chatJid = `${CHANNEL_PREFIX}${remoteJid}`;
+      const isGroup = remoteJid.endsWith('@g.us');
+      const senderRaw = isGroup ? key.participant || remoteJid : remoteJid;
+      const senderImId = jidNormalizedUser(senderRaw);
+      const senderId = `${CHANNEL_PREFIX}${senderRaw}`;
+      const senderName = pushName || (isGroup ? '群成员' : remoteJid);
+      const chatName =
+        groupNameCache.get(remoteJid) || (isGroup ? remoteJid : senderName);
+      const timestampISO = new Date(tsMs > 0 ? tsMs : Date.now()).toISOString();
 
-      // Lazy-fetch real group name and update DB out-of-band
-      if (!groupNameCache.has(remoteJid)) {
-        groupNameCache.set(remoteJid, remoteJid); // tentative, prevents repeat fetches
-        void resolveGroupName(remoteJid);
-      }
-    }
-
-    // If no text, try to handle media (image/video/audio/document)
-    let finalContent = text;
-    let attachmentsJson: string | undefined;
-    if (!finalContent) {
-      const groupFolder = opts.resolveGroupFolder?.(chatJid);
-      const media = await tryHandleMediaMessage(
-        msg,
-        content,
-        groupFolder,
-      );
-      if (!media) {
-        logger.debug(
-          { remoteJid, msgId: key.id, types: Object.keys(content) },
-          'WhatsApp message has neither text nor supported media',
-        );
-        return;
-      }
-      finalContent = media.content;
-      attachmentsJson = media.attachmentsJson;
-    }
-
-    storeChatMetadata(chatJid, timestampISO);
-    updateChatName(chatJid, chatName);
-    opts.onNewChat(chatJid, chatName);
-
-    // Slash command interception (matches Telegram pattern: `/cmd args`)
-    const trimmed = finalContent.trim();
-    const slashMatch = trimmed.match(/^\/(\S+)(?:\s+(.*))?$/s);
-    if (slashMatch && opts.onCommand) {
-      const cmdBody = (
-        slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
-      ).trim();
-      try {
-        const reply = await opts.onCommand(chatJid, cmdBody);
-        if (reply !== null && reply !== undefined) {
-          if (sock) {
-            try {
-              await sock.sendMessage(remoteJid, { text: reply });
-            } catch (err) {
-              logger.warn({ err, chatJid }, 'WhatsApp slash reply send failed');
-            }
-          }
+      // ── Group gates: sender allowlist → mention required → owner check ──
+      if (isGroup) {
+        if (
+          opts.isSenderAllowedInGroup &&
+          !opts.isSenderAllowedInGroup(chatJid, senderImId)
+        ) {
+          logger.debug(
+            { chatJid, senderImId },
+            'WhatsApp dropped: sender not allowlisted',
+          );
           return;
         }
-      } catch (err) {
-        logger.error({ err, chatJid, cmd: slashMatch[1] }, 'WhatsApp slash command failed');
+
+        const isBotMentioned = isMentioningBot(content, sock?.user?.id);
+        if (
+          opts.shouldProcessGroupMessage &&
+          !isBotMentioned &&
+          !opts.shouldProcessGroupMessage(chatJid, senderImId)
+        ) {
+          logger.debug(
+            { chatJid, senderImId },
+            'WhatsApp dropped: mention required but bot not @mentioned',
+          );
+          return;
+        }
+        if (
+          isBotMentioned &&
+          opts.isGroupOwnerMessage &&
+          !opts.isGroupOwnerMessage(chatJid, senderImId)
+        ) {
+          logger.debug(
+            { chatJid, senderImId },
+            'WhatsApp dropped: owner_mentioned mode, sender is not group owner',
+          );
+          return;
+        }
+
+        // Lazy-fetch real group name and update DB out-of-band
+        if (!groupNameCache.has(remoteJid)) {
+          groupNameCache.set(remoteJid, remoteJid); // tentative, prevents repeat fetches
+          void resolveGroupName(remoteJid);
+        }
       }
-    }
 
-    // Resolve agent routing (binding to a sub-agent inside a workspace)
-    const routing = opts.resolveEffectiveChatJid?.(chatJid);
-    const targetJid = routing?.effectiveJid ?? chatJid;
-    const id = crypto.randomUUID();
+      // If no text, try to handle media (image/video/audio/document)
+      let finalContent = text;
+      let attachmentsJson: string | undefined;
+      if (!finalContent) {
+        const groupFolder = opts.resolveGroupFolder?.(chatJid);
+        const media = await tryHandleMediaMessage(msg, content, groupFolder);
+        if (!media) {
+          logger.debug(
+            { remoteJid, msgId: key.id, types: Object.keys(content) },
+            'WhatsApp message has neither text nor supported media',
+          );
+          return;
+        }
+        finalContent = media.content;
+        attachmentsJson = media.attachmentsJson;
+      }
 
-    storeChatMetadata(targetJid, timestampISO);
-    storeMessageDirect(
-      id,
-      targetJid,
-      senderId,
-      senderName,
-      finalContent,
-      timestampISO,
-      false,
-      { attachments: attachmentsJson, sourceJid: chatJid },
-    );
+      storeChatMetadata(chatJid, timestampISO);
+      updateChatName(chatJid, chatName);
+      opts.onNewChat(chatJid, chatName);
 
-    broadcastNewMessage(
-      targetJid,
-      {
+      // Slash command interception (matches Telegram pattern: `/cmd args`)
+      const trimmed = finalContent.trim();
+      const slashMatch = trimmed.match(/^\/(\S+)(?:\s+(.*))?$/s);
+      if (slashMatch && opts.onCommand) {
+        const cmdBody = (
+          slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
+        ).trim();
+        try {
+          const reply = await opts.onCommand(chatJid, cmdBody);
+          if (reply !== null && reply !== undefined) {
+            if (sock) {
+              try {
+                await sock.sendMessage(remoteJid, { text: reply });
+              } catch (err) {
+                logger.warn(
+                  { err, chatJid },
+                  'WhatsApp slash reply send failed',
+                );
+              }
+            }
+            return;
+          }
+        } catch (err) {
+          logger.error(
+            { err, chatJid, cmd: slashMatch[1] },
+            'WhatsApp slash command failed',
+          );
+        }
+      }
+
+      // Resolve agent routing (binding to a sub-agent inside a workspace)
+      const routing = opts.resolveEffectiveChatJid?.(chatJid);
+      const targetJid = routing?.effectiveJid ?? chatJid;
+      const id = crypto.randomUUID();
+
+      storeChatMetadata(targetJid, timestampISO);
+      storeMessageDirect(
         id,
-        chat_jid: targetJid,
-        source_jid: chatJid,
-        sender: senderId,
-        sender_name: senderName,
-        content: finalContent,
-        timestamp: timestampISO,
-        attachments: attachmentsJson,
-        is_from_me: false,
-      },
-      routing?.agentId ?? undefined,
-    );
-    notifyNewImMessage();
+        targetJid,
+        senderId,
+        senderName,
+        finalContent,
+        timestampISO,
+        false,
+        { attachments: attachmentsJson, sourceJid: chatJid },
+      );
 
-    if (routing?.agentId) {
-      opts.onAgentMessage?.(chatJid, routing.agentId);
-      logger.info(
-        { chatJid, effectiveJid: targetJid, agentId: routing.agentId },
-        'WhatsApp message routed to conversation agent',
+      broadcastNewMessage(
+        targetJid,
+        {
+          id,
+          chat_jid: targetJid,
+          source_jid: chatJid,
+          sender: senderId,
+          sender_name: senderName,
+          content: finalContent,
+          timestamp: timestampISO,
+          attachments: attachmentsJson,
+          is_from_me: false,
+        },
+        routing?.agentId ?? undefined,
       );
-    } else {
-      logger.info(
-        { chatJid, sender: senderName, msgId: key.id, isGroup },
-        'WhatsApp message stored',
-      );
-    }
+      notifyNewImMessage();
+
+      if (routing?.agentId) {
+        opts.onAgentMessage?.(chatJid, routing.agentId);
+        logger.info(
+          { chatJid, effectiveJid: targetJid, agentId: routing.agentId },
+          'WhatsApp message routed to conversation agent',
+        );
+      } else {
+        logger.info(
+          { chatJid, sender: senderName, msgId: key.id, isGroup },
+          'WhatsApp message stored',
+        );
+      }
     } finally {
       if (dedupKey) processingLock.release(dedupKey);
     }
@@ -881,7 +888,14 @@ export function getWhatsAppAuthDir(
   userId: string,
   accountId = 'default',
 ): string {
-  return path.join(dataDir, 'config', 'user-im', userId, 'whatsapp-auth', accountId);
+  return path.join(
+    dataDir,
+    'config',
+    'user-im',
+    userId,
+    'whatsapp-auth',
+    accountId,
+  );
 }
 
 /**
@@ -890,7 +904,8 @@ export function getWhatsAppAuthDir(
  */
 export function extractMessageText(content: proto.IMessage): string | null {
   if (content.conversation) return content.conversation;
-  if (content.extendedTextMessage?.text) return content.extendedTextMessage.text;
+  if (content.extendedTextMessage?.text)
+    return content.extendedTextMessage.text;
   // Sometimes ephemeral / view-once wrap the inner content
   if (content.ephemeralMessage?.message) {
     return extractMessageText(content.ephemeralMessage.message);

@@ -29,11 +29,7 @@ import type {
   NewsChannel,
   TextBasedChannel,
 } from 'discord.js';
-import {
-  storeChatMetadata,
-  storeMessageDirect,
-  updateChatName,
-} from './db.js';
+import { storeChatMetadata, storeMessageDirect, updateChatName } from './db.js';
 import { notifyNewImMessage } from './message-notifier.js';
 import { broadcastNewMessage } from './web.js';
 import { logger } from './logger.js';
@@ -73,10 +69,7 @@ export interface DiscordConnectOpts {
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
   onBotRemovedFromGroup?: (chatJid: string) => void;
-  shouldProcessGroupMessage?: (
-    chatJid: string,
-    senderImId?: string,
-  ) => boolean;
+  shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
   isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
 }
 
@@ -87,14 +80,25 @@ export interface DiscordHistoryMessage {
   authorBot: boolean;
   content: string;
   timestamp: string;
-  attachments: Array<{ name: string; url: string; size: number; contentType?: string }>;
+  attachments: Array<{
+    name: string;
+    url: string;
+    size: number;
+    contentType?: string;
+  }>;
   replyToId?: string;
   edited: boolean;
 }
 
 export interface DiscordChannelInfo {
   id: string;
-  type: 'dm' | 'guild_text' | 'guild_voice' | 'guild_news' | 'guild_thread' | 'guild_other';
+  type:
+    | 'dm'
+    | 'guild_text'
+    | 'guild_voice'
+    | 'guild_news'
+    | 'guild_thread'
+    | 'guild_other';
   name: string;
   topic?: string;
   nsfw?: boolean;
@@ -171,11 +175,9 @@ function parseChatId(
   if (chatId.startsWith('discord:'))
     return { type: 'guild', id: chatId.slice(8) };
   // Bare ID form (after extractChatId strips prefix): dm:{userId} or raw snowflake
-  if (chatId.startsWith('dm:'))
-    return { type: 'dm', id: chatId.slice(3) };
+  if (chatId.startsWith('dm:')) return { type: 'dm', id: chatId.slice(3) };
   // Bare snowflake — assume guild channel
-  if (/^\d+$/.test(chatId))
-    return { type: 'guild', id: chatId };
+  if (/^\d+$/.test(chatId)) return { type: 'guild', id: chatId };
   return null;
 }
 
@@ -330,10 +332,7 @@ export function createDiscordConnection(
   /**
    * Add an eyes emoji reaction to a user's message as ack confirmation.
    */
-  async function attachAckReaction(
-    msg: Message,
-    jid: string,
-  ): Promise<void> {
+  async function attachAckReaction(msg: Message, jid: string): Promise<void> {
     try {
       await msg.react('\u{1F440}'); // eyes emoji
       ackReactionByChat.set(jid, {
@@ -407,249 +406,267 @@ export function createDiscordConnection(
       }
       markSeen(msgId);
       try {
+        // Skip stale messages from before connection (hot-reload scenario)
+        if (opts.ignoreMessagesBefore && msg.createdTimestamp) {
+          if (msg.createdTimestamp < opts.ignoreMessagesBefore) {
+            logger.debug(
+              {
+                msgId,
+                msgTime: msg.createdTimestamp,
+                ignoreBefore: opts.ignoreMessagesBefore,
+              },
+              'Discord dropped: stale message',
+            );
+            return;
+          }
+        }
 
-      // Skip stale messages from before connection (hot-reload scenario)
-      if (opts.ignoreMessagesBefore && msg.createdTimestamp) {
-        if (msg.createdTimestamp < opts.ignoreMessagesBefore) {
-          logger.debug(
-            {
-              msgId,
-              msgTime: msg.createdTimestamp,
-              ignoreBefore: opts.ignoreMessagesBefore,
-            },
-            'Discord dropped: stale message',
-          );
+        // Determine channel type and construct JID
+        const isDM =
+          msg.channel.type === ChannelType.DM ||
+          msg.channel.type === ChannelType.GroupDM;
+        const jid = isDM
+          ? `discord:dm:${msg.author.id}`
+          : `discord:${msg.channelId}`;
+
+        const senderName =
+          msg.member?.displayName ||
+          msg.author.displayName ||
+          msg.author.username;
+        const chatName = isDM
+          ? senderName
+          : (msg.channel as TextChannel).name || `Discord #${msg.channelId}`;
+        const senderImId = msg.author.id;
+
+        // Store last message ID for reply context
+        lastMessageIds.set(jid, msgId);
+
+        // Register chat early (before mention gate) so that
+        // shouldProcessGroupMessage can find the group in registeredGroups.
+        // Without this, first-time guild channel messages are always dropped
+        // because shouldProcessGroupMessage returns false for unknown groups.
+        storeChatMetadata(jid, new Date().toISOString());
+        updateChatName(jid, chatName);
+        opts.onNewChat(jid, chatName);
+
+        // Guild channel: check group filtering (must check actual @mention first)
+        if (!isDM) {
+          const isBotMentioned = discordClient?.user
+            ? msg.mentions.has(discordClient.user)
+            : false;
+
+          // Gate 1: require_mention mode — only process if bot was @mentioned
+          if (opts.shouldProcessGroupMessage) {
+            const shouldProcess = opts.shouldProcessGroupMessage(
+              jid,
+              senderImId,
+            );
+            if (!shouldProcess && !isBotMentioned) {
+              logger.debug(
+                { jid },
+                'Discord group message dropped (mention required but bot not @mentioned)',
+              );
+              return;
+            }
+          }
+          // Gate 2: owner_mentioned mode — only process if sender is owner or bot was @mentioned
+          if (opts.isGroupOwnerMessage) {
+            const isOwner = opts.isGroupOwnerMessage(jid, senderImId);
+            if (!isOwner && !isBotMentioned) {
+              logger.debug(
+                { jid, senderImId },
+                'Discord group message dropped (owner_mentioned mode)',
+              );
+              return;
+            }
+          }
+        }
+
+        // Authorization check — before downloading any attachments to avoid
+        // resource consumption from unauthorized channels
+        if (opts.isChatAuthorized && !opts.isChatAuthorized(jid)) {
+          logger.debug({ jid }, 'Discord chat not authorized');
           return;
         }
-      }
 
-      // Determine channel type and construct JID
-      const isDM =
-        msg.channel.type === ChannelType.DM ||
-        msg.channel.type === ChannelType.GroupDM;
-      const jid = isDM
-        ? `discord:dm:${msg.author.id}`
-        : `discord:${msg.channelId}`;
-
-      const senderName = msg.member?.displayName || msg.author.displayName || msg.author.username;
-      const chatName = isDM
-        ? senderName
-        : (msg.channel as TextChannel).name || `Discord #${msg.channelId}`;
-      const senderImId = msg.author.id;
-
-      // Store last message ID for reply context
-      lastMessageIds.set(jid, msgId);
-
-      // Register chat early (before mention gate) so that
-      // shouldProcessGroupMessage can find the group in registeredGroups.
-      // Without this, first-time guild channel messages are always dropped
-      // because shouldProcessGroupMessage returns false for unknown groups.
-      storeChatMetadata(jid, new Date().toISOString());
-      updateChatName(jid, chatName);
-      opts.onNewChat(jid, chatName);
-
-      // Guild channel: check group filtering (must check actual @mention first)
-      if (!isDM) {
-        const isBotMentioned = discordClient?.user
-          ? msg.mentions.has(discordClient.user)
-          : false;
-
-        // Gate 1: require_mention mode — only process if bot was @mentioned
-        if (opts.shouldProcessGroupMessage) {
-          const shouldProcess = opts.shouldProcessGroupMessage(jid, senderImId);
-          if (!shouldProcess && !isBotMentioned) {
-            logger.debug(
-              { jid },
-              'Discord group message dropped (mention required but bot not @mentioned)',
-            );
-            return;
-          }
+        // Extract content, stripping bot mentions
+        let content = msg.content;
+        if (!isDM && discordClient?.user) {
+          // Remove bot mention patterns: <@123456> or <@!123456>
+          content = content.replace(/<@!?\d+>/g, '').trim();
         }
-        // Gate 2: owner_mentioned mode — only process if sender is owner or bot was @mentioned
-        if (opts.isGroupOwnerMessage) {
-          const isOwner = opts.isGroupOwnerMessage(jid, senderImId);
-          if (!isOwner && !isBotMentioned) {
-            logger.debug(
-              { jid, senderImId },
-              'Discord group message dropped (owner_mentioned mode)',
-            );
-            return;
-          }
-        }
-      }
 
-      // Authorization check — before downloading any attachments to avoid
-      // resource consumption from unauthorized channels
-      if (opts.isChatAuthorized && !opts.isChatAuthorized(jid)) {
-        logger.debug({ jid }, 'Discord chat not authorized');
-        return;
-      }
+        // Process attachments
+        let attachmentsJson: string | undefined;
+        const imageAttachments: {
+          type: 'image';
+          data: string;
+          mimeType: string;
+        }[] = [];
 
-      // Extract content, stripping bot mentions
-      let content = msg.content;
-      if (!isDM && discordClient?.user) {
-        // Remove bot mention patterns: <@123456> or <@!123456>
-        content = content.replace(/<@!?\d+>/g, '').trim();
-      }
+        for (const attachment of msg.attachments.values()) {
+          const contentType = attachment.contentType || '';
+          const isImage = contentType.startsWith('image/');
+          const attachUrl = attachment.url;
+          const attachName = attachment.name || `file_${Date.now()}`;
 
-      // Process attachments
-      let attachmentsJson: string | undefined;
-      const imageAttachments: { type: 'image'; data: string; mimeType: string }[] = [];
+          if (isImage) {
+            // Download image for base64 and disk save
+            const buffer = await downloadAttachment(attachUrl);
+            if (buffer) {
+              const mimeType = detectImageMimeType(buffer) || contentType;
 
-      for (const attachment of msg.attachments.values()) {
-        const contentType = attachment.contentType || '';
-        const isImage = contentType.startsWith('image/');
-        const attachUrl = attachment.url;
-        const attachName = attachment.name || `file_${Date.now()}`;
+              // Inline as base64 if under threshold
+              if (buffer.length <= IMAGE_MAX_BASE64_SIZE) {
+                imageAttachments.push({
+                  type: 'image',
+                  data: buffer.toString('base64'),
+                  mimeType,
+                });
+              }
 
-        if (isImage) {
-          // Download image for base64 and disk save
-          const buffer = await downloadAttachment(attachUrl);
-          if (buffer) {
-            const mimeType = detectImageMimeType(buffer) || contentType;
-
-            // Inline as base64 if under threshold
-            if (buffer.length <= IMAGE_MAX_BASE64_SIZE) {
-              imageAttachments.push({
-                type: 'image',
-                data: buffer.toString('base64'),
-                mimeType,
-              });
-            }
-
-            // Save to disk
-            const groupFolder = opts.resolveGroupFolder?.(jid);
-            if (groupFolder) {
-              try {
-                const ext = mimeType.split('/')[1] || 'jpg';
-                const filename = `img_${Date.now()}.${ext}`;
-                const savedPath = await saveDownloadedFile(
-                  groupFolder,
-                  'discord',
-                  filename,
-                  buffer,
-                );
-                if (!content) {
-                  content = `[图片: ${savedPath}]`;
-                } else {
-                  content += `\n[图片: ${savedPath}]`;
+              // Save to disk
+              const groupFolder = opts.resolveGroupFolder?.(jid);
+              if (groupFolder) {
+                try {
+                  const ext = mimeType.split('/')[1] || 'jpg';
+                  const filename = `img_${Date.now()}.${ext}`;
+                  const savedPath = await saveDownloadedFile(
+                    groupFolder,
+                    'discord',
+                    filename,
+                    buffer,
+                  );
+                  if (!content) {
+                    content = `[图片: ${savedPath}]`;
+                  } else {
+                    content += `\n[图片: ${savedPath}]`;
+                  }
+                } catch (err) {
+                  logger.warn({ err }, 'Failed to save Discord image to disk');
+                  if (!content) content = '[图片]';
                 }
-              } catch (err) {
-                logger.warn({ err }, 'Failed to save Discord image to disk');
+              } else {
                 if (!content) content = '[图片]';
               }
-            } else {
-              if (!content) content = '[图片]';
             }
-          }
-        } else {
-          // Non-image file: download and save to workspace
-          const buffer = await downloadAttachment(attachUrl);
-          if (buffer) {
-            const groupFolder = opts.resolveGroupFolder?.(jid);
-            if (groupFolder) {
-              try {
-                const savedPath = await saveDownloadedFile(
-                  groupFolder,
-                  'discord',
-                  attachName,
-                  buffer,
-                );
-                if (!content) {
-                  content = `[文件: ${savedPath}]`;
-                } else {
-                  content += `\n[文件: ${savedPath}]`;
+          } else {
+            // Non-image file: download and save to workspace
+            const buffer = await downloadAttachment(attachUrl);
+            if (buffer) {
+              const groupFolder = opts.resolveGroupFolder?.(jid);
+              if (groupFolder) {
+                try {
+                  const savedPath = await saveDownloadedFile(
+                    groupFolder,
+                    'discord',
+                    attachName,
+                    buffer,
+                  );
+                  if (!content) {
+                    content = `[文件: ${savedPath}]`;
+                  } else {
+                    content += `\n[文件: ${savedPath}]`;
+                  }
+                } catch (err) {
+                  logger.warn({ err }, 'Failed to save Discord file to disk');
+                  if (!content) content = `[文件: ${attachName}]`;
                 }
-              } catch (err) {
-                logger.warn({ err }, 'Failed to save Discord file to disk');
+              } else {
                 if (!content) content = `[文件: ${attachName}]`;
               }
-            } else {
-              if (!content) content = `[文件: ${attachName}]`;
             }
           }
         }
-      }
 
-      if (imageAttachments.length > 0) {
-        attachmentsJson = JSON.stringify(imageAttachments);
-      }
+        if (imageAttachments.length > 0) {
+          attachmentsJson = JSON.stringify(imageAttachments);
+        }
 
-      // Skip empty messages
-      if (!content && !attachmentsJson) {
-        return;
-      }
-
-      // Handle slash commands
-      const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
-      if (slashMatch && opts.onCommand) {
-        const cmdBody = (
-          slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
-        ).trim();
-        try {
-          const reply = await opts.onCommand(jid, cmdBody, senderImId);
-          if (reply) {
-            const channel = await resolveChannel(jid);
-            if (channel) {
-              const chunks = splitDiscordChunks(reply);
-              for (const chunk of chunks) {
-                await channel.send(chunk);
-              }
-            }
-            return;
-          }
-        } catch (err) {
-          logger.error({ jid, err }, 'Discord slash command failed');
+        // Skip empty messages
+        if (!content && !attachmentsJson) {
           return;
         }
-      }
 
-      // Route and store message
-      const agentRouting = opts.resolveEffectiveChatJid?.(jid);
-      const targetJid = agentRouting?.effectiveJid ?? jid;
+        // Handle slash commands
+        const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
+        if (slashMatch && opts.onCommand) {
+          const cmdBody = (
+            slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
+          ).trim();
+          try {
+            const reply = await opts.onCommand(jid, cmdBody, senderImId);
+            if (reply) {
+              const channel = await resolveChannel(jid);
+              if (channel) {
+                const chunks = splitDiscordChunks(reply);
+                for (const chunk of chunks) {
+                  await channel.send(chunk);
+                }
+              }
+              return;
+            }
+          } catch (err) {
+            logger.error({ jid, err }, 'Discord slash command failed');
+            return;
+          }
+        }
 
-      const id = crypto.randomUUID();
-      const timestamp = new Date(msg.createdTimestamp).toISOString();
-      const senderId = `discord:${msg.author.id}`;
-      storeChatMetadata(targetJid, timestamp);
-      storeMessageDirect(id, targetJid, senderId, senderName, content, timestamp, false, {
-        attachments: attachmentsJson,
-        sourceJid: jid,
-      });
+        // Route and store message
+        const agentRouting = opts.resolveEffectiveChatJid?.(jid);
+        const targetJid = agentRouting?.effectiveJid ?? jid;
 
-      broadcastNewMessage(
-        targetJid,
-        {
+        const id = crypto.randomUUID();
+        const timestamp = new Date(msg.createdTimestamp).toISOString();
+        const senderId = `discord:${msg.author.id}`;
+        storeChatMetadata(targetJid, timestamp);
+        storeMessageDirect(
           id,
-          chat_jid: targetJid,
-          source_jid: jid,
-          sender: senderId,
-          sender_name: senderName,
+          targetJid,
+          senderId,
+          senderName,
           content,
           timestamp,
-          attachments: attachmentsJson,
-          is_from_me: false,
-        },
-        agentRouting?.agentId ?? undefined,
-      );
-
-      // Ack reaction: confirm receipt with eyes emoji
-      attachAckReaction(msg, jid).catch(() => {});
-
-      notifyNewImMessage();
-
-      if (agentRouting?.agentId) {
-        opts.onAgentMessage?.(jid, agentRouting.agentId);
-        logger.info(
-          { jid, effectiveJid: targetJid, agentId: agentRouting.agentId },
-          'Discord message routed to agent',
+          false,
+          {
+            attachments: attachmentsJson,
+            sourceJid: jid,
+          },
         );
-      } else {
-        logger.info(
-          { jid, sender: senderName, msgId },
-          'Discord message stored',
+
+        broadcastNewMessage(
+          targetJid,
+          {
+            id,
+            chat_jid: targetJid,
+            source_jid: jid,
+            sender: senderId,
+            sender_name: senderName,
+            content,
+            timestamp,
+            attachments: attachmentsJson,
+            is_from_me: false,
+          },
+          agentRouting?.agentId ?? undefined,
         );
-      }
+
+        // Ack reaction: confirm receipt with eyes emoji
+        attachAckReaction(msg, jid).catch(() => {});
+
+        notifyNewImMessage();
+
+        if (agentRouting?.agentId) {
+          opts.onAgentMessage?.(jid, agentRouting.agentId);
+          logger.info(
+            { jid, effectiveJid: targetJid, agentId: agentRouting.agentId },
+            'Discord message routed to agent',
+          );
+        } else {
+          logger.info(
+            { jid, sender: senderName, msgId },
+            'Discord message stored',
+          );
+        }
       } finally {
         processingLock.release(msgId);
       }
@@ -667,7 +684,10 @@ export function createDiscordConnection(
   ): Promise<void> {
     const channel = await resolveChannel(chatId);
     if (!channel) {
-      logger.error({ chatId }, 'Discord sendMessage: failed to resolve channel');
+      logger.error(
+        { chatId },
+        'Discord sendMessage: failed to resolve channel',
+      );
       return;
     }
 
@@ -742,25 +762,32 @@ export function createDiscordConnection(
               {
                 name: 'require_mention',
                 description: '切换群聊响应模式（需要 @Bot 才响应）',
-                options: [{
-                  name: 'enabled',
-                  description: 'true 或 false',
-                  type: 3, // STRING
-                  required: true,
-                  choices: [
-                    { name: 'true - 需要 @Bot', value: 'true' },
-                    { name: 'false - 全量响应', value: 'false' },
-                  ],
-                }],
+                options: [
+                  {
+                    name: 'enabled',
+                    description: 'true 或 false',
+                    type: 3, // STRING
+                    required: true,
+                    choices: [
+                      { name: 'true - 需要 @Bot', value: 'true' },
+                      { name: 'false - 全量响应', value: 'false' },
+                    ],
+                  },
+                ],
               },
             ]);
             // Clear guild-level commands (remove any stale ones from other apps)
             for (const guild of readyClient.guilds.cache.values()) {
-              try { await guild.commands.set([]); } catch {}
+              try {
+                await guild.commands.set([]);
+              } catch {}
             }
             logger.info('Discord application commands registered');
           } catch (err: any) {
-            logger.warn({ err: err.message }, 'Failed to register application commands');
+            logger.warn(
+              { err: err.message },
+              'Failed to register application commands',
+            );
           }
         });
 
@@ -781,16 +808,24 @@ export function createDiscordConnection(
 
           try {
             await interaction.deferReply();
-            const reply = await opts.onCommand?.(jid, cmdBody, interaction.user.id);
+            const reply = await opts.onCommand?.(
+              jid,
+              cmdBody,
+              interaction.user.id,
+            );
             if (reply) {
               // Discord interaction replies have 2000 char limit
-              const truncated = reply.length > 2000 ? reply.slice(0, 1997) + '...' : reply;
+              const truncated =
+                reply.length > 2000 ? reply.slice(0, 1997) + '...' : reply;
               await interaction.editReply(truncated);
             } else {
               await interaction.editReply('命令已执行');
             }
           } catch (err: any) {
-            logger.error({ jid, cmd: cmdBody, err: err.message }, 'Discord slash command failed');
+            logger.error(
+              { jid, cmd: cmdBody, err: err.message },
+              'Discord slash command failed',
+            );
             try {
               await interaction.editReply('命令执行失败');
             } catch {}
@@ -824,10 +859,7 @@ export function createDiscordConnection(
 
         // Guild delete (bot removed from a server) — log only
         discordClient.on(Events.GuildDelete, (guild) => {
-          logger.info(
-            { guildId: guild.id },
-            'Discord bot removed from guild',
-          );
+          logger.info({ guildId: guild.id }, 'Discord bot removed from guild');
         });
 
         // Login and wait for ClientReady before returning
@@ -880,7 +912,10 @@ export function createDiscordConnection(
     ): Promise<void> {
       const channel = await resolveChannel(chatId);
       if (!channel) {
-        logger.error({ chatId }, 'Discord sendImage: failed to resolve channel');
+        logger.error(
+          { chatId },
+          'Discord sendImage: failed to resolve channel',
+        );
         throw new Error(`Discord sendImage: unknown chat ${chatId}`);
       }
 
@@ -960,9 +995,8 @@ export function createDiscordConnection(
       const channel = await resolveChannel(chatId);
       if (!channel) return undefined;
 
-      const { DiscordStreamingEditController } = await import(
-        './discord-streaming-edit.js'
-      );
+      const { DiscordStreamingEditController } =
+        await import('./discord-streaming-edit.js');
       return new DiscordStreamingEditController(
         channel as TextChannel | DMChannel,
         {
@@ -991,8 +1025,8 @@ export function createDiscordConnection(
 
       const collection = await channel.messages.fetch(fetchOpts);
       // Collection is keyed by snowflake; sort newest-first → oldest-first for readability.
-      const messages = Array.from(collection.values()).sort((a, b) =>
-        a.createdTimestamp - b.createdTimestamp,
+      const messages = Array.from(collection.values()).sort(
+        (a, b) => a.createdTimestamp - b.createdTimestamp,
       );
 
       return messages.map((m) => ({
@@ -1053,7 +1087,10 @@ export function createDiscordConnection(
         id: guildChannel.id,
         type: typeLabel,
         name: guildChannel.name,
-        topic: 'topic' in guildChannel ? guildChannel.topic ?? undefined : undefined,
+        topic:
+          'topic' in guildChannel
+            ? (guildChannel.topic ?? undefined)
+            : undefined,
         nsfw: 'nsfw' in guildChannel ? guildChannel.nsfw : undefined,
         guildId: guildChannel.guildId,
         parentId: guildChannel.parentId ?? undefined,

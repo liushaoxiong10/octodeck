@@ -46,9 +46,33 @@ import {
 import { AgentLinkSession } from '../agent-link/session.js';
 import { requestProviderModels } from '../agent-link/model-rpc.js';
 import { requestProviderSkills } from '../agent-link/skills-rpc.js';
+import {
+  requestAgentDiscover,
+  requestAgentSessionDelete,
+  requestAgentSessions,
+} from '../agent-link/agent-runtime-rpc.js';
 import type { AuthUser } from '../types.js';
 import { listCustomBackends } from '../backends/custom-loader.js';
 import { handleAgentTeamLinkToolRequest } from './agent-teams.js';
+
+const LATEST_DAEMON_VERSION = 'octodeck-daemon/1.0.0';
+const DAEMON_UPDATE_COMMAND =
+  '~/.octodeck/daemon/bin/octodeck-daemon update -config ~/.octodeck/daemon/config.json';
+const DAEMON_UNINSTALL_COMMAND =
+  '~/.octodeck/daemon/bin/octodeck-daemon uninstall';
+
+function normalizeDaemonVersion(version: string | null | undefined): string {
+  return (version ?? '')
+    .trim()
+    .replace(/^v/, '')
+    .replace(/^octodeck-daemon\//, '');
+}
+
+function isDaemonUpdateAvailable(current: string | null | undefined): boolean {
+  const currentNorm = normalizeDaemonVersion(current);
+  const latestNorm = normalizeDaemonVersion(LATEST_DAEMON_VERSION);
+  return !!currentNorm && !!latestNorm && currentNorm !== latestNorm;
+}
 
 const BCRYPT_ROUNDS = 10;
 const TOKEN_BYTES = 32; // 64 hex chars
@@ -66,32 +90,45 @@ function newPlainToken(): string {
 agentLinkRoutes.get('/', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const links = listAgentLinksByUser(user.id);
-  const result = links.map((l) => ({
-    ...(() => {
-      const online = getOnlineMeta(l.id);
-      return { resources: online?.resources ?? l.resources ?? null };
-    })(),
-    id: l.id,
-    displayName: l.displayName,
-    capabilities: l.capabilities,
-    agentClients: l.agentClients ?? [],
-    os: l.os ?? null,
-    arch: l.arch ?? null,
-    hostname: l.hostname ?? null,
-    clientVersion: l.clientVersion ?? null,
-    lastConnectedAt: l.lastConnectedAt ?? null,
-    lastSeenAt: l.lastSeenAt ?? null,
-    createdAt: l.createdAt,
-    online: isOnline(l.id),
-    builtin: false,
-  }));
+  const result = links.map((l) => {
+    const online = getOnlineMeta(l.id);
+    const linkOnline = isOnline(l.id);
+    return {
+      resources: online?.resources ?? l.resources ?? null,
+      id: l.id,
+      displayName: l.displayName,
+      capabilities: l.capabilities,
+      agentClients: l.agentClients ?? [],
+      os: l.os ?? null,
+      arch: l.arch ?? null,
+      hostname: l.hostname ?? null,
+      clientVersion: l.clientVersion ?? null,
+      latestVersion: LATEST_DAEMON_VERSION,
+      updateAvailable: isDaemonUpdateAvailable(l.clientVersion),
+      updateCommand: DAEMON_UPDATE_COMMAND,
+      uninstallCommand: DAEMON_UNINSTALL_COMMAND,
+      lastConnectedAt: l.lastConnectedAt ?? null,
+      lastSeenAt: l.lastSeenAt ?? null,
+      status: online?.status ?? (linkOnline ? 'idle' : 'offline'),
+      runningRuns: online?.runningRuns ?? [],
+      maxConcurrentRuns: online?.maxConcurrentRuns ?? null,
+      availableSlots: online?.availableSlots ?? null,
+      runtimes: online?.runtimes ?? [],
+      createdAt: l.createdAt,
+      online: linkOnline,
+      builtin: false,
+    };
+  });
   return c.json({ links: result });
 });
 
 agentLinkRoutes.post('/', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
-  const body = (await c.req.json().catch(() => ({}))) as { displayName?: unknown };
-  const displayName = typeof body.displayName === 'string' ? body.displayName.trim() : '';
+  const body = (await c.req.json().catch(() => ({}))) as {
+    displayName?: unknown;
+  };
+  const displayName =
+    typeof body.displayName === 'string' ? body.displayName.trim() : '';
   if (!displayName || displayName.length > 64) {
     return c.json({ error: 'displayName 必填（≤64 字符）' }, 400);
   }
@@ -141,7 +178,9 @@ agentLinkRoutes.delete('/:id', authMiddleware, (c) => {
     .filter((backend) => backend.deviceLinkId === id)
     .map((backend) => ({ id: backend.id, displayName: backend.displayName }));
   const workspaces = Object.entries(getAllRegisteredGroups())
-    .filter(([, group]) => group.deviceLinkId === id || group.executionNode === id)
+    .filter(
+      ([, group]) => group.deviceLinkId === id || group.executionNode === id,
+    )
     .map(([jid, group]) => ({ jid, name: group.name, folder: group.folder }));
   const repos = listManagedReposByUser(user.id)
     .filter((repo) => repo.deviceLinkId === id)
@@ -150,10 +189,16 @@ agentLinkRoutes.delete('/:id', authMiddleware, (c) => {
     .filter((task) => task.execution_node === id)
     .map((task) => ({ id: task.id, prompt: task.prompt, status: task.status }));
 
-  if (agents.length > 0 || workspaces.length > 0 || repos.length > 0 || tasks.length > 0) {
+  if (
+    agents.length > 0 ||
+    workspaces.length > 0 ||
+    repos.length > 0 ||
+    tasks.length > 0
+  ) {
     return c.json(
       {
-        error: '该设备存在关联的 Agent/工作区/Repo/任务，请先删除或切换这些关联后再删除设备',
+        error:
+          '该设备存在关联的 Agent/工作区/Repo/任务，请先删除或切换这些关联后再删除设备',
         agents,
         workspaces,
         repos,
@@ -195,75 +240,252 @@ agentLinkRoutes.post('/agent-team-tool', async (c) => {
   return handleAgentTeamLinkToolRequest(c, matchedUserId, body);
 });
 
-agentLinkRoutes.get('/:id/providers/:providerId/models', authMiddleware, async (c) => {
+agentLinkRoutes.get(
+  '/:id/providers/:providerId/models',
+  authMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    const id = c.req.param('id');
+    const providerId = c.req.param('providerId');
+    const link = getAgentLinkById(id);
+    if (!link || link.userId !== user.id || link.revokedAt) {
+      return c.json({ error: '设备不存在或已移除' }, 404);
+    }
+    if (!(link.agentClients ?? []).some((client) => client.id === providerId)) {
+      return c.json({ error: `设备未上报 provider: ${providerId}` }, 404);
+    }
+    const session = getSession(id);
+    if (!session || session.state !== 'open') {
+      return c.json({ error: '设备离线' }, 409);
+    }
+    try {
+      const result = await requestProviderModels(session, {
+        linkId: id,
+        providerId,
+        timeoutMs: 15_000,
+      });
+      if (!result.ok) {
+        return c.json(
+          { error: result.error || '模型查询失败', models: [] },
+          502,
+        );
+      }
+      return c.json({ models: result.models, durationMs: result.durationMs });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '模型查询失败';
+      logger.warn(
+        { err, linkId: id, providerId },
+        'agent-link model discovery failed',
+      );
+      return c.json({ error: msg }, 504);
+    }
+  },
+);
+
+agentLinkRoutes.post('/:id/agents/discover', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   const id = c.req.param('id');
-  const providerId = c.req.param('providerId');
   const link = getAgentLinkById(id);
   if (!link || link.userId !== user.id || link.revokedAt) {
     return c.json({ error: '设备不存在或已移除' }, 404);
-  }
-  if (!(link.agentClients ?? []).some((client) => client.id === providerId)) {
-    return c.json({ error: `设备未上报 provider: ${providerId}` }, 404);
   }
   const session = getSession(id);
   if (!session || session.state !== 'open') {
     return c.json({ error: '设备离线' }, 409);
   }
   try {
-    const result = await requestProviderModels(session, {
+    const result = await requestAgentDiscover(session, {
       linkId: id,
-      providerId,
       timeoutMs: 15_000,
     });
     if (!result.ok) {
-      return c.json({ error: result.error || '模型查询失败', models: [] }, 502);
+      return c.json(
+        { error: result.error || 'Agent discover 失败', agents: [] },
+        502,
+      );
     }
-    return c.json({ models: result.models, durationMs: result.durationMs });
+    return c.json({ agents: result.agents, durationMs: result.durationMs });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : '模型查询失败';
-    logger.warn({ err, linkId: id, providerId }, 'agent-link model discovery failed');
+    const msg = err instanceof Error ? err.message : 'Agent discover 失败';
+    logger.warn({ err, linkId: id }, 'agent runtime discover failed');
     return c.json({ error: msg }, 504);
   }
 });
 
-agentLinkRoutes.get('/:id/providers/:providerId/skills', authMiddleware, async (c) => {
+agentLinkRoutes.get('/:id/agents/sessions', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   const id = c.req.param('id');
-  const providerId = c.req.param('providerId');
   const link = getAgentLinkById(id);
   if (!link || link.userId !== user.id || link.revokedAt) {
     return c.json({ error: '设备不存在或已移除' }, 404);
-  }
-  if (!(link.agentClients ?? []).some((client) => client.id === providerId)) {
-    return c.json({ error: `设备未上报 provider: ${providerId}` }, 404);
   }
   const session = getSession(id);
   if (!session || session.state !== 'open') {
     return c.json({ error: '设备离线' }, 409);
   }
   try {
-    const cwd = c.req.query('cwd')?.trim() || undefined;
-    const result = await requestProviderSkills(session, {
+    const agentId = c.req.query('agentId')?.trim() || undefined;
+    const workspace = c.req.query('workspace')?.trim() || undefined;
+    const result = await requestAgentSessions(session, {
       linkId: id,
-      providerId,
-      cwd,
+      agentId,
+      workspace,
       timeoutMs: 15_000,
     });
     if (!result.ok) {
-      return c.json({ error: result.error || 'Skills 查询失败', workspaceSkills: [], cliSkills: [] }, 502);
+      return c.json(
+        { error: result.error || 'Agent sessions 查询失败', sessions: [] },
+        502,
+      );
     }
-    return c.json({
-      workspaceSkills: result.workspaceSkills,
-      cliSkills: result.cliSkills,
-      durationMs: result.durationMs,
-    });
+    return c.json({ sessions: result.sessions, durationMs: result.durationMs });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Skills 查询失败';
-    logger.warn({ err, linkId: id, providerId }, 'agent-link skills discovery failed');
+    const msg = err instanceof Error ? err.message : 'Agent sessions 查询失败';
+    logger.warn({ err, linkId: id }, 'agent runtime sessions failed');
     return c.json({ error: msg }, 504);
   }
 });
+
+agentLinkRoutes.delete(
+  '/:id/agents/:agentId/sessions/:sessionId',
+  authMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    const id = c.req.param('id');
+    const agentId = c.req.param('agentId');
+    const sessionId = c.req.param('sessionId');
+    const workspace = c.req.query('workspace')?.trim() || '';
+    const link = getAgentLinkById(id);
+    if (!link || link.userId !== user.id || link.revokedAt) {
+      return c.json({ error: '设备不存在或已移除' }, 404);
+    }
+    if (!workspace) {
+      return c.json({ error: 'workspace query 必填' }, 400);
+    }
+    const session = getSession(id);
+    if (!session || session.state !== 'open') {
+      return c.json({ error: '设备离线' }, 409);
+    }
+    try {
+      const result = await requestAgentSessionDelete(session, {
+        linkId: id,
+        agentId,
+        workspace,
+        sessionId,
+        timeoutMs: 15_000,
+      });
+      if (!result.ok) {
+        return c.json(
+          { error: result.error || 'Agent session 删除失败', deleted: false },
+          502,
+        );
+      }
+      return c.json({ deleted: result.deleted, durationMs: result.durationMs });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Agent session 删除失败';
+      logger.warn(
+        { err, linkId: id, agentId, sessionId },
+        'agent runtime delete session failed',
+      );
+      return c.json({ error: msg }, 504);
+    }
+  },
+);
+
+agentLinkRoutes.post(
+  '/:id/agents/runs/:runId/permissions/:requestId/decision',
+  authMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    const id = c.req.param('id');
+    const runId = c.req.param('runId');
+    const requestId = c.req.param('requestId');
+    const link = getAgentLinkById(id);
+    if (!link || link.userId !== user.id || link.revokedAt) {
+      return c.json({ error: '设备不存在或已移除' }, 404);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as {
+      decision?: unknown;
+      message?: unknown;
+    };
+    const decision =
+      body.decision === 'reject'
+        ? 'reject'
+        : body.decision === 'approve'
+          ? 'approve'
+          : null;
+    if (!decision) {
+      return c.json({ error: 'decision 必须是 approve 或 reject' }, 400);
+    }
+    const session = getSession(id);
+    if (!session || session.state !== 'open') {
+      return c.json({ error: '设备离线' }, 409);
+    }
+    const ok = session.send({
+      type: 'agent.permission.decision',
+      runId,
+      requestId,
+      decision,
+      ...(typeof body.message === 'string'
+        ? { message: body.message.slice(0, 1024) }
+        : {}),
+    });
+    if (!ok) return c.json({ error: '发送 decision 失败' }, 502);
+    return c.json({ ok: true });
+  },
+);
+
+agentLinkRoutes.get(
+  '/:id/providers/:providerId/skills',
+  authMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    const id = c.req.param('id');
+    const providerId = c.req.param('providerId');
+    const link = getAgentLinkById(id);
+    if (!link || link.userId !== user.id || link.revokedAt) {
+      return c.json({ error: '设备不存在或已移除' }, 404);
+    }
+    if (!(link.agentClients ?? []).some((client) => client.id === providerId)) {
+      return c.json({ error: `设备未上报 provider: ${providerId}` }, 404);
+    }
+    const session = getSession(id);
+    if (!session || session.state !== 'open') {
+      return c.json({ error: '设备离线' }, 409);
+    }
+    try {
+      const cwd = c.req.query('cwd')?.trim() || undefined;
+      const result = await requestProviderSkills(session, {
+        linkId: id,
+        providerId,
+        cwd,
+        timeoutMs: 15_000,
+      });
+      if (!result.ok) {
+        return c.json(
+          {
+            error: result.error || 'Skills 查询失败',
+            workspaceSkills: [],
+            cliSkills: [],
+          },
+          502,
+        );
+      }
+      return c.json({
+        workspaceSkills: result.workspaceSkills,
+        cliSkills: result.cliSkills,
+        durationMs: result.durationMs,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Skills 查询失败';
+      logger.warn(
+        { err, linkId: id, providerId },
+        'agent-link skills discovery failed',
+      );
+      return c.json({ error: msg }, 504);
+    }
+  },
+);
 
 export default agentLinkRoutes;
 
@@ -287,7 +509,12 @@ export async function handleAgentLinkUpgrade(
 ): Promise<void> {
   const tokenHeader = request.headers['x-link-token'];
   const token = Array.isArray(tokenHeader) ? tokenHeader[0] : tokenHeader;
-  if (!token || typeof token !== 'string' || token.length < 16 || token.length > 256) {
+  if (
+    !token ||
+    typeof token !== 'string' ||
+    token.length < 16 ||
+    token.length > 256
+  ) {
     rejectUpgrade(socket, 401, 'missing_token');
     return;
   }
@@ -365,7 +592,10 @@ wss.on('connection', (ws, request: IncomingMessage) => {
   }
 
   const remoteIp = extractRemoteIp(request);
-  logger.info({ linkId, userId, remoteIp }, 'agent-link ws connected, awaiting hello');
+  logger.info(
+    { linkId, userId, remoteIp },
+    'agent-link ws connected, awaiting hello',
+  );
 
   const session = new AgentLinkSession({
     ws,

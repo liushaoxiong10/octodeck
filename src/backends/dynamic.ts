@@ -49,10 +49,7 @@ function makeResolveBinary(binary: string): () => string | null {
   return () => {
     if (binary.startsWith('/')) {
       try {
-        if (
-          fs.existsSync(binary) &&
-          fs.statSync(binary).isFile()
-        ) {
+        if (fs.existsSync(binary) && fs.statSync(binary).isFile()) {
           return binary;
         }
       } catch {
@@ -89,12 +86,24 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
       const cfg: HostCliDriverConfig = {
         backendId: def.id,
         resolveBinary,
+        resolveRemoteBinary: () => def.binary,
         buildArgv: (ctx) => {
-          if (def.supportsNativeSessions === true && ctx.sessionId && resumeArgvTemplate?.length) {
+          if (
+            def.supportsNativeSessions === true &&
+            ctx.sessionId &&
+            resumeArgvTemplate?.length
+          ) {
             return renderArgv(resumeArgvTemplate, { ...ctx, model: def.model });
           }
-          const rendered = renderArgv(argvTemplate, { ...ctx, model: def.model });
-          if (def.supportsNativeSessions === true && ctx.sessionId && sessionArgvTemplate?.length) {
+          const rendered = renderArgv(argvTemplate, {
+            ...ctx,
+            model: def.model,
+          });
+          if (
+            def.supportsNativeSessions === true &&
+            ctx.sessionId &&
+            sessionArgvTemplate?.length
+          ) {
             rendered.push(
               ...renderArgv(sessionArgvTemplate, { ...ctx, model: def.model }),
             );
@@ -112,9 +121,11 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
           ? args.group.executionNode
           : undefined;
       const deviceLinkId = groupDeviceLinkId || configuredDeviceLinkId;
-      const runtime = def.runtime ?? (deviceLinkId ? 'local-device' : 'server-side');
+      const runtime =
+        def.runtime ?? (deviceLinkId ? 'local-device' : 'server-side');
       const runArgs =
-        (def.workdirMode === 'custom' && def.workdir) || runtime === 'server-side'
+        (def.workdirMode === 'custom' && def.workdir) ||
+        runtime === 'server-side'
           ? {
               ...args,
               group: {
@@ -128,7 +139,8 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
               },
             }
           : args;
-      if (deviceLinkId && runtime === 'local-device') return runViaAgentLink(runArgs, cfg, deviceLinkId);
+      if (deviceLinkId && runtime === 'local-device')
+        return runViaAgentLink(runArgs, cfg, deviceLinkId);
       return runHostCli(runArgs, cfg);
     },
   };

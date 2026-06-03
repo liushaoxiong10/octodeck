@@ -95,10 +95,18 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
       const nextFolder = nextJid ? useChatStore.getState().groups[nextJid]?.folder : null;
       navigate(nextFolder ? `/chat/${nextFolder}` : '/chat');
     } catch (err: unknown) {
-      const typed = err as { boundAgents?: Array<{ agentName: string; imGroups: Array<{ name: string }> }> };
-      if (typed.boundAgents) {
-        const details = typed.boundAgents.map((a) => `「${a.agentName}」→ ${a.imGroups.map((g) => g.name).join('、')}`).join('\n');
-        alert(`该工作区下有子对话绑定了 IM 渠道，请先解绑后再删除：\n${details}`);
+      const typed = err as {
+        boundAgents?: Array<{ agentName: string; imGroups: Array<{ name: string }> }>;
+        boundMainImGroups?: Array<{ name: string }>;
+      };
+      if (typed.boundAgents?.length || typed.boundMainImGroups?.length) {
+        const details = [
+          ...(typed.boundAgents ?? []).map((a) => `「${a.agentName}」→ ${a.imGroups.map((g) => g.name).join('、')}`),
+          ...(typed.boundMainImGroups?.length
+            ? [`主对话 → ${typed.boundMainImGroups.map((g) => g.name).join('、')}`]
+            : []),
+        ].join('\n');
+        alert(`该工作区绑定了 IM 渠道，请先解绑后再删除：\n${details}`);
       } else {
         alert(`删除工作区失败：${err instanceof Error ? err.message : '未知错误'}`);
       }

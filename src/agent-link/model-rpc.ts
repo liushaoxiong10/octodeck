@@ -63,7 +63,10 @@ export function requestProviderModels(
 export function deliverModelResult(frame: ModelsResultFrame): void {
   const req = pending.get(frame.requestId);
   if (!req) {
-    logger.debug({ requestId: frame.requestId }, 'model-rpc: drop result for unknown request');
+    logger.debug(
+      { requestId: frame.requestId },
+      'model-rpc: drop result for unknown request',
+    );
     return;
   }
   pending.delete(frame.requestId);

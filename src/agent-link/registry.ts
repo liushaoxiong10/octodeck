@@ -21,7 +21,11 @@ import {
 import { syncClientAgentMemory } from '../memory-store.js';
 import {
   deliverEvent,
+  deliverAgentRunEvent,
+  deliverAgentRunResult,
+  deliverAgentRunStatus,
   deliverResult,
+  deliverStatus,
   failRunsForLink,
 } from './run-rpc.js';
 import {
@@ -29,14 +33,17 @@ import {
   deliverToolResult,
   failToolRequestsForLink,
 } from './tool-rpc.js';
-import {
-  deliverModelResult,
-  failModelRequestsForLink,
-} from './model-rpc.js';
+import { deliverModelResult, failModelRequestsForLink } from './model-rpc.js';
 import {
   deliverSkillsResult,
   failSkillsRequestsForLink,
 } from './skills-rpc.js';
+import {
+  deliverAgentDiscoverResult,
+  deliverAgentSessionDeleteResult,
+  deliverAgentSessionsResult,
+  failAgentRuntimeRequestsForLink,
+} from './agent-runtime-rpc.js';
 import { AgentLinkSession } from './session.js';
 
 export interface OnlineLinkInfo {
@@ -50,6 +57,12 @@ export interface OnlineLinkInfo {
   hostname?: string;
   clientVersion?: string;
   resources?: HelloFrame['resources'];
+  agentRuntimeCapabilities?: HelloFrame['agentRuntimeCapabilities'];
+  status?: 'idle' | 'busy' | 'draining' | 'offline';
+  runningRuns?: NonNullable<import('./protocol.js').PingFrame['runningRuns']>;
+  maxConcurrentRuns?: number;
+  availableSlots?: number;
+  runtimes?: NonNullable<import('./protocol.js').PingFrame['runtimes']>;
 }
 
 const sessions = new Map<string, AgentLinkSession>();
@@ -92,6 +105,19 @@ export function handleHello(
     hostname: frame.hostname,
     clientVersion: frame.version,
     resources: frame.resources,
+    agentRuntimeCapabilities: frame.agentRuntimeCapabilities,
+    status: 'idle',
+    runningRuns: [],
+    maxConcurrentRuns: undefined,
+    availableSlots: undefined,
+    runtimes: buildRuntimeStatuses(
+      session.linkId,
+      frame.agentClients ?? [],
+      frame.agentRuntimeCapabilities ?? [],
+      [],
+      undefined,
+      undefined,
+    ),
   };
   sessionMeta.set(session.linkId, meta);
 
@@ -135,6 +161,12 @@ export function handleFrame(
       const meta = sessionMeta.get(session.linkId);
       if (meta) {
         meta.resources = frame.resources;
+        meta.status = frame.status ?? meta.status;
+        meta.runningRuns = frame.runningRuns ?? meta.runningRuns ?? [];
+        meta.maxConcurrentRuns =
+          frame.maxConcurrentRuns ?? meta.maxConcurrentRuns;
+        meta.availableSlots = frame.availableSlots ?? meta.availableSlots;
+        meta.runtimes = frame.runtimes ?? meta.runtimes;
         sessionMeta.set(session.linkId, meta);
       }
       if (frame.resources) {
@@ -161,11 +193,23 @@ export function handleFrame(
       );
       if (frame.fatal) session.close(`peer_fatal:${frame.code}`);
       return;
+    case 'run.status':
+      deliverStatus(frame);
+      return;
     case 'run.event':
       deliverEvent(frame);
       return;
     case 'run.result':
       deliverResult(frame);
+      return;
+    case 'agent.run.status':
+      deliverAgentRunStatus(frame);
+      return;
+    case 'agent.run.event':
+      deliverAgentRunEvent(frame);
+      return;
+    case 'agent.run.result':
+      deliverAgentRunResult(frame);
       return;
     case 'tool.event':
       deliverToolEvent(frame);
@@ -202,9 +246,92 @@ export function handleFrame(
     case 'skills.result':
       deliverSkillsResult(frame);
       return;
+    case 'agent.discover.result':
+      if (frame.ok) {
+        const meta = sessionMeta.get(session.linkId);
+        if (meta) {
+          meta.runtimes = buildRuntimeStatuses(
+            session.linkId,
+            frame.agents,
+            frame.runtimeCapabilities ?? meta.agentRuntimeCapabilities ?? [],
+            meta.runningRuns ?? [],
+            meta.maxConcurrentRuns,
+            meta.availableSlots,
+          );
+          meta.agentRuntimeCapabilities =
+            frame.runtimeCapabilities ?? meta.agentRuntimeCapabilities;
+          sessionMeta.set(session.linkId, meta);
+          try {
+            recordAgentLinkConnect(session.linkId, {
+              capabilities: meta.capabilities,
+              agentClients: frame.agents,
+              resources: meta.resources,
+              os: meta.os,
+              arch: meta.arch,
+              hostname: meta.hostname,
+              clientVersion: meta.clientVersion,
+            });
+          } catch (err) {
+            logger.warn(
+              { linkId: session.linkId, err: (err as Error).message },
+              'agent-link discover db update failed',
+            );
+          }
+        }
+      }
+      deliverAgentDiscoverResult(frame);
+      return;
+    case 'agent.sessions.result':
+      deliverAgentSessionsResult(frame);
+      return;
+    case 'agent.session.delete.result':
+      deliverAgentSessionDeleteResult(frame);
+      return;
+    case 'agent.runtime.status': {
+      const meta = sessionMeta.get(session.linkId);
+      if (meta) {
+        meta.status = frame.status === 'offline' ? 'draining' : meta.status;
+        sessionMeta.set(session.linkId, meta);
+      }
+      logger.info(
+        {
+          linkId: session.linkId,
+          runtimeId: frame.runtimeId,
+          status: frame.status,
+          crashCount: frame.crashCount,
+          message: frame.message,
+        },
+        'agent runtime status',
+      );
+      return;
+    }
     default:
       return; // hello already handled, ping handled in session
   }
+}
+
+function buildRuntimeStatuses(
+  linkId: string,
+  agentClients: NonNullable<HelloFrame['agentClients']>,
+  runtimeCapabilities: NonNullable<HelloFrame['agentRuntimeCapabilities']>,
+  runningRuns: NonNullable<import('./protocol.js').PingFrame['runningRuns']>,
+  maxConcurrentRuns?: number,
+  availableSlots?: number,
+): NonNullable<import('./protocol.js').PingFrame['runtimes']> {
+  return agentClients.map((client) => ({
+    runtimeId: `${linkId}:${client.id}`,
+    deviceLinkId: linkId,
+    agentClientId: client.id,
+    displayName: client.displayName,
+    status: runningRuns.length > 0 ? 'busy' : 'idle',
+    runningRuns,
+    maxConcurrentRuns:
+      runtimeCapabilities.find((cap) => cap.agentId === client.id)
+        ?.maxConcurrentRuns ?? maxConcurrentRuns,
+    availableSlots:
+      runtimeCapabilities.find((cap) => cap.agentId === client.id)
+        ?.availableSlots ?? availableSlots,
+  }));
 }
 
 const lastSeenWrite = new Map<string, number>();
@@ -232,6 +359,7 @@ export function unregisterSession(session: AgentLinkSession): void {
     failToolRequestsForLink(session.linkId, 'link_offline');
     failModelRequestsForLink(session.linkId, 'link_offline');
     failSkillsRequestsForLink(session.linkId, 'link_offline');
+    failAgentRuntimeRequestsForLink(session.linkId, 'link_offline');
   }
 }
 
@@ -246,6 +374,26 @@ export function getSession(linkId: string): AgentLinkSession | undefined {
 
 export function getOnlineMeta(linkId: string): OnlineLinkInfo | undefined {
   return sessionMeta.get(linkId);
+}
+
+export function listOnlineRuntimesByProvider(
+  agentClientId: string,
+  userId?: string,
+): NonNullable<import('./protocol.js').PingFrame['runtimes']> {
+  const out: NonNullable<import('./protocol.js').PingFrame['runtimes']> = [];
+  for (const meta of sessionMeta.values()) {
+    if (userId && meta.userId !== userId) continue;
+    const runtimes = meta.runtimes ?? [];
+    for (const runtime of runtimes) {
+      if (
+        runtime.agentClientId === agentClientId &&
+        runtime.status !== 'offline'
+      ) {
+        out.push(runtime);
+      }
+    }
+  }
+  return out.sort((a, b) => (b.availableSlots ?? 0) - (a.availableSlots ?? 0));
 }
 
 export function listOnlineByUser(userId: string): OnlineLinkInfo[] {

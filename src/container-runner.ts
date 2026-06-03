@@ -13,7 +13,14 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { AGENT_RUNNER_SECRET, CONTAINER_IMAGE, DATA_DIR, GROUPS_DIR, TIMEZONE, WEB_PORT } from './config.js';
+import {
+  AGENT_RUNNER_SECRET,
+  CONTAINER_IMAGE,
+  DATA_DIR,
+  GROUPS_DIR,
+  TIMEZONE,
+  WEB_PORT,
+} from './config.js';
 import { logger } from './logger.js';
 import { resolveHostNodeBinary } from './node-resolver.js';
 import {
@@ -107,17 +114,30 @@ function ensureHostClaudeJson(): string {
 function getContainerClaudeJsonPath(): string {
   const containerJsonDir = path.join(DATA_DIR, 'config');
   fs.mkdirSync(containerJsonDir, { recursive: true });
-  const containerJsonPath = path.join(containerJsonDir, 'container-claude-json.json');
+  const containerJsonPath = path.join(
+    containerJsonDir,
+    'container-claude-json.json',
+  );
 
   try {
-    const hostJson = JSON.parse(fs.readFileSync(getHostClaudeJsonPath(), 'utf-8'));
+    const hostJson = JSON.parse(
+      fs.readFileSync(getHostClaudeJsonPath(), 'utf-8'),
+    );
     const stripped = { ...hostJson };
     delete stripped.cachedGrowthBookFeatures;
     delete stripped.oauthAccount;
     stripped.autoUpdates = false;
-    fs.writeFileSync(containerJsonPath, JSON.stringify(stripped, null, 2) + '\n', { mode: 0o644 });
+    fs.writeFileSync(
+      containerJsonPath,
+      JSON.stringify(stripped, null, 2) + '\n',
+      { mode: 0o644 },
+    );
   } catch {
-    fs.writeFileSync(containerJsonPath, '{"hasCompletedOnboarding":true,"autoUpdates":false}\n', { mode: 0o644 });
+    fs.writeFileSync(
+      containerJsonPath,
+      '{"hasCompletedOnboarding":true,"autoUpdates":false}\n',
+      { mode: 0o644 },
+    );
   }
 
   return containerJsonPath;
@@ -140,7 +160,10 @@ function ensureSymlinkTo(localPath: string, targetPath: string): void {
   try {
     fs.symlinkSync(targetPath, localPath);
   } catch (err) {
-    logger.warn({ err, localPath, targetPath }, 'Failed to create symlink for .claude.json, deviceId may differ');
+    logger.warn(
+      { err, localPath, targetPath },
+      'Failed to create symlink for .claude.json, deviceId may differ',
+    );
   }
 }
 
@@ -230,6 +253,8 @@ export interface ContainerInput {
   plugins?: Array<{ type: 'local'; path: string }>;
   /** AgentLink ID used by agent-runner remote MCP tools. */
   remoteExecutionLinkId?: string;
+  /** Cwd sent to remote device tools; supports daemon workspace URI. */
+  remoteToolCwd?: string;
   /** Controls whether agent-runner may expose native local tools. */
   localToolPolicy?: 'none' | 'server' | 'device-remote' | 'container';
   /** Base URL for agent-runner -> server tool bridge calls. */
@@ -309,7 +334,10 @@ function withModelProxyBaseUrl(
  */
 const providerOverrides = new Map<string, string>();
 
-export function setProviderOverride(groupFolder: string, providerId: string): void {
+export function setProviderOverride(
+  groupFolder: string,
+  providerId: string,
+): void {
   providerOverrides.set(groupFolder, providerId);
 }
 
@@ -529,7 +557,9 @@ function trySelectPoolProvider(
  * even when the user has plugins enabled. Failure is logged, never thrown —
  * the agent simply starts with whatever subset is already materialized.
  */
-export function prepareHostPlugins(ownerId: string | null | undefined): SdkPluginConfig[] {
+export function prepareHostPlugins(
+  ownerId: string | null | undefined,
+): SdkPluginConfig[] {
   if (!ownerId) return [];
   try {
     materializeUserRuntime(ownerId);
@@ -658,7 +688,9 @@ export function buildVolumeMounts(
     if (!st.isSymbolicLink() && st.size > STRIPPED_CLAUDE_JSON_MAX_SIZE) {
       fs.unlinkSync(sessionClaudeJson);
     }
-  } catch { /* not found, ok */ }
+  } catch {
+    /* not found, ok */
+  }
 
   // 挂载精简版 .claude.json（剥离 cachedGrowthBookFeatures），保留 deviceId 一致性
   const containerJson = getContainerClaudeJsonPath();
@@ -837,7 +869,9 @@ export function buildVolumeMounts(
     try {
       const staleCreds = path.join(groupSessionsDir, '.credentials.json');
       if (fs.existsSync(staleCreds)) fs.unlinkSync(staleCreds);
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   // Mount agent-runner source from host — recompiled on container startup.
@@ -858,21 +892,30 @@ export function buildVolumeMounts(
   // so the SDK's directory traversal (cwd → root) discovers them at /workspace/ level.
   // Only for admin-created workspaces; ordinary users must not inherit host-global config.
   if (claudeContextPlan.isAdminOwned) {
-    if (claudeContextPlan.claudeMdSource && fs.existsSync(claudeContextPlan.claudeMdSource)) {
+    if (
+      claudeContextPlan.claudeMdSource &&
+      fs.existsSync(claudeContextPlan.claudeMdSource)
+    ) {
       mounts.push({
         hostPath: claudeContextPlan.claudeMdSource,
         containerPath: '/workspace/CLAUDE.md',
         readonly: true,
       });
     }
-    if (claudeContextPlan.rulesSourceDir && fs.existsSync(claudeContextPlan.rulesSourceDir)) {
+    if (
+      claudeContextPlan.rulesSourceDir &&
+      fs.existsSync(claudeContextPlan.rulesSourceDir)
+    ) {
       mounts.push({
         hostPath: claudeContextPlan.rulesSourceDir,
         containerPath: '/workspace/.claude/rules',
         readonly: true,
       });
     }
-    if (claudeContextPlan.externalSkillsDir && fs.existsSync(claudeContextPlan.externalSkillsDir)) {
+    if (
+      claudeContextPlan.externalSkillsDir &&
+      fs.existsSync(claudeContextPlan.externalSkillsDir)
+    ) {
       mounts.push({
         hostPath: claudeContextPlan.externalSkillsDir,
         containerPath: '/workspace/external-skills',
@@ -933,7 +976,11 @@ function buildContainerArgs(
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
-  onProcess: (proc: ChildProcess, containerName: string, selectedProviderId: string | null) => void,
+  onProcess: (
+    proc: ChildProcess,
+    containerName: string,
+    selectedProviderId: string | null,
+  ) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
   ownerHomeFolder?: string,
 ): Promise<ContainerOutput> {
@@ -1049,7 +1096,14 @@ export async function runContainerAgent(
           projectRoot: process.cwd(),
           dataDir: DATA_DIR,
           groupSessionsDir: input.agentId
-            ? path.join(DATA_DIR, 'sessions', group.folder, 'agents', input.agentId, '.claude')
+            ? path.join(
+                DATA_DIR,
+                'sessions',
+                group.folder,
+                'agents',
+                input.agentId,
+                '.claude',
+              )
             : path.join(DATA_DIR, 'sessions', group.folder, '.claude'),
           mountUserSkills: shouldMountUserSkills,
         }).audit,
@@ -1317,7 +1371,11 @@ export function killProcessTree(
 export async function runHostAgent(
   group: RegisteredGroup,
   input: ContainerInput,
-  onProcess: (proc: ChildProcess, identifier: string, selectedProviderId: string | null) => void,
+  onProcess: (
+    proc: ChildProcess,
+    identifier: string,
+    selectedProviderId: string | null,
+  ) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
   ownerHomeFolder?: string,
 ): Promise<ContainerOutput> {
@@ -1461,7 +1519,9 @@ export async function runHostAgent(
   // 3. 写入 settings.json（合并模式，不覆盖已有用户配置）
   // Load user's global MCP servers (same logic as Docker mode).
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  const hostMcpServers = group.created_by ? loadUserMcpServers(group.created_by) : {};
+  const hostMcpServers = group.created_by
+    ? loadUserMcpServers(group.created_by)
+    : {};
   ensureSettingsJson(settingsFile, hostMcpServers);
 
   // 4. Skills / Rules / CLAUDE.md 自动链接到 session 目录
@@ -1478,7 +1538,8 @@ export async function runHostAgent(
     hostClaudeContextPlan,
     groupSessionsDir,
   );
-  hostClaudeContextPlan.audit.claudeMd.status = hostClaudeContextSync.claudeMdStatus;
+  hostClaudeContextPlan.audit.claudeMd.status =
+    hostClaudeContextSync.claudeMdStatus;
   hostClaudeContextPlan.audit.warnings = hostClaudeContextSync.warnings;
 
   // 5. 构建环境变量
@@ -1543,13 +1604,25 @@ export async function runHostAgent(
       // .claude.json without oauthAccount so the SDK falls back to API key mode.
       try {
         const sessionClaudeJson = path.join(groupSessionsDir, '.claude.json');
-        try { fs.unlinkSync(sessionClaudeJson); } catch { /* ignore */ }
+        try {
+          fs.unlinkSync(sessionClaudeJson);
+        } catch {
+          /* ignore */
+        }
         let claudeJson: Record<string, unknown> = {};
         try {
-          claudeJson = JSON.parse(fs.readFileSync(getHostClaudeJsonPath(), 'utf-8'));
-        } catch { /* ignore */ }
+          claudeJson = JSON.parse(
+            fs.readFileSync(getHostClaudeJsonPath(), 'utf-8'),
+          );
+        } catch {
+          /* ignore */
+        }
         delete claudeJson.oauthAccount;
-        fs.writeFileSync(sessionClaudeJson, JSON.stringify(claudeJson, null, 2) + '\n', { mode: 0o600 });
+        fs.writeFileSync(
+          sessionClaudeJson,
+          JSON.stringify(claudeJson, null, 2) + '\n',
+          { mode: 0o600 },
+        );
       } catch (err) {
         logger.warn(
           { folder: group.folder, err },
@@ -1603,7 +1676,8 @@ export async function runHostAgent(
     hostEnv['OCTODECK_WORKSPACE_GROUP'] = groupDir;
     hostEnv['OCTODECK_WORKSPACE_IPC'] = groupIpcDir;
     hostEnv['OCTODECK_AGENT_RUNNER_SECRET'] = AGENT_RUNNER_SECRET;
-    hostEnv['OCTODECK_SERVER_URL'] = process.env.OCTODECK_SERVER_URL || `http://127.0.0.1:${WEB_PORT}`;
+    hostEnv['OCTODECK_SERVER_URL'] =
+      process.env.OCTODECK_SERVER_URL || `http://127.0.0.1:${WEB_PORT}`;
 
     if (!disableMemoryLayer) {
       // Per-user global memory（OctoDeck 自带 memory 层）
@@ -1674,7 +1748,11 @@ export async function runHostAgent(
       const currentPath = hostEnv['PATH'] || process.env.PATH || '';
       hostEnv['PATH'] = `${resolvedClaudeDir}:${currentPath}`;
       logger.info(
-        { group: group.name, resolvedClaudeDir, resolvedPath: capResult.resolvedPaths['claude'] },
+        {
+          group: group.name,
+          resolvedClaudeDir,
+          resolvedPath: capResult.resolvedPaths['claude'],
+        },
         'Host preflight: claude binary resolved',
       );
     }
@@ -1802,6 +1880,11 @@ export async function runHostAgent(
           input.remoteExecutionLinkId ||
           (group.executionNode && group.executionNode !== 'server-local'
             ? group.executionNode
+            : undefined),
+        remoteToolCwd:
+          input.remoteToolCwd ||
+          (group.runtimeProfile === 'server-agent-device-tools'
+            ? `octodeck-workspace://${group.folder}`
             : undefined),
         localToolPolicy:
           input.localToolPolicy ||

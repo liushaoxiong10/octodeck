@@ -67,7 +67,7 @@ export const api = {
   post: <T>(path: string, body?: unknown, timeoutMs?: number) => apiFetch<T>(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined, ...(timeoutMs ? { timeoutMs } : {}) }),
   put: <T>(path: string, body?: unknown) => apiFetch<T>(path, { method: 'PUT', body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body?: unknown) => apiFetch<T>(path, { method: 'PATCH', body: body ? JSON.stringify(body) : undefined }),
-  delete: <T>(path: string) => apiFetch<T>(path, { method: 'DELETE' }),
+  delete: <T>(path: string, timeoutMs?: number) => apiFetch<T>(path, { method: 'DELETE', ...(timeoutMs ? { timeoutMs } : {}) }),
   uploadFiles: async <T>(path: string, files: FileList, extraFields?: Record<string, string>) => {
     const formData = new FormData();
     for (const file of files) formData.append('files', file);

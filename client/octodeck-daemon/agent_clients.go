@@ -15,6 +15,8 @@ type AgentClientInfo struct {
 	DisplayName     string   `json:"displayName"`
 	Binary          string   `json:"binary"`
 	Version         string   `json:"version,omitempty"`
+	Provider        string   `json:"provider,omitempty"`
+	Transport       string   `json:"transport,omitempty"`
 	PermissionModes []string `json:"permissionModes,omitempty"`
 	Capabilities    []string `json:"capabilities,omitempty"`
 }
@@ -23,30 +25,35 @@ type agentClientCandidate struct {
 	id          string
 	displayName string
 	command     string
+	transport   string
 }
 
 var supportedAgentClients = []agentClientCandidate{
 	{id: "claude-code", displayName: "Claude Code", command: "claude"},
 	{id: "codex", displayName: "Codex CLI", command: "codex"},
 	{id: "traecli", displayName: "TraeCLI", command: "traecli"},
+	{id: "seed", displayName: "Seed CLI", command: "seed", transport: "a2a"},
 }
 
 var agentClientVersionArgs = map[string][]string{
 	"claude-code": {"--version"},
 	"codex":       {"--version"},
 	"traecli":     {"--version"},
+	"seed":        {"--version"},
 }
 
 var agentClientPermissionModes = map[string][]string{
 	"claude-code": {"default", "acceptEdits", "bypassPermissions", "plan"},
 	"codex":       {"default", "read-only", "workspace-write", "full-access"},
 	"traecli":     {"default", "acceptEdits", "bypassPermissions"},
+	"seed":        {"default", "ask", "auto"},
 }
 
 var agentClientCapabilities = map[string][]string{
-	"claude-code": {"print", "stream-json", "mcp", "permissions", "tools", "session"},
+	"claude-code": {"print", "stream-json", "mcp", "permissions", "tools", "session", "skills"},
 	"codex":       {"exec", "plain-text", "sandbox", "approval-policy"},
 	"traecli":     {"print", "plain-text", "permissions", "tools"},
+	"seed":        {"a2a", "jsonrpc", "events", "permissions", "tools", "session"},
 }
 
 func agentClientSearchDirs() []string {
@@ -143,6 +150,13 @@ func isExecutable(path string) bool {
 }
 
 func discoverAgentClients() []AgentClientInfo {
+	return discoverAgentClientsForConfig(nil)
+}
+
+func discoverAgentClientsForConfig(cfg *Config) []AgentClientInfo {
+	if cfg != nil && cfg.RuntimePolicy.DisableAutoDiscover {
+		return registryAgentClients(cfg)
+	}
 	clients := make([]AgentClientInfo, 0, len(supportedAgentClients))
 	dirs := agentClientSearchDirs()
 	for _, c := range supportedAgentClients {
@@ -150,16 +164,79 @@ func discoverAgentClients() []AgentClientInfo {
 		if bin == "" {
 			continue
 		}
+		transport := c.transport
+		if transport == "" {
+			transport = "stdio"
+		}
 		clients = append(clients, AgentClientInfo{
 			ID:              c.id,
 			DisplayName:     c.displayName,
 			Binary:          bin,
 			Version:         detectAgentClientVersion(c.id, bin),
+			Provider:        c.id,
+			Transport:       transport,
 			PermissionModes: agentClientPermissionModes[c.id],
 			Capabilities:    agentClientCapabilities[c.id],
 		})
 	}
-	return clients
+	return mergeAgentClients(clients, registryAgentClients(cfg))
+}
+
+func registryAgentClients(cfg *Config) []AgentClientInfo {
+	if cfg == nil || len(cfg.AgentRegistry) == 0 {
+		return nil
+	}
+	out := make([]AgentClientInfo, 0, len(cfg.AgentRegistry))
+	for _, entry := range cfg.AgentRegistry {
+		transport := entry.Transport
+		if transport == "" {
+			transport = "stdio"
+		}
+		provider := entry.Provider
+		if provider == "" {
+			provider = entry.ID
+		}
+		version := ""
+		if entry.Binary != "" && transport == "stdio" {
+			args := entry.VersionCommand
+			if len(args) == 0 {
+				args = []string{"--version"}
+			}
+			version = detectAgentClientVersionWithArgs(entry.Binary, args)
+		}
+		out = append(out, AgentClientInfo{
+			ID:              entry.ID,
+			DisplayName:     ifEmpty(entry.DisplayName, entry.ID),
+			Binary:          entry.Binary,
+			Version:         version,
+			Provider:        provider,
+			Transport:       transport,
+			PermissionModes: entry.PermissionModes,
+			Capabilities:    append([]string(nil), entry.Capabilities...),
+		})
+	}
+	return out
+}
+
+func mergeAgentClients(auto []AgentClientInfo, registry []AgentClientInfo) []AgentClientInfo {
+	if len(registry) == 0 {
+		return auto
+	}
+	seen := make(map[string]int, len(auto)+len(registry))
+	out := make([]AgentClientInfo, 0, len(auto)+len(registry))
+	for _, c := range auto {
+		seen[c.ID] = len(out)
+		out = append(out, c)
+	}
+	for _, c := range registry {
+		if idx, ok := seen[c.ID]; ok {
+			out[idx] = c
+			continue
+		}
+		seen[c.ID] = len(out)
+		out = append(out, c)
+	}
+	return out
 }
 
 func detectAgentClientVersion(id string, binary string) string {
@@ -167,6 +244,10 @@ func detectAgentClientVersion(id string, binary string) string {
 	if !ok {
 		args = []string{"--version"}
 	}
+	return detectAgentClientVersionWithArgs(binary, args)
+}
+
+func detectAgentClientVersionWithArgs(binary string, args []string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)

@@ -70,10 +70,7 @@ export interface WebDeps {
    * which means a clean restart after a no-earlier-pending reply would
    * replay the reply on recovery (the same DB row is still <= the cursor).
    */
-  hasEarlierPendingMessages: (
-    jid: string,
-    candidate: MessageCursor,
-  ) => boolean;
+  hasEarlierPendingMessages: (jid: string, candidate: MessageCursor) => boolean;
   reloadFeishuConnection?: (config: {
     appId: string;
     appSecret: string;
@@ -269,9 +266,12 @@ export function parseCookie(
 
 // Host execution helpers
 export function isHostExecutionGroup(group: RegisteredGroup): boolean {
-  return group.runtimeProfile === 'device-cli-agent' ||
+  return (
+    group.runtimeProfile === 'device-cli-agent' ||
     group.runtimeProfile === 'server-agent-device-tools' ||
-    ((group.executionMode || 'container') === 'host' && group.runtimeProfile !== 'server-agent');
+    ((group.executionMode || 'container') === 'host' &&
+      group.runtimeProfile !== 'server-agent')
+  );
 }
 
 export function hasHostExecutionPermission(user: AuthUser): boolean {

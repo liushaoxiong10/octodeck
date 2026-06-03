@@ -4,6 +4,12 @@ import path from 'node:path';
 
 import type { Variables } from '../web-context.js';
 
+const DAEMON_VERSION = 'octodeck-daemon/1.0.0';
+const DAEMON_UPDATE_COMMAND =
+  '~/.octodeck/daemon/bin/octodeck-daemon update -config ~/.octodeck/daemon/config.json';
+const DAEMON_UNINSTALL_COMMAND =
+  '~/.octodeck/daemon/bin/octodeck-daemon uninstall';
+
 interface DaemonInstallScriptOptions {
   deviceId: string;
   token: string;
@@ -36,7 +42,7 @@ export function buildDaemonInstallScript(
         '/opt/homebrew/bin/claude',
       ],
       maxConcurrentRuns: 4,
-      version: 'octodeck-daemon/0.1.0',
+      version: DAEMON_VERSION,
     },
     null,
     2,
@@ -53,6 +59,7 @@ INSTALL_DIR="${'${OCTODECK_HOME}'}/daemon"
 WORKSPACE_DIR="${'${OCTODECK_HOME}'}/workspace"
 TASK_DIR="${'${OCTODECK_HOME}'}/task"
 REPOS_DIR="${'${OCTODECK_HOME}'}/repos"
+SESSION_DIR="${'${OCTODECK_HOME}'}/session"
 LEGACY_INSTALL_DIR="${'${HOME}'}/.hcagent"
 LEGACY_OCTODECK_INSTALL_DIR="${'${HOME}'}/.octodeck-daemon"
 CONFIG_FILE="${'${INSTALL_DIR}'}/config.json"
@@ -69,7 +76,7 @@ need() { command -v "$1" >/dev/null 2>&1 || { printf 'missing required command: 
 
 need curl
 
-mkdir -p "${'${INSTALL_DIR}'}/bin" "${'${WORKSPACE_DIR}'}" "${'${TASK_DIR}'}" "${'${REPOS_DIR}'}"
+mkdir -p "${'${INSTALL_DIR}'}/bin" "${'${WORKSPACE_DIR}'}" "${'${TASK_DIR}'}" "${'${REPOS_DIR}'}" "${'${SESSION_DIR}'}"
 
 if [ "${'${OS}'}" = "Darwin" ]; then
   log "stopping existing octodeck-daemon launch agent if present"
@@ -159,6 +166,42 @@ log "device ${'${LINK_ID}'} configured for ${'${SERVER}'}"
 `;
 }
 
+export function buildDaemonUninstallScript(): string {
+  return `#!/usr/bin/env bash
+set -euo pipefail
+
+OCTODECK_HOME="${'${HOME}'}/.octodeck"
+INSTALL_DIR="${'${OCTODECK_HOME}'}/daemon"
+BIN="${'${INSTALL_DIR}'}/bin/octodeck-daemon"
+PLIST="${'${HOME}'}/Library/LaunchAgents/com.octodeck.octodeck-daemon.plist"
+SYSTEMD_DIR="${'${HOME}'}/.config/systemd/user"
+SERVICE="${'${SYSTEMD_DIR}'}/octodeck-daemon.service"
+
+log() { printf '[octodeck-daemon-uninstall] %s\n' "$*"; }
+
+if [ -x "${'${BIN}'}" ]; then
+  log "running daemon built-in uninstall"
+  "${'${BIN}'}" uninstall || true
+else
+  OS="$(uname -s)"
+  if [ "${'${OS}'}" = "Darwin" ]; then
+    log "stopping launchctl service"
+    launchctl bootout "gui/$(id -u)/com.octodeck.octodeck-daemon" >/dev/null 2>&1 || true
+    launchctl bootout "gui/$(id -u)" "${'${PLIST}'}" >/dev/null 2>&1 || true
+    rm -f "${'${PLIST}'}"
+  elif command -v systemctl >/dev/null 2>&1; then
+    log "stopping systemd user service"
+    systemctl --user disable --now octodeck-daemon.service >/dev/null 2>&1 || true
+    rm -f "${'${SERVICE}'}"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
+  rm -rf "${'${INSTALL_DIR}'}"
+fi
+
+log "uninstalled. Workspace data under ${'${OCTODECK_HOME}'} is kept."
+`;
+}
+
 const daemonRoutes = new Hono<{ Variables: Variables }>();
 
 daemonRoutes.get('/octodeck-daemon-bin', async () => {
@@ -184,6 +227,26 @@ daemonRoutes.get('/octodeck-daemon-bin', async () => {
     headers: {
       'content-type': 'application/octet-stream',
       'content-disposition': 'attachment; filename="octodeck-daemon"',
+      'cache-control': 'no-store',
+    },
+  });
+});
+
+daemonRoutes.get('/version', (c) => {
+  const server = new URL(c.req.url).origin;
+  return c.json({
+    version: DAEMON_VERSION,
+    updateCommand: DAEMON_UPDATE_COMMAND,
+    uninstallCommand: DAEMON_UNINSTALL_COMMAND,
+    installCommand: `curl -fsSL "${server}/api/daemon/install-script?device=<DEVICE_ID>&apiKey=<TOKEN>&server=${encodeURIComponent(server)}" | bash`,
+  });
+});
+
+daemonRoutes.get('/uninstall-script', () => {
+  return new Response(buildDaemonUninstallScript(), {
+    status: 200,
+    headers: {
+      'content-type': 'text/x-shellscript; charset=utf-8',
       'cache-control': 'no-store',
     },
   });

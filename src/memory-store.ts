@@ -7,7 +7,12 @@ import { DATA_DIR, GROUPS_DIR } from './config.js';
 
 export type CloudMemoryType = 'global' | 'session' | 'agent';
 export type CloudMemoryAuthority = 'cloud' | 'client';
-export type CloudMemorySource = 'cloud_sdk' | 'web' | 'api' | 'client_sync' | 'migration';
+export type CloudMemorySource =
+  | 'cloud_sdk'
+  | 'web'
+  | 'api'
+  | 'client_sync'
+  | 'migration';
 
 export interface CloudMemoryRecord {
   id: string;
@@ -63,7 +68,8 @@ function hashContent(content: string): string {
 
 function normalizePath(input: string): string {
   const normalized = input.replace(/\\/g, '/').trim().replace(/^\/+/, '');
-  if (!normalized || normalized.includes('\0')) throw new Error('Invalid memory path');
+  if (!normalized || normalized.includes('\0'))
+    throw new Error('Invalid memory path');
   const parts = normalized.split('/');
   if (parts.some((part) => !part || part === '.' || part === '..')) {
     throw new Error('Invalid memory path');
@@ -80,7 +86,8 @@ function buildScopeKey(args: {
 }): string {
   if (args.memoryType === 'global') return `global:${args.userId}`;
   if (args.memoryType === 'session') {
-    if (!args.groupFolder) throw new Error('groupFolder is required for session memory');
+    if (!args.groupFolder)
+      throw new Error('groupFolder is required for session memory');
     return `session:${args.groupFolder}`;
   }
   if (!args.deviceLinkId || !args.agentId) {
@@ -109,7 +116,12 @@ function toRecord(row: any): CloudMemoryRecord {
   };
 }
 
-function getExisting(userId: string, memoryType: CloudMemoryType, scopeKey: string, memoryPath: string): CloudMemoryRecord | undefined {
+function getExisting(
+  userId: string,
+  memoryType: CloudMemoryType,
+  scopeKey: string,
+  memoryPath: string,
+): CloudMemoryRecord | undefined {
   const row = getDatabaseForInternalUse()
     .prepare(
       `SELECT * FROM cloud_memories
@@ -121,13 +133,26 @@ function getExisting(userId: string, memoryType: CloudMemoryType, scopeKey: stri
 
 export function putCloudMemory(args: PutCloudMemoryArgs): CloudMemoryRecord {
   if (args.memoryType === 'agent') {
-    throw new Error('agent memory is client authoritative; use syncClientAgentMemory');
+    throw new Error(
+      'agent memory is client authoritative; use syncClientAgentMemory',
+    );
   }
   const memoryPath = normalizePath(args.path);
   const scopeKey = buildScopeKey(args);
-  const existing = getExisting(args.userId, args.memoryType, scopeKey, memoryPath);
-  if (existing && args.expectedRevision !== undefined && existing.revision !== args.expectedRevision) {
-    throw new Error(`revision conflict: expected ${args.expectedRevision}, got ${existing.revision}`);
+  const existing = getExisting(
+    args.userId,
+    args.memoryType,
+    scopeKey,
+    memoryPath,
+  );
+  if (
+    existing &&
+    args.expectedRevision !== undefined &&
+    existing.revision !== args.expectedRevision
+  ) {
+    throw new Error(
+      `revision conflict: expected ${args.expectedRevision}, got ${existing.revision}`,
+    );
   }
   const now = new Date().toISOString();
   const id = existing?.id ?? crypto.randomUUID();
@@ -170,16 +195,28 @@ export function putCloudMemory(args: PutCloudMemoryArgs): CloudMemoryRecord {
 export function appendCloudMemory(args: PutCloudMemoryArgs): CloudMemoryRecord {
   const memoryPath = normalizePath(args.path);
   const scopeKey = buildScopeKey(args);
-  const existing = getExisting(args.userId, args.memoryType, scopeKey, memoryPath);
+  const existing = getExisting(
+    args.userId,
+    args.memoryType,
+    scopeKey,
+    memoryPath,
+  );
   const normalizedContent = args.content.replace(/\r\n?/g, '\n').trim();
   const entry = `### ${new Date().toISOString()}\n${normalizedContent}\n`;
   const nextContent = existing?.content
     ? `${existing.content.replace(/\s*$/, '')}\n---\n\n${entry}`
     : entry;
-  return putCloudMemory({ ...args, path: memoryPath, content: nextContent, expectedRevision: existing?.revision });
+  return putCloudMemory({
+    ...args,
+    path: memoryPath,
+    content: nextContent,
+    expectedRevision: existing?.revision,
+  });
 }
 
-export function syncClientAgentMemory(args: SyncClientAgentMemoryArgs): CloudMemoryRecord {
+export function syncClientAgentMemory(
+  args: SyncClientAgentMemoryArgs,
+): CloudMemoryRecord {
   const memoryPath = normalizePath(args.path);
   const scopeKey = buildScopeKey({
     memoryType: 'agent',
@@ -236,7 +273,9 @@ export function getCloudMemory(args: {
   return getExisting(args.userId, args.memoryType, scopeKey, memoryPath);
 }
 
-export function searchCloudMemory(args: SearchCloudMemoryArgs): CloudMemoryRecord[] {
+export function searchCloudMemory(
+  args: SearchCloudMemoryArgs,
+): CloudMemoryRecord[] {
   const query = args.query.trim().toLowerCase();
   if (!query) return [];
   const limit = Math.max(1, Math.min(args.limit ?? 20, 100));
@@ -247,7 +286,9 @@ export function searchCloudMemory(args: SearchCloudMemoryArgs): CloudMemoryRecor
         )
         .all(args.userId, args.memoryType)
     : getDatabaseForInternalUse()
-        .prepare(`SELECT * FROM cloud_memories WHERE user_id = ? ORDER BY updated_at DESC`)
+        .prepare(
+          `SELECT * FROM cloud_memories WHERE user_id = ? ORDER BY updated_at DESC`,
+        )
         .all(args.userId);
   return (rows as any[])
     .map(toRecord)
@@ -257,7 +298,9 @@ export function searchCloudMemory(args: SearchCloudMemoryArgs): CloudMemoryRecor
 
 export function listCloudMemories(userId: string): CloudMemoryRecord[] {
   return getDatabaseForInternalUse()
-    .prepare(`SELECT * FROM cloud_memories WHERE user_id = ? ORDER BY memory_type ASC, scope_key ASC, path ASC`)
+    .prepare(
+      `SELECT * FROM cloud_memories WHERE user_id = ? ORDER BY memory_type ASC, scope_key ASC, path ASC`,
+    )
     .all(userId)
     .map(toRecord);
 }
@@ -310,7 +353,9 @@ export function importLegacyCloudMemories(args: {
 
     const legacyDateDir = path.join(DATA_DIR, 'memory', groupFolder);
     if (!fs.existsSync(legacyDateDir)) continue;
-    for (const entry of fs.readdirSync(legacyDateDir, { withFileTypes: true })) {
+    for (const entry of fs.readdirSync(legacyDateDir, {
+      withFileTypes: true,
+    })) {
       if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
       importIfMissing({
         memoryType: 'session',

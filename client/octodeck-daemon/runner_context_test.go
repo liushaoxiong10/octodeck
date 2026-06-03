@@ -236,6 +236,21 @@ func TestDefaultRunCwdUsesOctodeckTaskDir(t *testing.T) {
 	}
 }
 
+func TestValidateRunRequestAllowsDeviceWorkspaceURI(t *testing.T) {
+	req := &RunRequestFrame{
+		RunID:          "run-workspace-uri",
+		Binary:         "/usr/bin/python3",
+		Argv:           []string{"-c", "print('ok')"},
+		Cwd:            "octodeck-workspace://flow-demo",
+		OutputProtocol: "plain-text",
+		TimeoutMs:      int64(5 * time.Second / time.Millisecond),
+		MaxOutputBytes: 4096,
+	}
+	if err := validateRunRequest(&Config{AllowedBinaries: []string{"/usr/bin/python3"}}, req); err != nil {
+		t.Fatalf("expected workspace URI cwd to pass validation, got %v", err)
+	}
+}
+
 func TestResolveWorkspaceRepoRejectsDeviceDirectoryOutsideAllowedRoots(t *testing.T) {
 	allowed := t.TempDir()
 	outside := t.TempDir()
@@ -253,22 +268,27 @@ func TestReplaceArgvPlaceholderUsesResolvedRemoteCwd(t *testing.T) {
 }
 
 func TestPrepareAgentTeamMCPConfigWritesClaudeConfigAndReplacesPlaceholder(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"server":"https://octodeck.example","token":"link-token","linkId":"cl_123"}`), 0o644); err != nil {
+	root := t.TempDir()
+	legacyConfigPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(legacyConfigPath, []byte(`{"server":"https://octodeck.example","token":"link-token","linkId":"cl_123"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("OCTODECK_DAEMON_CONFIG", configPath)
+	t.Setenv("OCTODECK_DAEMON_CONFIG", legacyConfigPath)
 	originalArgs := os.Args
 	os.Args = []string{"octodeck-daemon"}
 	t.Cleanup(func() { os.Args = originalArgs })
 
-	cfg := &Config{Server: "https://octodeck.example", Token: "link-token", LinkID: "cl_123"}
+	cfg := &Config{Server: "https://octodeck.example", Token: "link-token", LinkID: "cl_123", WorkspaceDir: filepath.Join(root, "workspace")}
 	argv, err := prepareAgentTeamMCPConfig(cfg, []string{"-p", "hello", "--mcp-config", agentTeamMCPConfigPlaceholder}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(argv) != 4 || argv[3] == agentTeamMCPConfigPlaceholder {
 		t.Fatalf("placeholder was not replaced: %#v", argv)
+	}
+	expectedMCPConfig := filepath.Join(root, "daemon", "agent-team-mcp.json")
+	if argv[3] != expectedMCPConfig {
+		t.Fatalf("expected MCP config under daemon dir %q, got %q", expectedMCPConfig, argv[3])
 	}
 
 	data, err := os.ReadFile(argv[3])
@@ -291,10 +311,12 @@ func TestPrepareAgentTeamMCPConfigWritesClaudeConfigAndReplacesPlaceholder(t *te
 	if server.Type != "stdio" {
 		t.Fatalf("unexpected MCP transport type: %q", server.Type)
 	}
-	if !filepath.IsAbs(server.Command) {
-		t.Fatalf("MCP server command must be absolute so Claude can spawn it reliably, got %q in %s", server.Command, string(data))
+	expectedCommand := filepath.Join(root, "daemon", "bin", "octodeck-daemon")
+	if server.Command != expectedCommand {
+		t.Fatalf("expected MCP command %q, got %q in %s", expectedCommand, server.Command, string(data))
 	}
-	if strings.Join(server.Args, " ") != "mcp-agent-team --config "+configPath {
+	expectedConfigPath := filepath.Join(root, "daemon", "config.json")
+	if strings.Join(server.Args, " ") != "mcp-agent-team --config "+expectedConfigPath {
 		t.Fatalf("unexpected MCP args: %#v", server.Args)
 	}
 	if server.Env["OCTODECK_AGENT_TEAM_MCP"] != "1" {
@@ -306,17 +328,18 @@ func TestPrepareAgentTeamMCPConfigWritesClaudeConfigAndReplacesPlaceholder(t *te
 }
 
 func TestPrepareAgentTeamMCPConfigWritesTraeProjectConfigAndRemovesMarker(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"server":"https://octodeck.example","token":"link-token","linkId":"cl_123"}`), 0o644); err != nil {
+	root := t.TempDir()
+	legacyConfigPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(legacyConfigPath, []byte(`{"server":"https://octodeck.example","token":"link-token","linkId":"cl_123"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("OCTODECK_DAEMON_CONFIG", configPath)
+	t.Setenv("OCTODECK_DAEMON_CONFIG", legacyConfigPath)
 	originalArgs := os.Args
 	os.Args = []string{"octodeck-daemon"}
 	t.Cleanup(func() { os.Args = originalArgs })
 
 	cwd := t.TempDir()
-	cfg := &Config{Server: "https://octodeck.example", Token: "link-token", LinkID: "cl_123"}
+	cfg := &Config{Server: "https://octodeck.example", Token: "link-token", LinkID: "cl_123", WorkspaceDir: filepath.Join(root, "workspace")}
 	argv, err := prepareAgentTeamMCPConfig(cfg, []string{"-p", "hello", agentTeamMCPProjectConfigMarker}, cwd)
 	if err != nil {
 		t.Fatal(err)
@@ -345,7 +368,12 @@ func TestPrepareAgentTeamMCPConfigWritesTraeProjectConfigAndRemovesMarker(t *tes
 	if server.Type != "stdio" {
 		t.Fatalf("unexpected MCP transport type: %q", server.Type)
 	}
-	if strings.Join(server.Args, " ") != "mcp-agent-team --config "+configPath {
+	expectedCommand := filepath.Join(root, "daemon", "bin", "octodeck-daemon")
+	if server.Command != expectedCommand {
+		t.Fatalf("expected MCP command %q, got %q", expectedCommand, server.Command)
+	}
+	expectedConfigPath := filepath.Join(root, "daemon", "config.json")
+	if strings.Join(server.Args, " ") != "mcp-agent-team --config "+expectedConfigPath {
 		t.Fatalf("unexpected MCP args: %#v", server.Args)
 	}
 	if server.Timeout != 30 {

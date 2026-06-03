@@ -19,12 +19,14 @@ export const TaskPatchSchema = z.object({
   context_mode: z.enum(['group', 'isolated']).optional(),
   execution_type: z.enum(['agent', 'script']).optional(),
   execution_mode: z.enum(['host', 'container']).optional(),
-  execution_node: z.string().min(1).max(64).optional(),
+  execution_node: z.string().min(1).max(128).optional(),
   script_command: z.string().max(4096).nullable().optional(),
   status: z.enum(['active', 'paused']).optional(),
   next_run: z.string().optional(),
   notify_channels: z
-    .array(z.enum(['feishu', 'telegram', 'qq', 'wechat', 'dingtalk', 'discord']))
+    .array(
+      z.enum(['feishu', 'telegram', 'qq', 'wechat', 'dingtalk', 'discord']),
+    )
     .nullable()
     .optional(),
 });
@@ -44,10 +46,12 @@ export const TaskCreateSchema = z
     context_mode: z.enum(['group', 'isolated']).optional(),
     execution_type: z.enum(['agent', 'script']).optional(),
     execution_mode: z.enum(['host', 'container']).optional(),
-    execution_node: z.string().min(1).max(64).optional(),
+    execution_node: z.string().min(1).max(128).optional(),
     script_command: z.string().max(4096).optional(),
     notify_channels: z
-      .array(z.enum(['feishu', 'telegram', 'qq', 'wechat', 'dingtalk', 'discord']))
+      .array(
+        z.enum(['feishu', 'telegram', 'qq', 'wechat', 'dingtalk', 'discord']),
+      )
       .nullable()
       .optional(),
   })
@@ -129,11 +133,15 @@ export const MessageCreateSchema = z
 export const GroupCreateSchema = z.object({
   name: z.string().min(1).max(MAX_GROUP_NAME_LEN),
   runtime_profile: AgentRuntimeProfileSchema.optional(),
-  device_link_id: z.string().regex(/^cl_[0-9a-f]{16}$/).optional(),
+  device_link_id: z
+    .string()
+    .regex(/^cl_[0-9a-f]{16}$/)
+    .optional(),
   agent_client_id: z.string().min(1).max(64).optional(),
+  backend: z.string().min(1).max(64).optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
   // Device target for native execution: built-in server device or connected octodeck-daemon device.
-  execution_node: z.string().min(1).max(64).optional(),
+  execution_node: z.string().min(1).max(128).optional(),
   custom_cwd: z
     .string()
     .optional()
@@ -161,11 +169,24 @@ export const GroupCreateSchema = z.object({
 });
 
 export const RepoCreateSchema = z.object({
-  name: z.string().min(1).max(80).transform((val) => val.trim()),
+  name: z
+    .string()
+    .min(1)
+    .max(80)
+    .transform((val) => val.trim()),
   kind: z.enum(['git', 'device_path']),
-  git_url: z.string().optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
-  device_path: z.string().optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
-  device_link_id: z.string().optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  git_url: z
+    .string()
+    .optional()
+    .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  device_path: z
+    .string()
+    .optional()
+    .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  device_link_id: z
+    .string()
+    .optional()
+    .transform((val) => (val && val.trim() ? val.trim() : undefined)),
 });
 
 export const GroupMemberAddSchema = z.object({
@@ -229,12 +250,15 @@ export const GroupPatchSchema = z.object({
     .enum(['auto', 'always', 'when_mentioned', 'owner_mentioned', 'disabled'])
     .optional(),
   runtime_profile: AgentRuntimeProfileSchema.optional(),
-  device_link_id: z.string().regex(/^cl_[0-9a-f]{16}$/).optional(),
+  device_link_id: z
+    .string()
+    .regex(/^cl_[0-9a-f]{16}$/)
+    .optional(),
   agent_client_id: z.string().min(1).max(64).optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
   backend: z.string().min(1).max(64).optional(),
-  // Phase 5.1: 'server-local' | <agent_link_id> ('cl_' + 16 hex)
-  execution_node: z.string().min(1).max(64).optional(),
+  // 'server-local' | cl_xxx | runtime:cl_xxx:agentClient | provider:agentClient
+  execution_node: z.string().min(1).max(128).optional(),
 });
 
 export const LoginSchema = z.object({
@@ -349,7 +373,10 @@ export const CustomBackendCreateSchema = z
         message: '当前不支持 container 模式',
       });
     }
-    if ((data.runtime ?? 'local-device') === 'local-device' && !data.deviceLinkId) {
+    if (
+      (data.runtime ?? 'local-device') === 'local-device' &&
+      !data.deviceLinkId
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['deviceLinkId'],
@@ -358,9 +385,17 @@ export const CustomBackendCreateSchema = z
     }
     if (data.workdirMode === 'custom') {
       if (!data.workdir) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['workdir'], message: '自定义 Workdir 必填' });
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['workdir'],
+          message: '自定义 Workdir 必填',
+        });
       } else if (!data.workdir.startsWith('/')) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['workdir'], message: 'Workdir 必须是绝对路径' });
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['workdir'],
+          message: 'Workdir 必须是绝对路径',
+        });
       }
     }
     if (data.agentClientId) {
@@ -374,13 +409,25 @@ export const CustomBackendCreateSchema = z
       return;
     }
     if (!data.binary) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['binary'], message: 'binary 必填' });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['binary'],
+        message: 'binary 必填',
+      });
     }
     if (!data.outputProtocol) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['outputProtocol'], message: 'outputProtocol 必填' });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['outputProtocol'],
+        message: 'outputProtocol 必填',
+      });
     }
     if (!data.argvTemplate) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['argvTemplate'], message: 'argvTemplate 必填' });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['argvTemplate'],
+        message: 'argvTemplate 必填',
+      });
     } else if (!data.argvTemplate.some((s) => s.includes('{prompt}'))) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -422,9 +469,17 @@ export const CustomBackendPatchSchema = z
     }
     if (data.workdirMode === 'custom') {
       if (!data.workdir) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['workdir'], message: '自定义 Workdir 必填' });
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['workdir'],
+          message: '自定义 Workdir 必填',
+        });
       } else if (!data.workdir.startsWith('/')) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['workdir'], message: 'Workdir 必须是绝对路径' });
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['workdir'],
+          message: 'Workdir 必须是绝对路径',
+        });
       }
     }
     if (

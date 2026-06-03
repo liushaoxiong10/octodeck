@@ -43,6 +43,8 @@ export interface HostCliDriverConfig {
   backendId: string;
   /** 解析二进制路径；返回 null/undefined 时 driver 直接报错退出。 */
   resolveBinary: () => string | null | undefined;
+  /** 解析远端执行二进制路径；不做服务端文件存在性校验。 */
+  resolveRemoteBinary?: () => string | null | undefined;
   /** 由 placeholder 上下文生成 argv。每项都不会再被 shell 解析。 */
   buildArgv: (ctx: HostCliPlaceholderCtx) => string[];
   /** stdout 解析协议。 */
@@ -186,7 +188,10 @@ export async function runHostCli(
   if (
     execNode &&
     execNode !== 'server-local' &&
-    /^cl_[0-9a-f]{16}$/.test(execNode)
+    (/^cl_[0-9a-f]{16}$/.test(execNode) ||
+      /^runtime:cl_[0-9a-f]{16}:[^:]+$/.test(execNode) ||
+      /^cl_[0-9a-f]{16}:[^:]+$/.test(execNode) ||
+      /^provider:[^:]+$/.test(execNode))
   ) {
     return runViaAgentLink(args, cfg, execNode);
   }

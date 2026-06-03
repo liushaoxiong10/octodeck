@@ -483,7 +483,7 @@ configRoutes.patch(
         ((validation.data.apiType !== undefined &&
           validation.data.apiType !== previous.apiType) ||
           (validation.data.anthropicBaseUrl !== undefined &&
-          validation.data.anthropicBaseUrl !== previous.anthropicBaseUrl) ||
+            validation.data.anthropicBaseUrl !== previous.anthropicBaseUrl) ||
           (validation.data.anthropicModel !== undefined &&
             validation.data.anthropicModel !== previous.anthropicModel))
       );
@@ -503,9 +503,7 @@ configRoutes.patch(
             providerId: id,
             protocolFieldChanged,
           },
-          protocolFieldChanged
-            ? { clearSessionsForProviderId: id }
-            : undefined,
+          protocolFieldChanged ? { clearSessionsForProviderId: id } : undefined,
         );
       }
 
@@ -674,20 +672,34 @@ configRoutes.post(
       const provider = getProviders().find((p) => p.id === id);
       if (!provider) return c.json({ error: '未找到指定供应商' }, 404);
 
-      const token = provider.anthropicApiKey || provider.anthropicAuthToken || provider.claudeCodeOauthToken;
-      if (!token) return c.json({ error: '供应商缺少 API Key / Token，无法拉取模型列表' }, 400);
+      const token =
+        provider.anthropicApiKey ||
+        provider.anthropicAuthToken ||
+        provider.claudeCodeOauthToken;
+      if (!token)
+        return c.json(
+          { error: '供应商缺少 API Key / Token，无法拉取模型列表' },
+          400,
+        );
 
       const models = await discoverProviderModels({
         apiType: provider.apiType || 'claude',
         baseUrl: provider.anthropicBaseUrl || 'https://api.anthropic.com',
         token,
       });
-      const updated = updateProviderModels(id, models, provider.anthropicModel || models[0]?.id);
+      const updated = updateProviderModels(
+        id,
+        models,
+        provider.anthropicModel || models[0]?.id,
+      );
       appendClaudeConfigAudit(actor, 'fetch_provider_models', [
         `id:${id}`,
         `models:${models.length}`,
       ]);
-      return c.json({ provider: toPublicProvider(updated), models: updated.models });
+      return c.json({
+        provider: toPublicProvider(updated),
+        models: updated.models,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : '拉取模型列表失败';
       logger.warn({ err }, 'Failed to fetch provider models');
@@ -1470,10 +1482,7 @@ configRoutes.post(
             deviceLinkId: validation.data.deviceLinkId ?? null,
             agentClientId: validation.data.agentClientId ?? null,
           };
-      const def = upsertCustomBackend(
-        payload,
-        user.username,
-      );
+      const def = upsertCustomBackend(payload, user.username);
       return c.json(def, 201);
     } catch (err) {
       const msg =
@@ -1561,70 +1570,91 @@ configRoutes.delete(
 
 // ─── External Claude resources (admin only) ─────────────────────────
 
-configRoutes.get('/external-resources', authMiddleware, systemConfigMiddleware, (c) => {
-  // 仅 admin 可查看宿主机资源，普通用户不允许看到宿主机任何内容
-  const user = c.get('user') as AuthUser;
-  if (user.role !== 'admin') {
-    return c.json({ dir: '', rules: [], claudeMd: null });
-  }
-  const effectiveDir = getEffectiveExternalDir();
+configRoutes.get(
+  '/external-resources',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    // 仅 admin 可查看宿主机资源，普通用户不允许看到宿主机任何内容
+    const user = c.get('user') as AuthUser;
+    if (user.role !== 'admin') {
+      return c.json({ dir: '', rules: [], claudeMd: null });
+    }
+    const effectiveDir = getEffectiveExternalDir();
 
-  const result: {
-    dir: string;
-    rules: Array<{ name: string; size: number }>;
-    claudeMd: string | null;
-  } = { dir: effectiveDir, rules: [], claudeMd: null };
+    const result: {
+      dir: string;
+      rules: Array<{ name: string; size: number }>;
+      claudeMd: string | null;
+    } = { dir: effectiveDir, rules: [], claudeMd: null };
 
-  // Rules
-  const rulesDir = path.join(effectiveDir, 'rules');
-  try {
-    if (fs.existsSync(rulesDir)) {
-      for (const entry of fs.readdirSync(rulesDir, { withFileTypes: true })) {
-        if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-        try {
-          const st = fs.statSync(path.join(rulesDir, entry.name));
-          result.rules.push({ name: entry.name, size: st.size });
-        } catch { /* skip */ }
+    // Rules
+    const rulesDir = path.join(effectiveDir, 'rules');
+    try {
+      if (fs.existsSync(rulesDir)) {
+        for (const entry of fs.readdirSync(rulesDir, { withFileTypes: true })) {
+          if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+          try {
+            const st = fs.statSync(path.join(rulesDir, entry.name));
+            result.rules.push({ name: entry.name, size: st.size });
+          } catch {
+            /* skip */
+          }
+        }
       }
+    } catch {
+      /* ignore */
     }
-  } catch { /* ignore */ }
 
-  // CLAUDE.md
-  const claudeMdPath = path.join(effectiveDir, 'CLAUDE.md');
-  try {
-    if (fs.existsSync(claudeMdPath)) {
-      const content = fs.readFileSync(claudeMdPath, 'utf-8');
-      result.claudeMd = content.length > 10000 ? content.slice(0, 10000) + '\n...(截断)' : content;
+    // CLAUDE.md
+    const claudeMdPath = path.join(effectiveDir, 'CLAUDE.md');
+    try {
+      if (fs.existsSync(claudeMdPath)) {
+        const content = fs.readFileSync(claudeMdPath, 'utf-8');
+        result.claudeMd =
+          content.length > 10000
+            ? content.slice(0, 10000) + '\n...(截断)'
+            : content;
+      }
+    } catch {
+      /* ignore */
     }
-  } catch { /* ignore */ }
 
-  return c.json(result);
-});
+    return c.json(result);
+  },
+);
 
 // Read a single rule file content (admin only)
-configRoutes.get('/external-resources/rule', authMiddleware, systemConfigMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
-  if (user.role !== 'admin') {
-    return c.text('Forbidden', 403);
-  }
-  const name = c.req.query('name');
-  if (!name || name.includes('/') || name.includes('..')) {
-    return c.text('Invalid name', 400);
-  }
-  const effectiveDir = getEffectiveExternalDir();
-  const filePath = path.join(effectiveDir, 'rules', name);
-  try {
-    const resolved = fs.realpathSync(filePath);
-    // 确保解析后的路径仍在 rules 目录内
-    if (!resolved.startsWith(fs.realpathSync(path.join(effectiveDir, 'rules')))) {
+configRoutes.get(
+  '/external-resources/rule',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    const user = c.get('user') as AuthUser;
+    if (user.role !== 'admin') {
       return c.text('Forbidden', 403);
     }
-    const content = fs.readFileSync(resolved, 'utf-8');
-    return c.text(content);
-  } catch {
-    return c.text('Not found', 404);
-  }
-});
+    const name = c.req.query('name');
+    if (!name || name.includes('/') || name.includes('..')) {
+      return c.text('Invalid name', 400);
+    }
+    const effectiveDir = getEffectiveExternalDir();
+    const filePath = path.join(effectiveDir, 'rules', name);
+    try {
+      const resolved = fs.realpathSync(filePath);
+      // 确保解析后的路径仍在 rules 目录内
+      if (
+        !resolved.startsWith(fs.realpathSync(path.join(effectiveDir, 'rules')))
+      ) {
+        return c.text('Forbidden', 403);
+      }
+      const content = fs.readFileSync(resolved, 'utf-8');
+      return c.text(content);
+    } catch {
+      return c.text('Not found', 404);
+    }
+  },
+);
 
 // ─── Per-user IM connection status ──────────────────────────────────
 
@@ -3024,10 +3054,7 @@ configRoutes.post('/user-im/whatsapp/logout', authMiddleware, async (c) => {
     try {
       await deps.logoutUserWhatsApp(user.id, accountId);
     } catch (err) {
-      logger.warn(
-        { err, userId: user.id },
-        'WhatsApp logout deps call failed',
-      );
+      logger.warn({ err, userId: user.id }, 'WhatsApp logout deps call failed');
     }
   }
 
@@ -3141,8 +3168,12 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
   const activationMode =
     typeof rawActivationMode === 'string' &&
     VALID_ACTIVATION_MODES.has(rawActivationMode)
-      ? (rawActivationMode as typeof rawActivationMode &
-          'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled')
+      ? (rawActivationMode as
+          | (typeof rawActivationMode & 'auto')
+          | 'always'
+          | 'when_mentioned'
+          | 'owner_mentioned'
+          | 'disabled')
       : undefined;
 
   // Parse owner_im_id for owner_mentioned mode
@@ -3186,7 +3217,9 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
       target_main_jid: targetMainJid,
       target_agent_id: undefined,
       reply_policy: replyPolicy,
-      ...(activationMode !== undefined ? { activation_mode: activationMode } : {}),
+      ...(activationMode !== undefined
+        ? { activation_mode: activationMode }
+        : {}),
       ...(ownerImId !== undefined ? { owner_im_id: ownerImId } : {}),
     };
     applyBindingUpdate(imJid, updated);
@@ -3201,7 +3234,9 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
   if (activationMode !== undefined || ownerImId !== undefined) {
     const updated: RegisteredGroup = {
       ...imGroup,
-      ...(activationMode !== undefined ? { activation_mode: activationMode } : {}),
+      ...(activationMode !== undefined
+        ? { activation_mode: activationMode }
+        : {}),
       ...(ownerImId !== undefined ? { owner_im_id: ownerImId } : {}),
     };
     applyBindingUpdate(imJid, updated);
@@ -3213,7 +3248,10 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
   }
 
   return c.json(
-    { error: 'Must provide target_main_jid, target_agent_id, activation_mode, or unbind' },
+    {
+      error:
+        'Must provide target_main_jid, target_agent_id, activation_mode, or unbind',
+    },
     400,
   );
 });

@@ -21,9 +21,13 @@ export function resolveDeviceAgentClient(
   if (!device) {
     throw new Error('设备不存在或已移除');
   }
-  const client = (device.agentClients ?? []).find((c) => c.id === agentClientId);
+  const client = (device.agentClients ?? []).find(
+    (c) => c.id === agentClientId,
+  );
   if (!client) {
-    throw new Error(`未在设备 ${device.id} 上发现 Agent client: ${agentClientId}`);
+    throw new Error(
+      `未在设备 ${device.id} 上发现 Agent client: ${agentClientId}`,
+    );
   }
   return client;
 }
@@ -65,7 +69,9 @@ export function buildAgentBackendFromClient(input: {
   };
 }
 
-export function normalizeAgentClientBackendDef(def: CustomBackendDef): CustomBackendDef {
+export function normalizeAgentClientBackendDef(
+  def: CustomBackendDef,
+): CustomBackendDef {
   if (!def.agentClientId) return { ...def };
   try {
     const template = templateForAgentClient(def.agentClientId);
@@ -84,7 +90,14 @@ export function normalizeAgentClientBackendDef(def: CustomBackendDef): CustomBac
 
 function templateForAgentClient(
   id: string,
-): Pick<CustomBackendDef, 'argvTemplate' | 'outputProtocol' | 'supportsNativeSessions' | 'sessionArgvTemplate' | 'resumeArgvTemplate'> {
+): Pick<
+  CustomBackendDef,
+  | 'argvTemplate'
+  | 'outputProtocol'
+  | 'supportsNativeSessions'
+  | 'sessionArgvTemplate'
+  | 'resumeArgvTemplate'
+> {
   switch (id) {
     case 'claude-code':
       return {
@@ -105,10 +118,24 @@ function templateForAgentClient(
       };
     case 'codex':
       return {
-        argvTemplate: ['exec', '--skip-git-repo-check', '-m', '{model}', '{prompt}'],
+        argvTemplate: [
+          'exec',
+          '--skip-git-repo-check',
+          '-m',
+          '{model}',
+          '{prompt}',
+        ],
         outputProtocol: 'plain-text',
         supportsNativeSessions: true,
-        resumeArgvTemplate: ['exec', 'resume', '--skip-git-repo-check', '-m', '{model}', '{sessionId}', '{prompt}'],
+        resumeArgvTemplate: [
+          'exec',
+          'resume',
+          '--skip-git-repo-check',
+          '-m',
+          '{model}',
+          '{sessionId}',
+          '{prompt}',
+        ],
       };
     case 'traecli':
       return {

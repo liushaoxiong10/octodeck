@@ -37,7 +37,9 @@ function sseEvent(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-async function* readSseLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+async function* readSseLines(
+  stream: ReadableStream<Uint8Array>,
+): AsyncGenerator<string> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -55,53 +57,75 @@ async function* readSseLines(stream: ReadableStream<Uint8Array>): AsyncGenerator
   if (buf.trim()) yield buf.trim();
 }
 
-function convertStream(apiType: ModelEndpointApiType, upstream: ReadableStream<Uint8Array>, model: string): ReadableStream<Uint8Array> {
+function convertStream(
+  apiType: ModelEndpointApiType,
+  upstream: ReadableStream<Uint8Array>,
+  model: string,
+): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const push = (chunk: string) => controller.enqueue(encoder.encode(chunk));
-      push(sseEvent('message_start', {
-        type: 'message_start',
-        message: {
-          id: `msg_${Date.now()}`,
-          type: 'message',
-          role: 'assistant',
-          model,
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          usage: { input_tokens: 0, output_tokens: 0 },
-        },
-      }));
-      push(sseEvent('content_block_start', {
-        type: 'content_block_start',
-        index: 0,
-        content_block: { type: 'text', text: '' },
-      }));
+      push(
+        sseEvent('message_start', {
+          type: 'message_start',
+          message: {
+            id: `msg_${Date.now()}`,
+            type: 'message',
+            role: 'assistant',
+            model,
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 0, output_tokens: 0 },
+          },
+        }),
+      );
+      push(
+        sseEvent('content_block_start', {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        }),
+      );
       try {
         for await (const line of readSseLines(upstream)) {
           if (!line.startsWith('data:')) continue;
           const raw = line.slice(5).trim();
           if (!raw || raw === '[DONE]') continue;
           let parsed: any;
-          try { parsed = JSON.parse(raw); } catch { continue; }
-          const delta = apiType === 'openai-chat'
-            ? parsed?.choices?.[0]?.delta?.content
-            : parsed?.delta ?? parsed?.item?.content?.[0]?.text;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            continue;
+          }
+          const delta =
+            apiType === 'openai-chat'
+              ? parsed?.choices?.[0]?.delta?.content
+              : (parsed?.delta ?? parsed?.item?.content?.[0]?.text);
           if (typeof delta === 'string' && delta) {
-            push(sseEvent('content_block_delta', {
-              type: 'content_block_delta',
-              index: 0,
-              delta: { type: 'text_delta', text: delta },
-            }));
+            push(
+              sseEvent('content_block_delta', {
+                type: 'content_block_delta',
+                index: 0,
+                delta: { type: 'text_delta', text: delta },
+              }),
+            );
           }
         }
-        push(sseEvent('content_block_stop', { type: 'content_block_stop', index: 0 }));
-        push(sseEvent('message_delta', {
-          type: 'message_delta',
-          delta: { stop_reason: 'end_turn', stop_sequence: null },
-          usage: { output_tokens: 0 },
-        }));
+        push(
+          sseEvent('content_block_stop', {
+            type: 'content_block_stop',
+            index: 0,
+          }),
+        );
+        push(
+          sseEvent('message_delta', {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn', stop_sequence: null },
+            usage: { output_tokens: 0 },
+          }),
+        );
         push(sseEvent('message_stop', { type: 'message_stop' }));
         controller.close();
       } catch (err) {
@@ -139,7 +163,11 @@ modelProxyRoutes.all('/:providerId/*', async (c) => {
     return c.json({ error: 'invalid_json' }, 400);
   }
 
-  const upstreamBody = convertAnthropicRequest(apiType, anthropicBody, provider.anthropicModel || anthropicBody.model || '');
+  const upstreamBody = convertAnthropicRequest(
+    apiType,
+    anthropicBody,
+    provider.anthropicModel || anthropicBody.model || '',
+  );
   const upstreamUrl = joinUrl(provider.anthropicBaseUrl, upstreamPath(apiType));
   try {
     const upstream = await fetch(upstreamUrl, {
@@ -152,19 +180,33 @@ modelProxyRoutes.all('/:providerId/*', async (c) => {
     });
     if (!upstream.ok) {
       const text = await upstream.text().catch(() => upstream.statusText);
-      return new Response(text, { status: upstream.status, headers: { 'content-type': upstream.headers.get('content-type') || 'text/plain' } });
+      return new Response(text, {
+        status: upstream.status,
+        headers: {
+          'content-type': upstream.headers.get('content-type') || 'text/plain',
+        },
+      });
     }
     if (anthropicBody.stream && upstream.body) {
-      return new Response(convertStream(apiType, upstream.body, provider.anthropicModel || ''), {
-        status: 200,
-        headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
-      });
+      return new Response(
+        convertStream(apiType, upstream.body, provider.anthropicModel || ''),
+        {
+          status: 200,
+          headers: {
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-cache',
+          },
+        },
+      );
     }
     const body = await upstream.json();
     return json(convertToAnthropicResponse(apiType, body));
   } catch (err) {
     logger.warn({ err, providerId }, 'model proxy request failed');
-    return c.json({ error: err instanceof Error ? err.message : 'model proxy failed' }, 502);
+    return c.json(
+      { error: err instanceof Error ? err.message : 'model proxy failed' },
+      502,
+    );
   }
 });
 

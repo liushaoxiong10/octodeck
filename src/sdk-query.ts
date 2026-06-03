@@ -4,14 +4,26 @@
  * provider configured in the settings page (ANTHROPIC_API_KEY / OAuth / Base URL).
  */
 
-import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk';
+import {
+  createSdkMcpServer,
+  query,
+  tool,
+} from '@anthropic-ai/claude-agent-sdk';
 import fs from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import { DATA_DIR } from './config.js';
-import { buildClaudeEnvLines, getClaudeProviderConfig } from './runtime-config.js';
+import {
+  buildClaudeEnvLines,
+  getClaudeProviderConfig,
+} from './runtime-config.js';
 import { logger } from './logger.js';
-import { appendCloudMemory, getCloudMemory, putCloudMemory, searchCloudMemory } from './memory-store.js';
+import {
+  appendCloudMemory,
+  getCloudMemory,
+  putCloudMemory,
+  searchCloudMemory,
+} from './memory-store.js';
 
 // Mutex: process.env mutation is not re-entrant. Serialize concurrent calls
 // to prevent overlapping env writes from corrupting each other.
@@ -64,13 +76,16 @@ export async function sdkQuery(
 
   try {
     const model = opts?.model || config.anthropicModel || undefined;
-    const cloudMemoryMcp = opts?.userId && typeof createSdkMcpServer === 'function' && typeof tool === 'function'
-      ? createSdkMcpServer({
-          name: 'octodeck-cloud-memory',
-          version: '1.0.0',
-          tools: createCloudMemoryTools(opts.userId),
-        })
-      : null;
+    const cloudMemoryMcp =
+      opts?.userId &&
+      typeof createSdkMcpServer === 'function' &&
+      typeof tool === 'function'
+        ? createSdkMcpServer({
+            name: 'octodeck-cloud-memory',
+            version: '1.0.0',
+            tools: createCloudMemoryTools(opts.userId),
+          })
+        : null;
 
     let result = '';
     const conversation = query({
@@ -87,7 +102,9 @@ export async function sdkQuery(
               skills: 'all' as const,
             }
           : {}),
-        ...(cloudMemoryMcp ? { mcpServers: { octodeck_cloud_memory: cloudMemoryMcp } } : {}),
+        ...(cloudMemoryMcp
+          ? { mcpServers: { octodeck_cloud_memory: cloudMemoryMcp } }
+          : {}),
         abortController,
       },
     });
@@ -100,7 +117,10 @@ export async function sdkQuery(
 
     return result.trim() || null;
   } catch (err) {
-    logger.warn({ err: (err as Error).message?.slice(0, 200) }, 'sdkQuery failed');
+    logger.warn(
+      { err: (err as Error).message?.slice(0, 200) },
+      'sdkQuery failed',
+    );
     return null;
   } finally {
     clearTimeout(timer);
@@ -118,62 +138,122 @@ export async function sdkQuery(
 
 function createCloudMemoryTools(userId: string) {
   return [
-    tool('cloud_memory_search', '搜索云端数据库记忆。', {
-      query: z.string(),
-      memory_type: z.enum(['global', 'session', 'agent']).optional(),
-    }, async (args) => ({
-      content: [{ type: 'text' as const, text: JSON.stringify(searchCloudMemory({ userId, query: args.query, memoryType: args.memory_type }), null, 2) }],
-    })),
-    tool('cloud_memory_get', '读取云端数据库记忆。', {
-      memory_type: z.enum(['global', 'session', 'agent']),
-      path: z.string(),
-      group_folder: z.string().optional(),
-      device_link_id: z.string().optional(),
-      agent_id: z.string().optional(),
-    }, async (args) => ({
-      content: [{ type: 'text' as const, text: JSON.stringify(getCloudMemory({
-        userId,
-        memoryType: args.memory_type,
-        path: args.path,
-        groupFolder: args.group_folder,
-        deviceLinkId: args.device_link_id,
-        agentId: args.agent_id,
-      }) ?? null, null, 2) }],
-    })),
-    tool('cloud_memory_append', '追加写入云端权威记忆，仅支持 global/session。', {
-      memory_type: z.enum(['global', 'session']),
-      path: z.string(),
-      content: z.string(),
-      group_folder: z.string().optional(),
-    }, async (args) => ({
-      content: [{ type: 'text' as const, text: JSON.stringify(appendCloudMemory({
-        userId,
-        memoryType: args.memory_type,
-        path: args.path,
-        content: args.content,
-        groupFolder: args.group_folder,
-        source: 'cloud_sdk',
-        updatedBy: userId,
-      }), null, 2) }],
-    })),
-    tool('cloud_memory_update', '覆盖更新云端权威记忆，仅支持 global/session。', {
-      memory_type: z.enum(['global', 'session']),
-      path: z.string(),
-      content: z.string(),
-      group_folder: z.string().optional(),
-      expected_revision: z.number().optional(),
-    }, async (args) => ({
-      content: [{ type: 'text' as const, text: JSON.stringify(putCloudMemory({
-        userId,
-        memoryType: args.memory_type,
-        path: args.path,
-        content: args.content,
-        groupFolder: args.group_folder,
-        expectedRevision: args.expected_revision,
-        source: 'cloud_sdk',
-        updatedBy: userId,
-      }), null, 2) }],
-    })),
+    tool(
+      'cloud_memory_search',
+      '搜索云端数据库记忆。',
+      {
+        query: z.string(),
+        memory_type: z.enum(['global', 'session', 'agent']).optional(),
+      },
+      async (args) => ({
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              searchCloudMemory({
+                userId,
+                query: args.query,
+                memoryType: args.memory_type,
+              }),
+              null,
+              2,
+            ),
+          },
+        ],
+      }),
+    ),
+    tool(
+      'cloud_memory_get',
+      '读取云端数据库记忆。',
+      {
+        memory_type: z.enum(['global', 'session', 'agent']),
+        path: z.string(),
+        group_folder: z.string().optional(),
+        device_link_id: z.string().optional(),
+        agent_id: z.string().optional(),
+      },
+      async (args) => ({
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              getCloudMemory({
+                userId,
+                memoryType: args.memory_type,
+                path: args.path,
+                groupFolder: args.group_folder,
+                deviceLinkId: args.device_link_id,
+                agentId: args.agent_id,
+              }) ?? null,
+              null,
+              2,
+            ),
+          },
+        ],
+      }),
+    ),
+    tool(
+      'cloud_memory_append',
+      '追加写入云端权威记忆，仅支持 global/session。',
+      {
+        memory_type: z.enum(['global', 'session']),
+        path: z.string(),
+        content: z.string(),
+        group_folder: z.string().optional(),
+      },
+      async (args) => ({
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              appendCloudMemory({
+                userId,
+                memoryType: args.memory_type,
+                path: args.path,
+                content: args.content,
+                groupFolder: args.group_folder,
+                source: 'cloud_sdk',
+                updatedBy: userId,
+              }),
+              null,
+              2,
+            ),
+          },
+        ],
+      }),
+    ),
+    tool(
+      'cloud_memory_update',
+      '覆盖更新云端权威记忆，仅支持 global/session。',
+      {
+        memory_type: z.enum(['global', 'session']),
+        path: z.string(),
+        content: z.string(),
+        group_folder: z.string().optional(),
+        expected_revision: z.number().optional(),
+      },
+      async (args) => ({
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              putCloudMemory({
+                userId,
+                memoryType: args.memory_type,
+                path: args.path,
+                content: args.content,
+                groupFolder: args.group_folder,
+                expectedRevision: args.expected_revision,
+                source: 'cloud_sdk',
+                updatedBy: userId,
+              }),
+              null,
+              2,
+            ),
+          },
+        ],
+      }),
+    ),
   ];
 }
 
@@ -188,7 +268,10 @@ function prepareCloudSkillConfigDir(userId: string): string | null {
 
   for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
     if (entry.isDirectory() || entry.isSymbolicLink()) {
-      fs.rmSync(path.join(skillsDir, entry.name), { recursive: true, force: true });
+      fs.rmSync(path.join(skillsDir, entry.name), {
+        recursive: true,
+        force: true,
+      });
     }
   }
 

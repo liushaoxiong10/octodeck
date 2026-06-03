@@ -26,11 +26,7 @@ import {
   type OutboundFrame,
 } from './protocol.js';
 
-export type SessionState =
-  | 'awaiting_hello'
-  | 'open'
-  | 'closing'
-  | 'closed';
+export type SessionState = 'awaiting_hello' | 'open' | 'closing' | 'closed';
 
 export interface SessionOptions {
   ws: WebSocket;
@@ -38,8 +34,14 @@ export interface SessionOptions {
   /** ws 握手已经匹配到的 link id（bcrypt.compare 已通过）。 */
   linkId: string;
   userId: string;
-  onHello: (session: AgentLinkSession, frame: HelloFrame) => void | Promise<void>;
-  onFrame: (session: AgentLinkSession, frame: InboundFrame) => void | Promise<void>;
+  onHello: (
+    session: AgentLinkSession,
+    frame: HelloFrame,
+  ) => void | Promise<void>;
+  onFrame: (
+    session: AgentLinkSession,
+    frame: InboundFrame,
+  ) => void | Promise<void>;
   onClose: (session: AgentLinkSession, reason: string) => void;
 }
 
@@ -92,7 +94,12 @@ export class AgentLinkSession {
 
   private handleMessage(data: unknown): void {
     if (this.state === 'closed' || this.state === 'closing') return;
-    const text = typeof data === 'string' ? data : Buffer.isBuffer(data) ? data.toString('utf8') : String(data);
+    const text =
+      typeof data === 'string'
+        ? data
+        : Buffer.isBuffer(data)
+          ? data.toString('utf8')
+          : String(data);
 
     if (text.length > 1_048_576) {
       this.sendError('protocol_violation', 'frame too large', true);

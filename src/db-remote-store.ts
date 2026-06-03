@@ -1,7 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DatabaseBackendConfig, redactDatabaseUrl } from './db-backend-config.js';
+import {
+  DatabaseBackendConfig,
+  redactDatabaseUrl,
+} from './db-backend-config.js';
 import { logger } from './logger.js';
 
 const SNAPSHOT_ID = 'messages.db';
@@ -64,7 +67,10 @@ export class DebouncedRemotePersistenceController implements RemotePersistenceCo
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.flush().catch((err) => {
-        logger.error({ err, backend: this.backend }, 'Failed to persist SQLite snapshot');
+        logger.error(
+          { err, backend: this.backend },
+          'Failed to persist SQLite snapshot',
+        );
       });
     }, this.debounceMs);
   }
@@ -79,9 +85,11 @@ export class DebouncedRemotePersistenceController implements RemotePersistenceCo
       return;
     }
     this.dirty = false;
-    this.inFlight = this.store.persistLocalDatabase(this.localPath).finally(() => {
-      this.inFlight = null;
-    });
+    this.inFlight = this.store
+      .persistLocalDatabase(this.localPath)
+      .finally(() => {
+        this.inFlight = null;
+      });
     await this.inFlight;
   }
 
@@ -96,9 +104,12 @@ export async function createRemoteStoreFromConfig(
 ): Promise<RemoteSqliteStore | null> {
   if (config.backend === 'sqlite') return null;
   if (!config.databaseUrl) {
-    throw new Error(`OCTODECK_DATABASE_URL is required when OCTODECK_DB_BACKEND=${config.backend}`);
+    throw new Error(
+      `OCTODECK_DATABASE_URL is required when OCTODECK_DB_BACKEND=${config.backend}`,
+    );
   }
-  if (config.backend === 'mysql') return createMysqlRemoteStore(config.databaseUrl);
+  if (config.backend === 'mysql')
+    return createMysqlRemoteStore(config.databaseUrl);
   return createMongoRemoteStore(config.databaseUrl);
 }
 
@@ -113,22 +124,30 @@ export async function prepareSqlitePathForBackend(
     remoteStore = await createRemoteStoreFromConfig(config);
     if (!remoteStore) return new NoopPersistenceController();
     await remoteStore.prepareLocalDatabase(localPath);
-    logger.info({
-      backend: config.backend,
-      databaseUrl: redactDatabaseUrl(config.databaseUrl),
-    }, 'Using remote database backend for SQLite snapshot storage');
+    logger.info(
+      {
+        backend: config.backend,
+        databaseUrl: redactDatabaseUrl(config.databaseUrl),
+      },
+      'Using remote database backend for SQLite snapshot storage',
+    );
     return new DebouncedRemotePersistenceController(remoteStore, localPath);
   } catch (err) {
     if (remoteStore) await remoteStore.close().catch(() => undefined);
     if (config.fallbackToSqlite) {
-      logger.warn({ err, backend: config.backend }, 'Remote database unavailable; falling back to local SQLite');
+      logger.warn(
+        { err, backend: config.backend },
+        'Remote database unavailable; falling back to local SQLite',
+      );
       return new NoopPersistenceController();
     }
     throw err;
   }
 }
 
-async function createMysqlRemoteStore(databaseUrl: string): Promise<RemoteSqliteStore> {
+async function createMysqlRemoteStore(
+  databaseUrl: string,
+): Promise<RemoteSqliteStore> {
   const mysql = await import('mysql2/promise');
   const pool = mysql.createPool(databaseUrl);
 
@@ -166,7 +185,9 @@ async function createMysqlRemoteStore(databaseUrl: string): Promise<RemoteSqlite
   };
 }
 
-async function createMongoRemoteStore(databaseUrl: string): Promise<RemoteSqliteStore> {
+async function createMongoRemoteStore(
+  databaseUrl: string,
+): Promise<RemoteSqliteStore> {
   const { MongoClient, Binary } = await import('mongodb');
   const client = new MongoClient(databaseUrl);
   await client.connect();
@@ -178,7 +199,9 @@ async function createMongoRemoteStore(databaseUrl: string): Promise<RemoteSqlite
   return {
     backend: 'mongodb',
     async prepareLocalDatabase(localPath: string): Promise<void> {
-      const doc = await collection.findOne<{ data?: Buffer | { buffer?: Buffer } }>({ id: SNAPSHOT_ID });
+      const doc = await collection.findOne<{
+        data?: Buffer | { buffer?: Buffer };
+      }>({ id: SNAPSHOT_ID });
       const data = normalizeMongoBinary(doc?.data);
       if (!data) return;
       writeSnapshot(localPath, data);
@@ -187,7 +210,13 @@ async function createMongoRemoteStore(databaseUrl: string): Promise<RemoteSqlite
       const data = readSnapshot(localPath);
       await collection.updateOne(
         { id: SNAPSHOT_ID },
-        { $set: { id: SNAPSHOT_ID, data: new Binary(data), updatedAt: new Date() } },
+        {
+          $set: {
+            id: SNAPSHOT_ID,
+            data: new Binary(data),
+            updatedAt: new Date(),
+          },
+        },
         { upsert: true },
       );
     },
@@ -201,16 +230,23 @@ function firstMysqlSnapshot(rows: unknown): SnapshotRecord | null {
   if (!Array.isArray(rows) || rows.length === 0) return null;
   const row = rows[0] as { data?: Buffer | Uint8Array; updatedAt?: Date };
   if (!row.data) return null;
-  return { data: Buffer.from(row.data), updatedAt: row.updatedAt || new Date() };
+  return {
+    data: Buffer.from(row.data),
+    updatedAt: row.updatedAt || new Date(),
+  };
 }
 
 function normalizeMongoBinary(value: unknown): Buffer | null {
   if (!value) return null;
   if (Buffer.isBuffer(value)) return value;
   if (value instanceof Uint8Array) return Buffer.from(value);
-  const maybeBinary = value as { buffer?: Buffer | Uint8Array; value?: () => Buffer };
+  const maybeBinary = value as {
+    buffer?: Buffer | Uint8Array;
+    value?: () => Buffer;
+  };
   if (maybeBinary.buffer) return Buffer.from(maybeBinary.buffer);
-  if (typeof maybeBinary.value === 'function') return Buffer.from(maybeBinary.value());
+  if (typeof maybeBinary.value === 'function')
+    return Buffer.from(maybeBinary.value());
   return null;
 }
 

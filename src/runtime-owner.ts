@@ -70,8 +70,7 @@ export function resolveAdminSharedRuntimeOwner(args: {
   getUserById: (id: string) => RuntimeOwnerCandidateUser | null | undefined;
 }): string | null | undefined {
   const hashIdx = args.chatJid.indexOf('#');
-  const baseJid =
-    hashIdx >= 0 ? args.chatJid.slice(0, hashIdx) : args.chatJid;
+  const baseJid = hashIdx >= 0 ? args.chatJid.slice(0, hashIdx) : args.chatJid;
   if (baseJid !== 'web:main' || !args.isHome) {
     return args.fallbackOwner;
   }
@@ -105,8 +104,7 @@ export function resolvePerMessageRuntimeOwner(args: {
   getUserById: (id: string) => RuntimeOwnerCandidateUser | null | undefined;
 }): string | null | undefined {
   const hashIdx = args.chatJid.indexOf('#');
-  const baseJid =
-    hashIdx >= 0 ? args.chatJid.slice(0, hashIdx) : args.chatJid;
+  const baseJid = hashIdx >= 0 ? args.chatJid.slice(0, hashIdx) : args.chatJid;
   if (baseJid !== 'web:main' || !args.isHome) {
     return args.fallbackOwner;
   }

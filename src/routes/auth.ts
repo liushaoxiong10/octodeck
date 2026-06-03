@@ -51,7 +51,11 @@ import {
 } from '../auth.js';
 import type { AuthUser, User, UserPublic } from '../types.js';
 import { logger } from '../logger.js';
-import { lastActiveCache, invalidateSessionCache, invalidateUserSessions } from '../web-context.js';
+import {
+  lastActiveCache,
+  invalidateSessionCache,
+  invalidateUserSessions,
+} from '../web-context.js';
 import { getSystemSettings } from '../runtime-config.js';
 
 const authRoutes = new Hono<{ Variables: Variables }>();
@@ -59,7 +63,11 @@ const authRoutes = new Hono<{ Variables: Variables }>();
 // --- Helper Functions ---
 
 // Cookie helpers live in auth.ts (single source of truth, also used by middleware).
-import { setSessionCookie, clearSessionCookie, clearSessionCookies } from '../auth.js';
+import {
+  setSessionCookie,
+  clearSessionCookie,
+  clearSessionCookies,
+} from '../auth.js';
 export { setSessionCookie, clearSessionCookie };
 
 export function isUsernameConflictError(err: unknown): boolean {
@@ -106,8 +114,7 @@ function buildSetupStatus() {
       !!p.claudeOAuthCredentials ||
       !!p.anthropicApiKey?.trim();
     const hasThirdParty = !!(
-      p.anthropicBaseUrl?.trim() &&
-      p.anthropicAuthToken?.trim()
+      p.anthropicBaseUrl?.trim() && p.anthropicAuthToken?.trim()
     );
     return hasOfficial || hasThirdParty;
   });

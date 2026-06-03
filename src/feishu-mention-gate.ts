@@ -36,7 +36,10 @@ export interface MentionGateInput {
    *   - 返回 true → always 模式，放行；
    *   - 返回 false → when_mentioned / owner_mentioned，必须确认 bot 被 @。
    */
-  shouldProcessGroupMessage?: (chatJid: string, senderOpenId?: string) => boolean;
+  shouldProcessGroupMessage?: (
+    chatJid: string,
+    senderOpenId?: string,
+  ) => boolean;
   /**
    * owner_mentioned 模式专用：判断 sender 是否为该群登记的 owner。
    * 仅在 bot 真的被 @ 的前提下才会被调用。
@@ -84,7 +87,9 @@ export function isBotMentioned(
  * | false                    | 有        | 是      | 是 / 无 owner 检查 | allow |
  * | false                    | 有        | 是      | 否            | reject:not_owner |
  */
-export function evaluateMentionGate(input: MentionGateInput): MentionGateDecision {
+export function evaluateMentionGate(
+  input: MentionGateInput,
+): MentionGateDecision {
   if (input.chatType !== 'group' || !input.shouldProcessGroupMessage) {
     return ALLOW;
   }

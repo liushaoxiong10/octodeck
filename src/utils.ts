@@ -86,7 +86,9 @@ export function isSecureRequest(c: any): boolean {
   try {
     const url = new URL(c.req.url, 'http://localhost');
     if (url.protocol === 'https:') return true;
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return false;
 }
 

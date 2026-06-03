@@ -154,9 +154,7 @@ async function computeFileHashes(
         const remaining = MD5_10M_SIZE - bytesRead;
         if (remaining > 0) {
           md5_10mHash.update(
-            remaining >= buf.length
-              ? buf
-              : buf.subarray(0, remaining),
+            remaining >= buf.length ? buf : buf.subarray(0, remaining),
           );
         }
       }
@@ -681,7 +679,12 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
 
     // Check upload cache
     const md5 = crypto.createHash('md5').update(imageBuffer).digest('hex');
-    const cached = getCachedFileInfo(md5, chatType, openid, QQMediaFileType.IMAGE);
+    const cached = getCachedFileInfo(
+      md5,
+      chatType,
+      openid,
+      QQMediaFileType.IMAGE,
+    );
     if (cached) return cached;
 
     const endpoint =
@@ -689,22 +692,29 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
         ? `/v2/users/${openid}/files`
         : `/v2/groups/${openid}/files`;
 
-    const res = await apiRequest<{ file_info: string; file_uuid?: string; ttl?: number }>(
-      'POST',
-      endpoint,
-      {
-        file_type: 1, // 1 = image
-        file_data: imageBuffer.toString('base64'),
-        srv_send_msg: false,
-      },
-    );
+    const res = await apiRequest<{
+      file_info: string;
+      file_uuid?: string;
+      ttl?: number;
+    }>('POST', endpoint, {
+      file_type: 1, // 1 = image
+      file_data: imageBuffer.toString('base64'),
+      srv_send_msg: false,
+    });
     if (!res.file_info) {
       throw new Error('QQ uploadMedia: no file_info in response');
     }
 
     // Cache the result
     if (res.ttl && res.ttl > 0) {
-      setCachedFileInfo(md5, chatType, openid, QQMediaFileType.IMAGE, res.file_info, res.ttl);
+      setCachedFileInfo(
+        md5,
+        chatType,
+        openid,
+        QQMediaFileType.IMAGE,
+        res.file_info,
+        res.ttl,
+      );
     }
 
     return res.file_info;
@@ -868,11 +878,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
 
     let lastError: Error | null = null;
 
-    for (
-      let attempt = 0;
-      attempt <= COMPLETE_UPLOAD_MAX_RETRIES;
-      attempt++
-    ) {
+    for (let attempt = 0; attempt <= COMPLETE_UPLOAD_MAX_RETRIES; attempt++) {
       try {
         return await apiRequest<QQMediaUploadResponse>('POST', endpoint, {
           upload_id: uploadId,
@@ -903,10 +909,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
     const fileSize = stat.size;
     const fileName = path.basename(filePath);
 
-    logger.info(
-      { fileName, fileSize, fileType },
-      'QQ chunked upload starting',
-    );
+    logger.info({ fileName, fileSize, fileType }, 'QQ chunked upload starting');
 
     const hashes = await computeFileHashes(filePath, fileSize);
 
@@ -950,10 +953,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       const length = Math.min(block_size, fileSize - offset);
 
       const partBuffer = await readFileChunk(filePath, offset, length);
-      const md5Hex = crypto
-        .createHash('md5')
-        .update(partBuffer)
-        .digest('hex');
+      const md5Hex = crypto.createHash('md5').update(partBuffer).digest('hex');
 
       await putToPresignedUrl(
         part.presigned_url,
@@ -986,7 +986,14 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
 
     // Cache the result
     if (result.ttl > 0) {
-      setCachedFileInfo(hashes.md5, chatType, openid, fileType, result.file_info, result.ttl);
+      setCachedFileInfo(
+        hashes.md5,
+        chatType,
+        openid,
+        fileType,
+        result.file_info,
+        result.ttl,
+      );
     }
 
     return result.file_info;
@@ -1006,12 +1013,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
     }
 
     const fileType = getQQMediaFileType(fileName);
-    const fileInfo = await chunkedUpload(
-      chatType,
-      openid,
-      filePath,
-      fileType,
-    );
+    const fileInfo = await chunkedUpload(chatType, openid, filePath, fileType);
 
     const chatKey = `${chatType}:${openid}`;
     const msgSeq = getNextMsgSeq(chatKey);
@@ -1031,9 +1033,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
 
   // ─── File Download ─────────────────────────────────────────
 
-  async function downloadQQAttachment(
-    url: string,
-  ): Promise<Buffer | null> {
+  async function downloadQQAttachment(url: string): Promise<Buffer | null> {
     try {
       const buffer = await new Promise<Buffer>((resolve, reject) => {
         const doRequest = (reqUrl: string, redirectCount: number = 0) => {
@@ -1112,7 +1112,12 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
         const ext = IMAGE_EXT_MAP[imageMime] ?? '.jpg';
         const fileName = `qq_img_${msgId.slice(-8)}${ext}`;
         try {
-          const relPath = await saveDownloadedFile(groupFolder, 'qq', fileName, buffer);
+          const relPath = await saveDownloadedFile(
+            groupFolder,
+            'qq',
+            fileName,
+            buffer,
+          );
           if (relPath) content = `[图片: ${relPath}]\n${content}`.trim();
         } catch (err) {
           logger.warn({ err }, `Failed to save QQ ${logContext} image`);
@@ -1124,14 +1129,20 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
     }
 
     // Non-image file
-    const urlFilename = attachment.filename
-      || attachUrl.split('/').pop()?.split('?')[0]
-      || `qq_file_${msgId.slice(-8)}`;
+    const urlFilename =
+      attachment.filename ||
+      attachUrl.split('/').pop()?.split('?')[0] ||
+      `qq_file_${msgId.slice(-8)}`;
     const fileName = urlFilename.replace(/[^a-zA-Z0-9._\-\u4e00-\u9fff]/g, '_');
 
     if (groupFolder) {
       try {
-        const relPath = await saveDownloadedFile(groupFolder, 'qq', fileName, buffer);
+        const relPath = await saveDownloadedFile(
+          groupFolder,
+          'qq',
+          fileName,
+          buffer,
+        );
         if (relPath) content = `[文件: ${relPath}]\n${content}`.trim();
       } catch (err) {
         logger.warn({ err }, `Failed to save QQ ${logContext} file`);
@@ -1279,7 +1290,10 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
         const action = classifyCloseCode(code);
         switch (action.kind) {
           case 'refresh-token':
-            logger.info({ code }, 'QQ invalid token close, forcing token refresh');
+            logger.info(
+              { code },
+              'QQ invalid token close, forcing token refresh',
+            );
             tokenInfo = null;
             sessionId = null;
             lastSequence = null;
@@ -1473,7 +1487,10 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       if (!msgId) return;
       const msgTimeMs = data.timestamp ? new Date(data.timestamp).getTime() : 0;
       if (isStale(msgTimeMs)) {
-        logger.debug({ msgId, msgTimeMs }, 'Stale QQ C2C message (>30min), dropping');
+        logger.debug(
+          { msgId, msgTimeMs },
+          'Stale QQ C2C message (>30min), dropping',
+        );
         return;
       }
       if (isDuplicate(msgId)) return;
@@ -1483,162 +1500,171 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       }
       markSeen(msgId);
       try {
-      // Skip stale messages from before connection (hot-reload scenario)
-      if (opts.ignoreMessagesBefore && data.timestamp) {
-        const msgTime = new Date(data.timestamp).getTime();
-        if (!isNaN(msgTime) && msgTime < opts.ignoreMessagesBefore) return;
-      }
-
-      const userOpenId = data.author?.id || data.author?.user_openid;
-      if (!userOpenId) return;
-
-      // Remember the latest incoming msg_id so stream_messages can use it as
-      // the passive-reply reference (the endpoint rejects requests without one).
-      lastIncomingMsgId.set(userOpenId, msgId);
-
-      const jid = `qq:c2c:${userOpenId}`;
-      const realName = (data.author?.username || '').trim();
-      const senderName = realName || `QQ用户`;
-      const chatName = senderName;
-
-      // Strip bot mention from content
-      let content = (data.content || '').trim();
-
-      // ── /pair <code> command ──
-      const pairMatch = content.match(/^\/pair\s+(\S+)/i);
-      if (pairMatch && opts.onPairAttempt) {
-        const code = pairMatch[1];
-        try {
-          const success = await opts.onPairAttempt(jid, chatName, code);
-          const reply = success
-            ? '配对成功！此聊天已连接到你的账号。'
-            : '配对码无效或已过期，请在 Web 设置页重新生成。';
-          await sendQQMessage('c2c', userOpenId, reply);
-        } catch (err) {
-          logger.error({ err, jid }, 'QQ pair attempt error');
-          await sendQQMessage('c2c', userOpenId, '配对失败，请稍后重试。');
+        // Skip stale messages from before connection (hot-reload scenario)
+        if (opts.ignoreMessagesBefore && data.timestamp) {
+          const msgTime = new Date(data.timestamp).getTime();
+          if (!isNaN(msgTime) && msgTime < opts.ignoreMessagesBefore) return;
         }
-        return;
-      }
 
-      // ── Authorization check ──
-      if (!opts.isChatAuthorized(jid)) {
-        const now = Date.now();
-        const lastReject = rejectTimestamps.get(jid) ?? 0;
-        if (now - lastReject >= REJECT_COOLDOWN_MS) {
-          rejectTimestamps.set(jid, now);
-          await sendQQMessage(
-            'c2c',
-            userOpenId,
-            '此聊天尚未配对。请发送 /pair <code> 进行配对。\n' +
-              '你可以在 Web 设置页生成配对码。',
-          );
-        }
-        return;
-      }
+        const userOpenId = data.author?.id || data.author?.user_openid;
+        if (!userOpenId) return;
 
-      // ── Authorized: process message ──
-      storeChatMetadata(jid, new Date().toISOString());
+        // Remember the latest incoming msg_id so stream_messages can use it as
+        // the passive-reply reference (the endpoint rejects requests without one).
+        lastIncomingMsgId.set(userOpenId, msgId);
 
-      // QQ C2C payloads usually omit author.username, so naively writing
-      // chatName here would clobber user-set names (the rename API writes
-      // to both chats.name and registered_groups.name).  Only persist when
-      // the platform gave us a real username; otherwise pass the existing
-      // registered name through so buildOnNewChat's diff guard leaves it
-      // untouched, and fall back to the placeholder only for first-time
-      // registration.
-      if (realName) {
-        updateChatName(jid, realName);
-        opts.onNewChat(jid, realName);
-      } else {
-        const existing = getRegisteredGroup(jid);
-        opts.onNewChat(jid, existing?.name ?? chatName);
-      }
+        const jid = `qq:c2c:${userOpenId}`;
+        const realName = (data.author?.username || '').trim();
+        const senderName = realName || `QQ用户`;
+        const chatName = senderName;
 
-      // Handle slash commands
-      const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
-      if (slashMatch && opts.onCommand) {
-        const cmdBody = (
-          slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
-        ).trim();
-        try {
-          const reply = await opts.onCommand(jid, cmdBody);
-          if (reply) {
-            await sendQQMessage('c2c', userOpenId, markdownToPlainText(reply));
-            return;
+        // Strip bot mention from content
+        let content = (data.content || '').trim();
+
+        // ── /pair <code> command ──
+        const pairMatch = content.match(/^\/pair\s+(\S+)/i);
+        if (pairMatch && opts.onPairAttempt) {
+          const code = pairMatch[1];
+          try {
+            const success = await opts.onPairAttempt(jid, chatName, code);
+            const reply = success
+              ? '配对成功！此聊天已连接到你的账号。'
+              : '配对码无效或已过期，请在 Web 设置页重新生成。';
+            await sendQQMessage('c2c', userOpenId, reply);
+          } catch (err) {
+            logger.error({ err, jid }, 'QQ pair attempt error');
+            await sendQQMessage('c2c', userOpenId, '配对失败，请稍后重试。');
           }
-        } catch (err) {
-          logger.error({ jid, err }, 'QQ slash command failed');
-          await sendQQMessage('c2c', userOpenId, '命令执行失败，请稍后重试');
           return;
         }
-      }
 
-      // Handle attachments (images / files)
-      let attachmentsJson: string | undefined;
-      if (data.attachments?.length) {
-        const result = await processQQAttachment(
-          data.attachments[0], msgId, jid, content, opts, 'c2c',
-        );
-        content = result.content;
-        attachmentsJson = result.attachmentsJson;
-      }
+        // ── Authorization check ──
+        if (!opts.isChatAuthorized(jid)) {
+          const now = Date.now();
+          const lastReject = rejectTimestamps.get(jid) ?? 0;
+          if (now - lastReject >= REJECT_COOLDOWN_MS) {
+            rejectTimestamps.set(jid, now);
+            await sendQQMessage(
+              'c2c',
+              userOpenId,
+              '此聊天尚未配对。请发送 /pair <code> 进行配对。\n' +
+                '你可以在 Web 设置页生成配对码。',
+            );
+          }
+          return;
+        }
 
-      // Route and store message
-      const agentRouting = opts.resolveEffectiveChatJid?.(jid);
-      const targetJid = agentRouting?.effectiveJid ?? jid;
+        // ── Authorized: process message ──
+        storeChatMetadata(jid, new Date().toISOString());
 
-      const id = crypto.randomUUID();
-      let timestamp: string;
-      try {
-        timestamp = data.timestamp
-          ? new Date(data.timestamp).toISOString()
-          : new Date().toISOString();
-      } catch {
-        timestamp = new Date().toISOString();
-      }
-      const senderId = `qq:${userOpenId}`;
-      storeChatMetadata(targetJid, timestamp);
-      storeMessageDirect(
-        id,
-        targetJid,
-        senderId,
-        senderName,
-        content,
-        timestamp,
-        false,
-        { attachments: attachmentsJson, sourceJid: jid },
-      );
+        // QQ C2C payloads usually omit author.username, so naively writing
+        // chatName here would clobber user-set names (the rename API writes
+        // to both chats.name and registered_groups.name).  Only persist when
+        // the platform gave us a real username; otherwise pass the existing
+        // registered name through so buildOnNewChat's diff guard leaves it
+        // untouched, and fall back to the placeholder only for first-time
+        // registration.
+        if (realName) {
+          updateChatName(jid, realName);
+          opts.onNewChat(jid, realName);
+        } else {
+          const existing = getRegisteredGroup(jid);
+          opts.onNewChat(jid, existing?.name ?? chatName);
+        }
 
-      broadcastNewMessage(
-        targetJid,
-        {
+        // Handle slash commands
+        const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
+        if (slashMatch && opts.onCommand) {
+          const cmdBody = (
+            slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
+          ).trim();
+          try {
+            const reply = await opts.onCommand(jid, cmdBody);
+            if (reply) {
+              await sendQQMessage(
+                'c2c',
+                userOpenId,
+                markdownToPlainText(reply),
+              );
+              return;
+            }
+          } catch (err) {
+            logger.error({ jid, err }, 'QQ slash command failed');
+            await sendQQMessage('c2c', userOpenId, '命令执行失败，请稍后重试');
+            return;
+          }
+        }
+
+        // Handle attachments (images / files)
+        let attachmentsJson: string | undefined;
+        if (data.attachments?.length) {
+          const result = await processQQAttachment(
+            data.attachments[0],
+            msgId,
+            jid,
+            content,
+            opts,
+            'c2c',
+          );
+          content = result.content;
+          attachmentsJson = result.attachmentsJson;
+        }
+
+        // Route and store message
+        const agentRouting = opts.resolveEffectiveChatJid?.(jid);
+        const targetJid = agentRouting?.effectiveJid ?? jid;
+
+        const id = crypto.randomUUID();
+        let timestamp: string;
+        try {
+          timestamp = data.timestamp
+            ? new Date(data.timestamp).toISOString()
+            : new Date().toISOString();
+        } catch {
+          timestamp = new Date().toISOString();
+        }
+        const senderId = `qq:${userOpenId}`;
+        storeChatMetadata(targetJid, timestamp);
+        storeMessageDirect(
           id,
-          chat_jid: targetJid,
-          source_jid: jid,
-          sender: senderId,
-          sender_name: senderName,
+          targetJid,
+          senderId,
+          senderName,
           content,
           timestamp,
-          attachments: attachmentsJson,
-          is_from_me: false,
-        },
-        agentRouting?.agentId ?? undefined,
-      );
-      notifyNewImMessage();
+          false,
+          { attachments: attachmentsJson, sourceJid: jid },
+        );
 
-      if (agentRouting?.agentId) {
-        opts.onAgentMessage?.(jid, agentRouting.agentId);
-        logger.info(
-          { jid, effectiveJid: targetJid, agentId: agentRouting.agentId },
-          'QQ C2C message routed to agent',
+        broadcastNewMessage(
+          targetJid,
+          {
+            id,
+            chat_jid: targetJid,
+            source_jid: jid,
+            sender: senderId,
+            sender_name: senderName,
+            content,
+            timestamp,
+            attachments: attachmentsJson,
+            is_from_me: false,
+          },
+          agentRouting?.agentId ?? undefined,
         );
-      } else {
-        logger.info(
-          { jid, sender: senderName, msgId },
-          'QQ C2C message stored',
-        );
-      }
+        notifyNewImMessage();
+
+        if (agentRouting?.agentId) {
+          opts.onAgentMessage?.(jid, agentRouting.agentId);
+          logger.info(
+            { jid, effectiveJid: targetJid, agentId: agentRouting.agentId },
+            'QQ C2C message routed to agent',
+          );
+        } else {
+          logger.info(
+            { jid, sender: senderName, msgId },
+            'QQ C2C message stored',
+          );
+        }
       } finally {
         processingLock.release(msgId);
       }
@@ -1656,7 +1682,10 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       if (!msgId) return;
       const msgTimeMs = data.timestamp ? new Date(data.timestamp).getTime() : 0;
       if (isStale(msgTimeMs)) {
-        logger.debug({ msgId, msgTimeMs }, 'Stale QQ group message (>30min), dropping');
+        logger.debug(
+          { msgId, msgTimeMs },
+          'Stale QQ group message (>30min), dropping',
+        );
         return;
       }
       if (isDuplicate(msgId)) return;
@@ -1666,153 +1695,162 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       }
       markSeen(msgId);
       try {
-      // Skip stale messages from before connection (hot-reload scenario)
-      if (opts.ignoreMessagesBefore && data.timestamp) {
-        const msgTime = new Date(data.timestamp).getTime();
-        if (!isNaN(msgTime) && msgTime < opts.ignoreMessagesBefore) return;
-      }
-
-      const groupOpenId = data.group_openid;
-      if (!groupOpenId) return;
-
-      const jid = `qq:group:${groupOpenId}`;
-      const memberOpenId = data.author?.member_openid;
-      const senderName = data.author?.username || `QQ群成员`;
-      const chatName = `QQ群 ${groupOpenId.slice(0, 8)}`;
-
-      // Strip bot mention text (e.g. <@!bot_id>)
-      let content = (data.content || '').replace(/<@!\w+>/g, '').trim();
-
-      // ── /pair <code> command ──
-      const pairMatch = content.match(/^\/pair\s+(\S+)/i);
-      if (pairMatch && opts.onPairAttempt) {
-        const code = pairMatch[1];
-        try {
-          const success = await opts.onPairAttempt(jid, chatName, code);
-          const reply = success
-            ? '配对成功！此群聊已连接。'
-            : '配对码无效或已过期，请在 Web 设置页重新生成。';
-          await sendQQMessage('group', groupOpenId, reply);
-        } catch (err) {
-          logger.error({ err, jid }, 'QQ group pair attempt error');
-          await sendQQMessage('group', groupOpenId, '配对失败，请稍后重试。');
+        // Skip stale messages from before connection (hot-reload scenario)
+        if (opts.ignoreMessagesBefore && data.timestamp) {
+          const msgTime = new Date(data.timestamp).getTime();
+          if (!isNaN(msgTime) && msgTime < opts.ignoreMessagesBefore) return;
         }
-        return;
-      }
 
-      // ── Authorization check ──
-      if (!opts.isChatAuthorized(jid)) {
-        const now = Date.now();
-        const lastReject = rejectTimestamps.get(jid) ?? 0;
-        if (now - lastReject >= REJECT_COOLDOWN_MS) {
-          rejectTimestamps.set(jid, now);
-          await sendQQMessage(
-            'group',
-            groupOpenId,
-            '此群聊尚未配对。请发送 /pair <code> 进行配对。',
-          );
+        const groupOpenId = data.group_openid;
+        if (!groupOpenId) return;
+
+        const jid = `qq:group:${groupOpenId}`;
+        const memberOpenId = data.author?.member_openid;
+        const senderName = data.author?.username || `QQ群成员`;
+        const chatName = `QQ群 ${groupOpenId.slice(0, 8)}`;
+
+        // Strip bot mention text (e.g. <@!bot_id>)
+        let content = (data.content || '').replace(/<@!\w+>/g, '').trim();
+
+        // ── /pair <code> command ──
+        const pairMatch = content.match(/^\/pair\s+(\S+)/i);
+        if (pairMatch && opts.onPairAttempt) {
+          const code = pairMatch[1];
+          try {
+            const success = await opts.onPairAttempt(jid, chatName, code);
+            const reply = success
+              ? '配对成功！此群聊已连接。'
+              : '配对码无效或已过期，请在 Web 设置页重新生成。';
+            await sendQQMessage('group', groupOpenId, reply);
+          } catch (err) {
+            logger.error({ err, jid }, 'QQ group pair attempt error');
+            await sendQQMessage('group', groupOpenId, '配对失败，请稍后重试。');
+          }
+          return;
         }
-        return;
-      }
 
-      // ── Authorized: process message ──
-      storeChatMetadata(jid, new Date().toISOString());
-
-      // QQ group payloads don't carry a group name; chatName is always a
-      // placeholder derived from groupOpenId.  Only write it on first-time
-      // registration — otherwise we'd clobber user-set names (rename API).
-      const existing = getRegisteredGroup(jid);
-      if (!existing) {
-        updateChatName(jid, chatName);
-        opts.onNewChat(jid, chatName);
-      } else {
-        opts.onNewChat(jid, existing.name ?? chatName);
-      }
-
-      // Handle slash commands
-      const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
-      if (slashMatch && opts.onCommand) {
-        const cmdBody = (
-          slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
-        ).trim();
-        try {
-          const reply = await opts.onCommand(jid, cmdBody);
-          if (reply) {
+        // ── Authorization check ──
+        if (!opts.isChatAuthorized(jid)) {
+          const now = Date.now();
+          const lastReject = rejectTimestamps.get(jid) ?? 0;
+          if (now - lastReject >= REJECT_COOLDOWN_MS) {
+            rejectTimestamps.set(jid, now);
             await sendQQMessage(
               'group',
               groupOpenId,
-              markdownToPlainText(reply),
+              '此群聊尚未配对。请发送 /pair <code> 进行配对。',
+            );
+          }
+          return;
+        }
+
+        // ── Authorized: process message ──
+        storeChatMetadata(jid, new Date().toISOString());
+
+        // QQ group payloads don't carry a group name; chatName is always a
+        // placeholder derived from groupOpenId.  Only write it on first-time
+        // registration — otherwise we'd clobber user-set names (rename API).
+        const existing = getRegisteredGroup(jid);
+        if (!existing) {
+          updateChatName(jid, chatName);
+          opts.onNewChat(jid, chatName);
+        } else {
+          opts.onNewChat(jid, existing.name ?? chatName);
+        }
+
+        // Handle slash commands
+        const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
+        if (slashMatch && opts.onCommand) {
+          const cmdBody = (
+            slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
+          ).trim();
+          try {
+            const reply = await opts.onCommand(jid, cmdBody);
+            if (reply) {
+              await sendQQMessage(
+                'group',
+                groupOpenId,
+                markdownToPlainText(reply),
+              );
+              return;
+            }
+          } catch (err) {
+            logger.error({ jid, err }, 'QQ group slash command failed');
+            await sendQQMessage(
+              'group',
+              groupOpenId,
+              '命令执行失败，请稍后重试',
             );
             return;
           }
-        } catch (err) {
-          logger.error({ jid, err }, 'QQ group slash command failed');
-          await sendQQMessage('group', groupOpenId, '命令执行失败，请稍后重试');
-          return;
         }
-      }
 
-      // Handle attachments (images / files)
-      let attachmentsJson: string | undefined;
-      if (data.attachments?.length) {
-        const result = await processQQAttachment(
-          data.attachments[0], msgId, jid, content, opts, 'group',
-        );
-        content = result.content;
-        attachmentsJson = result.attachmentsJson;
-      }
+        // Handle attachments (images / files)
+        let attachmentsJson: string | undefined;
+        if (data.attachments?.length) {
+          const result = await processQQAttachment(
+            data.attachments[0],
+            msgId,
+            jid,
+            content,
+            opts,
+            'group',
+          );
+          content = result.content;
+          attachmentsJson = result.attachmentsJson;
+        }
 
-      // Route and store
-      const agentRouting = opts.resolveEffectiveChatJid?.(jid);
-      const targetJid = agentRouting?.effectiveJid ?? jid;
+        // Route and store
+        const agentRouting = opts.resolveEffectiveChatJid?.(jid);
+        const targetJid = agentRouting?.effectiveJid ?? jid;
 
-      const id = crypto.randomUUID();
-      let timestamp: string;
-      try {
-        timestamp = data.timestamp
-          ? new Date(data.timestamp).toISOString()
-          : new Date().toISOString();
-      } catch {
-        timestamp = new Date().toISOString();
-      }
-      const senderId = memberOpenId ? `qq:${memberOpenId}` : 'qq:unknown';
-      storeChatMetadata(targetJid, timestamp);
-      storeMessageDirect(
-        id,
-        targetJid,
-        senderId,
-        senderName,
-        content,
-        timestamp,
-        false,
-        { attachments: attachmentsJson, sourceJid: jid },
-      );
-
-      broadcastNewMessage(
-        targetJid,
-        {
+        const id = crypto.randomUUID();
+        let timestamp: string;
+        try {
+          timestamp = data.timestamp
+            ? new Date(data.timestamp).toISOString()
+            : new Date().toISOString();
+        } catch {
+          timestamp = new Date().toISOString();
+        }
+        const senderId = memberOpenId ? `qq:${memberOpenId}` : 'qq:unknown';
+        storeChatMetadata(targetJid, timestamp);
+        storeMessageDirect(
           id,
-          chat_jid: targetJid,
-          source_jid: jid,
-          sender: senderId,
-          sender_name: senderName,
+          targetJid,
+          senderId,
+          senderName,
           content,
           timestamp,
-          attachments: attachmentsJson,
-          is_from_me: false,
-        },
-        agentRouting?.agentId ?? undefined,
-      );
-      notifyNewImMessage();
+          false,
+          { attachments: attachmentsJson, sourceJid: jid },
+        );
 
-      if (agentRouting?.agentId) {
-        opts.onAgentMessage?.(jid, agentRouting.agentId);
-      }
+        broadcastNewMessage(
+          targetJid,
+          {
+            id,
+            chat_jid: targetJid,
+            source_jid: jid,
+            sender: senderId,
+            sender_name: senderName,
+            content,
+            timestamp,
+            attachments: attachmentsJson,
+            is_from_me: false,
+          },
+          agentRouting?.agentId ?? undefined,
+        );
+        notifyNewImMessage();
 
-      logger.info(
-        { jid, sender: senderName, msgId },
-        'QQ group message stored',
-      );
+        if (agentRouting?.agentId) {
+          opts.onAgentMessage?.(jid, agentRouting.agentId);
+        }
+
+        logger.info(
+          { jid, sender: senderName, msgId },
+          'QQ group message stored',
+        );
       } finally {
         processingLock.release(msgId);
       }
@@ -1963,12 +2001,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
       }
 
       try {
-        await sendQQFileMessage(
-          parsed.type,
-          parsed.openid,
-          filePath,
-          fileName,
-        );
+        await sendQQFileMessage(parsed.type, parsed.openid, filePath, fileName);
         logger.info({ chatId, fileName }, 'QQ file sent');
       } catch (err) {
         logger.error({ err, chatId, fileName }, 'Failed to send QQ file');

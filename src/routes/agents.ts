@@ -61,10 +61,7 @@ async function checkFeishuThreadCapable(
 }
 
 /** Update workspace RegisteredGroup in DB + in-memory cache. */
-function updateWorkspaceGroup(
-  jid: string,
-  workspace: RegisteredGroup,
-): void {
+function updateWorkspaceGroup(jid: string, workspace: RegisteredGroup): void {
   setRegisteredGroup(jid, workspace);
   const deps = getWebDeps();
   if (deps) {
@@ -397,9 +394,7 @@ function isThreadCapableFeishuGroup(info?: {
   group_message_type?: string;
 }): boolean {
   if (!info || info.channel_type !== 'feishu') return false;
-  return (
-    info.chat_mode === 'topic' || info.group_message_type === 'thread'
-  );
+  return info.chat_mode === 'topic' || info.group_message_type === 'thread';
 }
 
 // GET /api/groups/:jid/im-groups — list available IM group chats for this folder
@@ -571,7 +566,11 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   if (!canAccessGroup(user, { ...imGroup, jid: imJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
-  const { threadCapable } = await checkFeishuThreadCapable(user.id, imJid, imGroup);
+  const { threadCapable } = await checkFeishuThreadCapable(
+    user.id,
+    imJid,
+    imGroup,
+  );
   if (threadCapable) {
     return c.json(
       {
@@ -694,7 +693,11 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   if (!canAccessGroup(user, { ...imGroup, jid: imJid })) {
     return c.json({ error: 'Forbidden' }, 403);
   }
-  const { threadCapable, feishuInfo } = await checkFeishuThreadCapable(user.id, imJid, imGroup);
+  const { threadCapable, feishuInfo } = await checkFeishuThreadCapable(
+    user.id,
+    imJid,
+    imGroup,
+  );
   const targetMainJid = jid; // Use actual registered JID (not folder-based)
   const legacyMainJid = `web:${group.folder}`;
   const force = body.force === true;
@@ -715,7 +718,10 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   }
   if (group.conversation_source === 'feishu_thread' && !threadCapable) {
     return c.json(
-      { error: 'Topic workspaces only accept Feishu topic/thread group bindings' },
+      {
+        error:
+          'Topic workspaces only accept Feishu topic/thread group bindings',
+      },
       400,
     );
   }

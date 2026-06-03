@@ -102,7 +102,11 @@ export async function extractFileText(
     if (OFFICE_EXTS.has(ext)) {
       // Try textutil first (macOS), then pandoc (Linux container).
       for (const [bin, args, label] of [
-        ['textutil', ['-convert', 'txt', '-stdout', filePath], 'textutil'] as const,
+        [
+          'textutil',
+          ['-convert', 'txt', '-stdout', filePath],
+          'textutil',
+        ] as const,
         ['pandoc', ['--to=plain', filePath], 'pandoc'] as const,
       ]) {
         try {

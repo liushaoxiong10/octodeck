@@ -322,9 +322,20 @@ export async function executeInlineBashDocker(
   // env passthrough for docker is via -e flags; child env is the orchestrator's
   // own env (ignored by docker exec).
   const startedAt = Date.now();
-  const result = await runChildProcess('docker', args, undefined, undefined, opts);
+  const result = await runChildProcess(
+    'docker',
+    args,
+    undefined,
+    undefined,
+    opts,
+  );
   // executionMode is 'container' (NOT 'docker') to align with
   // ExpandContext.executionMode / ExecutionMode enum and avoid log enum split.
-  logInlineMetric('container', rawCmdString.length, Date.now() - startedAt, result);
+  logInlineMetric(
+    'container',
+    rawCmdString.length,
+    Date.now() - startedAt,
+    result,
+  );
   return result;
 }

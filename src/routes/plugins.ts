@@ -23,10 +23,7 @@ import {
 } from '../plugin-utils.js';
 import { checkPluginDependencies } from '../plugin-dependency-check.js';
 import { getUserHomeGroup } from '../db.js';
-import {
-  scanHostMarketplaces,
-  isScanInFlight,
-} from '../plugin-importer.js';
+import { scanHostMarketplaces, isScanInFlight } from '../plugin-importer.js';
 import {
   readCatalogIndex,
   type CatalogIndex,
@@ -100,7 +97,10 @@ pluginsRoutes.get('/', authMiddleware, async (c) => {
 
   const byMarketplace = new Map<string, MarketplaceRow>();
 
-  function ensureMarketplaceRow(name: string, fallbackSyncedAt: string): MarketplaceRow {
+  function ensureMarketplaceRow(
+    name: string,
+    fallbackSyncedAt: string,
+  ): MarketplaceRow {
     const existing = byMarketplace.get(name);
     if (existing) return existing;
     const mpCat = catalog.marketplaces[name];

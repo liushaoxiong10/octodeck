@@ -11,7 +11,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -21,6 +23,8 @@ import (
 
 func goos() string   { return runtime.GOOS }
 func goarch() string { return runtime.GOARCH }
+
+const daemonVersion = "octodeck-daemon/1.0.0"
 
 func hostname() string {
 	h, err := os.Hostname()
@@ -37,6 +41,28 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "agent-runtime" {
+		if err := runAgentRuntimeCommand(os.Args[2:]); err != nil {
+			log.Fatalf("octodeck-daemon agent-runtime: %v", err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "update" {
+		if err := runUpdateCommand(os.Args[2:]); err != nil {
+			log.Fatalf("octodeck-daemon update: %v", err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "uninstall" {
+		if err := runUninstallCommand(os.Args[2:]); err != nil {
+			log.Fatalf("octodeck-daemon uninstall: %v", err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Println(daemonVersion)
+		return
+	}
 
 	var configPath string
 	flag.StringVar(&configPath, "config", "", "path to config.json (default ~/.octodeck/daemon/config.json)")
@@ -46,7 +72,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("octodeck-daemon: %v", err)
 	}
-	cfg.AgentClients = discoverAgentClients()
+	cfg.AgentClients = discoverAgentClientsForConfig(cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -66,6 +92,168 @@ func main() {
 	if err := runForever(ctx, cfg); err != nil {
 		log.Printf("octodeck-daemon: terminated: %v", err)
 		os.Exit(1)
+	}
+}
+
+func runUpdateCommand(args []string) error {
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	var configPath string
+	var targetPath string
+	var restart bool
+	fs.StringVar(&configPath, "config", "", "path to config.json")
+	fs.StringVar(&targetPath, "target", "", "path to octodeck-daemon binary to replace (default current executable)")
+	fs.BoolVar(&restart, "restart", true, "restart octodeck-daemon user service after updating")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	if targetPath == "" {
+		targetPath, err = os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolve current executable: %w", err)
+		}
+	}
+	targetPath, err = filepath.Abs(targetPath)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(targetPath)
+	mode := os.FileMode(0o755)
+	if err == nil {
+		mode = info.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat target binary: %w", err)
+	}
+	binURL := strings.TrimRight(cfg.Server, "/") + "/api/daemon/octodeck-daemon-bin"
+	tmp := filepath.Join(filepath.Dir(targetPath), fmt.Sprintf(".octodeck-daemon.update.%d", os.Getpid()))
+	if err := downloadFile(binURL, tmp, mode); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, targetPath); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace target binary: %w", err)
+	}
+	fmt.Printf("octodeck-daemon: updated %s from %s\n", targetPath, binURL)
+	if restart {
+		if err := restartDaemonService(); err != nil {
+			fmt.Fprintf(os.Stderr, "octodeck-daemon: updated but restart failed: %v\n", err)
+			fmt.Fprintln(os.Stderr, "octodeck-daemon: please restart the daemon manually")
+			return nil
+		}
+		fmt.Println("octodeck-daemon: restart requested")
+	}
+	return nil
+}
+
+func downloadFile(url string, target string, mode os.FileMode) error {
+	client := &http.Client{Timeout: 2 * time.Minute}
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("download %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("download %s: http %s", url, resp.Status)
+	}
+	f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(f, resp.Body)
+	closeErr := f.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Chmod(target, mode)
+}
+
+func restartDaemonService() error {
+	if runtime.GOOS == "darwin" {
+		plist := filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", "com.octodeck.octodeck-daemon.plist")
+		if _, err := os.Stat(plist); err == nil {
+			return exec.Command("launchctl", "kickstart", "-k", fmt.Sprintf("gui/%d/com.octodeck.octodeck-daemon", os.Getuid())).Run()
+		}
+	}
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		service := filepath.Join(os.Getenv("HOME"), ".config", "systemd", "user", "octodeck-daemon.service")
+		if _, statErr := os.Stat(service); statErr == nil {
+			return exec.Command("systemctl", "--user", "restart", "octodeck-daemon.service").Run()
+		}
+	}
+	return fmt.Errorf("no launchctl/systemd user service found")
+}
+
+func runUninstallCommand(args []string) error {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	var removeData bool
+	var keepConfig bool
+	fs.BoolVar(&removeData, "remove-data", false, "also remove workspace/task/repos/session data under ~/.octodeck")
+	fs.BoolVar(&keepConfig, "keep-config", false, "keep ~/.octodeck/daemon/config.json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	home, err := octodeckHomeDir()
+	if err != nil {
+		return err
+	}
+	daemon, err := defaultDaemonDir()
+	if err != nil {
+		return err
+	}
+	stopAndRemoveDaemonService()
+	if keepConfig {
+		configPath := filepath.Join(daemon, "config.json")
+		configData, readErr := os.ReadFile(configPath)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return fmt.Errorf("read config before uninstall: %w", readErr)
+		}
+		if err := os.RemoveAll(daemon); err != nil {
+			return fmt.Errorf("remove daemon dir: %w", err)
+		}
+		if readErr == nil {
+			if err := os.MkdirAll(daemon, 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+				return err
+			}
+		}
+	} else if err := os.RemoveAll(daemon); err != nil {
+		return fmt.Errorf("remove daemon dir: %w", err)
+	}
+	if removeData {
+		for _, name := range []string{"workspace", "task", "repos", "session"} {
+			if err := os.RemoveAll(filepath.Join(home, name)); err != nil {
+				return fmt.Errorf("remove %s: %w", name, err)
+			}
+		}
+	}
+	fmt.Println("octodeck-daemon: uninstalled")
+	if !removeData {
+		fmt.Printf("octodeck-daemon: kept workspace data under %s (use --remove-data to delete it)\n", home)
+	}
+	return nil
+}
+
+func stopAndRemoveDaemonService() {
+	if runtime.GOOS == "darwin" {
+		plist := filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", "com.octodeck.octodeck-daemon.plist")
+		_ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d/com.octodeck.octodeck-daemon", os.Getuid())).Run()
+		_ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d", os.Getuid()), plist).Run()
+		_ = os.Remove(plist)
+	}
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		service := filepath.Join(os.Getenv("HOME"), ".config", "systemd", "user", "octodeck-daemon.service")
+		_ = exec.Command("systemctl", "--user", "disable", "--now", "octodeck-daemon.service").Run()
+		_ = os.Remove(service)
+		_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
 	}
 }
 

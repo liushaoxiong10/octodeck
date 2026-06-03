@@ -36,7 +36,9 @@ export function validateSkillPath(
   const normalizedRoot = path.resolve(skillsRoot);
   const normalizedDir = path.resolve(skillDir);
   const relative = path.relative(normalizedRoot, normalizedDir);
-  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+  return (
+    relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
+  );
 }
 
 export function parseFrontmatter(content: string): Record<string, string> {

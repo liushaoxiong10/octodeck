@@ -29,3 +29,11 @@ export function buildDaemonInstallUrl(opts: DaemonInstallOptions): string {
 export function buildDaemonInstallCommand(opts: DaemonInstallOptions): string {
   return `curl -fsSL "${buildDaemonInstallUrl(opts)}" | bash`;
 }
+
+export function buildDaemonUpdateCommand(): string {
+  return '~/.octodeck/daemon/bin/octodeck-daemon update -config ~/.octodeck/daemon/config.json';
+}
+
+export function buildDaemonUninstallCommand(): string {
+  return '~/.octodeck/daemon/bin/octodeck-daemon uninstall';
+}

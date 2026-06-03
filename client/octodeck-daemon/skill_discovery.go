@@ -12,6 +12,7 @@ import (
 )
 
 type skillDiscoverer struct {
+	cfg  *Config
 	send func(any) error
 }
 
@@ -28,14 +29,14 @@ type skillsManifest struct {
 
 const maxSkillContentBytes = 200_000
 
-func newSkillDiscoverer(send func(any) error) *skillDiscoverer {
-	return &skillDiscoverer{send: send}
+func newSkillDiscoverer(cfg *Config, send func(any) error) *skillDiscoverer {
+	return &skillDiscoverer{cfg: cfg, send: send}
 }
 
 func (d *skillDiscoverer) handle(ctx context.Context, req *SkillsRequestFrame) {
 	go func() {
 		started := time.Now()
-		result, err := discoverProviderSkills(ctx, req.ProviderID, req.Cwd)
+		result, err := discoverProviderSkills(ctx, d.cfg, req.ProviderID, req.Cwd)
 		var errPtr *string
 		if err != nil {
 			msg := err.Error()
@@ -53,12 +54,15 @@ func (d *skillDiscoverer) handle(ctx context.Context, req *SkillsRequestFrame) {
 	}()
 }
 
-func discoverProviderSkills(ctx context.Context, providerID string, cwd string) (skillsDiscoveryResult, error) {
+func discoverProviderSkills(ctx context.Context, cfg *Config, providerID string, cwd string) (skillsDiscoveryResult, error) {
 	providerID = strings.TrimSpace(providerID)
 	if providerID == "" {
 		return skillsDiscoveryResult{}, fmt.Errorf("providerId required")
 	}
 	clients := discoverAgentClients()
+	if cfg != nil && len(cfg.AgentClients) > 0 {
+		clients = cfg.AgentClients
+	}
 	var found bool
 	for _, client := range clients {
 		if client.ID == providerID {
@@ -80,6 +84,13 @@ func discoverProviderSkills(ctx context.Context, providerID string, cwd string) 
 		if wd, err := os.Getwd(); err == nil {
 			cwd = wd
 		}
+	} else if strings.HasPrefix(cwd, deviceWorkspaceURIPrefix) {
+		folder := strings.TrimPrefix(cwd, deviceWorkspaceURIPrefix)
+		resolved, err := ensureNamedWorkspaceDir(cfg, folder)
+		if err != nil {
+			return skillsDiscoveryResult{}, err
+		}
+		cwd = resolved
 	}
 	home, _ := os.UserHomeDir()
 	return skillsDiscoveryResult{

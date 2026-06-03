@@ -9,6 +9,8 @@ import {
 import type { AuthUser } from '../types.js';
 import type { RegisteredGroup } from '../types.js';
 import { getRegisteredGroup } from '../db.js';
+import { getSession } from '../agent-link/registry.js';
+import { invokeRemoteTool } from '../agent-link/tool-rpc.js';
 import { logger } from '../logger.js';
 import {
   listFiles,
@@ -120,7 +122,14 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 
 // 不安全的扩展名（HTML/SVG 有 XSS 风险，压缩包不可预览）
-const UNSAFE_PREVIEW_EXTENSIONS = new Set(['html', 'svg', 'zip', 'tar', 'gz', '7z']);
+const UNSAFE_PREVIEW_EXTENSIONS = new Set([
+  'html',
+  'svg',
+  'zip',
+  'tar',
+  'gz',
+  '7z',
+]);
 
 // 允许 inline 预览的安全 MIME 类型（从 MIME_MAP 中排除不安全扩展名自动推导）
 const SAFE_PREVIEW_MIME_TYPES = new Set(
@@ -234,8 +243,77 @@ async function openDirectoryInFileManager(targetDir: string): Promise<void> {
 
 const fileRoutes = new Hono<{ Variables: Variables }>();
 
+function isDeviceWorkspaceFilesGroup(group: RegisteredGroup): boolean {
+  return (
+    (group.runtimeProfile === 'server-agent-device-tools' ||
+      group.runtimeProfile === 'device-cli-agent') &&
+    !!(group.deviceLinkId || group.executionNode)
+  );
+}
+
+function deviceWorkspaceCwd(group: RegisteredGroup): string {
+  return `octodeck-workspace://${group.folder}`;
+}
+
+function normalizeRemoteRelativePath(relativePath: string): string {
+  const normalized = path.posix.normalize(
+    (relativePath || '').replace(/\\/g, '/'),
+  );
+  if (normalized === '.' || normalized === '') return '';
+  if (
+    normalized.startsWith('../') ||
+    normalized === '..' ||
+    path.posix.isAbsolute(normalized)
+  ) {
+    throw new Error('Path traversal detected');
+  }
+  return normalized;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function readDeviceWorkspaceFile(
+  group: RegisteredGroup,
+  relativePath: string,
+  maxBytes: number,
+): Promise<Buffer> {
+  const result = await invokeDeviceWorkspaceTool(
+    group,
+    'Read',
+    { file_path: normalizeRemoteRelativePath(relativePath), base64: true },
+    { maxOutputBytes: maxBytes },
+  );
+  const encoded =
+    typeof result?.contentBase64 === 'string' ? result.contentBase64 : '';
+  return Buffer.from(encoded, 'base64');
+}
+
+async function invokeDeviceWorkspaceTool(
+  group: RegisteredGroup,
+  toolName: string,
+  input: Record<string, unknown>,
+  opts?: { timeoutMs?: number; maxOutputBytes?: number },
+) {
+  const linkId = group.deviceLinkId || group.executionNode;
+  if (!linkId) throw new Error('Device link not configured');
+  const session = getSession(linkId);
+  if (!session || session.state !== 'open') throw new Error('Device offline');
+  const result = await invokeRemoteTool(session, {
+    linkId,
+    toolName,
+    input,
+    cwd: deviceWorkspaceCwd(group),
+    timeoutMs: opts?.timeoutMs ?? 60_000,
+    maxOutputBytes: opts?.maxOutputBytes ?? 10 * 1024 * 1024,
+  });
+  if (!result.ok) throw new Error(result.error || `${toolName} failed`);
+  return result.result as Record<string, unknown> | null;
+}
+
 // GET /api/groups/:jid/files?path= - 列出文件
-fileRoutes.get('/:jid/files', authMiddleware, (c) => {
+fileRoutes.get('/:jid/files', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
   const subPath = c.req.query('path') || '';
 
@@ -256,6 +334,37 @@ fileRoutes.get('/:jid/files', authMiddleware, (c) => {
   }
 
   try {
+    if (isDeviceWorkspaceFilesGroup(group)) {
+      const relativePath = normalizeRemoteRelativePath(subPath);
+      const result = await invokeDeviceWorkspaceTool(group, 'LS', {
+        path: relativePath || '.',
+      });
+      const entries = Array.isArray(result?.entries)
+        ? (result.entries as Array<Record<string, unknown>>)
+        : [];
+      const files = entries.map((entry) => {
+        const name = String(entry.name || '');
+        const entryPath = relativePath
+          ? path.posix.join(relativePath, name)
+          : name;
+        return {
+          name,
+          path: entryPath,
+          type: entry.type === 'directory' ? 'directory' : 'file',
+          size: typeof entry.size === 'number' ? entry.size : 0,
+          modifiedAt:
+            typeof entry.modifiedAt === 'string'
+              ? entry.modifiedAt
+              : new Date().toISOString(),
+          isSystem: isSystemPath(entryPath),
+          absolutePath:
+            typeof entry.path === 'string'
+              ? entry.path
+              : path.posix.join(deviceWorkspaceCwd(group), entryPath),
+        };
+      });
+      return c.json({ files, currentPath: relativePath });
+    }
     const result = listFiles(group.folder, subPath, getFileRootOverride(group));
     const files = result.files.map((entry) => ({
       ...entry,
@@ -302,6 +411,40 @@ fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
     // 支持单文件和多文件上传
     const fileList = Array.isArray(files) ? files : [files];
     const uploadedFiles: string[] = [];
+
+    if (isDeviceWorkspaceFilesGroup(group)) {
+      const normalizedTarget = normalizeRemoteRelativePath(targetPath);
+      for (const file of fileList) {
+        if (!(file instanceof File)) continue;
+        if (file.size > MAX_FILE_SIZE) {
+          return c.json(
+            { error: `File ${file.name} exceeds maximum size of 50MB` },
+            400,
+          );
+        }
+        if (file.name.includes('..') || file.name.startsWith('/')) {
+          return c.json({ error: `Invalid file name: ${file.name}` }, 400);
+        }
+        const relativeFilePath = normalizeRemoteRelativePath(
+          path.posix.join(normalizedTarget, file.name),
+        );
+        if (isSystemPath(normalizedTarget) || isSystemPath(relativeFilePath)) {
+          return c.json({ error: 'Cannot upload to system path' }, 403);
+        }
+        const buffer = Buffer.from(await file.arrayBuffer());
+        await invokeDeviceWorkspaceTool(
+          group,
+          'Write',
+          {
+            file_path: relativeFilePath,
+            contentBase64: buffer.toString('base64'),
+          },
+          { timeoutMs: 120_000, maxOutputBytes: Math.max(buffer.length, 1024) },
+        );
+        uploadedFiles.push(file.name);
+      }
+      return c.json({ success: true, files: uploadedFiles });
+    }
 
     // Billing: check storage limit before uploading
     if (isBillingEnabled() && group.created_by) {
@@ -433,7 +576,7 @@ fileRoutes.post('/:jid/files/open-directory', authMiddleware, async (c) => {
 });
 
 // GET /api/groups/:jid/files/download/:path - 下载文件
-fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
+fileRoutes.get('/:jid/files/download/:path', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
@@ -458,6 +601,25 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
+    if (isDeviceWorkspaceFilesGroup(group)) {
+      const safePath = normalizeRemoteRelativePath(relativePath);
+      const data = await readDeviceWorkspaceFile(
+        group,
+        safePath,
+        MAX_FILE_SIZE,
+      );
+      const fileName = path.posix.basename(safePath);
+      return new Response(data, {
+        status: 200,
+        headers: {
+          'Content-Disposition': buildAttachmentContentDisposition(fileName),
+          'Content-Type': 'application/octet-stream',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "default-src 'none'; sandbox",
+          'Content-Length': String(data.length),
+        },
+      });
+    }
     const absolutePath = validateAndResolvePath(
       group.folder,
       relativePath,
@@ -534,7 +696,7 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
 });
 
 // GET /api/groups/:jid/files/preview/:path - 预览文件
-fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
+fileRoutes.get('/:jid/files/preview/:path', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
@@ -559,6 +721,29 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
+    if (isDeviceWorkspaceFilesGroup(group)) {
+      const safePath = normalizeRemoteRelativePath(relativePath);
+      const data = await readDeviceWorkspaceFile(
+        group,
+        safePath,
+        MAX_FILE_SIZE,
+      );
+      const ext = path.posix.extname(safePath).slice(1).toLowerCase();
+      const mimeType = MIME_MAP[ext] || 'application/octet-stream';
+      const safePreview = SAFE_PREVIEW_MIME_TYPES.has(mimeType);
+      return new Response(data, {
+        status: 200,
+        headers: {
+          'Content-Security-Policy': "default-src 'none'; sandbox",
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Type': safePreview ? mimeType : 'application/octet-stream',
+          'Content-Disposition': safePreview
+            ? 'inline'
+            : `attachment; filename="${encodeURIComponent(path.posix.basename(safePath))}"`,
+          'Content-Length': String(data.length),
+        },
+      });
+    }
     const absolutePath = validateAndResolvePath(
       group.folder,
       relativePath,
@@ -612,8 +797,7 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
       const rangeHeader = c.req.header('range');
       if (rangeHeader) {
         const normalizedRange = rangeHeader.trim();
-        const isBytesRange =
-          normalizedRange.toLowerCase().startsWith('bytes=');
+        const isBytesRange = normalizedRange.toLowerCase().startsWith('bytes=');
         const isMultiRange = isBytesRange && normalizedRange.includes(',');
 
         if (isBytesRange && !isMultiRange) {
@@ -676,7 +860,7 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
 });
 
 // GET /api/groups/:jid/files/content/:path - 读取文本文件内容
-fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
+fileRoutes.get('/:jid/files/content/:path', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
@@ -701,6 +885,22 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
+    if (isDeviceWorkspaceFilesGroup(group)) {
+      const safePath = normalizeRemoteRelativePath(relativePath);
+      const ext = path.posix.extname(safePath).slice(1).toLowerCase();
+      if (!TEXT_EXTENSIONS.has(ext)) {
+        return c.json(
+          { error: 'File type not supported for content reading' },
+          400,
+        );
+      }
+      const data = await readDeviceWorkspaceFile(
+        group,
+        safePath,
+        10 * 1024 * 1024,
+      );
+      return c.json({ content: data.toString('utf-8'), size: data.length });
+    }
     const absolutePath = validateAndResolvePath(
       group.folder,
       relativePath,
@@ -770,6 +970,26 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
       return c.json({ error: 'Cannot edit system file' }, 403);
     }
 
+    if (isDeviceWorkspaceFilesGroup(group)) {
+      const safePath = normalizeRemoteRelativePath(relativePath);
+      const ext = path.posix.extname(safePath).slice(1).toLowerCase();
+      if (!TEXT_EXTENSIONS.has(ext)) {
+        return c.json({ error: 'File type not supported for editing' }, 400);
+      }
+      const body = await c.req.json().catch(() => ({}));
+      if (typeof body.content !== 'string') {
+        return c.json({ error: 'Content field is required' }, 400);
+      }
+      if (Buffer.byteLength(body.content, 'utf-8') > 10 * 1024 * 1024) {
+        return c.json({ error: 'Content too large (max 10MB)' }, 400);
+      }
+      await invokeDeviceWorkspaceTool(group, 'Write', {
+        file_path: safePath,
+        content: body.content,
+      });
+      return c.json({ success: true });
+    }
+
     const absolutePath = validateAndResolvePath(
       group.folder,
       relativePath,
@@ -832,7 +1052,7 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
 });
 
 // DELETE /api/groups/:jid/files/:path - 删除文件
-fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
+fileRoutes.delete('/:jid/files/:path', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
@@ -858,6 +1078,16 @@ fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
+    if (isDeviceWorkspaceFilesGroup(group)) {
+      const safePath = normalizeRemoteRelativePath(relativePath);
+      if (!safePath || isSystemPath(safePath)) {
+        return c.json({ error: 'Cannot delete system path' }, 403);
+      }
+      await invokeDeviceWorkspaceTool(group, 'Bash', {
+        command: `rm -rf -- ${shellQuote(safePath)}`,
+      });
+      return c.json({ success: true });
+    }
     deleteFile(group.folder, relativePath, rootOverride);
     invalidateGroupStorageUsage(group.folder, rootOverride);
 
@@ -906,6 +1136,25 @@ fileRoutes.post('/:jid/directories', authMiddleware, async (c) => {
 
     if (!name || typeof name !== 'string') {
       return c.json({ error: 'Directory name is required' }, 400);
+    }
+
+    if (isDeviceWorkspaceFilesGroup(group)) {
+      if (name.includes('..') || name.includes('/') || name.includes('\\')) {
+        return c.json({ error: 'Invalid directory name' }, 400);
+      }
+      const safeParent = normalizeRemoteRelativePath(
+        typeof parentPath === 'string' ? parentPath : '',
+      );
+      const safePath = normalizeRemoteRelativePath(
+        path.posix.join(safeParent, name),
+      );
+      if (!safePath || isSystemPath(safePath)) {
+        return c.json({ error: 'Cannot create system path' }, 403);
+      }
+      await invokeDeviceWorkspaceTool(group, 'Bash', {
+        command: `mkdir -p -- ${shellQuote(safePath)}`,
+      });
+      return c.json({ success: true });
     }
 
     createDirectory(

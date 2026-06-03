@@ -18,6 +18,7 @@ import { useConnectedChannels } from '../../hooks/useConnectedChannels';
 import { useTasksStore } from '../../stores/tasks';
 import { useGroupsStore } from '../../stores/groups';
 import { useAgentLinksStore } from '../../stores/agentLinks';
+import type { AgentLink } from '../../stores/agentLinks';
 import { formatGroupLabel } from '../settings/channel-meta';
 
 interface CreateTaskFormProps {
@@ -38,6 +39,24 @@ interface CreateTaskFormProps {
 }
 
 type CreateMode = 'ai' | 'manual';
+
+function isAgentLinkExecutionTarget(target: string | null | undefined): target is string {
+  return !!target && (/^cl_[0-9a-f]{16}$/.test(target) || /^runtime:cl_[0-9a-f]{16}:[^:]+$/.test(target) || /^cl_[0-9a-f]{16}:[^:]+$/.test(target) || /^provider:[^:]+$/.test(target));
+}
+
+function uniqueProviderIds(devices: AgentLink[]): string[] {
+  return [...new Set(devices.flatMap((device) => [
+    ...(device.runtimes ?? []).map((runtime) => runtime.agentClientId),
+    ...device.agentClients.map((client) => client.id),
+  ]).filter(Boolean))].sort();
+}
+
+function targetSummary(target: string): string {
+  if (target.startsWith('provider:')) return `Provider Pool ${target.slice('provider:'.length)}`;
+  if (target.startsWith('runtime:')) return `Runtime ${target.slice('runtime:'.length)}`;
+  if (target.includes(':')) return `Runtime ${target}`;
+  return `Device ${target}`;
+}
 
 export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormProps) {
   const [mode, setMode] = useState<CreateMode>('ai');
@@ -104,7 +123,7 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
   useEffect(() => {
     if (executionNodeExplicit) return;
     const sourceNode = chatJid ? groups[chatJid]?.execution_node : undefined;
-    setExecutionNode(sourceNode && sourceNode.startsWith('cl_') ? sourceNode : '');
+    setExecutionNode(isAgentLinkExecutionTarget(sourceNode) ? sourceNode : '');
   }, [chatJid, groups, executionNodeExplicit]);
 
   const isScript = formData.executionType === 'script';
@@ -115,6 +134,44 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
     if (aWeb !== bWeb) return aWeb - bWeb;
     return a.localeCompare(b);
   });
+
+  const executionTargetOptions = [
+    ...uniqueProviderIds(devices).map((providerId) => {
+      const onlineRuntimes = devices.flatMap((device) => device.runtimes ?? [])
+        .filter((runtime) => runtime.agentClientId === providerId && runtime.status !== 'offline');
+      const bestSlots = onlineRuntimes.reduce((max, runtime) => Math.max(max, runtime.availableSlots ?? 0), 0);
+      return {
+        value: `provider:${providerId}`,
+        label: `⚡ Provider Pool · ${providerId} · ${onlineRuntimes.length} online · best slots ${bestSlots}`,
+        disabled: onlineRuntimes.length === 0,
+      };
+    }),
+    ...devices.flatMap((device) => {
+      const runtimes = device.runtimes && device.runtimes.length > 0
+        ? device.runtimes
+        : device.agentClients.map((client) => ({
+            runtimeId: `${device.id}:${client.id}`,
+            deviceLinkId: device.id,
+            agentClientId: client.id,
+            displayName: client.displayName || client.id,
+            status: device.online ? 'idle' : 'offline',
+            availableSlots: device.availableSlots ?? undefined,
+            maxConcurrentRuns: device.maxConcurrentRuns ?? undefined,
+          }));
+      return [
+        {
+          value: device.id,
+          label: `${device.online ? '🟢' : '⚪️'} Device · ${device.displayName} (${device.id}) · slots ${typeof device.availableSlots === 'number' ? device.availableSlots : '—'}`,
+          disabled: !device.online,
+        },
+        ...runtimes.map((runtime) => ({
+          value: `runtime:${runtime.deviceLinkId}:${runtime.agentClientId}`,
+          label: `${runtime.status !== 'offline' ? '🟢' : '⚪️'} Runtime · ${device.displayName} · ${runtime.displayName ?? runtime.agentClientId} · ${runtime.status} · slots ${typeof runtime.availableSlots === 'number' ? runtime.availableSlots : '—'}`,
+          disabled: !device.online || runtime.status === 'offline' || runtime.status === 'draining',
+        })),
+      ];
+    }),
+  ];
 
   const renderTargetWorkspace = () => (
     <div>
@@ -469,7 +526,7 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
             {isAdmin && formData.executionMode === 'host' && (
               <div>
                 <label className="block text-sm font-medium text-foreground mb-2">
-                  执行 Device
+                  执行 Runtime / Provider
                 </label>
                 <Select
                   value={executionNode}
@@ -482,9 +539,12 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {devices.map((device) => (
-                      <SelectItem key={device.id} value={device.id} disabled={!device.online}>
-                        {device.online ? '🟢' : '⚪️'} {device.displayName} ({device.id})
+                    {executionNode && !executionTargetOptions.some((target) => target.value === executionNode) && (
+                      <SelectItem value={executionNode}>{targetSummary(executionNode)} · 当前配置</SelectItem>
+                    )}
+                    {executionTargetOptions.map((target) => (
+                      <SelectItem key={target.value} value={target.value} disabled={target.disabled}>
+                        {target.label}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -494,8 +554,8 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
                 )}
                 <p className="mt-1 text-xs text-muted-foreground">
                   {executionNodeExplicit
-                    ? '已手动指定执行 Device，不再跟随源工作区'
-                    : '默认继承源工作区的执行 Device'}
+                    ? '已手动指定执行 Runtime / Provider，不再跟随源工作区'
+                    : '默认继承源工作区的执行 Runtime / Provider。Provider Pool 会自动选择有空闲 slots 的在线 runtime'}
                 </p>
               </div>
             )}

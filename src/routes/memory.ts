@@ -57,30 +57,38 @@ function ownedFoldersForUser(user: AuthUser): string[] {
   const groups = getAllRegisteredGroups();
   const folders = new Set<string>();
   for (const group of Object.values(groups)) {
-    if (user.role === 'admin' || group.created_by === user.id) folders.add(group.folder);
+    if (user.role === 'admin' || group.created_by === user.id)
+      folders.add(group.folder);
   }
   return Array.from(folders);
 }
 
 function ensureLegacyImported(user: AuthUser): void {
-  importLegacyCloudMemories({ userId: user.id, groupFolders: ownedFoldersForUser(user) });
+  importLegacyCloudMemories({
+    userId: user.id,
+    groupFolders: ownedFoldersForUser(user),
+  });
 }
 
 function cloudRecordToSource(record: CloudMemoryRecord): MemorySource {
   const owner = getUserById(record.userId);
-  const ownerLabel = owner ? owner.display_name || owner.username : record.userId;
-  const type = record.memoryType === 'agent'
-    ? 'agent'
-    : record.memoryType === 'global'
-      ? 'global'
-      : record.path.startsWith('memory/')
-        ? 'date'
-        : 'session';
-  const labelPrefix = record.memoryType === 'global'
-    ? `${ownerLabel} / 云端全局记忆`
-    : record.memoryType === 'agent'
-      ? `${record.deviceLinkId || 'client'} / client agent 记忆镜像`
-      : `${record.groupFolder || record.scopeKey} / 云端会话记忆`;
+  const ownerLabel = owner
+    ? owner.display_name || owner.username
+    : record.userId;
+  const type =
+    record.memoryType === 'agent'
+      ? 'agent'
+      : record.memoryType === 'global'
+        ? 'global'
+        : record.path.startsWith('memory/')
+          ? 'date'
+          : 'session';
+  const labelPrefix =
+    record.memoryType === 'global'
+      ? `${ownerLabel} / 云端全局记忆`
+      : record.memoryType === 'agent'
+        ? `${record.deviceLinkId || 'client'} / client agent 记忆镜像`
+        : `${record.groupFolder || record.scopeKey} / 云端会话记忆`;
   return {
     path: `cloud://${record.memoryType}/${record.scopeKey}/${record.path}`,
     label: `${labelPrefix} / ${record.path}`,
@@ -105,13 +113,23 @@ function parseCloudPath(cloudPath: string): {
   if (!cloudPath.startsWith('cloud://')) return null;
   const rest = cloudPath.slice('cloud://'.length);
   const [memoryType, ...parts] = rest.split('/');
-  if (memoryType !== 'global' && memoryType !== 'session' && memoryType !== 'agent') return null;
+  if (
+    memoryType !== 'global' &&
+    memoryType !== 'session' &&
+    memoryType !== 'agent'
+  )
+    return null;
   const scopeKey = parts.shift();
   if (!scopeKey) return null;
   const memoryPath = parts.join('/');
   if (!memoryPath) return null;
   if (memoryType === 'session' && scopeKey.startsWith('session:')) {
-    return { memoryType, scopeKey, groupFolder: scopeKey.slice('session:'.length), path: memoryPath };
+    return {
+      memoryType,
+      scopeKey,
+      groupFolder: scopeKey.slice('session:'.length),
+      path: memoryPath,
+    };
   }
   if (memoryType === 'agent' && scopeKey.startsWith('agent:')) {
     const [, deviceLinkId, agentId] = scopeKey.split(':');
@@ -347,7 +365,8 @@ function writeMemoryFile(
 ): MemoryFilePayload {
   const cloudRef = parseCloudPath(relativePath);
   if (cloudRef) {
-    if (cloudRef.memoryType === 'agent') throw new Error('client agent memory is read-only cloud mirror');
+    if (cloudRef.memoryType === 'agent')
+      throw new Error('client agent memory is read-only cloud mirror');
     const record = putCloudMemory({
       userId: user.id,
       memoryType: cloudRef.memoryType,
@@ -393,7 +412,13 @@ function writeMemoryFile(
 }
 
 // Directories to skip when scanning group workspaces for memory files
-const WALK_SKIP_DIRS = new Set(['logs', '.claude', 'conversations', 'downloads', 'node_modules']);
+const WALK_SKIP_DIRS = new Set([
+  'logs',
+  '.claude',
+  'conversations',
+  'downloads',
+  'node_modules',
+]);
 
 function walkFiles(
   baseDir: string,
@@ -429,7 +454,9 @@ function isMemoryCandidateFile(filePath: string): boolean {
 
 function listMemorySources(user: AuthUser): MemorySource[] {
   ensureLegacyImported(user);
-  return listCloudMemories(user.id).map(cloudRecordToSource).slice(0, MEMORY_LIST_LIMIT);
+  return listCloudMemories(user.id)
+    .map(cloudRecordToSource)
+    .slice(0, MEMORY_LIST_LIMIT);
 
   const files = new Set<string>();
   const isAdmin = user.role === 'admin';
@@ -497,7 +524,9 @@ function listMemorySources(user: AuthUser): MemorySource[] {
         const fullPath = path.join(convDir, entry.name);
         if (isMemoryCandidateFile(fullPath)) files.add(fullPath);
       }
-    } catch { /* skip unreadable */ }
+    } catch {
+      /* skip unreadable */
+    }
   }
 
   const sources: MemorySource[] = [];
@@ -565,26 +594,33 @@ function searchMemorySources(
   limit = MEMORY_SEARCH_LIMIT,
 ): MemorySearchHit[] {
   ensureLegacyImported(user);
-  return searchCloudMemory({ userId: user.id, query: keyword, limit }).map((record) => {
-    const lower = record.content.toLowerCase();
-    const normalizedKeyword = keyword.trim().toLowerCase();
-    const firstIndex = lower.indexOf(normalizedKeyword);
-    let count = 0;
-    let from = 0;
-    while (from < lower.length) {
-      const idx = lower.indexOf(normalizedKeyword, from);
-      if (idx === -1) break;
-      count += 1;
-      from = idx + normalizedKeyword.length;
-    }
-    return {
-      ...cloudRecordToSource(record),
-      hits: count,
-      snippet: firstIndex >= 0
-        ? buildSearchSnippet(record.content, firstIndex, normalizedKeyword.length)
-        : '',
-    };
-  });
+  return searchCloudMemory({ userId: user.id, query: keyword, limit }).map(
+    (record) => {
+      const lower = record.content.toLowerCase();
+      const normalizedKeyword = keyword.trim().toLowerCase();
+      const firstIndex = lower.indexOf(normalizedKeyword);
+      let count = 0;
+      let from = 0;
+      while (from < lower.length) {
+        const idx = lower.indexOf(normalizedKeyword, from);
+        if (idx === -1) break;
+        count += 1;
+        from = idx + normalizedKeyword.length;
+      }
+      return {
+        ...cloudRecordToSource(record),
+        hits: count,
+        snippet:
+          firstIndex >= 0
+            ? buildSearchSnippet(
+                record.content,
+                firstIndex,
+                normalizedKeyword.length,
+              )
+            : '',
+      };
+    },
+  );
 
   const normalizedKeyword = keyword.trim().toLowerCase();
   if (!normalizedKeyword) return [];
@@ -703,7 +739,11 @@ memoryRoutes.get('/global', authMiddleware, (c) => {
   try {
     const user = c.get('user') as AuthUser;
     ensureLegacyImported(user);
-    const record = getCloudMemory({ userId: user.id, memoryType: 'global', path: 'CLAUDE.md' });
+    const record = getCloudMemory({
+      userId: user.id,
+      memoryType: 'global',
+      path: 'CLAUDE.md',
+    });
     return c.json({
       path: 'cloud://global/global:' + user.id + '/CLAUDE.md',
       content: record?.content ?? '',
@@ -760,9 +800,22 @@ memoryRoutes.put('/global', authMiddleware, async (c) => {
 
 memoryRoutes.post('/client-agent-sync', authMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
-  const { deviceLinkId, agentId, path: memoryPath, content } = body as Record<string, unknown>;
-  if (typeof deviceLinkId !== 'string' || typeof agentId !== 'string' || typeof memoryPath !== 'string' || typeof content !== 'string') {
-    return c.json({ error: 'deviceLinkId, agentId, path and content are required' }, 400);
+  const {
+    deviceLinkId,
+    agentId,
+    path: memoryPath,
+    content,
+  } = body as Record<string, unknown>;
+  if (
+    typeof deviceLinkId !== 'string' ||
+    typeof agentId !== 'string' ||
+    typeof memoryPath !== 'string' ||
+    typeof content !== 'string'
+  ) {
+    return c.json(
+      { error: 'deviceLinkId, agentId, path and content are required' },
+      400,
+    );
   }
   try {
     const user = c.get('user') as AuthUser;
@@ -777,7 +830,8 @@ memoryRoutes.post('/client-agent-sync', authMiddleware, async (c) => {
     });
     return c.json({ memory: record });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Failed to sync client agent memory';
+    const message =
+      err instanceof Error ? err.message : 'Failed to sync client agent memory';
     return c.json({ error: message }, 400);
   }
 });

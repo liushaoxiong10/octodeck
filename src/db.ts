@@ -57,7 +57,8 @@ import {
 import { getDefaultPermissions, normalizePermissions } from './permissions.js';
 
 let db: InstanceType<typeof Database>;
-let persistenceController: RemotePersistenceController = new NoopPersistenceController();
+let persistenceController: RemotePersistenceController =
+  new NoopPersistenceController();
 let persistenceExitHookRegistered = false;
 
 // Prepared statement cache — lazy-initialized on first use after initDatabase()
@@ -339,6 +340,10 @@ function initializeSqliteDatabase(
       last_run TEXT,
       last_result TEXT,
       status TEXT DEFAULT 'active',
+      claim_token TEXT,
+      claimed_by TEXT,
+      claimed_at TEXT,
+      lease_expires_at TEXT,
       created_at TEXT NOT NULL,
       created_by TEXT,
       notify_channels TEXT
@@ -900,6 +905,10 @@ function initializeSqliteDatabase(
   ensureColumn('scheduled_tasks', 'execution_node', 'TEXT');
   ensureColumn('scheduled_tasks', 'workspace_jid', 'TEXT');
   ensureColumn('scheduled_tasks', 'workspace_folder', 'TEXT');
+  ensureColumn('scheduled_tasks', 'claim_token', 'TEXT');
+  ensureColumn('scheduled_tasks', 'claimed_by', 'TEXT');
+  ensureColumn('scheduled_tasks', 'claimed_at', 'TEXT');
+  ensureColumn('scheduled_tasks', 'lease_expires_at', 'TEXT');
   ensureColumn('registered_groups', 'selected_skills', 'TEXT');
   ensureColumn('sessions', 'agent_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('agents', 'kind', "TEXT NOT NULL DEFAULT 'task'");
@@ -1028,6 +1037,10 @@ function initializeSqliteDatabase(
     'last_run',
     'last_result',
     'status',
+    'claim_token',
+    'claimed_by',
+    'claimed_at',
+    'lease_expires_at',
     'created_at',
     'created_by',
     'execution_type',
@@ -1254,19 +1267,7 @@ function initializeSqliteDatabase(
         db.prepare(
           `INSERT OR IGNORE INTO billing_plans (id, name, description, tier, monthly_cost_usd, allow_overage, features, is_default, is_active, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          'free',
-          '免费版',
-          '基础免费套餐',
-          0,
-          0,
-          0,
-          '[]',
-          1,
-          1,
-          now,
-          now,
-        );
+        ).run('free', '免费版', '基础免费套餐', 0, 0, 0, '[]', 1, 1, now, now);
       }
 
       // Initialize balances for all existing users
@@ -1334,7 +1335,9 @@ function initializeSqliteDatabase(
   );
   ensureColumn('balance_transactions', 'notes', 'TEXT');
   // Create unique index only if it doesn't exist
-  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bal_tx_idempotency ON balance_transactions(idempotency_key) WHERE idempotency_key IS NOT NULL`);
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_bal_tx_idempotency ON balance_transactions(idempotency_key) WHERE idempotency_key IS NOT NULL`,
+  );
 
   // v26→v27 migration: wallet-first commercialization baseline
   const v27Ver = getRouterStateInternal('schema_version');
@@ -1517,9 +1520,7 @@ function initializeSqliteDatabase(
   ).run('schema_version', SCHEMA_VERSION);
 }
 
-async function initializeRemoteBackedDatabase(
-  dbPath: string,
-): Promise<void> {
+async function initializeRemoteBackedDatabase(dbPath: string): Promise<void> {
   const config = getDatabaseBackendConfig();
   const controller = await prepareSqlitePathForBackend(config, dbPath);
   initializeSqliteDatabase(dbPath, controller);
@@ -1576,7 +1577,13 @@ export interface AgentTeamRunRecord {
   teamId: string;
   userId: string;
   prompt: string;
-  status: 'running' | 'waiting_approval' | 'paused' | 'success' | 'error' | 'cancelled';
+  status:
+    | 'running'
+    | 'waiting_approval'
+    | 'paused'
+    | 'success'
+    | 'error'
+    | 'cancelled';
   traceId: string;
   workflowShape: string;
   roleAssignments?: unknown;
@@ -1623,7 +1630,14 @@ export interface AgentTeamBlackboardRecord {
   runId: string;
   taskId?: string;
   roleId?: string;
-  kind: 'input' | 'role_output' | 'artifact' | 'route_decision' | 'verifier_report' | 'approval_note' | 'checkpoint';
+  kind:
+    | 'input'
+    | 'role_output'
+    | 'artifact'
+    | 'route_decision'
+    | 'verifier_report'
+    | 'approval_note'
+    | 'checkpoint';
   key: string;
   contentType: string;
   value: string;
@@ -1738,7 +1752,9 @@ export function recordAgentTeamTask(record: AgentTeamTaskRecord): void {
   );
 }
 
-export function recordAgentTeamTraceEvent(event: AgentTeamTraceEventRecord): void {
+export function recordAgentTeamTraceEvent(
+  event: AgentTeamTraceEventRecord,
+): void {
   if (!db) return;
   db.prepare(
     `INSERT INTO agent_team_events (
@@ -1760,7 +1776,9 @@ export function recordAgentTeamTraceEvent(event: AgentTeamTraceEventRecord): voi
   );
 }
 
-export function recordAgentTeamBlackboard(record: AgentTeamBlackboardRecord): void {
+export function recordAgentTeamBlackboard(
+  record: AgentTeamBlackboardRecord,
+): void {
   if (!db) return;
   db.prepare(
     `INSERT INTO agent_team_blackboard (
@@ -1784,7 +1802,9 @@ export function recordAgentTeamBlackboard(record: AgentTeamBlackboardRecord): vo
   );
 }
 
-export function recordAgentTeamCheckpoint(record: AgentTeamCheckpointRecord): void {
+export function recordAgentTeamCheckpoint(
+  record: AgentTeamCheckpointRecord,
+): void {
   if (!db) return;
   db.prepare(
     `INSERT INTO agent_team_checkpoints (id, run_id, task_id, node_id, state, blackboard_cursor, created_at)
@@ -1827,13 +1847,18 @@ export function recordAgentTeamApproval(record: AgentTeamApprovalRecord): void {
   );
 }
 
-export function getAgentTeamRun(id: string, userId?: string): AgentTeamRunView | null {
+export function getAgentTeamRun(
+  id: string,
+  userId?: string,
+): AgentTeamRunView | null {
   if (!db) return null;
-  const row = db.prepare(
-    `SELECT id, team_id, user_id, prompt, status, trace_id, workflow_shape, role_assignments,
+  const row = db
+    .prepare(
+      `SELECT id, team_id, user_id, prompt, status, trace_id, workflow_shape, role_assignments,
       final_result, error, created_at, started_at, completed_at, updated_at
      FROM agent_team_runs WHERE id = ? ${userId ? 'AND user_id = ?' : ''}`,
-  ).get(...(userId ? [id, userId] : [id])) as any;
+    )
+    .get(...(userId ? [id, userId] : [id])) as any;
   if (!row) return null;
   return {
     id: row.id,
@@ -1872,14 +1897,16 @@ export function listAgentTeamRuns(options: {
   }
   const limit = Math.max(1, Math.min(100, Math.trunc(options.limit ?? 50)));
   params.push(limit);
-  const rows = db.prepare(
-    `SELECT id, team_id, user_id, prompt, status, trace_id, workflow_shape, role_assignments,
+  const rows = db
+    .prepare(
+      `SELECT id, team_id, user_id, prompt, status, trace_id, workflow_shape, role_assignments,
       final_result, error, created_at, started_at, completed_at, updated_at
      FROM agent_team_runs
      WHERE ${clauses.join(' AND ')}
      ORDER BY datetime(created_at) DESC, rowid DESC
      LIMIT ?`,
-  ).all(...params) as any[];
+    )
+    .all(...params) as any[];
   return rows.map((row) => ({
     id: row.id,
     teamId: row.team_id,
@@ -1898,61 +1925,97 @@ export function listAgentTeamRuns(options: {
   }));
 }
 
-export function listAgentTeamTasks(runId: string): Array<Record<string, unknown>> {
+export function listAgentTeamTasks(
+  runId: string,
+): Array<Record<string, unknown>> {
   if (!db) return [];
-  return db.prepare(
-    `SELECT id, run_id AS runId, role_id AS roleId, phase, actor_id AS actorId, status, attempt, input, output, error,
+  return db
+    .prepare(
+      `SELECT id, run_id AS runId, role_id AS roleId, phase, actor_id AS actorId, status, attempt, input, output, error,
       started_at AS startedAt, completed_at AS completedAt, updated_at AS updatedAt
      FROM agent_team_tasks WHERE run_id = ? ORDER BY started_at, id`,
-  ).all(runId) as Array<Record<string, unknown>>;
+    )
+    .all(runId) as Array<Record<string, unknown>>;
 }
 
-export function listAgentTeamTraceEvents(runId: string): Array<Record<string, unknown>> {
+export function listAgentTeamTraceEvents(
+  runId: string,
+): Array<Record<string, unknown>> {
   if (!db) return [];
-  return (db.prepare(
-    `SELECT trace_id AS traceId, span_id AS spanId, parent_span_id AS parentSpanId, session_id AS sessionId,
+  return (
+    db
+      .prepare(
+        `SELECT trace_id AS traceId, span_id AS spanId, parent_span_id AS parentSpanId, session_id AS sessionId,
       run_id AS runId, task_id AS taskId, actor, type, payload, timestamp, schema_version AS schemaVersion
      FROM agent_team_events WHERE run_id = ? ORDER BY id`,
-  ).all(runId) as Array<Record<string, unknown>>).map((row) => ({
+      )
+      .all(runId) as Array<Record<string, unknown>>
+  ).map((row) => ({
     ...row,
     payload: JSON.parse(String(row.payload ?? 'null')),
   }));
 }
 
-export function listAgentTeamBlackboard(runId: string): Array<Record<string, unknown>> {
+export function listAgentTeamBlackboard(
+  runId: string,
+): Array<Record<string, unknown>> {
   if (!db) return [];
-  return db.prepare(
-    `SELECT id, run_id AS runId, task_id AS taskId, role_id AS roleId, kind, key, content_type AS contentType,
+  return db
+    .prepare(
+      `SELECT id, run_id AS runId, task_id AS taskId, role_id AS roleId, kind, key, content_type AS contentType,
       value, visibility, created_at AS createdAt
      FROM agent_team_blackboard WHERE run_id = ? ORDER BY created_at, id`,
-  ).all(runId) as Array<Record<string, unknown>>;
+    )
+    .all(runId) as Array<Record<string, unknown>>;
 }
 
-export function getAgentTeamApproval(id: string, runId: string): Record<string, unknown> | null {
+export function getAgentTeamApproval(
+  id: string,
+  runId: string,
+): Record<string, unknown> | null {
   if (!db) return null;
-  const row = db.prepare(
-    `SELECT id, run_id AS runId, task_id AS taskId, requested_by AS requestedBy, status, risk_level AS riskLevel,
+  const row = db
+    .prepare(
+      `SELECT id, run_id AS runId, task_id AS taskId, requested_by AS requestedBy, status, risk_level AS riskLevel,
       title, description, payload, resolved_by AS resolvedBy, resolved_at AS resolvedAt, created_at AS createdAt
      FROM agent_team_approvals WHERE id = ? AND run_id = ?`,
-  ).get(id, runId) as Record<string, unknown> | undefined;
-  return row ? { ...row, payload: JSON.parse(String(row.payload ?? 'null')) } : null;
+    )
+    .get(id, runId) as Record<string, unknown> | undefined;
+  return row
+    ? { ...row, payload: JSON.parse(String(row.payload ?? 'null')) }
+    : null;
 }
 
-export function listAgentTeamApprovals(runId: string): Array<Record<string, unknown>> {
+export function listAgentTeamApprovals(
+  runId: string,
+): Array<Record<string, unknown>> {
   if (!db) return [];
-  return (db.prepare(
-    `SELECT id, run_id AS runId, task_id AS taskId, requested_by AS requestedBy, status, risk_level AS riskLevel,
+  return (
+    db
+      .prepare(
+        `SELECT id, run_id AS runId, task_id AS taskId, requested_by AS requestedBy, status, risk_level AS riskLevel,
       title, description, payload, resolved_by AS resolvedBy, resolved_at AS resolvedAt, created_at AS createdAt
      FROM agent_team_approvals WHERE run_id = ? ORDER BY created_at, id`,
-  ).all(runId) as Array<Record<string, unknown>>).map((row) => ({ ...row, payload: JSON.parse(String(row.payload ?? 'null')) }));
+      )
+      .all(runId) as Array<Record<string, unknown>>
+  ).map((row) => ({
+    ...row,
+    payload: JSON.parse(String(row.payload ?? 'null')),
+  }));
 }
 
-export function listAgentTeamCheckpoints(runId: string): Array<Record<string, unknown>> {
+export function listAgentTeamCheckpoints(
+  runId: string,
+): Array<Record<string, unknown>> {
   if (!db) return [];
-  return (db.prepare(
-    `SELECT id, run_id AS runId, task_id AS taskId, node_id AS nodeId, state, blackboard_cursor AS blackboardCursor, created_at AS createdAt
+  return (
+    db
+      .prepare(
+        `SELECT id, run_id AS runId, task_id AS taskId, node_id AS nodeId, state, blackboard_cursor AS blackboardCursor, created_at AS createdAt
      FROM agent_team_checkpoints WHERE run_id = ? ORDER BY created_at, id`,
-  ).all(runId) as Array<Record<string, unknown>>).map((row) => ({ ...row, state: JSON.parse(String(row.state ?? 'null')) }));
+      )
+      .all(runId) as Array<Record<string, unknown>>
+  ).map((row) => ({ ...row, state: JSON.parse(String(row.state ?? 'null')) }));
 }
 
 /**
@@ -2060,7 +2123,11 @@ function toUtf8String(value: unknown, warnField?: string): string {
     const decoded = Buffer.from(value as Uint8Array).toString('utf8');
     if (warnField) {
       logger.warn(
-        { field: warnField, byteLen: (value as Uint8Array).byteLength, sample: decoded.slice(0, 80) },
+        {
+          field: warnField,
+          byteLen: (value as Uint8Array).byteLength,
+          sample: decoded.slice(0, 80),
+        },
         'toUtf8String: Buffer on TEXT column, decoded as UTF-8',
       );
     }
@@ -2089,7 +2156,9 @@ function normalizeMessageRow(
   row: NewMessage & { is_from_me: number },
 ): NewMessage & { is_from_me: boolean };
 function normalizeMessageRow(row: NewMessage): NewMessage;
-function normalizeMessageRow(row: NewMessage & { is_from_me?: number }): NewMessage & { is_from_me?: boolean } {
+function normalizeMessageRow(
+  row: NewMessage & { is_from_me?: number },
+): NewMessage & { is_from_me?: boolean } {
   const { is_from_me, content, ...rest } = row;
   const out: NewMessage & { is_from_me?: boolean } = {
     ...rest,
@@ -2132,7 +2201,9 @@ export function storeMessageDirect(
   const { attachments, tokenUsage, sourceJid, meta } = opts ?? {};
   const existingFinalRow =
     meta?.sourceKind === 'sdk_final' && meta.turnId
-      ? (stmts().storeMessageSelect.get(chatJid, meta.turnId) as { id: string } | undefined)
+      ? (stmts().storeMessageSelect.get(chatJid, meta.turnId) as
+          | { id: string }
+          | undefined)
       : undefined;
   const effectiveMsgId = existingFinalRow?.id || msgId;
   stmts().storeMessageInsert.run(
@@ -2204,7 +2275,12 @@ export function updateLatestMessageTokenUsage(
   costUsd?: number,
 ): void {
   if (msgId) {
-    stmts().updateTokenUsageById.run(tokenUsage, costUsd ?? null, msgId, chatJid);
+    stmts().updateTokenUsageById.run(
+      tokenUsage,
+      costUsd ?? null,
+      msgId,
+      chatJid,
+    );
   } else {
     stmts().updateTokenUsageLatest.run(tokenUsage, costUsd ?? null, chatJid);
   }
@@ -2716,9 +2792,14 @@ function mapTaskRow(row: unknown): ScheduledTask {
   if (r.execution_node === undefined) r.execution_node = null;
   if (r.workspace_jid === undefined) r.workspace_jid = null;
   if (r.workspace_folder === undefined) r.workspace_folder = null;
+  if (r.claim_token === undefined) r.claim_token = null;
+  if (r.claimed_by === undefined) r.claimed_by = null;
+  if (r.claimed_at === undefined) r.claimed_at = null;
+  if (r.lease_expires_at === undefined) r.lease_expires_at = null;
   // Defensive: legacy BLOB cells in TEXT-affinity columns come back as Buffer.
   r.prompt = toUtf8String(r.prompt);
-  if (r.script_command !== undefined) r.script_command = toUtf8StringOrNull(r.script_command);
+  if (r.script_command !== undefined)
+    r.script_command = toUtf8StringOrNull(r.script_command);
   return r as ScheduledTask;
 }
 
@@ -2800,7 +2881,10 @@ export function updateTask(
     values.push(
       updates.script_command == null
         ? null
-        : toUtf8String(updates.script_command, 'scheduled_tasks.script_command'),
+        : toUtf8String(
+            updates.script_command,
+            'scheduled_tasks.script_command',
+          ),
     );
   }
   if (updates.next_run !== undefined) {
@@ -2813,7 +2897,11 @@ export function updateTask(
   }
   if (updates.notify_channels !== undefined) {
     fields.push('notify_channels = ?');
-    values.push(updates.notify_channels != null ? JSON.stringify(updates.notify_channels) : null);
+    values.push(
+      updates.notify_channels != null
+        ? JSON.stringify(updates.notify_channels)
+        : null,
+    );
   }
   if (updates.chat_jid !== undefined) {
     fields.push('chat_jid = ?');
@@ -2879,6 +2967,71 @@ export function getDueTasks(): ScheduledTask[] {
     .map(mapTaskRow);
 }
 
+export interface TaskRunClaim {
+  token: string;
+  claimedBy: string;
+  claimedAt: string;
+  leaseExpiresAt: string;
+}
+
+export function claimTaskRun(
+  id: string,
+  options: {
+    expectedNextRun?: string | null;
+    manualRun?: boolean;
+    claimedBy?: string;
+    leaseMs?: number;
+  } = {},
+): TaskRunClaim | null {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const leaseMs = Math.max(1_000, options.leaseMs ?? 6 * 60 * 60 * 1000);
+  const leaseExpiresAt = new Date(now.getTime() + leaseMs).toISOString();
+  const claimedBy = options.claimedBy ?? 'scheduler';
+  const token = crypto.randomUUID();
+  const isManualRun = options.manualRun === true;
+
+  const result = isManualRun
+    ? db
+        .prepare(
+          `
+        UPDATE scheduled_tasks
+        SET claim_token = ?, claimed_by = ?, claimed_at = ?, lease_expires_at = ?
+        WHERE id = ?
+          AND status = 'active'
+          AND (claim_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= ?)
+        `,
+        )
+        .run(token, claimedBy, nowIso, leaseExpiresAt, id, nowIso)
+    : db
+        .prepare(
+          `
+        UPDATE scheduled_tasks
+        SET claim_token = ?, claimed_by = ?, claimed_at = ?, lease_expires_at = ?
+        WHERE id = ?
+          AND status = 'active'
+          AND next_run = ?
+          AND next_run IS NOT NULL
+          AND next_run <= ?
+          AND (claim_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= ?)
+        `,
+        )
+        .run(
+          token,
+          claimedBy,
+          nowIso,
+          leaseExpiresAt,
+          id,
+          options.expectedNextRun ?? null,
+          nowIso,
+          nowIso,
+        );
+
+  return result.changes === 1
+    ? { token, claimedBy, claimedAt: nowIso, leaseExpiresAt }
+    : null;
+}
+
 export function updateTaskAfterRun(
   id: string,
   nextRun: string | null,
@@ -2892,6 +3045,48 @@ export function updateTaskAfterRun(
     WHERE id = ?
   `,
   ).run(nextRun, now, lastResult, nextRun, id);
+}
+
+export function updateTaskAfterRunClaimed(
+  id: string,
+  claimToken: string,
+  nextRun: string | null,
+  lastResult: string,
+): boolean {
+  const now = new Date().toISOString();
+  const result = db
+    .prepare(
+      `
+    UPDATE scheduled_tasks
+    SET next_run = ?,
+        last_run = ?,
+        last_result = ?,
+        status = CASE WHEN ? IS NULL THEN 'completed' ELSE status END,
+        claim_token = NULL,
+        claimed_by = NULL,
+        claimed_at = NULL,
+        lease_expires_at = NULL
+    WHERE id = ? AND claim_token = ?
+  `,
+    )
+    .run(nextRun, now, lastResult, nextRun, id, claimToken);
+  return result.changes === 1;
+}
+
+export function releaseTaskRunClaim(id: string, claimToken: string): boolean {
+  const result = db
+    .prepare(
+      `
+    UPDATE scheduled_tasks
+    SET claim_token = NULL,
+        claimed_by = NULL,
+        claimed_at = NULL,
+        lease_expires_at = NULL
+    WHERE id = ? AND claim_token = ?
+    `,
+    )
+    .run(id, claimToken);
+  return result.changes === 1;
 }
 
 // Advance next_run for a task we deliberately did NOT execute (e.g. overdue
@@ -2937,7 +3132,12 @@ export function logTaskRunStart(taskId: string): number {
 
 export function updateTaskRunLog(
   id: number,
-  updates: { duration_ms: number; status: 'success' | 'error'; result: string | null; error: string | null },
+  updates: {
+    duration_ms: number;
+    status: 'success' | 'error';
+    result: string | null;
+    error: string | null;
+  },
 ): void {
   db.prepare(
     `
@@ -2970,9 +3170,9 @@ export function cleanupOldTaskRunLogs(retentionDays = 30): number {
 }
 
 export function cleanupOldDailyUsage(retentionDays = 90): number {
-  const cutoff = new Date(
-    Date.now() - retentionDays * 24 * 60 * 60 * 1000,
-  ).toISOString().slice(0, 10);
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
   const result = db
     .prepare('DELETE FROM daily_usage WHERE date < ?')
     .run(cutoff);
@@ -3249,9 +3449,10 @@ function parseGroupRow(
       row.binding_mode === 'thread_map' ? 'thread_map' : 'single_context',
     feishu_chat_mode: row.feishu_chat_mode ?? undefined,
     feishu_group_message_type: row.feishu_group_message_type ?? undefined,
-    sender_allowlist: row.sender_allowlist != null
-      ? (JSON.parse(row.sender_allowlist) as string[])
-      : undefined,
+    sender_allowlist:
+      row.sender_allowlist != null
+        ? (JSON.parse(row.sender_allowlist) as string[])
+        : undefined,
     runtimeProfile: parseRuntimeProfile(row.runtime_profile),
     deviceLinkId: row.device_link_id ?? undefined,
     agentClientId: row.agent_client_id ?? undefined,
@@ -3272,7 +3473,12 @@ function parseActivationMode(
   raw: string | null,
 ): 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled' {
   if (raw && VALID_ACTIVATION_MODES.has(raw))
-    return raw as 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
+    return raw as
+      | 'auto'
+      | 'always'
+      | 'when_mentioned'
+      | 'owner_mentioned'
+      | 'disabled';
   return 'auto';
 }
 
@@ -3319,7 +3525,9 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.binding_mode ?? 'single_context',
     group.feishu_chat_mode ?? null,
     group.feishu_group_message_type ?? null,
-    group.sender_allowlist != null ? JSON.stringify(group.sender_allowlist) : null,
+    group.sender_allowlist != null
+      ? JSON.stringify(group.sender_allowlist)
+      : null,
     group.runtimeProfile ?? null,
     group.deviceLinkId ?? null,
     group.agentClientId ?? null,
@@ -3397,18 +3605,24 @@ export function createManagedRepo(input: {
 
 export function listManagedReposByUser(userId: string): ManagedRepo[] {
   const rows = db
-    .prepare('SELECT * FROM repos WHERE created_by = ? ORDER BY updated_at DESC, created_at DESC')
+    .prepare(
+      'SELECT * FROM repos WHERE created_by = ? ORDER BY updated_at DESC, created_at DESC',
+    )
     .all(userId) as ManagedRepoRow[];
   return rows.map(parseManagedRepoRow);
 }
 
 export function getManagedRepoById(id: string): ManagedRepo | undefined {
-  const row = db.prepare('SELECT * FROM repos WHERE id = ?').get(id) as ManagedRepoRow | undefined;
+  const row = db.prepare('SELECT * FROM repos WHERE id = ?').get(id) as
+    | ManagedRepoRow
+    | undefined;
   return row ? parseManagedRepoRow(row) : undefined;
 }
 
 export function deleteManagedRepo(id: string, userId: string): boolean {
-  const result = db.prepare('DELETE FROM repos WHERE id = ? AND created_by = ?').run(id, userId);
+  const result = db
+    .prepare('DELETE FROM repos WHERE id = ? AND created_by = ?')
+    .run(id, userId);
   return result.changes > 0;
 }
 
@@ -3418,7 +3632,9 @@ export function deleteManagedRepo(id: string, userId: string): boolean {
  * the bot. Created by buildOnNewChat when a Feishu group is auto-registered
  * before the owner has DM'd the bot. Used by Feishu owner backfill.
  */
-export function findEmptyAllowlistFeishuGroupsForUser(userId: string): string[] {
+export function findEmptyAllowlistFeishuGroupsForUser(
+  userId: string,
+): string[] {
   const rows = db
     .prepare(
       "SELECT jid FROM registered_groups WHERE created_by = ? AND jid LIKE 'feishu:%' AND sender_allowlist = '[]'",
@@ -3541,7 +3757,9 @@ export function getImContextBinding(
     .prepare(
       'SELECT * FROM im_context_bindings WHERE source_jid = ? AND context_type = ? AND context_id = ?',
     )
-    .get(sourceJid, contextType, contextId) as Record<string, unknown> | undefined;
+    .get(sourceJid, contextType, contextId) as
+    | Record<string, unknown>
+    | undefined;
   return row ? mapImContextBindingRow(row) : undefined;
 }
 
@@ -4100,8 +4318,7 @@ function mapUserRow(row: Record<string, unknown>): User {
       typeof row.avatar_emoji === 'string' ? row.avatar_emoji : null,
     avatar_color:
       typeof row.avatar_color === 'string' ? row.avatar_color : null,
-    avatar_url:
-      typeof row.avatar_url === 'string' ? row.avatar_url : null,
+    avatar_url: typeof row.avatar_url === 'string' ? row.avatar_url : null,
     ai_name: typeof row.ai_name === 'string' ? row.ai_name : null,
     ai_avatar_emoji:
       typeof row.ai_avatar_emoji === 'string' ? row.ai_avatar_emoji : null,
@@ -4561,7 +4778,9 @@ export function createUserSession(session: UserSession): void {
 export function getSessionWithUser(
   sessionId: string,
 ): UserSessionWithUser | undefined {
-  const row = stmts().getSessionWithUser.get(sessionId) as Record<string, unknown> | undefined;
+  const row = stmts().getSessionWithUser.get(sessionId) as
+    | Record<string, unknown>
+    | undefined;
   if (!row) return undefined;
   const role = parseUserRole(row.role);
   return {
@@ -5288,8 +5507,7 @@ function mapAgentRow(row: Record<string, unknown>): SubAgent {
       typeof row.completed_at === 'string' ? row.completed_at : null,
     result_summary:
       typeof row.result_summary === 'string' ? row.result_summary : null,
-    last_im_jid:
-      typeof row.last_im_jid === 'string' ? row.last_im_jid : null,
+    last_im_jid: typeof row.last_im_jid === 'string' ? row.last_im_jid : null,
     spawned_from_jid:
       typeof row.spawned_from_jid === 'string' ? row.spawned_from_jid : null,
     source_kind:
@@ -5549,9 +5767,9 @@ export function updateBillingPlan(
   db.transaction(() => {
     // Clear old default BEFORE setting new one to avoid brief dual-default state
     if (updates.is_default) {
-      db.prepare(
-        'UPDATE billing_plans SET is_default = 0 WHERE id != ?',
-      ).run(id);
+      db.prepare('UPDATE billing_plans SET is_default = 0 WHERE id != ?').run(
+        id,
+      );
     }
     db.prepare(
       `UPDATE billing_plans SET ${fields.join(', ')} WHERE id = ?`,
@@ -5591,8 +5809,7 @@ function mapBillingPlanRow(row: Record<string, unknown>): BillingPlan {
     weekly_token_quota:
       row.weekly_token_quota != null ? Number(row.weekly_token_quota) : null,
     rate_multiplier: Number(row.rate_multiplier) || 1.0,
-    trial_days:
-      row.trial_days != null ? Number(row.trial_days) : null,
+    trial_days: row.trial_days != null ? Number(row.trial_days) : null,
     sort_order: Number(row.sort_order) || 0,
     display_price:
       typeof row.display_price === 'string' ? row.display_price : null,
@@ -5681,9 +5898,9 @@ export function cancelUserSubscription(userId: string): void {
   db.prepare(
     "UPDATE user_subscriptions SET status = 'cancelled', cancelled_at = ? WHERE user_id = ? AND status = 'active'",
   ).run(now, userId);
-  db.prepare(
-    'UPDATE users SET subscription_plan_id = NULL WHERE id = ?',
-  ).run(userId);
+  db.prepare('UPDATE users SET subscription_plan_id = NULL WHERE id = ?').run(
+    userId,
+  );
 }
 
 export function expireSubscriptions(): number {
@@ -5779,9 +5996,17 @@ export function expireSubscriptions(): number {
         `INSERT INTO user_subscriptions (id, user_id, plan_id, status, started_at, expires_at, cancelled_at, trial_ends_at, notes, auto_renew, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
-        newSub.id, newSub.user_id, newSub.plan_id, newSub.status,
-        newSub.started_at, newSub.expires_at, newSub.cancelled_at,
-        newSub.trial_ends_at, newSub.notes, newSub.auto_renew, newSub.created_at,
+        newSub.id,
+        newSub.user_id,
+        newSub.plan_id,
+        newSub.status,
+        newSub.started_at,
+        newSub.expires_at,
+        newSub.cancelled_at,
+        newSub.trial_ends_at,
+        newSub.notes,
+        newSub.auto_renew,
+        newSub.created_at,
       );
 
       logBillingAudit('subscription_assigned', userId, null, {
@@ -5897,9 +6122,7 @@ export function adjustUserBalance(
   // Idempotency check: if key already used, return the existing transaction
   if (idempotencyKey) {
     const existing = db
-      .prepare(
-        'SELECT * FROM balance_transactions WHERE idempotency_key = ?',
-      )
+      .prepare('SELECT * FROM balance_transactions WHERE idempotency_key = ?')
       .get(idempotencyKey) as Record<string, unknown> | undefined;
     if (existing) {
       return {
@@ -5908,10 +6131,20 @@ export function adjustUserBalance(
         type: String(existing.type) as BalanceTransactionType,
         amount_usd: Number(existing.amount_usd),
         balance_after: Number(existing.balance_after),
-        description: typeof existing.description === 'string' ? existing.description : null,
-        reference_type: typeof existing.reference_type === 'string' ? existing.reference_type as BalanceReferenceType : null,
-        reference_id: typeof existing.reference_id === 'string' ? existing.reference_id : null,
-        actor_id: typeof existing.actor_id === 'string' ? existing.actor_id : null,
+        description:
+          typeof existing.description === 'string'
+            ? existing.description
+            : null,
+        reference_type:
+          typeof existing.reference_type === 'string'
+            ? (existing.reference_type as BalanceReferenceType)
+            : null,
+        reference_id:
+          typeof existing.reference_id === 'string'
+            ? existing.reference_id
+            : null,
+        actor_id:
+          typeof existing.actor_id === 'string' ? existing.actor_id : null,
         source:
           typeof existing.source === 'string'
             ? (existing.source as BalanceTransactionSource)
@@ -5968,26 +6201,28 @@ export function adjustUserBalance(
     const balanceAfter = Number(newRow.balance_usd);
 
     // Record transaction
-    const result = db.prepare(
-      `INSERT INTO balance_transactions (
+    const result = db
+      .prepare(
+        `INSERT INTO balance_transactions (
         user_id, type, amount_usd, balance_after, description, reference_type,
         reference_id, actor_id, source, operator_type, notes, created_at, idempotency_key
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      userId,
-      type,
-      amount,
-      balanceAfter,
-      description,
-      referenceType,
-      referenceId,
-      actorId,
-      source,
-      operatorType,
-      notes,
-      now,
-      idempotencyKey ?? null,
-    );
+      )
+      .run(
+        userId,
+        type,
+        amount,
+        balanceAfter,
+        description,
+        referenceType,
+        referenceId,
+        actorId,
+        source,
+        operatorType,
+        notes,
+        now,
+        idempotencyKey ?? null,
+      );
 
     return {
       id: Number(result.lastInsertRowid),
@@ -6042,11 +6277,11 @@ export function getBalanceTransactions(
       amount_usd: Number(r.amount_usd),
       balance_after: Number(r.balance_after),
       description: typeof r.description === 'string' ? r.description : null,
-      reference_type: typeof r.reference_type === 'string'
-        ? (r.reference_type as BalanceReferenceType)
-        : null,
-      reference_id:
-        typeof r.reference_id === 'string' ? r.reference_id : null,
+      reference_type:
+        typeof r.reference_type === 'string'
+          ? (r.reference_type as BalanceReferenceType)
+          : null,
+      reference_id: typeof r.reference_id === 'string' ? r.reference_id : null,
       actor_id: typeof r.actor_id === 'string' ? r.actor_id : null,
       source:
         typeof r.source === 'string'
@@ -6084,9 +6319,7 @@ export function getMonthlyUsage(
   month: string,
 ): MonthlyUsage | undefined {
   const row = db
-    .prepare(
-      'SELECT * FROM monthly_usage WHERE user_id = ? AND month = ?',
-    )
+    .prepare('SELECT * FROM monthly_usage WHERE user_id = ? AND month = ?')
     .get(userId, month) as Record<string, unknown> | undefined;
   if (!row) return undefined;
   return mapMonthlyUsageRow(row);
@@ -6128,9 +6361,9 @@ export function getUserMonthlyUsageHistory(
 // --- Redeem Codes ---
 
 export function getRedeemCode(code: string): RedeemCode | undefined {
-  const row = db.prepare('SELECT * FROM redeem_codes WHERE code = ?').get(code) as
-    | Record<string, unknown>
-    | undefined;
+  const row = db
+    .prepare('SELECT * FROM redeem_codes WHERE code = ?')
+    .get(code) as Record<string, unknown> | undefined;
   if (!row) return undefined;
   return mapRedeemCodeRow(row);
 }
@@ -6174,14 +6407,13 @@ export function incrementRedeemCodeUsage(code: string, userId: string): void {
 }
 
 export function deleteRedeemCode(code: string): boolean {
-  const result = db.prepare('DELETE FROM redeem_codes WHERE code = ?').run(code);
+  const result = db
+    .prepare('DELETE FROM redeem_codes WHERE code = ?')
+    .run(code);
   return result.changes > 0;
 }
 
-export function hasUserRedeemedCode(
-  userId: string,
-  code: string,
-): boolean {
+export function hasUserRedeemedCode(userId: string, code: string): boolean {
   const row = db
     .prepare(
       'SELECT COUNT(*) as cnt FROM redeem_code_usage WHERE user_id = ? AND code = ?',
@@ -6196,8 +6428,7 @@ function mapRedeemCodeRow(row: Record<string, unknown>): RedeemCode {
     type: String(row.type) as RedeemCode['type'],
     value_usd: row.value_usd != null ? Number(row.value_usd) : null,
     plan_id: typeof row.plan_id === 'string' ? row.plan_id : null,
-    duration_days:
-      row.duration_days != null ? Number(row.duration_days) : null,
+    duration_days: row.duration_days != null ? Number(row.duration_days) : null,
     max_uses: Number(row.max_uses) || 1,
     used_count: Number(row.used_count) || 0,
     expires_at: typeof row.expires_at === 'string' ? row.expires_at : null,
@@ -6243,7 +6474,8 @@ export function getBillingAuditLog(
     conditions.push('event_type = ?');
     params.push(eventType);
   }
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const where =
+    conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
   const total = (
     db
@@ -6263,9 +6495,10 @@ export function getBillingAuditLog(
       event_type: String(r.event_type) as BillingAuditEventType,
       user_id: String(r.user_id),
       actor_id: typeof r.actor_id === 'string' ? r.actor_id : null,
-      details: typeof r.details === 'string'
-        ? (JSON.parse(r.details) as Record<string, unknown>)
-        : null,
+      details:
+        typeof r.details === 'string'
+          ? (JSON.parse(r.details) as Record<string, unknown>)
+          : null,
       created_at: String(r.created_at),
     })),
     total,
@@ -6405,9 +6638,10 @@ export function getDailyUsage(
   return mapDailyUsageRow(row);
 }
 
-export function getWeeklyUsageSummary(
-  userId: string,
-): { totalCost: number; totalTokens: number } {
+export function getWeeklyUsageSummary(userId: string): {
+  totalCost: number;
+  totalTokens: number;
+} {
   // Align to calendar week (Monday–Sunday) to match checkQuota() reset logic
   const now = new Date();
   const dayOfWeek = now.getDay(); // 0=Sun, 1=Mon, ...
@@ -6442,11 +6676,17 @@ export function getUserDailyUsageHistory(
 export function getDailyUsageSumForMonth(
   userId: string,
   month: string,
-): { totalInputTokens: number; totalOutputTokens: number; totalCost: number; messageCount: number } {
+): {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCost: number;
+  messageCount: number;
+} {
   const startDate = `${month}-01`;
   // End date: first day of next month
   const [y, m] = month.split('-').map(Number);
-  const nextMonth = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+  const nextMonth =
+    m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
   const endDate = `${nextMonth}-01`;
 
   const row = db
@@ -6535,14 +6775,17 @@ export function getDashboardStats(): {
   const month = new Date().toISOString().slice(0, 7);
 
   const totalUsers = (
-    db.prepare("SELECT COUNT(*) as cnt FROM users WHERE status != 'deleted'")
+    db
+      .prepare("SELECT COUNT(*) as cnt FROM users WHERE status != 'deleted'")
       .get() as { cnt: number }
   ).cnt;
 
   const activeUsers = (
-    db.prepare(
-      "SELECT COUNT(DISTINCT user_id) as cnt FROM daily_usage WHERE date = ?",
-    ).get(today) as { cnt: number }
+    db
+      .prepare(
+        'SELECT COUNT(DISTINCT user_id) as cnt FROM daily_usage WHERE date = ?',
+      )
+      .get(today) as { cnt: number }
   ).cnt;
 
   const planDistribution = db
@@ -6558,21 +6801,27 @@ export function getDashboardStats(): {
     .all() as Array<{ plan_name: string; count: number }>;
 
   const todayCost = (
-    db.prepare(
-      'SELECT COALESCE(SUM(total_cost_usd), 0) as total FROM daily_usage WHERE date = ?',
-    ).get(today) as { total: number }
+    db
+      .prepare(
+        'SELECT COALESCE(SUM(total_cost_usd), 0) as total FROM daily_usage WHERE date = ?',
+      )
+      .get(today) as { total: number }
   ).total;
 
   const monthCost = (
-    db.prepare(
-      'SELECT COALESCE(SUM(total_cost_usd), 0) as total FROM monthly_usage WHERE month = ?',
-    ).get(month) as { total: number }
+    db
+      .prepare(
+        'SELECT COALESCE(SUM(total_cost_usd), 0) as total FROM monthly_usage WHERE month = ?',
+      )
+      .get(month) as { total: number }
   ).total;
 
   const activeSubscriptions = (
-    db.prepare(
-      "SELECT COUNT(*) as cnt FROM user_subscriptions WHERE status = 'active'",
-    ).get() as { cnt: number }
+    db
+      .prepare(
+        "SELECT COUNT(*) as cnt FROM user_subscriptions WHERE status = 'active'",
+      )
+      .get() as { cnt: number }
   ).cnt;
 
   return {
@@ -6625,7 +6874,14 @@ export function batchAssignPlan(
       db.prepare(
         `INSERT INTO user_subscriptions (id, user_id, plan_id, status, started_at, expires_at, auto_renew, created_at)
          VALUES (?, ?, ?, 'active', ?, ?, 0, ?)`,
-      ).run(subId, userId, planId, now.toISOString(), expiresAt, now.toISOString());
+      ).run(
+        subId,
+        userId,
+        planId,
+        now.toISOString(),
+        expiresAt,
+        now.toISOString(),
+      );
 
       db.prepare('UPDATE users SET subscription_plan_id = ? WHERE id = ?').run(
         planId,
@@ -6666,7 +6922,6 @@ export function getAllPlanSubscriberCounts(): Record<string, number> {
   }
   return result;
 }
-
 
 /**
  * Atomically increment redeem code usage with optimistic locking.
@@ -6730,7 +6985,8 @@ function parseAgentLinkRow(row: AgentLinkRow): AgentLink {
   let resources: AgentLink['resources'] | undefined;
   try {
     const parsed = JSON.parse(row.capabilities);
-    if (Array.isArray(parsed)) caps = parsed.filter((c) => typeof c === 'string');
+    if (Array.isArray(parsed))
+      caps = parsed.filter((c) => typeof c === 'string');
   } catch {
     /* ignore malformed */
   }
@@ -6738,17 +6994,27 @@ function parseAgentLinkRow(row: AgentLinkRow): AgentLink {
     const parsed = JSON.parse(row.agent_clients || '[]');
     if (Array.isArray(parsed)) {
       agentClients = parsed
-        .filter((c) => c && typeof c.id === 'string' && typeof c.binary === 'string')
+        .filter(
+          (c) => c && typeof c.id === 'string' && typeof c.binary === 'string',
+        )
         .map((c) => ({
           id: c.id,
           displayName: typeof c.displayName === 'string' ? c.displayName : c.id,
           binary: c.binary,
           ...(typeof c.version === 'string' ? { version: c.version } : {}),
           ...(Array.isArray(c.permissionModes)
-            ? { permissionModes: c.permissionModes.filter((m: unknown) => typeof m === 'string') }
+            ? {
+                permissionModes: c.permissionModes.filter(
+                  (m: unknown) => typeof m === 'string',
+                ),
+              }
             : {}),
           ...(Array.isArray(c.capabilities)
-            ? { capabilities: c.capabilities.filter((m: unknown) => typeof m === 'string') }
+            ? {
+                capabilities: c.capabilities.filter(
+                  (m: unknown) => typeof m === 'string',
+                ),
+              }
             : {}),
         }));
     }
@@ -6759,7 +7025,9 @@ function parseAgentLinkRow(row: AgentLinkRow): AgentLink {
     const parsed = JSON.parse(row.resources || '{}');
     if (parsed && typeof parsed === 'object') {
       resources = {
-        ...(typeof parsed.cpuCount === 'number' ? { cpuCount: parsed.cpuCount } : {}),
+        ...(typeof parsed.cpuCount === 'number'
+          ? { cpuCount: parsed.cpuCount }
+          : {}),
         ...(typeof parsed.cpuUsedPercent === 'number'
           ? { cpuUsedPercent: parsed.cpuUsedPercent }
           : {}),
@@ -6784,7 +7052,9 @@ function parseAgentLinkRow(row: AgentLinkRow): AgentLink {
         ...(typeof parsed.diskUsedPercent === 'number'
           ? { diskUsedPercent: parsed.diskUsedPercent }
           : {}),
-        ...(typeof parsed.collectedAt === 'string' ? { collectedAt: parsed.collectedAt } : {}),
+        ...(typeof parsed.collectedAt === 'string'
+          ? { collectedAt: parsed.collectedAt }
+          : {}),
       };
     }
   } catch {
@@ -6811,11 +7081,20 @@ function parseAgentLinkRow(row: AgentLinkRow): AgentLink {
 /** 内部使用：返回 token_hash，仅 ws 握手时调用。 */
 export function getAgentLinkRowForAuth(
   id: string,
-): { id: string; userId: string; tokenHash: string; revoked: boolean } | undefined {
+):
+  | { id: string; userId: string; tokenHash: string; revoked: boolean }
+  | undefined {
   const row = db
-    .prepare('SELECT id, user_id, token_hash, revoked_at FROM agent_links WHERE id = ?')
+    .prepare(
+      'SELECT id, user_id, token_hash, revoked_at FROM agent_links WHERE id = ?',
+    )
     .get(id) as
-    | { id: string; user_id: string; token_hash: string; revoked_at: string | null }
+    | {
+        id: string;
+        user_id: string;
+        token_hash: string;
+        revoked_at: string | null;
+      }
     | undefined;
   if (!row) return undefined;
   return {
@@ -6837,7 +7116,11 @@ export function listAgentLinkAuthCandidates(): Array<{
       'SELECT id, user_id, token_hash FROM agent_links WHERE revoked_at IS NULL',
     )
     .all() as Array<{ id: string; user_id: string; token_hash: string }>;
-  return rows.map((r) => ({ id: r.id, userId: r.user_id, tokenHash: r.token_hash }));
+  return rows.map((r) => ({
+    id: r.id,
+    userId: r.user_id,
+    tokenHash: r.token_hash,
+  }));
 }
 
 export function createAgentLink(input: {
@@ -6871,9 +7154,9 @@ export function listAgentLinksByUser(userId: string): AgentLink[] {
 }
 
 export function getAgentLinkById(id: string): AgentLink | undefined {
-  const row = db
-    .prepare('SELECT * FROM agent_links WHERE id = ?')
-    .get(id) as AgentLinkRow | undefined;
+  const row = db.prepare('SELECT * FROM agent_links WHERE id = ?').get(id) as
+    | AgentLinkRow
+    | undefined;
   if (!row) return undefined;
   return parseAgentLinkRow(row);
 }
@@ -6916,17 +7199,18 @@ export function recordAgentLinkResources(
   resources?: AgentLink['resources'],
 ): void {
   const now = new Date().toISOString();
-  db.prepare('UPDATE agent_links SET resources = ?, last_seen_at = ? WHERE id = ?').run(
-    JSON.stringify(resources ?? {}),
-    now,
-    id,
-  );
+  db.prepare(
+    'UPDATE agent_links SET resources = ?, last_seen_at = ? WHERE id = ?',
+  ).run(JSON.stringify(resources ?? {}), now, id);
 }
 
 /** 心跳 / 任意帧到达时更新 last_seen_at。 */
 export function touchAgentLinkSeen(id: string): void {
   const now = new Date().toISOString();
-  db.prepare('UPDATE agent_links SET last_seen_at = ? WHERE id = ?').run(now, id);
+  db.prepare('UPDATE agent_links SET last_seen_at = ? WHERE id = ?').run(
+    now,
+    id,
+  );
 }
 
 export function revokeAgentLink(id: string, userId: string): boolean {

@@ -152,8 +152,9 @@ export function SkillsPage() {
 
   const enabledCount = skills.filter((s) => s.enabled).length;
 
-  const handleInstall = async (pkg: string) => {
-    await installSkill(pkg);
+  const handleInstall = async (pkg: string, options?: Parameters<typeof installSkill>[1]) => {
+    await installSkill(pkg, options);
+    if (options?.target === 'device') setDeviceSkillsRefreshKey((value) => value + 1);
   };
 
   const handleRefresh = () => {
@@ -314,6 +315,7 @@ export function SkillsPage() {
         onClose={() => setShowInstallDialog(false)}
         onInstall={handleInstall}
         installing={installing}
+        devices={devices}
       />
     </div>
   );

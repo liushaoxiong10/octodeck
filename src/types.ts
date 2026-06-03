@@ -71,7 +71,12 @@ export interface RegisteredGroup {
   target_main_jid?: string; // IM 消息路由到指定工作区的主对话（web:{folder}）
   reply_policy?: 'source_only' | 'mirror'; // IM 绑定的回复策略
   require_mention?: boolean; // 群聊是否需要 @机器人 才响应（默认 false）
-  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled'; // 消息门控模式（默认 'auto'，兼容 require_mention）
+  activation_mode?:
+    | 'auto'
+    | 'always'
+    | 'when_mentioned'
+    | 'owner_mentioned'
+    | 'disabled'; // 消息门控模式（默认 'auto'，兼容 require_mention）
   owner_im_id?: string; // activation_mode 为 'owner_mentioned' 时，仅此 IM 标识符的发送者被响应
   sender_allowlist?: string[] | null; // null/undefined = 不限制，[] = 仅 owner 可触发（未 /claim 时无人可触发），[ids] = 白名单
   mcp_mode?: 'inherit' | 'custom'; // MCP 配置模式（默认 'inherit' 继承用户配置）
@@ -89,7 +94,9 @@ export interface RegisteredGroup {
   /**
    * 命令执行节点。
    *   - undefined / 'server-local' → server 进程内 spawn（沿用旧逻辑）
-   *   - 其他值 → AgentLink ID（cl_xxxx），通过 ws 转发给已注册的 octodeck-daemon 客户端执行
+   *   - cl_xxxx → 指定 AgentLink 设备
+   *   - runtime:cl_xxxx:agentClient 或 cl_xxxx:agentClient → 指定设备上的 Agent runtime
+   *   - provider:agentClient → 自动选择在线且有容量的 provider runtime
    * 不在线的 link 会降级回 'server-local' 并打 warn。
    */
   executionNode?: string;
@@ -224,6 +231,10 @@ export interface ScheduledTask {
   last_run: string | null;
   last_result: string | null;
   status: 'active' | 'paused' | 'completed' | 'parsing';
+  claim_token?: string | null;
+  claimed_by?: string | null;
+  claimed_at?: string | null;
+  lease_expires_at?: string | null;
   created_at: string;
   created_by?: string;
   notify_channels?: string[] | null;
@@ -495,12 +506,7 @@ export type WsMessageOut =
   | {
       type: 'whatsapp_status';
       userId: string;
-      status:
-        | 'connecting'
-        | 'qr'
-        | 'connected'
-        | 'disconnected'
-        | 'logged_out';
+      status: 'connecting' | 'qr' | 'connected' | 'disconnected' | 'logged_out';
       qr?: string;
       qrDataUrl?: string;
       error?: string;
@@ -530,12 +536,28 @@ export type WsMessageOut =
           id: string;
           timestamp: number;
           text: string;
-          kind: 'tool' | 'skill' | 'hook' | 'status' | 'task' | 'memory' | 'debug' | 'context';
+          kind:
+            | 'tool'
+            | 'skill'
+            | 'hook'
+            | 'status'
+            | 'task'
+            | 'memory'
+            | 'debug'
+            | 'context';
         }>;
         traceEvents?: Array<{
           id: string;
           timestamp: number;
-          kind: 'tool' | 'skill' | 'hook' | 'status' | 'task' | 'memory' | 'debug' | 'context';
+          kind:
+            | 'tool'
+            | 'skill'
+            | 'hook'
+            | 'status'
+            | 'task'
+            | 'memory'
+            | 'debug'
+            | 'context';
           scope?: StreamEvent['agentScope'];
           title: string;
           summary?: string;

@@ -4,12 +4,19 @@ import (
 	"context"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 // runEntry tracks a single in-flight run.
 type runEntry struct {
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
+	cmd            *exec.Cmd
+	cancel         context.CancelFunc
+	runID          string
+	backendID      string
+	cwd            string
+	status         string
+	startedAt      time.Time
+	lastActivityAt time.Time
 }
 
 // runnerPool keeps track of currently running children.
@@ -33,20 +40,49 @@ func (p *runnerPool) reserve(runID string) bool {
 	if len(p.runs) >= p.maxRuns {
 		return false
 	}
-	p.runs[runID] = nil // placeholder
+	now := time.Now()
+	p.runs[runID] = &runEntry{runID: runID, status: "accepted", lastActivityAt: now}
 	return true
+}
+
+func (p *runnerPool) noteAccepted(runID, backendID, cwd string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.runs[runID]; ok && e != nil {
+		e.backendID = backendID
+		e.cwd = cwd
+		e.status = "accepted"
+		e.lastActivityAt = time.Now()
+	}
 }
 
 // attach binds a started cmd to an existing reservation. Idempotent on missing.
 func (p *runnerPool) attach(runID string, cmd *exec.Cmd, cancel context.CancelFunc) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, ok := p.runs[runID]; !ok {
+	e, ok := p.runs[runID]
+	if !ok || e == nil {
 		// reservation already released (e.g. cancel raced); kill and bail
 		cancel()
 		return
 	}
-	p.runs[runID] = &runEntry{cmd: cmd, cancel: cancel}
+	now := time.Now()
+	e.cmd = cmd
+	e.cancel = cancel
+	e.status = "started"
+	e.startedAt = now
+	e.lastActivityAt = now
+}
+
+func (p *runnerPool) noteActivity(runID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.runs[runID]; ok && e != nil {
+		if e.status == "started" {
+			e.status = "running"
+		}
+		e.lastActivityAt = time.Now()
+	}
 }
 
 // release removes a run after it has finished (or after a failed reservation).
@@ -64,7 +100,9 @@ func (p *runnerPool) cancelRun(runID string) bool {
 	if !ok || entry == nil {
 		return false
 	}
-	entry.cancel()
+	if entry.cancel != nil {
+		entry.cancel()
+	}
 	return true
 }
 
@@ -73,8 +111,53 @@ func (p *runnerPool) cancelAll() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, e := range p.runs {
-		if e != nil {
+		if e != nil && e.cancel != nil {
 			e.cancel()
 		}
 	}
+}
+
+func (p *runnerPool) maxConcurrentRuns() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.maxRuns
+}
+
+func (p *runnerPool) snapshot() []RunningRunInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]RunningRunInfo, 0, len(p.runs))
+	for runID, e := range p.runs {
+		if e == nil {
+			out = append(out, RunningRunInfo{RunID: runID, Status: "accepted"})
+			continue
+		}
+		info := RunningRunInfo{
+			RunID:          e.runID,
+			BackendID:      e.backendID,
+			Cwd:            e.cwd,
+			Status:         e.status,
+			StartedAt:      formatTime(e.startedAt),
+			LastActivityAt: formatTime(e.lastActivityAt),
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
+func (p *runnerPool) availableSlots() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	available := p.maxRuns - len(p.runs)
+	if available < 0 {
+		return 0
+	}
+	return available
+}
+
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }

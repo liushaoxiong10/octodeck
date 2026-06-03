@@ -17,7 +17,14 @@
  *   - 注册表按 runId 索引；同 linkId 多 run 并发可行
  */
 import { logger } from '../logger.js';
-import type { RunEventFrame, RunResultFrame } from './protocol.js';
+import type {
+  AgentRunEventFrame,
+  AgentRunResultFrame,
+  AgentRunStatusFrame,
+  RunEventFrame,
+  RunResultFrame,
+  RunStatusFrame,
+} from './protocol.js';
 
 export interface RunController {
   /** 服务端生成的 runId（uuid v4）。 */
@@ -25,6 +32,8 @@ export interface RunController {
   readonly linkId: string;
   /** 远端 stdout/stderr 增量片段。 */
   onChunk(stream: 'stdout' | 'stderr', data: string): void;
+  /** 远端生命周期状态更新。 */
+  onStatus?(status: RunStatusFrame): void;
   /** 远端进程结束（exit / signal / timeout）。 */
   finish(result: {
     exitCode: number | null;
@@ -36,7 +45,17 @@ export interface RunController {
   fail(reason: string): void;
 }
 
+export interface AgentRunController {
+  readonly runId: string;
+  readonly linkId: string;
+  onEvent(frame: AgentRunEventFrame): void;
+  onStatus?(status: AgentRunStatusFrame): void;
+  finish(result: AgentRunResultFrame): void;
+  fail(reason: string): void;
+}
+
 const controllers = new Map<string, RunController>();
+const agentControllers = new Map<string, AgentRunController>();
 
 export function registerRun(controller: RunController): void {
   if (controllers.has(controller.runId)) {
@@ -54,6 +73,37 @@ export function unregisterRun(runId: string): void {
 
 export function getRun(runId: string): RunController | undefined {
   return controllers.get(runId);
+}
+
+export function registerAgentRun(controller: AgentRunController): void {
+  if (agentControllers.has(controller.runId)) {
+    logger.warn(
+      { runId: controller.runId },
+      'agent-run-rpc: duplicate registration, replacing',
+    );
+  }
+  agentControllers.set(controller.runId, controller);
+}
+
+export function unregisterAgentRun(runId: string): void {
+  agentControllers.delete(runId);
+}
+
+export function getAgentRun(runId: string): AgentRunController | undefined {
+  return agentControllers.get(runId);
+}
+
+export function deliverStatus(frame: RunStatusFrame): void {
+  const ctrl = controllers.get(frame.runId);
+  if (!ctrl?.onStatus) return;
+  try {
+    ctrl.onStatus(frame);
+  } catch (err) {
+    logger.error(
+      { runId: frame.runId, err: (err as Error).message },
+      'run-rpc: onStatus threw',
+    );
+  }
 }
 
 /** Called from agent-link/registry.ts handleFrame for run.event. */
@@ -102,6 +152,58 @@ export function deliverResult(frame: RunResultFrame): void {
   }
 }
 
+export function deliverAgentRunStatus(frame: AgentRunStatusFrame): void {
+  const ctrl = agentControllers.get(frame.runId);
+  if (!ctrl?.onStatus) return;
+  try {
+    ctrl.onStatus(frame);
+  } catch (err) {
+    logger.error(
+      { runId: frame.runId, err: (err as Error).message },
+      'agent-run-rpc: onStatus threw',
+    );
+  }
+}
+
+export function deliverAgentRunEvent(frame: AgentRunEventFrame): void {
+  const ctrl = agentControllers.get(frame.runId);
+  if (!ctrl) {
+    logger.debug(
+      { runId: frame.runId, eventType: frame.eventType },
+      'agent-run-rpc: drop event for unknown runId',
+    );
+    return;
+  }
+  try {
+    ctrl.onEvent(frame);
+  } catch (err) {
+    logger.error(
+      { runId: frame.runId, err: (err as Error).message },
+      'agent-run-rpc: onEvent threw',
+    );
+  }
+}
+
+export function deliverAgentRunResult(frame: AgentRunResultFrame): void {
+  const ctrl = agentControllers.get(frame.runId);
+  if (!ctrl) {
+    logger.debug(
+      { runId: frame.runId },
+      'agent-run-rpc: drop result for unknown runId',
+    );
+    return;
+  }
+  agentControllers.delete(frame.runId);
+  try {
+    ctrl.finish(frame);
+  } catch (err) {
+    logger.error(
+      { runId: frame.runId, err: (err as Error).message },
+      'agent-run-rpc: finish threw',
+    );
+  }
+}
+
 /** Called when a session closes — fail every run waiting on that link. */
 export function failRunsForLink(linkId: string, reason: string): void {
   const dead: string[] = [];
@@ -120,6 +222,26 @@ export function failRunsForLink(linkId: string, reason: string): void {
       logger.error(
         { runId, err: (err as Error).message },
         'run-rpc: fail handler threw',
+      );
+    }
+  }
+
+  const deadAgentRuns: string[] = [];
+  for (const [runId, ctrl] of agentControllers) {
+    if (ctrl.linkId === linkId) {
+      deadAgentRuns.push(runId);
+    }
+  }
+  for (const runId of deadAgentRuns) {
+    const ctrl = agentControllers.get(runId);
+    agentControllers.delete(runId);
+    if (!ctrl) continue;
+    try {
+      ctrl.fail(reason);
+    } catch (err) {
+      logger.error(
+        { runId, err: (err as Error).message },
+        'agent-run-rpc: fail handler threw',
       );
     }
   }

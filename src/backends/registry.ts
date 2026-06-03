@@ -18,9 +18,7 @@ import type { AgentBackend } from './types.js';
 const FALLBACK_BACKEND_ID = 'claude-sdk';
 
 /** 内置 backend ID — unregisterBackend 永远不会动这些。 */
-export const BUILTIN_BACKEND_IDS: ReadonlySet<string> = new Set([
-  'claude-sdk',
-]);
+export const BUILTIN_BACKEND_IDS: ReadonlySet<string> = new Set(['claude-sdk']);
 
 const registry = new Map<string, AgentBackend>();
 
@@ -83,7 +81,11 @@ export function resolveBackend(group: RegisteredGroup): AgentBackend {
 
   if (!allowedSet.has(requestedId)) {
     logger.warn(
-      { groupFolder: group.folder, requested: requestedId, fallback: fallback.id },
+      {
+        groupFolder: group.folder,
+        requested: requestedId,
+        fallback: fallback.id,
+      },
       'Group backend not in allowedBackends whitelist, falling back',
     );
     return fallback;
@@ -92,7 +94,11 @@ export function resolveBackend(group: RegisteredGroup): AgentBackend {
   const backend = registry.get(requestedId);
   if (!backend) {
     logger.warn(
-      { groupFolder: group.folder, requested: requestedId, fallback: fallback.id },
+      {
+        groupFolder: group.folder,
+        requested: requestedId,
+        fallback: fallback.id,
+      },
       'Group backend not registered, falling back',
     );
     return fallback;

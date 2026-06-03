@@ -136,7 +136,10 @@ function coerceEnableRef(value: unknown): UserPluginEnableRefV2 | null {
   };
 }
 
-export function writeUserPluginsV2(userId: string, config: UserPluginsV2): void {
+export function writeUserPluginsV2(
+  userId: string,
+  config: UserPluginsV2,
+): void {
   if (!isValidNameSegment(userId)) {
     throw new Error(`Invalid userId: ${userId}`);
   }
@@ -148,7 +151,11 @@ export function writeUserPluginsV2(userId: string, config: UserPluginsV2): void 
   try {
     fs.renameSync(tmp, file);
   } catch (err) {
-    try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* already gone */
+    }
     throw err;
   }
 }

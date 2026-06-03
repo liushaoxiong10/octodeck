@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +27,7 @@ type wsClient struct {
 	conn     *websocket.Conn
 	sendMu   sync.Mutex
 	runner   *runner
+	agents   *agentRuntimeSupervisor
 	tools    *toolRunner
 	models   *modelDiscoverer
 	skills   *skillDiscoverer
@@ -77,9 +78,10 @@ func dial(ctx context.Context, cfg *Config) (*wsClient, error) {
 	c := &wsClient{cfg: cfg, conn: conn}
 	c.pool = newRunnerPool(cfg.MaxConcurrentRuns)
 	c.runner = newRunner(cfg, c.pool, c.send)
+	c.agents = newAgentRuntimeSupervisor(cfg, c.pool, c.send)
 	c.tools = newToolRunner(cfg, c.send)
 	c.models = newModelDiscoverer(c.send)
-	c.skills = newSkillDiscoverer(c.send)
+	c.skills = newSkillDiscoverer(cfg, c.send)
 
 	if err := c.sendHello(ctx); err != nil {
 		_ = conn.Close(websocket.StatusNormalClosure, "hello failed")
@@ -94,15 +96,18 @@ func dial(ctx context.Context, cfg *Config) (*wsClient, error) {
 
 func (c *wsClient) sendHello(ctx context.Context) error {
 	frame := &HelloFrame{
-		Type:         tHello,
-		ID:           1,
-		Version:      ifEmpty(c.cfg.Version, "octodeck-daemon/0.1.0"),
-		OS:           goos(),
-		Arch:         goarch(),
-		Hostname:     hostname(),
-		Capabilities: []string{"run.host-cli", "tool.remote"},
-		AgentClients: c.cfg.AgentClients,
-		Resources:    collectResourceSnapshot(),
+		Type:                     tHello,
+		ID:                       1,
+		Version:                  ifEmpty(c.cfg.Version, "octodeck-daemon/0.1.0"),
+		ProtocolVersion:          2,
+		ProtocolMinVersion:       1,
+		OS:                       goos(),
+		Arch:                     goarch(),
+		Hostname:                 hostname(),
+		Capabilities:             []string{"run.host-cli", "run.status", "agent.run", "agent.run.events", "agent.discover", "agent.sessions", "heartbeat.runningRuns", "runtime.status", "tool.remote"},
+		AgentClients:             c.cfg.AgentClients,
+		AgentRuntimeCapabilities: buildRuntimeCapabilities(c.cfg, c.pool),
+		Resources:                collectResourceSnapshot(),
 	}
 	data, err := encodeFrame(frame)
 	if err != nil {
@@ -173,7 +178,7 @@ func (c *wsClient) run(ctx context.Context) error {
 			case <-hbCtx.Done():
 				return
 			case <-t.C:
-				_ = c.send(&PingFrame{Type: tPing, ID: pingID, Resources: collectResourceSnapshot()})
+				_ = c.send(c.buildPingFrame(pingID))
 				pingID++
 			}
 		}
@@ -209,6 +214,18 @@ func (c *wsClient) run(ctx context.Context) error {
 			c.runner.handle(ctx, f)
 		case *RunCancelFrame:
 			c.pool.cancelRun(f.RunID)
+		case *AgentRunRequestFrame:
+			c.agents.handle(ctx, f)
+		case *AgentRunCancelFrame:
+			c.agents.cancelRun(f.RunID, f.Reason)
+		case *AgentDiscoverRequestFrame:
+			c.agents.handleDiscover(ctx, f)
+		case *AgentSessionsRequestFrame:
+			c.agents.handleSessions(ctx, f)
+		case *AgentSessionDeleteRequestFrame:
+			c.agents.handleSessionDelete(ctx, f)
+		case *AgentPermissionDecisionFrame:
+			c.agents.handlePermissionDecision(ctx, f)
 		case *ToolRequestFrame:
 			c.tools.handle(ctx, f)
 		case *ToolCancelFrame:
@@ -225,6 +242,47 @@ func (c *wsClient) run(ctx context.Context) error {
 			// duplicate hello_ack — ignore
 		}
 	}
+}
+
+func (c *wsClient) buildPingFrame(id int64) *PingFrame {
+	running := c.pool.snapshot()
+	status := "idle"
+	if len(running) > 0 {
+		status = "busy"
+	}
+	maxRuns := c.pool.maxConcurrentRuns()
+	available := c.pool.availableSlots()
+	return &PingFrame{
+		Type:              tPing,
+		ID:                id,
+		Resources:         collectResourceSnapshot(),
+		Status:            status,
+		RunningRuns:       running,
+		MaxConcurrentRuns: maxRuns,
+		AvailableSlots:    available,
+		Runtimes:          buildRuntimeStatuses(c.cfg.LinkID, c.cfg.AgentClients, running, maxRuns, available),
+	}
+}
+
+func buildRuntimeStatuses(linkID string, clients []AgentClientInfo, running []RunningRunInfo, maxRuns, available int) []RuntimeStatus {
+	out := make([]RuntimeStatus, 0, len(clients))
+	status := "idle"
+	if len(running) > 0 {
+		status = "busy"
+	}
+	for _, client := range clients {
+		out = append(out, RuntimeStatus{
+			RuntimeID:         linkID + ":" + client.ID,
+			DeviceLinkID:      linkID,
+			AgentClientID:     client.ID,
+			DisplayName:       client.DisplayName,
+			Status:            status,
+			MaxConcurrentRuns: maxRuns,
+			RunningRuns:       running,
+			AvailableSlots:    available,
+		})
+	}
+	return out
 }
 
 func (c *wsClient) sendMemorySync(frame *MemorySyncFrame) error {

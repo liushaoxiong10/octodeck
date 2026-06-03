@@ -6,12 +6,15 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useSkillsStore, type SearchResult } from '@/stores/skills';
 import { MarkdownRenderer } from '../chat/MarkdownRenderer';
+import type { AgentLink } from '@/stores/agentLinks';
+import type { InstallSkillOptions } from '@/stores/skills';
 
 interface InstallSkillDialogProps {
   open: boolean;
   onClose: () => void;
-  onInstall: (pkg: string) => Promise<void>;
+  onInstall: (pkg: string, options?: InstallSkillOptions) => Promise<void>;
   installing: boolean;
+  devices?: AgentLink[];
 }
 
 type Tab = 'search' | 'manual';
@@ -148,11 +151,14 @@ export function InstallSkillDialog({
   onClose,
   onInstall,
   installing,
+  devices = [],
 }: InstallSkillDialogProps) {
   const [tab, setTab] = useState<Tab>('search');
   const [pkg, setPkg] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [installingPkg, setInstallingPkg] = useState<string | null>(null);
+  const [target, setTarget] = useState<'cloud' | 'device'>('cloud');
+  const [deviceLinkId, setDeviceLinkId] = useState('');
 
   const { searching, searchResults, searchSkills } = useSkillsStore();
 
@@ -166,7 +172,7 @@ export function InstallSkillDialog({
   const handleInstallFromSearch = async (result: SearchResult) => {
     try {
       setInstallingPkg(result.package);
-      await onInstall(result.package);
+      await onInstall(result.package, buildInstallOptions());
       setInstallingPkg(null);
       onClose();
     } catch (err) {
@@ -184,7 +190,7 @@ export function InstallSkillDialog({
     }
 
     try {
-      await onInstall(trimmed);
+      await onInstall(trimmed, buildInstallOptions());
       setPkg('');
       onClose();
     } catch (err) {
@@ -197,11 +203,20 @@ export function InstallSkillDialog({
       setPkg('');
       setSearchQuery('');
       setInstallingPkg(null);
+      setTarget('cloud');
+      setDeviceLinkId('');
       onClose();
     }
   };
 
   const isInstalling = installing || !!installingPkg;
+
+  const onlineDevices = devices.filter((device) => device.online);
+  const buildInstallOptions = (): InstallSkillOptions => {
+    if (target !== 'device') return { target: 'cloud' };
+    if (!deviceLinkId) throw new Error('请选择安装目标 Device');
+    return { target: 'device', deviceLinkId };
+  };
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
@@ -209,6 +224,33 @@ export function InstallSkillDialog({
         <DialogHeader>
           <DialogTitle>安装技能</DialogTitle>
         </DialogHeader>
+
+        <div className="space-y-2 rounded-lg border border-border p-3">
+          <label className="block text-sm font-medium text-foreground">安装目标</label>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="flex items-center gap-2 rounded-md border p-2 text-sm">
+              <input type="radio" name="skill-target" checked={target === 'cloud'} onChange={() => setTarget('cloud')} disabled={isInstalling} />
+              云端
+            </label>
+            <label className="flex items-center gap-2 rounded-md border p-2 text-sm">
+              <input type="radio" name="skill-target" checked={target === 'device'} onChange={() => setTarget('device')} disabled={isInstalling || onlineDevices.length === 0} />
+              指定 Device
+            </label>
+          </div>
+          {target === 'device' && (
+            <select
+              value={deviceLinkId}
+              onChange={(e) => setDeviceLinkId(e.target.value)}
+              disabled={isInstalling}
+              className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+            >
+              <option value="" disabled>请选择在线 Device</option>
+              {onlineDevices.map((device) => (
+                <option key={device.id} value={device.id}>{device.displayName} ({device.id})</option>
+              ))}
+            </select>
+          )}
+        </div>
 
         {/* Tabs */}
         <div className="flex border-b border-border shrink-0">

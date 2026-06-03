@@ -11,14 +11,12 @@ import {
   TIMEZONE,
 } from './config.js';
 import { getSystemSettings } from './runtime-config.js';
-import {
-  ContainerOutput,
-  writeTasksSnapshot,
-} from './container-runner.js';
+import { ContainerOutput, writeTasksSnapshot } from './container-runner.js';
 import { resolveBackend } from './backends/registry.js';
 import {
   addGroupMember,
   advanceSkippedTask,
+  claimTaskRun,
   getAllTasks,
   cleanupOldTaskRunLogs,
   cleanupStaleRunningLogs,
@@ -30,10 +28,12 @@ import {
   getUserHomeGroup,
   logTaskRun,
   logTaskRunStart,
+  releaseTaskRunClaim,
   updateTaskRunLog,
   setRegisteredGroup,
   updateChatName,
   updateTaskAfterRun,
+  updateTaskAfterRunClaimed,
   updateTaskWorkspace,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
@@ -112,7 +112,9 @@ function ensureTaskWorkspace(
     const oldDir = path.join(GROUPS_DIR, task.workspace_folder);
     try {
       fs.rmSync(oldDir, { recursive: true, force: true });
-    } catch { /* ignore if already gone */ }
+    } catch {
+      /* ignore if already gone */
+    }
   }
 
   const jid = `web:${crypto.randomUUID()}`;
@@ -136,7 +138,10 @@ function ensureTaskWorkspace(
     folder,
     added_at: new Date().toISOString(),
     executionMode,
-    executionNode: executionMode === 'host' ? resolveTaskExecutionNode(task, deps) : undefined,
+    executionNode:
+      executionMode === 'host'
+        ? resolveTaskExecutionNode(task, deps)
+        : undefined,
     created_by: ownerId,
   };
 
@@ -188,9 +193,20 @@ export interface SchedulerDependencies {
     options?: { source?: string },
   ) => Promise<string | undefined | void>;
   broadcastStreamEvent?: (chatJid: string, event: StreamEvent) => void;
-  onWorkspaceCreated?: (jid: string, folder: string, name: string, userId?: string) => void;
+  onWorkspaceCreated?: (
+    jid: string,
+    folder: string,
+    name: string,
+    userId?: string,
+  ) => void;
   /** Store task prompt as a user-visible message in the workspace chat */
-  storePromptMessage?: (chatJid: string, senderId: string, senderName: string, text: string, taskId?: string) => void;
+  storePromptMessage?: (
+    chatJid: string,
+    senderId: string,
+    senderName: string,
+    text: string,
+    taskId?: string,
+  ) => void;
   /** Store task result in workspace chat and push to owner's IM channels */
   storeResultAndNotify?: (
     chatJid: string,
@@ -211,6 +227,8 @@ export interface RunTaskOptions {
   taskRunId?: string;
   /** Manual trigger — don't update next_run, skip isTaskStillActive check */
   manualRun?: boolean;
+  /** DB fencing token acquired by claimTaskRun before execution starts. */
+  claimToken?: string;
 }
 
 const runningTaskIds = new Set<string>();
@@ -233,6 +251,39 @@ export function shouldSkipBackfill(
   if (graceMs <= 0 || !nextRunIso) return false;
   const overdueMs = nowMs - new Date(nextRunIso).getTime();
   return overdueMs > graceMs;
+}
+
+function completeTaskRunWithFence(
+  taskId: string,
+  claimToken: string | undefined,
+  nextRun: string | null,
+  resultSummary: string,
+): boolean {
+  if (!claimToken) {
+    updateTaskAfterRun(taskId, nextRun, resultSummary);
+    return true;
+  }
+  const updated = updateTaskAfterRunClaimed(
+    taskId,
+    claimToken,
+    nextRun,
+    resultSummary,
+  );
+  if (!updated) {
+    logger.warn(
+      { taskId },
+      'Task run completion ignored because claim token is stale or missing',
+    );
+  }
+  return updated;
+}
+
+function releaseTaskClaimIfPresent(
+  taskId: string,
+  claimToken: string | undefined,
+): void {
+  if (!claimToken) return;
+  releaseTaskRunClaim(taskId, claimToken);
 }
 
 function computeNextRun(task: ScheduledTask): string | null {
@@ -277,11 +328,17 @@ async function runTask(
   deps: SchedulerDependencies,
   options?: RunTaskOptions,
 ): Promise<void> {
-  if (!options?.manualRun && !isTaskStillActive(staleTask.id, 'task')) return;
+  if (!options?.manualRun && !isTaskStillActive(staleTask.id, 'task')) {
+    releaseTaskClaimIfPresent(staleTask.id, options?.claimToken);
+    return;
+  }
 
   // Refresh task from DB to avoid stale closure data
   const task = getTaskById(staleTask.id);
-  if (!task) return;
+  if (!task) {
+    releaseTaskClaimIfPresent(staleTask.id, options?.claimToken);
+    return;
+  }
 
   runningTaskIds.add(task.id);
   const startTime = Date.now();
@@ -304,7 +361,12 @@ async function runTask(
       error: `Workspace group not found: ${workspace.jid}`,
     });
     const nextRun = options?.manualRun ? task.next_run : computeNextRun(task);
-    updateTaskAfterRun(task.id, nextRun, `Error: Workspace group not found: ${workspace.jid}`);
+    completeTaskRunWithFence(
+      task.id,
+      options?.claimToken,
+      nextRun,
+      `Error: Workspace group not found: ${workspace.jid}`,
+    );
     runningTaskIds.delete(task.id);
     return;
   }
@@ -343,7 +405,12 @@ async function runTask(
       });
       runningTaskIds.delete(task.id);
       const nextRun = options?.manualRun ? task.next_run : computeNextRun(task);
-      updateTaskAfterRun(task.id, nextRun, 'Error: 账户已禁用');
+      completeTaskRunWithFence(
+        task.id,
+        options?.claimToken,
+        nextRun,
+        'Error: 账户已禁用',
+      );
       return;
     }
   }
@@ -352,7 +419,10 @@ async function runTask(
   if (isBillingEnabled() && workspaceGroup.created_by) {
     const owner = getUserById(workspaceGroup.created_by);
     if (owner && owner.role !== 'admin') {
-      const accessResult = checkBillingAccessFresh(workspaceGroup.created_by, owner.role);
+      const accessResult = checkBillingAccessFresh(
+        workspaceGroup.created_by,
+        owner.role,
+      );
       if (!accessResult.allowed) {
         const reason = accessResult.reason || '当前账户不可用';
         logger.info(
@@ -372,8 +442,15 @@ async function runTask(
         });
         runningTaskIds.delete(task.id);
         // Still compute next run so the task isn't stuck (but preserve for manual runs)
-        const nextRun = options?.manualRun ? task.next_run : computeNextRun(task);
-        updateTaskAfterRun(task.id, nextRun, `Error: 计费限制: ${reason}`);
+        const nextRun = options?.manualRun
+          ? task.next_run
+          : computeNextRun(task);
+        completeTaskRunWithFence(
+          task.id,
+          options?.claimToken,
+          nextRun,
+          `Error: 计费限制: ${reason}`,
+        );
         return;
       }
     }
@@ -399,9 +476,17 @@ async function runTask(
 
   // Store task prompt as a user message in workspace chat so it's visible in conversation
   if (deps.storePromptMessage) {
-    const owner = workspaceGroup.created_by ? getUserById(workspaceGroup.created_by) : null;
+    const owner = workspaceGroup.created_by
+      ? getUserById(workspaceGroup.created_by)
+      : null;
     const senderName = owner?.display_name || owner?.username || '定时任务';
-    deps.storePromptMessage(workspace.jid, owner?.id || 'system', senderName, task.prompt, task.id);
+    deps.storePromptMessage(
+      workspace.jid,
+      owner?.id || 'system',
+      senderName,
+      task.prompt,
+      task.id,
+    );
   }
 
   let result: string | null = null;
@@ -491,8 +576,14 @@ async function runTask(
           ),
         onOutput: async (streamedOutput: ContainerOutput) => {
           // Broadcast stream events to WebSocket clients viewing the task workspace
-          if (streamedOutput.status === 'stream' && streamedOutput.streamEvent) {
-            deps.broadcastStreamEvent?.(workspace.jid, streamedOutput.streamEvent);
+          if (
+            streamedOutput.status === 'stream' &&
+            streamedOutput.streamEvent
+          ) {
+            deps.broadcastStreamEvent?.(
+              workspace.jid,
+              streamedOutput.streamEvent,
+            );
           }
           if (streamedOutput.result) {
             result = streamedOutput.result;
@@ -565,16 +656,20 @@ async function runTask(
     : result
       ? result.slice(0, 200)
       : 'Completed';
+  let completionAccepted = false;
   try {
-    updateTaskAfterRun(task.id, nextRun, resultSummary);
+    completionAccepted = completeTaskRunWithFence(
+      task.id,
+      options?.claimToken,
+      nextRun,
+      resultSummary,
+    );
   } finally {
     runningTaskIds.delete(task.id);
   }
 
-  if (deps.storeResultAndNotify && (result || error)) {
-    const text = error
-      ? `执行出错: ${error}`
-      : stripAgentInternalTags(result!);
+  if (completionAccepted && deps.storeResultAndNotify && (result || error)) {
+    const text = error ? `执行出错: ${error}` : stripAgentInternalTags(result!);
 
     if (text) {
       try {
@@ -597,7 +692,12 @@ async function runTask(
   }
 
   // Auto-cleanup once-task workspace after completion
-  if (task.schedule_type === 'once' && !options?.manualRun && task.workspace_jid && task.workspace_folder) {
+  if (
+    task.schedule_type === 'once' &&
+    !options?.manualRun &&
+    task.workspace_jid &&
+    task.workspace_folder
+  ) {
     setTimeout(() => {
       try {
         const groups = deps.registeredGroups();
@@ -605,10 +705,16 @@ async function runTask(
           deleteGroupData(task.workspace_jid!, task.workspace_folder!);
           delete groups[task.workspace_jid!];
           removeFlowArtifacts(task.workspace_folder!);
-          logger.info({ taskId: task.id, folder: task.workspace_folder }, 'Cleaned up once-task workspace');
+          logger.info(
+            { taskId: task.id, folder: task.workspace_folder },
+            'Cleaned up once-task workspace',
+          );
         }
       } catch (err) {
-        logger.error({ taskId: task.id, err }, 'Failed to cleanup once-task workspace');
+        logger.error(
+          { taskId: task.id, err },
+          'Failed to cleanup once-task workspace',
+        );
       }
     }, 60_000);
   }
@@ -619,12 +725,19 @@ async function runScriptTask(
   deps: SchedulerDependencies,
   groupJid: string,
   manualRun = false,
+  claimToken?: string,
 ): Promise<void> {
-  if (!manualRun && !isTaskStillActive(staleTask.id, 'script task')) return;
+  if (!manualRun && !isTaskStillActive(staleTask.id, 'script task')) {
+    releaseTaskClaimIfPresent(staleTask.id, claimToken);
+    return;
+  }
 
   // Refresh task from DB to avoid stale closure data
   const task = getTaskById(staleTask.id);
-  if (!task) return;
+  if (!task) {
+    releaseTaskClaimIfPresent(staleTask.id, claimToken);
+    return;
+  }
 
   runningTaskIds.add(task.id);
   const startTime = Date.now();
@@ -655,7 +768,12 @@ async function runScriptTask(
         });
         runningTaskIds.delete(task.id);
         const nextRun = manualRun ? task.next_run : computeNextRun(task);
-        updateTaskAfterRun(task.id, nextRun, 'Error: 账户已禁用');
+        completeTaskRunWithFence(
+          task.id,
+          claimToken,
+          nextRun,
+          'Error: 账户已禁用',
+        );
         return;
       }
     }
@@ -668,7 +786,10 @@ async function runScriptTask(
     if (group?.created_by) {
       const owner = getUserById(group.created_by);
       if (owner && owner.role !== 'admin') {
-        const accessResult = checkBillingAccessFresh(group.created_by, owner.role);
+        const accessResult = checkBillingAccessFresh(
+          group.created_by,
+          owner.role,
+        );
         if (!accessResult.allowed) {
           const reason = accessResult.reason || '当前账户不可用';
           logger.info(
@@ -688,7 +809,12 @@ async function runScriptTask(
           });
           runningTaskIds.delete(task.id);
           const nextRun = manualRun ? task.next_run : computeNextRun(task);
-          updateTaskAfterRun(task.id, nextRun, `Error: 计费限制: ${reason}`);
+          completeTaskRunWithFence(
+            task.id,
+            claimToken,
+            nextRun,
+            `Error: 计费限制: ${reason}`,
+          );
           return;
         }
       }
@@ -710,7 +836,12 @@ async function runScriptTask(
       error: 'script_command is empty',
     });
     const nextRun = manualRun ? task.next_run : computeNextRun(task);
-    updateTaskAfterRun(task.id, nextRun, 'Error: script_command is empty');
+    completeTaskRunWithFence(
+      task.id,
+      claimToken,
+      nextRun,
+      'Error: script_command is empty',
+    );
     runningTaskIds.delete(task.id);
     return;
   }
@@ -732,36 +863,6 @@ async function runScriptTask(
       result = scriptResult.stdout.trim() || null;
     } else {
       result = scriptResult.stdout.trim() || null;
-    }
-
-    // Send result to user (skip if no output and no error)
-    if (error || result) {
-      const text = error
-        ? `[脚本] 执行失败: ${error}${result ? `\n输出:\n${result.slice(0, 500)}` : ''}`
-        : `[脚本] ${result!.slice(0, 1000)}`;
-      const fullText = `${deps.assistantName}: ${text}`;
-
-      await deps.sendMessage(groupJid, fullText, { source: 'scheduled_task' });
-
-      if (deps.storeResultAndNotify) {
-        const groups = deps.registeredGroups();
-        const group = groups[groupJid];
-        if (group?.created_by) {
-          try {
-            await deps.storeResultAndNotify(groupJid, fullText, {
-              ownerId: group.created_by,
-              notifyChannels: task.notify_channels,
-              skipStore: true,
-              workspaceFolder: task.group_folder,
-            });
-          } catch (notifyErr) {
-            logger.error(
-              { taskId: task.id, err: notifyErr },
-              'Failed to notify script task result to IM',
-            );
-          }
-        }
-      }
     }
 
     logger.info(
@@ -793,10 +894,47 @@ async function runScriptTask(
     : result
       ? result.slice(0, 200)
       : 'Completed';
+  let completionAccepted = false;
   try {
-    updateTaskAfterRun(task.id, nextRun, resultSummary);
+    completionAccepted = completeTaskRunWithFence(
+      task.id,
+      claimToken,
+      nextRun,
+      resultSummary,
+    );
   } finally {
     runningTaskIds.delete(task.id);
+  }
+
+  // Send result only after the DB claim accepts completion. If this run lost
+  // its lease/fencing token, suppress stale user-visible side effects too.
+  if (completionAccepted && (error || result)) {
+    const text = error
+      ? `[脚本] 执行失败: ${error}${result ? `\n输出:\n${result.slice(0, 500)}` : ''}`
+      : `[脚本] ${result!.slice(0, 1000)}`;
+    const fullText = `${deps.assistantName}: ${text}`;
+
+    await deps.sendMessage(groupJid, fullText, { source: 'scheduled_task' });
+
+    if (deps.storeResultAndNotify) {
+      const groups = deps.registeredGroups();
+      const group = groups[groupJid];
+      if (group?.created_by) {
+        try {
+          await deps.storeResultAndNotify(groupJid, fullText, {
+            ownerId: group.created_by,
+            notifyChannels: task.notify_channels,
+            skipStore: true,
+            workspaceFolder: task.group_folder,
+          });
+        } catch (notifyErr) {
+          logger.error(
+            { taskId: task.id, err: notifyErr },
+            'Failed to notify script task result to IM',
+          );
+        }
+      }
+    }
   }
 }
 
@@ -809,6 +947,7 @@ async function runGroupModeTask(
   deps: SchedulerDependencies,
   targetGroupJid: string,
   manualRun = false,
+  claimToken?: string,
 ): Promise<void> {
   const startTime = Date.now();
   runningTaskIds.add(task.id);
@@ -850,7 +989,10 @@ async function runGroupModeTask(
     });
   } catch (err) {
     resultSummary = `Error: ${err instanceof Error ? err.message : String(err)}`;
-    logger.error({ taskId: task.id, error: resultSummary }, 'Group-mode task injection failed');
+    logger.error(
+      { taskId: task.id, error: resultSummary },
+      'Group-mode task injection failed',
+    );
 
     logTaskRun({
       task_id: task.id,
@@ -863,7 +1005,7 @@ async function runGroupModeTask(
   } finally {
     try {
       const nextRun = manualRun ? task.next_run : computeNextRun(task);
-      updateTaskAfterRun(task.id, nextRun, resultSummary);
+      completeTaskRunWithFence(task.id, claimToken, nextRun, resultSummary);
     } finally {
       runningTaskIds.delete(task.id);
     }
@@ -886,7 +1028,10 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   try {
     const cleaned = cleanupStaleRunningLogs();
     if (cleaned > 0) {
-      logger.info({ cleaned }, 'Cleaned up stale running task logs from previous session');
+      logger.info(
+        { cleaned },
+        'Cleaned up stale running task logs from previous session',
+      );
     }
   } catch (err) {
     logger.error({ err }, 'Failed to cleanup stale running task logs');
@@ -913,7 +1058,10 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
       }
     }
     if (cleaned > 0) {
-      logger.info({ cleaned }, 'Cleaned up orphaned once-task workspaces from previous session');
+      logger.info(
+        { cleaned },
+        'Cleaned up orphaned once-task workspaces from previous session',
+      );
     }
   } catch (err) {
     logger.error({ err }, 'Failed to cleanup orphaned once-task workspaces');
@@ -956,7 +1104,8 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         }
 
         if (shouldSkipBackfill(currentTask.next_run, Date.now(), graceMs)) {
-          const overdueMs = Date.now() - new Date(currentTask.next_run!).getTime();
+          const overdueMs =
+            Date.now() - new Date(currentTask.next_run!).getTime();
           const advancedNextRun = computeNextRun(currentTask);
           advanceSkippedTask(currentTask.id, advancedNextRun);
           logTaskRun({
@@ -968,7 +1117,12 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
             error: null,
           });
           logger.info(
-            { taskId: currentTask.id, overdueMs, graceMs, nextRun: advancedNextRun },
+            {
+              taskId: currentTask.id,
+              overdueMs,
+              graceMs,
+              nextRun: advancedNextRun,
+            },
             'Skipping overdue task: exceeds backfill grace window',
           );
           continue;
@@ -993,22 +1147,67 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
             );
             continue;
           }
+          const claim = claimTaskRun(currentTask.id, {
+            expectedNextRun: currentTask.next_run,
+            claimedBy: 'scheduler:script',
+          });
+          if (!claim) {
+            logger.debug(
+              { taskId: currentTask.id },
+              'Script task claim lost, skipping',
+            );
+            continue;
+          }
           // Script tasks run directly, not through GroupQueue
-          runScriptTask(currentTask, deps, targetGroupJid).catch((err) => {
+          runScriptTask(
+            currentTask,
+            deps,
+            targetGroupJid,
+            false,
+            claim.token,
+          ).catch((err) => {
             logger.error(
               { taskId: currentTask.id, err },
               'Unhandled error in runScriptTask',
             );
           });
         } else if (currentTask.context_mode === 'group') {
+          const claim = claimTaskRun(currentTask.id, {
+            expectedNextRun: currentTask.next_run,
+            claimedBy: 'scheduler:group',
+          });
+          if (!claim) {
+            logger.debug(
+              { taskId: currentTask.id },
+              'Group-mode task claim lost, skipping',
+            );
+            continue;
+          }
           // Group mode: inject prompt into source workspace as a regular message
-          runGroupModeTask(currentTask, deps, targetGroupJid).catch((err) => {
+          runGroupModeTask(
+            currentTask,
+            deps,
+            targetGroupJid,
+            false,
+            claim.token,
+          ).catch((err) => {
             logger.error(
               { taskId: currentTask.id, err },
               'Unhandled error in runGroupModeTask',
             );
           });
         } else {
+          const claim = claimTaskRun(currentTask.id, {
+            expectedNextRun: currentTask.next_run,
+            claimedBy: 'scheduler:isolated',
+          });
+          if (!claim) {
+            logger.debug(
+              { taskId: currentTask.id },
+              'Isolated task claim lost, skipping',
+            );
+            continue;
+          }
           // Isolated mode (default): each agent task has a dedicated workspace
           const taskQueueJid = currentTask.workspace_jid
             ? `${currentTask.workspace_jid}#task:${currentTask.id}`
@@ -1016,6 +1215,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           deps.queue.enqueueTask(taskQueueJid, currentTask.id, () =>
             runTask(currentTask, deps, {
               taskRunId: currentTask.id,
+              claimToken: claim.token,
             }),
           );
         }
@@ -1047,23 +1247,37 @@ export function triggerTaskNow(
   if (runningTaskIds.has(taskId))
     return { success: false, error: 'Task is already running' };
 
+  const claim = claimTaskRun(task.id, {
+    manualRun: true,
+    claimedBy: 'manual',
+  });
+  if (!claim) return { success: false, error: 'Task is already running' };
+
   const groups = deps.registeredGroups();
   const targetGroupJid = resolveTargetGroupJid(task, groups);
-  if (!targetGroupJid)
+  if (!targetGroupJid) {
+    releaseTaskRunClaim(task.id, claim.token);
     return { success: false, error: 'Target group not registered' };
+  }
 
   if (task.execution_type === 'script') {
-    if (!hasScriptCapacity())
+    if (!hasScriptCapacity()) {
+      releaseTaskRunClaim(task.id, claim.token);
       return { success: false, error: 'Script concurrency limit reached' };
-    runScriptTask(task, deps, targetGroupJid, true).catch((err) =>
+    }
+    runScriptTask(task, deps, targetGroupJid, true, claim.token).catch((err) =>
       logger.error({ taskId, err }, 'Manual script task failed'),
     );
   } else if (task.context_mode === 'group') {
-    runGroupModeTask(task, deps, targetGroupJid, true).catch((err) =>
-      logger.error({ taskId, err }, 'Manual group-mode task failed'),
+    runGroupModeTask(task, deps, targetGroupJid, true, claim.token).catch(
+      (err) => logger.error({ taskId, err }, 'Manual group-mode task failed'),
     );
   } else {
-    const opts: RunTaskOptions = { manualRun: true, taskRunId: task.id };
+    const opts: RunTaskOptions = {
+      manualRun: true,
+      taskRunId: task.id,
+      claimToken: claim.token,
+    };
     const taskQueueJid = task.workspace_jid
       ? `${task.workspace_jid}#task:${task.id}`
       : `${targetGroupJid}#task:${task.id}`;

@@ -1,4 +1,7 @@
-export type ModelEndpointApiType = 'claude' | 'openai-chat' | 'openai-responses';
+export type ModelEndpointApiType =
+  | 'claude'
+  | 'openai-chat'
+  | 'openai-responses';
 
 type AnthropicContent = string | Array<Record<string, unknown>>;
 
@@ -25,8 +28,10 @@ function contentToText(content: AnthropicContent | undefined): string {
   if (!Array.isArray(content)) return '';
   return content
     .map((part) => {
-      if (part?.type === 'text' && typeof part.text === 'string') return part.text;
-      if (part?.type === 'tool_result') return JSON.stringify(part.content ?? '');
+      if (part?.type === 'text' && typeof part.text === 'string')
+        return part.text;
+      if (part?.type === 'tool_result')
+        return JSON.stringify(part.content ?? '');
       return '';
     })
     .filter(Boolean)
@@ -52,7 +57,10 @@ function finishReason(reason: string | null | undefined): string {
   }
 }
 
-export function convertAnthropicToOpenAIChat(req: AnthropicRequest, model: string): Record<string, unknown> {
+export function convertAnthropicToOpenAIChat(
+  req: AnthropicRequest,
+  model: string,
+): Record<string, unknown> {
   const messages: Array<Record<string, unknown>> = [];
   const system = systemToText(req.system);
   if (system) messages.push({ role: 'system', content: system });
@@ -70,32 +78,45 @@ export function convertAnthropicToOpenAIChat(req: AnthropicRequest, model: strin
   };
 }
 
-function anthropicInputContent(content: AnthropicContent): Array<Record<string, unknown>> {
-  if (typeof content === 'string') return [{ type: 'input_text', text: content }];
+function anthropicInputContent(
+  content: AnthropicContent,
+): Array<Record<string, unknown>> {
+  if (typeof content === 'string')
+    return [{ type: 'input_text', text: content }];
   return content
     .map((part) => {
-      if (part.type === 'text') return { type: 'input_text', text: part.text ?? '' };
+      if (part.type === 'text')
+        return { type: 'input_text', text: part.text ?? '' };
       return null;
     })
     .filter(Boolean) as Array<Record<string, unknown>>;
 }
 
-export function convertAnthropicToOpenAIResponses(req: AnthropicRequest, model: string): Record<string, unknown> {
+export function convertAnthropicToOpenAIResponses(
+  req: AnthropicRequest,
+  model: string,
+): Record<string, unknown> {
   return {
     model,
-    ...(systemToText(req.system) ? { instructions: systemToText(req.system) } : {}),
+    ...(systemToText(req.system)
+      ? { instructions: systemToText(req.system) }
+      : {}),
     input: (req.messages ?? []).map((msg) => ({
       role: msg.role,
       content: anthropicInputContent(msg.content),
     })),
-    ...(req.max_tokens !== undefined ? { max_output_tokens: req.max_tokens } : {}),
+    ...(req.max_tokens !== undefined
+      ? { max_output_tokens: req.max_tokens }
+      : {}),
     ...(req.stream !== undefined ? { stream: req.stream } : {}),
     ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
     ...(req.top_p !== undefined ? { top_p: req.top_p } : {}),
   };
 }
 
-export function convertOpenAIChatToAnthropic(resp: any): Record<string, unknown> {
+export function convertOpenAIChatToAnthropic(
+  resp: any,
+): Record<string, unknown> {
   const choice = resp?.choices?.[0] ?? {};
   const text = choice?.message?.content ?? '';
   return {
@@ -107,18 +128,23 @@ export function convertOpenAIChatToAnthropic(resp: any): Record<string, unknown>
     stop_reason: finishReason(choice?.finish_reason),
     stop_sequence: null,
     usage: {
-      input_tokens: resp?.usage?.prompt_tokens ?? resp?.usage?.input_tokens ?? 0,
-      output_tokens: resp?.usage?.completion_tokens ?? resp?.usage?.output_tokens ?? 0,
+      input_tokens:
+        resp?.usage?.prompt_tokens ?? resp?.usage?.input_tokens ?? 0,
+      output_tokens:
+        resp?.usage?.completion_tokens ?? resp?.usage?.output_tokens ?? 0,
     },
   };
 }
 
-export function convertOpenAIResponsesToAnthropic(resp: any): Record<string, unknown> {
+export function convertOpenAIResponsesToAnthropic(
+  resp: any,
+): Record<string, unknown> {
   const output = Array.isArray(resp?.output) ? resp.output : [];
   const texts: string[] = [];
   for (const item of output) {
     for (const part of item?.content ?? []) {
-      if (part?.type === 'output_text' && typeof part.text === 'string') texts.push(part.text);
+      if (part?.type === 'output_text' && typeof part.text === 'string')
+        texts.push(part.text);
     }
   }
   return {
@@ -136,14 +162,24 @@ export function convertOpenAIResponsesToAnthropic(resp: any): Record<string, unk
   };
 }
 
-export function convertAnthropicRequest(apiType: ModelEndpointApiType, req: AnthropicRequest, model: string): Record<string, unknown> {
-  if (apiType === 'openai-chat') return convertAnthropicToOpenAIChat(req, model);
-  if (apiType === 'openai-responses') return convertAnthropicToOpenAIResponses(req, model);
+export function convertAnthropicRequest(
+  apiType: ModelEndpointApiType,
+  req: AnthropicRequest,
+  model: string,
+): Record<string, unknown> {
+  if (apiType === 'openai-chat')
+    return convertAnthropicToOpenAIChat(req, model);
+  if (apiType === 'openai-responses')
+    return convertAnthropicToOpenAIResponses(req, model);
   return { ...req, model };
 }
 
-export function convertToAnthropicResponse(apiType: ModelEndpointApiType, resp: unknown): Record<string, unknown> {
+export function convertToAnthropicResponse(
+  apiType: ModelEndpointApiType,
+  resp: unknown,
+): Record<string, unknown> {
   if (apiType === 'openai-chat') return convertOpenAIChatToAnthropic(resp);
-  if (apiType === 'openai-responses') return convertOpenAIResponsesToAnthropic(resp);
+  if (apiType === 'openai-responses')
+    return convertOpenAIResponsesToAnthropic(resp);
   return resp as Record<string, unknown>;
 }

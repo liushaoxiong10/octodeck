@@ -11,43 +11,111 @@ import (
 type frameType string
 
 const (
-	tHello         frameType = "hello"
-	tHelloAck      frameType = "hello_ack"
-	tPing          frameType = "ping"
-	tError         frameType = "error"
-	tRunRequest    frameType = "run.request"
-	tRunCancel     frameType = "run.cancel"
-	tRunEvent      frameType = "run.event"
-	tRunResult     frameType = "run.result"
-	tToolRequest   frameType = "tool.request"
-	tToolCancel    frameType = "tool.cancel"
-	tToolEvent     frameType = "tool.event"
-	tToolResult    frameType = "tool.result"
-	tModelsRequest frameType = "models.request"
-	tModelsResult  frameType = "models.result"
-	tSkillsRequest frameType = "skills.request"
-	tSkillsResult  frameType = "skills.result"
-	tMemorySync    frameType = "memory.sync"
+	tHello                     frameType = "hello"
+	tHelloAck                  frameType = "hello_ack"
+	tPing                      frameType = "ping"
+	tError                     frameType = "error"
+	tRunRequest                frameType = "run.request"
+	tRunCancel                 frameType = "run.cancel"
+	tRunStatus                 frameType = "run.status"
+	tRunEvent                  frameType = "run.event"
+	tRunResult                 frameType = "run.result"
+	tAgentRunRequest           frameType = "agent.run.request"
+	tAgentRunCancel            frameType = "agent.run.cancel"
+	tAgentRunStatus            frameType = "agent.run.status"
+	tAgentRunEvent             frameType = "agent.run.event"
+	tAgentRunResult            frameType = "agent.run.result"
+	tAgentDiscoverRequest      frameType = "agent.discover.request"
+	tAgentDiscoverResult       frameType = "agent.discover.result"
+	tAgentSessionsRequest      frameType = "agent.sessions.request"
+	tAgentSessionsResult       frameType = "agent.sessions.result"
+	tAgentSessionDeleteRequest frameType = "agent.session.delete.request"
+	tAgentSessionDeleteResult  frameType = "agent.session.delete.result"
+	tAgentPermissionDecision   frameType = "agent.permission.decision"
+	tAgentRuntimeStatus        frameType = "agent.runtime.status"
+	tToolRequest               frameType = "tool.request"
+	tToolCancel                frameType = "tool.cancel"
+	tToolEvent                 frameType = "tool.event"
+	tToolResult                frameType = "tool.result"
+	tModelsRequest             frameType = "models.request"
+	tModelsResult              frameType = "models.result"
+	tSkillsRequest             frameType = "skills.request"
+	tSkillsResult              frameType = "skills.result"
+	tMemorySync                frameType = "memory.sync"
 )
 
 // ─── Outbound (C→S) ──────────────────────────────────────────
 
 type HelloFrame struct {
-	Type         frameType         `json:"type"`
-	ID           int64             `json:"id"`
-	Version      string            `json:"version"`
-	OS           string            `json:"os,omitempty"`
-	Arch         string            `json:"arch,omitempty"`
-	Hostname     string            `json:"hostname,omitempty"`
-	Capabilities []string          `json:"capabilities"`
-	AgentClients []AgentClientInfo `json:"agentClients,omitempty"`
-	Resources    ResourceSnapshot  `json:"resources"`
+	Type                     frameType           `json:"type"`
+	ID                       int64               `json:"id"`
+	Version                  string              `json:"version"`
+	ProtocolVersion          int                 `json:"protocolVersion,omitempty"`
+	ProtocolMinVersion       int                 `json:"protocolMinVersion,omitempty"`
+	OS                       string              `json:"os,omitempty"`
+	Arch                     string              `json:"arch,omitempty"`
+	Hostname                 string              `json:"hostname,omitempty"`
+	Capabilities             []string            `json:"capabilities"`
+	AgentClients             []AgentClientInfo   `json:"agentClients,omitempty"`
+	AgentRuntimeCapabilities []RuntimeCapability `json:"agentRuntimeCapabilities,omitempty"`
+	Resources                ResourceSnapshot    `json:"resources"`
+}
+
+type RuntimeCapability struct {
+	RuntimeID         string            `json:"runtimeId"`
+	AgentID           string            `json:"agentId"`
+	Provider          string            `json:"provider,omitempty"`
+	Transport         string            `json:"transport,omitempty"`
+	Features          []string          `json:"features,omitempty"`
+	PermissionModes   []string          `json:"permissionModes,omitempty"`
+	AllowedWorkspaces []string          `json:"allowedWorkspaces,omitempty"`
+	AllowedTools      []string          `json:"allowedTools,omitempty"`
+	DisallowedTools   []string          `json:"disallowedTools,omitempty"`
+	ToolPolicy        map[string]string `json:"toolPolicy,omitempty"`
+	MaxConcurrentRuns int               `json:"maxConcurrentRuns,omitempty"`
+	AvailableSlots    int               `json:"availableSlots,omitempty"`
 }
 
 type PingFrame struct {
-	Type      frameType        `json:"type"`
-	ID        int64            `json:"id"`
-	Resources ResourceSnapshot `json:"resources"`
+	Type              frameType        `json:"type"`
+	ID                int64            `json:"id"`
+	Resources         ResourceSnapshot `json:"resources"`
+	Status            string           `json:"status,omitempty"`
+	RunningRuns       []RunningRunInfo `json:"runningRuns,omitempty"`
+	MaxConcurrentRuns int              `json:"maxConcurrentRuns,omitempty"`
+	AvailableSlots    int              `json:"availableSlots,omitempty"`
+	Runtimes          []RuntimeStatus  `json:"runtimes,omitempty"`
+}
+
+type RunningRunInfo struct {
+	RunID          string `json:"runId"`
+	BackendID      string `json:"backendId,omitempty"`
+	Cwd            string `json:"cwd,omitempty"`
+	Status         string `json:"status,omitempty"`
+	StartedAt      string `json:"startedAt,omitempty"`
+	LastActivityAt string `json:"lastActivityAt,omitempty"`
+}
+
+type RuntimeStatus struct {
+	RuntimeID         string           `json:"runtimeId"`
+	DeviceLinkID      string           `json:"deviceLinkId"`
+	AgentClientID     string           `json:"agentClientId"`
+	DisplayName       string           `json:"displayName,omitempty"`
+	Status            string           `json:"status"`
+	MaxConcurrentRuns int              `json:"maxConcurrentRuns,omitempty"`
+	RunningRuns       []RunningRunInfo `json:"runningRuns,omitempty"`
+	AvailableSlots    int              `json:"availableSlots,omitempty"`
+}
+
+type RunStatusFrame struct {
+	Type           frameType `json:"type"`
+	RunID          string    `json:"runId"`
+	Status         string    `json:"status"`
+	BackendID      string    `json:"backendId,omitempty"`
+	Cwd            string    `json:"cwd,omitempty"`
+	Message        string    `json:"message,omitempty"`
+	StartedAt      string    `json:"startedAt,omitempty"`
+	LastActivityAt string    `json:"lastActivityAt,omitempty"`
 }
 
 type RunEventFrame struct {
@@ -64,6 +132,97 @@ type RunResultFrame struct {
 	Signal     *string   `json:"signal"`
 	TimedOut   bool      `json:"timedOut"`
 	DurationMs int64     `json:"durationMs"`
+}
+
+type AgentRunStatusFrame struct {
+	Type           frameType `json:"type"`
+	RunID          string    `json:"runId"`
+	AgentID        string    `json:"agentId,omitempty"`
+	Status         string    `json:"status"`
+	Cwd            string    `json:"cwd,omitempty"`
+	Message        string    `json:"message,omitempty"`
+	StartedAt      string    `json:"startedAt,omitempty"`
+	LastActivityAt string    `json:"lastActivityAt,omitempty"`
+}
+
+type AgentRunEventFrame struct {
+	Type      frameType      `json:"type"`
+	RunID     string         `json:"runId"`
+	AgentID   string         `json:"agentId,omitempty"`
+	EventType string         `json:"eventType"`
+	Text      string         `json:"text,omitempty"`
+	SessionID string         `json:"sessionId,omitempty"`
+	Payload   map[string]any `json:"payload,omitempty"`
+	At        string         `json:"at,omitempty"`
+}
+
+type AgentRunResultFrame struct {
+	Type       frameType      `json:"type"`
+	RunID      string         `json:"runId"`
+	AgentID    string         `json:"agentId,omitempty"`
+	OK         bool           `json:"ok"`
+	Result     string         `json:"result,omitempty"`
+	Error      *string        `json:"error"`
+	ErrorInfo  *AgentRunError `json:"errorInfo,omitempty"`
+	SessionID  string         `json:"sessionId,omitempty"`
+	Usage      map[string]any `json:"usage,omitempty"`
+	TimedOut   bool           `json:"timedOut"`
+	DurationMs int64          `json:"durationMs"`
+}
+
+type AgentRunError struct {
+	Code      string         `json:"code"`
+	Message   string         `json:"message"`
+	Retryable bool           `json:"retryable,omitempty"`
+	Details   map[string]any `json:"details,omitempty"`
+}
+
+type AgentDiscoverResultFrame struct {
+	Type                frameType           `json:"type"`
+	RequestID           string              `json:"requestId"`
+	OK                  bool                `json:"ok"`
+	Agents              []AgentClientInfo   `json:"agents"`
+	RuntimeCapabilities []RuntimeCapability `json:"runtimeCapabilities,omitempty"`
+	Error               *string             `json:"error"`
+	DurationMs          int64               `json:"durationMs"`
+}
+
+type AgentSessionInfo struct {
+	ID        string `json:"id"`
+	AgentID   string `json:"agentId"`
+	Workspace string `json:"workspace"`
+	Title     string `json:"title,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	Path      string `json:"path"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
+	SizeBytes int64  `json:"sizeBytes,omitempty"`
+}
+
+type AgentSessionsResultFrame struct {
+	Type       frameType          `json:"type"`
+	RequestID  string             `json:"requestId"`
+	OK         bool               `json:"ok"`
+	Sessions   []AgentSessionInfo `json:"sessions"`
+	Error      *string            `json:"error"`
+	DurationMs int64              `json:"durationMs"`
+}
+
+type AgentSessionDeleteResultFrame struct {
+	Type       frameType `json:"type"`
+	RequestID  string    `json:"requestId"`
+	OK         bool      `json:"ok"`
+	Deleted    bool      `json:"deleted"`
+	Error      *string   `json:"error"`
+	DurationMs int64     `json:"durationMs"`
+}
+
+type AgentRuntimeStatusFrame struct {
+	Type       frameType `json:"type"`
+	RuntimeID  string    `json:"runtimeId"`
+	Status     string    `json:"status"`
+	Message    string    `json:"message,omitempty"`
+	StartedAt  string    `json:"startedAt,omitempty"`
+	CrashCount int       `json:"crashCount,omitempty"`
 }
 
 type ToolEventFrame struct {
@@ -168,6 +327,46 @@ type RunRequestFrame struct {
 	WorkspaceRepo        *WorkspaceRepoSpec `json:"workspaceRepo,omitempty"`
 }
 
+type AgentRunRequestFrame struct {
+	Type                 frameType          `json:"type"`
+	ID                   int64              `json:"id"`
+	RunID                string             `json:"runId"`
+	AgentID              string             `json:"agentId"`
+	Workspace            *AgentRunWorkspace `json:"workspace,omitempty"`
+	Input                AgentRunInput      `json:"input"`
+	Cwd                  string             `json:"cwd,omitempty"`
+	Env                  map[string]string  `json:"env,omitempty"`
+	TimeoutMs            int64              `json:"timeoutMs"`
+	MaxOutputBytes       int64              `json:"maxOutputBytes"`
+	Policy               AgentRunPolicy     `json:"policy,omitempty"`
+	Context              any                `json:"context,omitempty"`
+	RemoteCwdPlaceholder string             `json:"remoteCwdPlaceholder,omitempty"`
+	WorkspaceRepo        *WorkspaceRepoSpec `json:"workspaceRepo,omitempty"`
+}
+
+type AgentRunWorkspace struct {
+	Kind        string             `json:"kind,omitempty"`
+	Cwd         string             `json:"cwd,omitempty"`
+	Folder      string             `json:"folder,omitempty"`
+	Repo        *WorkspaceRepoSpec `json:"repo,omitempty"`
+	SessionRoot string             `json:"sessionRoot,omitempty"`
+}
+
+type AgentRunInput struct {
+	Prompt    string         `json:"prompt"`
+	SessionID string         `json:"sessionId,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+}
+
+type AgentRunPolicy struct {
+	PermissionMode  string            `json:"permissionMode,omitempty"`
+	AllowedTools    []string          `json:"allowedTools,omitempty"`
+	DisallowedTools []string          `json:"disallowedTools,omitempty"`
+	ToolPolicy      map[string]string `json:"toolPolicy,omitempty"`
+	Model           string            `json:"model,omitempty"`
+	SystemPrompt    string            `json:"systemPrompt,omitempty"`
+}
+
 type WorkspaceRepoSpec struct {
 	Kind        string `json:"kind"`
 	GitURL      string `json:"gitUrl,omitempty"`
@@ -179,6 +378,43 @@ type RunCancelFrame struct {
 	Type   frameType `json:"type"`
 	RunID  string    `json:"runId"`
 	Reason string    `json:"reason"`
+}
+
+type AgentRunCancelFrame struct {
+	Type   frameType `json:"type"`
+	RunID  string    `json:"runId"`
+	Reason string    `json:"reason"`
+}
+
+type AgentDiscoverRequestFrame struct {
+	Type      frameType `json:"type"`
+	ID        int64     `json:"id"`
+	RequestID string    `json:"requestId"`
+}
+
+type AgentSessionsRequestFrame struct {
+	Type      frameType `json:"type"`
+	ID        int64     `json:"id"`
+	RequestID string    `json:"requestId"`
+	AgentID   string    `json:"agentId,omitempty"`
+	Workspace string    `json:"workspace,omitempty"`
+}
+
+type AgentSessionDeleteRequestFrame struct {
+	Type      frameType `json:"type"`
+	ID        int64     `json:"id"`
+	RequestID string    `json:"requestId"`
+	AgentID   string    `json:"agentId"`
+	Workspace string    `json:"workspace"`
+	SessionID string    `json:"sessionId"`
+}
+
+type AgentPermissionDecisionFrame struct {
+	Type      frameType `json:"type"`
+	RunID     string    `json:"runId"`
+	RequestID string    `json:"requestId"`
+	Decision  string    `json:"decision"`
+	Message   string    `json:"message,omitempty"`
 }
 
 type ToolRequestFrame struct {
@@ -250,6 +486,42 @@ func parseInbound(raw []byte) (any, error) {
 		return &f, nil
 	case tRunCancel:
 		var f RunCancelFrame
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, err
+		}
+		return &f, nil
+	case tAgentRunRequest:
+		var f AgentRunRequestFrame
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, err
+		}
+		return &f, nil
+	case tAgentRunCancel:
+		var f AgentRunCancelFrame
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, err
+		}
+		return &f, nil
+	case tAgentDiscoverRequest:
+		var f AgentDiscoverRequestFrame
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, err
+		}
+		return &f, nil
+	case tAgentSessionsRequest:
+		var f AgentSessionsRequestFrame
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, err
+		}
+		return &f, nil
+	case tAgentSessionDeleteRequest:
+		var f AgentSessionDeleteRequestFrame
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, err
+		}
+		return &f, nil
+	case tAgentPermissionDecision:
+		var f AgentPermissionDecisionFrame
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, err
 		}

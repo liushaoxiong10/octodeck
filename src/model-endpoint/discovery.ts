@@ -51,7 +51,9 @@ export async function discoverProviderModels(
   const response = await fetchImpl(url, { method: 'GET', headers });
   if (!response.ok) {
     const text = await response.text().catch(() => response.statusText);
-    throw new Error(`models_fetch_failed:${response.status}:${text.slice(0, 200)}`);
+    throw new Error(
+      `models_fetch_failed:${response.status}:${text.slice(0, 200)}`,
+    );
   }
 
   const body = (await response.json()) as unknown;

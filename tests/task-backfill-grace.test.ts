@@ -26,7 +26,9 @@ const {
   getTaskById,
   getDueTasks,
   advanceSkippedTask,
+  claimTaskRun,
   updateTaskAfterRun,
+  updateTaskAfterRunClaimed,
 } = await import('../src/db.js');
 
 const { shouldSkipBackfill } = await import('../src/task-scheduler.js');
@@ -115,6 +117,58 @@ describe('task backfill grace — db helpers', () => {
     const after = getTaskById(id)!;
     expect(after.last_run).toBeTruthy(); // contrast with advanceSkippedTask
     expect(after.last_result).toBe('ran ok');
+  });
+
+  test('claimTaskRun atomically grants only one active claim for a due scheduled run', () => {
+    const nextRun = new Date(Date.now() - 60_000).toISOString();
+    const id = makeTask({ next_run: nextRun });
+
+    const first = claimTaskRun(id, { expectedNextRun: nextRun, claimedBy: 'worker-a' });
+    const second = claimTaskRun(id, { expectedNextRun: nextRun, claimedBy: 'worker-b' });
+
+    expect(first).toBeTruthy();
+    expect(second).toBeNull();
+    const after = getTaskById(id)!;
+    expect(after.claim_token).toBe(first!.token);
+    expect(after.claimed_by).toBe('worker-a');
+    expect(after.lease_expires_at).toBeTruthy();
+  });
+
+  test('claimTaskRun fences stale completion tokens', () => {
+    const nextRun = new Date(Date.now() - 60_000).toISOString();
+    const id = makeTask({ next_run: nextRun });
+    const claim = claimTaskRun(id, { expectedNextRun: nextRun, claimedBy: 'worker-a' })!;
+
+    const staleUpdated = updateTaskAfterRunClaimed(
+      id,
+      'stale-token',
+      new Date(Date.now() + 60_000).toISOString(),
+      'stale result',
+    );
+    expect(staleUpdated).toBe(false);
+    expect(getTaskById(id)!.last_result).not.toBe('stale result');
+
+    const next = new Date(Date.now() + 120_000).toISOString();
+    const updated = updateTaskAfterRunClaimed(id, claim.token, next, 'fresh result');
+    expect(updated).toBe(true);
+    const after = getTaskById(id)!;
+    expect(after.last_result).toBe('fresh result');
+    expect(after.next_run).toBe(next);
+    expect(after.claim_token).toBeNull();
+  });
+
+  test('expired claim can be reclaimed by another worker', async () => {
+    const nextRun = new Date(Date.now() - 60_000).toISOString();
+    const id = makeTask({ next_run: nextRun });
+    const first = claimTaskRun(id, { expectedNextRun: nextRun, claimedBy: 'worker-a', leaseMs: 1_000 })!;
+    expect(first).toBeTruthy();
+
+    expect(claimTaskRun(id, { expectedNextRun: nextRun, claimedBy: 'worker-b' })).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+    const second = claimTaskRun(id, { expectedNextRun: nextRun, claimedBy: 'worker-b' });
+    expect(second).toBeTruthy();
+    expect(second!.token).not.toBe(first.token);
   });
 });
 

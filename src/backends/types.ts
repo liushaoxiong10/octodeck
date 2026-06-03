@@ -11,10 +11,7 @@
  */
 import type { ChildProcess } from 'child_process';
 
-import type {
-  ContainerInput,
-  ContainerOutput,
-} from '../container-runner.js';
+import type { ContainerInput, ContainerOutput } from '../container-runner.js';
 import type { ExecutionMode, RegisteredGroup } from '../types.js';
 
 /** 上层（index.ts / task-scheduler.ts）传入的进程注册回调。 */
@@ -25,9 +22,7 @@ export type BackendOnProcess = (
 ) => void;
 
 /** 上层流式回调 —— backend 必须按现有 ContainerOutput 形状输出。 */
-export type BackendOnOutput = (
-  output: ContainerOutput,
-) => Promise<void>;
+export type BackendOnOutput = (output: ContainerOutput) => Promise<void>;
 
 export interface BackendRunArgs {
   group: RegisteredGroup;

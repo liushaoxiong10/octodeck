@@ -88,7 +88,10 @@ export function getCatalogMarketplaceDir(marketplace: string): string {
   return path.join(getCatalogRoot(), 'marketplaces', marketplace);
 }
 
-export function getCatalogPluginDir(marketplace: string, plugin: string): string {
+export function getCatalogPluginDir(
+  marketplace: string,
+  plugin: string,
+): string {
   if (!isValidNameSegment(plugin)) {
     throw new Error(`Invalid plugin name segment: ${plugin}`);
   }
@@ -148,8 +151,7 @@ export function readCatalogIndex(): CatalogIndex {
     return cloneEmpty();
   }
   const out = cloneEmpty();
-  out.lastScanAt =
-    typeof rec.lastScanAt === 'string' ? rec.lastScanAt : null;
+  out.lastScanAt = typeof rec.lastScanAt === 'string' ? rec.lastScanAt : null;
   if (rec.marketplaces && typeof rec.marketplaces === 'object') {
     out.marketplaces = rec.marketplaces as CatalogIndex['marketplaces'];
   }

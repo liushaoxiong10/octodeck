@@ -39,7 +39,14 @@ export async function runScript(
 
   activeScriptCount++;
 
-  if (executionNode && executionNode !== 'server-local' && /^cl_[0-9a-f]{16}$/.test(executionNode)) {
+  if (
+    executionNode &&
+    executionNode !== 'server-local' &&
+    (/^cl_[0-9a-f]{16}$/.test(executionNode) ||
+      /^runtime:cl_[0-9a-f]{16}:[^:]+$/.test(executionNode) ||
+      /^cl_[0-9a-f]{16}:[^:]+$/.test(executionNode) ||
+      /^provider:[^:]+$/.test(executionNode))
+  ) {
     const linkId = executionNode;
     try {
       const cfg: HostCliDriverConfig = {
@@ -53,8 +60,7 @@ export async function runScript(
           PATH: process.env.PATH || '',
           LANG: process.env.LANG || 'en_US.UTF-8',
           TZ:
-            process.env.TZ ||
-            Intl.DateTimeFormat().resolvedOptions().timeZone,
+            process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone,
           GROUP_FOLDER: groupFolder,
           HOME: process.env.HOME || cwd,
         },
@@ -82,8 +88,9 @@ export async function runScript(
         linkId,
       );
       return {
-        stdout: output.status === 'success' ? output.result ?? '' : '',
-        stderr: output.status === 'error' ? output.error || output.result || '' : '',
+        stdout: output.status === 'success' ? (output.result ?? '') : '',
+        stderr:
+          output.status === 'error' ? output.error || output.result || '' : '',
         exitCode: output.status === 'success' ? 0 : 1,
         timedOut: false,
         durationMs: Date.now() - startTime,

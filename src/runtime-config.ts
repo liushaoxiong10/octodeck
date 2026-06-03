@@ -3,7 +3,12 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-import { AGENT_RUNNER_SECRET, ASSISTANT_NAME, DATA_DIR, WEB_PORT } from './config.js';
+import {
+  AGENT_RUNNER_SECRET,
+  ASSISTANT_NAME,
+  DATA_DIR,
+  WEB_PORT,
+} from './config.js';
 import { logger } from './logger.js';
 
 const MAX_FIELD_LENGTH = 2000;
@@ -389,11 +394,18 @@ export interface UnifiedProviderPublic {
 const MAX_PROVIDERS = 20;
 const POOL_CONFIG_FILE = path.join(CLAUDE_CONFIG_DIR, 'provider-pool.json');
 
-export type ModelEndpointApiType = 'claude' | 'openai-chat' | 'openai-responses';
+export type ModelEndpointApiType =
+  | 'claude'
+  | 'openai-chat'
+  | 'openai-responses';
 
 function normalizeApiType(input: unknown): ModelEndpointApiType {
   if (input === undefined || input === null || input === '') return 'claude';
-  if (input === 'claude' || input === 'openai-chat' || input === 'openai-responses') {
+  if (
+    input === 'claude' ||
+    input === 'openai-chat' ||
+    input === 'openai-responses'
+  ) {
     return input;
   }
   throw new Error('Invalid field: apiType');
@@ -455,7 +467,10 @@ function normalizeModel(input: unknown): string {
   return value;
 }
 
-function normalizeProviderModels(input: unknown, fetchedAt: string | null): ProviderModelConfig[] {
+function normalizeProviderModels(
+  input: unknown,
+  fetchedAt: string | null,
+): ProviderModelConfig[] {
   if (!Array.isArray(input)) return [];
   const out: ProviderModelConfig[] = [];
   const seen = new Set<string>();
@@ -465,11 +480,12 @@ function normalizeProviderModels(input: unknown, fetchedAt: string | null): Prov
     const id = normalizeModel(typeof obj.id === 'string' ? obj.id : '');
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    const displayNameRaw = typeof obj.displayName === 'string'
-      ? obj.displayName
-      : typeof (obj as any).display_name === 'string'
-        ? (obj as any).display_name
-        : id;
+    const displayNameRaw =
+      typeof obj.displayName === 'string'
+        ? obj.displayName
+        : typeof (obj as any).display_name === 'string'
+          ? (obj as any).display_name
+          : id;
     out.push({
       id,
       displayName: normalizeModel(displayNameRaw) || id,
@@ -1081,7 +1097,10 @@ function fromStoredProviderV4(stored: StoredProviderV4): UnifiedProvider {
     anthropicBaseUrl: stored.anthropicBaseUrl || '',
     anthropicAuthToken: secrets.anthropicAuthToken || '',
     anthropicModel: stored.anthropicModel || '',
-    models: normalizeProviderModels(stored.models, stored.modelsFetchedAt ?? null),
+    models: normalizeProviderModels(
+      stored.models,
+      stored.modelsFetchedAt ?? null,
+    ),
     modelsFetchedAt: stored.modelsFetchedAt ?? null,
     anthropicApiKey: secrets.anthropicApiKey || '',
     claudeCodeOauthToken: secrets.claudeCodeOauthToken || '',
@@ -1141,7 +1160,14 @@ function migrateV3toV4(v3: ClaudeStoredStateV3Resolved): {
       anthropicAuthToken: profile.anthropicAuthToken,
       anthropicModel: profile.anthropicModel,
       models: profile.anthropicModel
-        ? [{ id: profile.anthropicModel, displayName: profile.anthropicModel, enabled: true, fetchedAt: null }]
+        ? [
+            {
+              id: profile.anthropicModel,
+              displayName: profile.anthropicModel,
+              enabled: true,
+              fetchedAt: null,
+            },
+          ]
         : [],
       modelsFetchedAt: null,
       anthropicApiKey: '',
@@ -1324,7 +1350,9 @@ export function createProvider(input: {
   }
 
   const now = new Date().toISOString();
-  const selectedModel = input.anthropicModel ? normalizeModel(input.anthropicModel) : '';
+  const selectedModel = input.anthropicModel
+    ? normalizeModel(input.anthropicModel)
+    : '';
   const fetchedModels = normalizeProviderModels(
     input.models?.map((m) => ({
       id: m.id,
@@ -1334,9 +1362,18 @@ export function createProvider(input: {
     })) || [],
     input.models?.length ? now : null,
   );
-  const modelList = selectedModel && !fetchedModels.some((m) => m.id === selectedModel)
-    ? [{ id: selectedModel, displayName: selectedModel, enabled: true, fetchedAt: null }, ...fetchedModels]
-    : fetchedModels;
+  const modelList =
+    selectedModel && !fetchedModels.some((m) => m.id === selectedModel)
+      ? [
+          {
+            id: selectedModel,
+            displayName: selectedModel,
+            enabled: true,
+            fetchedAt: null,
+          },
+          ...fetchedModels,
+        ]
+      : fetchedModels;
   const provider: UnifiedProvider = {
     id: crypto.randomBytes(8).toString('hex'),
     name: normalizeProfileName(input.name),
@@ -1417,7 +1454,10 @@ export function updateProvider(
   };
 
   if (patch.anthropicModel !== undefined && updated.anthropicModel) {
-    const models = normalizeProviderModels(updated.models, updated.modelsFetchedAt);
+    const models = normalizeProviderModels(
+      updated.models,
+      updated.modelsFetchedAt,
+    );
     if (!models.some((m) => m.id === updated.anthropicModel)) {
       models.unshift({
         id: updated.anthropicModel,
@@ -1457,10 +1497,20 @@ export function updateProviderModels(
   );
   const current = state.providers[idx];
   const requestedModel = selectedModel ? normalizeModel(selectedModel) : '';
-  const selected = requestedModel || current.anthropicModel || normalizedModels[0]?.id || '';
-  const finalModels = selected && !normalizedModels.some((m) => m.id === selected)
-    ? [{ id: selected, displayName: selected, enabled: true, fetchedAt: null }, ...normalizedModels]
-    : normalizedModels;
+  const selected =
+    requestedModel || current.anthropicModel || normalizedModels[0]?.id || '';
+  const finalModels =
+    selected && !normalizedModels.some((m) => m.id === selected)
+      ? [
+          {
+            id: selected,
+            displayName: selected,
+            enabled: true,
+            fetchedAt: null,
+          },
+          ...normalizedModels,
+        ]
+      : normalizedModels;
 
   state.providers[idx] = {
     ...current,
@@ -1587,7 +1637,11 @@ export function providerToConfig(
   options?: { proxyBaseUrl?: string },
 ): ClaudeProviderConfig {
   const apiType = provider.apiType || 'claude';
-  const proxyBaseUrl = (options?.proxyBaseUrl || process.env.OCTODECK_MODEL_PROXY_BASE_URL || `http://127.0.0.1:${WEB_PORT}`).replace(/\/+$/, '');
+  const proxyBaseUrl = (
+    options?.proxyBaseUrl ||
+    process.env.OCTODECK_MODEL_PROXY_BASE_URL ||
+    `http://127.0.0.1:${WEB_PORT}`
+  ).replace(/\/+$/, '');
   const useProxy = apiType !== 'claude';
   return {
     apiType,
@@ -1596,9 +1650,7 @@ export function providerToConfig(
       ? `${proxyBaseUrl}/api/model-proxy/${encodeURIComponent(provider.id)}`
       : provider.anthropicBaseUrl,
     anthropicAuthToken: useProxy ? '' : provider.anthropicAuthToken,
-    anthropicApiKey: useProxy
-      ? AGENT_RUNNER_SECRET
-      : provider.anthropicApiKey,
+    anthropicApiKey: useProxy ? AGENT_RUNNER_SECRET : provider.anthropicApiKey,
     claudeCodeOauthToken: provider.claudeCodeOauthToken,
     claudeOAuthCredentials: provider.claudeOAuthCredentials,
     anthropicModel: provider.anthropicModel,
@@ -3677,9 +3729,7 @@ export function saveUserDingTalkConfig(
 
 // ========== Discord User IM Config ==========
 
-export function getUserDiscordConfig(
-  userId: string,
-): UserDiscordConfig | null {
+export function getUserDiscordConfig(userId: string): UserDiscordConfig | null {
   const filePath = path.join(userImDir(userId), 'discord.json');
   try {
     if (!fs.existsSync(filePath)) return null;
@@ -3970,7 +4020,8 @@ function buildEnvFallbackSettings(): SystemSettings {
       DEFAULT_SYSTEM_SETTINGS.billingCurrencyRate,
     ),
     externalClaudeDir:
-      process.env.EXTERNAL_CLAUDE_DIR || DEFAULT_SYSTEM_SETTINGS.externalClaudeDir,
+      process.env.EXTERNAL_CLAUDE_DIR ||
+      DEFAULT_SYSTEM_SETTINGS.externalClaudeDir,
     autoCompactWindow: parseIntEnv(
       process.env.AUTO_COMPACT_WINDOW,
       DEFAULT_SYSTEM_SETTINGS.autoCompactWindow,
@@ -4132,7 +4183,9 @@ export function saveSystemSettings(
     if (trimmed) {
       try {
         const resolved = fs.realpathSync(trimmed);
-        merged.externalClaudeDir = fs.statSync(resolved).isDirectory() ? resolved : '';
+        merged.externalClaudeDir = fs.statSync(resolved).isDirectory()
+          ? resolved
+          : '';
       } catch {
         merged.externalClaudeDir = '';
       }

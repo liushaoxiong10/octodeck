@@ -35,7 +35,50 @@ export interface AgentLink {
   lastSeenAt: string | null;
   createdAt: string;
   online: boolean;
+  status?: 'idle' | 'busy' | 'draining' | 'offline';
+  runningRuns?: Array<{
+    runId: string;
+    backendId?: string;
+    cwd?: string;
+    status?: string;
+    startedAt?: string;
+    lastActivityAt?: string;
+  }>;
+  maxConcurrentRuns?: number | null;
+  availableSlots?: number | null;
+  runtimes?: Array<{
+    runtimeId: string;
+    deviceLinkId: string;
+    agentClientId: string;
+    displayName?: string;
+    status: 'idle' | 'busy' | 'draining' | 'offline';
+    maxConcurrentRuns?: number;
+    availableSlots?: number;
+    runningRuns?: AgentLink['runningRuns'];
+  }>;
   builtin?: boolean;
+  updateAvailable?: boolean;
+  latestVersion?: string | null;
+  updateCommand?: string;
+  uninstallCommand?: string;
+}
+
+export interface DaemonVersionInfo {
+  version: string;
+  updateCommand: string;
+  uninstallCommand: string;
+  installCommand: string;
+}
+
+export interface AgentRuntimeSession {
+  id: string;
+  agentId: string;
+  workspace: string;
+  title?: string;
+  provider?: string;
+  path: string;
+  updatedAt?: string;
+  sizeBytes?: number;
 }
 
 interface AgentLinkCreateResponse {
@@ -58,6 +101,18 @@ interface AgentLinksState {
   create: (displayName: string) => Promise<AgentLinkCreateResponse>;
   rotate: (id: string) => Promise<AgentLinkRotateResponse>;
   remove: (id: string) => Promise<void>;
+  getDaemonVersion: () => Promise<DaemonVersionInfo>;
+  discoverAgents: (id: string) => Promise<AgentLink['agentClients']>;
+  listAgentSessions: (
+    id: string,
+    opts?: { agentId?: string; workspace?: string },
+  ) => Promise<AgentRuntimeSession[]>;
+  deleteAgentSession: (
+    id: string,
+    agentId: string,
+    sessionId: string,
+    workspace: string,
+  ) => Promise<boolean>;
 }
 
 export const useAgentLinksStore = create<AgentLinksState>((set, get) => ({
@@ -97,5 +152,37 @@ export const useAgentLinksStore = create<AgentLinksState>((set, get) => ({
   remove: async (id) => {
     await api.delete(`/api/devices/${encodeURIComponent(id)}`);
     await get().load();
+  },
+
+  getDaemonVersion: async () =>
+    api.get<DaemonVersionInfo>('/api/daemon/version'),
+
+  discoverAgents: async (id) => {
+    const res = await api.post<{ agents: AgentLink['agentClients'] }>(
+      `/api/devices/${encodeURIComponent(id)}/agents/discover`,
+      undefined,
+      20_000,
+    );
+    await get().load();
+    return res.agents ?? [];
+  },
+
+  listAgentSessions: async (id, opts) => {
+    const params = new URLSearchParams();
+    if (opts?.agentId) params.set('agentId', opts.agentId);
+    if (opts?.workspace) params.set('workspace', opts.workspace);
+    const query = params.toString();
+    const res = await api.get<{ sessions: AgentRuntimeSession[] }>(
+      `/api/devices/${encodeURIComponent(id)}/agents/sessions${query ? `?${query}` : ''}`,
+    );
+    return res.sessions ?? [];
+  },
+
+  deleteAgentSession: async (id, agentId, sessionId, workspace) => {
+    const res = await api.delete<{ deleted: boolean }>(
+      `/api/devices/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/sessions/${encodeURIComponent(sessionId)}?workspace=${encodeURIComponent(workspace)}`,
+      20_000,
+    );
+    return !!res.deleted;
   },
 }));

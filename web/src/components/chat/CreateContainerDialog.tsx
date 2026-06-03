@@ -19,17 +19,28 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { DirectoryBrowser } from '../shared/DirectoryBrowser';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { useAgentLinksStore } from '../../stores/agentLinks';
 import { useReposStore } from '../../stores/repos';
+import { useCustomBackendsStore } from '../../stores/customBackends';
+
+function deviceIdFromExecutionTarget(target: string): string | null {
+  if (/^cl_[0-9a-f]{16}$/.test(target)) return target;
+  const runtimeMatch = target.match(/^runtime:(cl_[0-9a-f]{16}):[^:]+$/);
+  if (runtimeMatch) return runtimeMatch[1];
+  const legacyRuntimeMatch = target.match(/^(cl_[0-9a-f]{16}):[^:]+$/);
+  if (legacyRuntimeMatch) return legacyRuntimeMatch[1];
+  return null;
+}
 
 interface CreateContainerDialogProps {
   open: boolean;
   onClose: () => void;
   onCreated: (jid: string, folder: string) => void;
 }
+
+type RuntimeProfile = 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent';
 
 export function CreateContainerDialog({
   open,
@@ -38,29 +49,50 @@ export function CreateContainerDialog({
 }: CreateContainerDialogProps) {
   const [name, setName] = useState('');
   const [loading, setLoading] = useState(false);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [runtimeProfile, setRuntimeProfile] = useState<'server-agent' | 'server-agent-device-tools' | 'device-cli-agent'>('server-agent');
+  const [advancedOpen, setAdvancedOpen] = useState(true);
+  const [runtimeProfile, setRuntimeProfile] = useState<RuntimeProfile | ''>('');
   const [executionNode, setExecutionNode] = useState('');
-  const [agentClientId, setAgentClientId] = useState('claude-code');
-  const [hostRepoMode, setHostRepoMode] = useState<'default' | 'repo'>('default');
-  const [customCwd, setCustomCwd] = useState('');
+  const [agentBackendId, setAgentBackendId] = useState('');
+  const [hostRepoMode, setHostRepoMode] = useState<'all' | 'repo'>('all');
   const [selectedRepoId, setSelectedRepoId] = useState('');
 
   const createFlow = useChatStore((s) => s.createFlow);
   const canHostExec = useAuthStore((s) => s.user?.role === 'admin');
   const { links: devices, load: loadDevices } = useAgentLinksStore();
+  const { backends, load: loadBackends } = useCustomBackendsStore();
   const { repos, load: loadRepos } = useReposStore();
 
   useEffect(() => {
     if (open && canHostExec) {
       void loadDevices();
+      void loadBackends();
       void loadRepos();
     }
-  }, [open, canHostExec, loadDevices, loadRepos]);
+  }, [open, canHostExec, loadDevices, loadBackends, loadRepos]);
 
   const selectedRepo = useMemo(
     () => repos.find((repo) => repo.id === selectedRepoId),
     [repos, selectedRepoId],
+  );
+
+  const selectedDeviceId = deviceIdFromExecutionTarget(executionNode);
+  const deviceTargetOptions = useMemo(
+    () => devices,
+    [devices],
+  );
+
+  const selectableAgentBackends = useMemo(
+    () => backends
+      .filter((backend) => backend.runtime === 'local-device' || backend.deviceLinkId)
+      .filter((backend) => !selectedDeviceId || backend.deviceLinkId === selectedDeviceId)
+      .filter((backend) => backend.deviceLinkId && backend.agentClientId)
+      .sort((a, b) => a.displayName.localeCompare(b.displayName)),
+    [backends, selectedDeviceId],
+  );
+
+  const selectedAgentBackend = useMemo(
+    () => backends.find((backend) => backend.id === agentBackendId),
+    [backends, agentBackendId],
   );
 
   const selectableRepos = useMemo(
@@ -74,14 +106,24 @@ export function CreateContainerDialog({
     }
   }, [selectedRepo]);
 
+  useEffect(() => {
+    if (runtimeProfile !== 'device-cli-agent') return;
+    if (selectableAgentBackends.length === 0) {
+      setAgentBackendId('');
+      return;
+    }
+    if (!selectableAgentBackends.some((backend) => backend.id === agentBackendId)) {
+      setAgentBackendId(selectableAgentBackends[0].id);
+    }
+  }, [runtimeProfile, selectableAgentBackends, agentBackendId]);
+
   const reset = () => {
     setName('');
-    setAdvancedOpen(false);
-    setRuntimeProfile('server-agent');
+    setAdvancedOpen(true);
+    setRuntimeProfile('');
     setExecutionNode('');
-    setAgentClientId('claude-code');
-    setHostRepoMode('default');
-    setCustomCwd('');
+    setAgentBackendId('');
+    setHostRepoMode('all');
     setSelectedRepoId('');
   };
 
@@ -96,6 +138,10 @@ export function CreateContainerDialog({
 
     setLoading(true);
     try {
+      if (!runtimeProfile) {
+        toast.error('请选择执行形态');
+        return;
+      }
       const options: Record<string, string> = {};
       options.runtime_profile = runtimeProfile;
       if (runtimeProfile !== 'server-agent') {
@@ -105,15 +151,22 @@ export function CreateContainerDialog({
         }
         options.device_link_id = executionNode;
         if (runtimeProfile === 'device-cli-agent') {
-          options.agent_client_id = agentClientId;
+          if (!selectedAgentBackend || selectedAgentBackend.deviceLinkId !== executionNode) {
+            toast.error('请选择该 Device 上已定义的 Agent');
+            return;
+          }
+          if (!selectedAgentBackend.agentClientId) {
+            toast.error('该 Agent 未绑定 Device CLI，请先在 Agents 页面重新配置');
+            return;
+          }
+          options.backend = selectedAgentBackend.id;
+          options.agent_client_id = selectedAgentBackend.agentClientId;
         }
         if (hostRepoMode === 'repo' && selectedRepoId) {
           options.repo_id = selectedRepoId;
         } else if (hostRepoMode === 'repo') {
           toast.error('请选择项目 Repo');
           return;
-        } else if (customCwd.trim()) {
-          options.custom_cwd = customCwd.trim();
         }
       }
       const created = await createFlow(trimmed, Object.keys(options).length ? options : undefined);
@@ -174,8 +227,7 @@ export function CreateContainerDialog({
                         checked={runtimeProfile === 'server-agent'}
                         onChange={() => {
                           setRuntimeProfile('server-agent');
-                          setCustomCwd('');
-                          setHostRepoMode('default');
+                          setHostRepoMode('all');
                           setSelectedRepoId('');
                           setExecutionNode('');
                         }}
@@ -234,62 +286,75 @@ export function CreateContainerDialog({
                 </div>
 
                 {/* Device native execution: target and custom cwd */}
-                {runtimeProfile !== 'server-agent' && (
+                {runtimeProfile && runtimeProfile !== 'server-agent' && (
                   <>
                     <div>
-                      <label className="block text-sm font-medium mb-2">执行 Device</label>
+                      <label className="block text-sm font-medium mb-2">
+                        执行 Device
+                      </label>
                       <select
                         value={executionNode}
                         onChange={(e) => {
                           setExecutionNode(e.target.value);
                           if (selectedRepo?.kind === 'device_path' && selectedRepo.device_link_id !== e.target.value) {
                             setSelectedRepoId('');
-                            setHostRepoMode('default');
+                            setHostRepoMode('all');
                           }
                         }}
                         disabled={selectedRepo?.kind === 'device_path'}
                         className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
                       >
                         <option value="" disabled>请选择 Device</option>
-                        {devices.map((device) => (
+                        {deviceTargetOptions.map((device) => (
                           <option key={device.id} value={device.id} disabled={!device.online}>
-                            {device.online ? '🟢' : '⚪️'} {device.displayName} ({device.id}){device.online ? '' : ' · 离线'}
+                            {device.online ? '🟢' : '⚪️'} {device.displayName} ({device.id}) · slots {typeof device.availableSlots === 'number' ? device.availableSlots : '—'}{device.online ? '' : ' · 离线'}
                           </option>
                         ))}
                       </select>
+                      {runtimeProfile === 'device-cli-agent' && (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          先选择 Device，再选择该 Device 上已经在 Agents 页面定义好的 Agent；runtime 仅用于定义 Agent 时发现 CLI 能力。
+                        </p>
+                      )}
                     </div>
-                    {runtimeProfile === 'device-cli-agent' && (
+                    {runtimeProfile === 'device-cli-agent' && selectedDeviceId && (
                       <div>
-                        <label className="block text-sm font-medium mb-2">Agent CLI</label>
+                        <label className="block text-sm font-medium mb-2">Device Agent</label>
                         <select
-                          value={agentClientId}
-                          onChange={(e) => setAgentClientId(e.target.value)}
+                          value={agentBackendId}
+                          onChange={(e) => setAgentBackendId(e.target.value)}
+                          disabled={!executionNode || selectableAgentBackends.length === 0}
                           className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
                         >
-                          <option value="claude-code">Claude Code</option>
-                          <option value="codex">Codex</option>
+                          {selectableAgentBackends.length === 0 ? (
+                            <option value="">该 Device 暂无已定义 Agent，请先在 Agents 页面创建</option>
+                          ) : selectableAgentBackends.map((backend) => (
+                            <option key={backend.id} value={backend.id}>
+                              {backend.displayName} · {backend.agentClientId} · {backend.id}
+                            </option>
+                          ))}
                         </select>
-                        <p className="text-xs text-muted-foreground mt-1">选择 Device 上用于执行 Agent 的 CLI backend。</p>
+                        <p className="text-xs text-muted-foreground mt-1">工作区会绑定到这个已定义 Agent，后续会使用它的模型、参数和会话能力。</p>
                       </div>
                     )}
                     <div>
-                      <label className="block text-sm font-medium mb-2">项目 Repo</label>
+                      <label className="block text-sm font-medium mb-2">可见项目 Repo</label>
                       <div className="space-y-2">
                         <label className="flex items-start gap-3 p-2 rounded-lg border cursor-pointer hover:bg-accent/50 transition-colors">
-                          <input type="radio" name="host_repo_mode" value="default" checked={hostRepoMode === 'default'} onChange={() => { setHostRepoMode('default'); setSelectedRepoId(''); }} className="mt-0.5 accent-primary" />
+                          <input type="radio" name="host_repo_mode" value="all" checked={hostRepoMode === 'all'} onChange={() => { setHostRepoMode('all'); setSelectedRepoId(''); }} className="mt-0.5 accent-primary" />
                           <div>
-                            <span className="text-sm font-medium">默认 Device 工作区</span>
-                            <p className="text-xs text-muted-foreground mt-0.5">使用 Device 上 OctoDeck 默认工作目录</p>
+                            <span className="text-sm font-medium">全部 Repo 可见</span>
+                            <p className="text-xs text-muted-foreground mt-0.5">Agent 运行目录始终是 Device Workspace；不限制到单个 Repo</p>
                           </div>
                         </label>
                         <label className="flex items-start gap-3 p-2 rounded-lg border cursor-pointer hover:bg-accent/50 transition-colors">
-                          <input type="radio" name="host_repo_mode" value="repo" checked={hostRepoMode === 'repo'} onChange={() => { setHostRepoMode('repo'); setCustomCwd(''); }} className="mt-0.5 accent-primary" />
+                          <input type="radio" name="host_repo_mode" value="repo" checked={hostRepoMode === 'repo'} onChange={() => { setHostRepoMode('repo'); }} className="mt-0.5 accent-primary" />
                           <div className="flex-1">
                             <div className="flex items-center gap-1.5">
                               <GitBranch className="w-4 h-4 text-muted-foreground" />
                               <span className="text-sm font-medium">已管理 Repo</span>
                             </div>
-                            <p className="text-xs text-muted-foreground mt-0.5">从侧边栏 Repo Center 中选择；Git 仓库可在任意 Device 执行，Device 目录固定到绑定设备</p>
+                            <p className="text-xs text-muted-foreground mt-0.5">从 Repo Center 指定一个项目作为上下文；工作区仍是 Agent 运行目录</p>
                           </div>
                         </label>
                         {hostRepoMode === 'repo' && (
@@ -299,7 +364,6 @@ export function CreateContainerDialog({
                               onChange={(e) => {
                                 const repo = repos.find((item) => item.id === e.target.value);
                                 setSelectedRepoId(e.target.value);
-                                setCustomCwd('');
                                 if (repo?.kind === 'device_path' && repo.device_link_id) {
                                   setExecutionNode(repo.device_link_id);
                                 }
@@ -328,9 +392,6 @@ export function CreateContainerDialog({
                         )}
                       </div>
                     </div>
-                    {hostRepoMode === 'default' && (
-                      <DirectoryBrowser value={customCwd} onChange={setCustomCwd} placeholder="兼容旧模式：直接指定 cwd（可选）" />
-                    )}
                     <div className="flex items-start gap-2 p-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg">
                       <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
                       <p className="text-xs text-amber-700 dark:text-amber-300">
@@ -349,7 +410,7 @@ export function CreateContainerDialog({
           <Button variant="outline" onClick={handleClose} disabled={loading}>
             取消
           </Button>
-          <Button onClick={handleConfirm} disabled={loading || !name.trim()}>
+          <Button onClick={handleConfirm} disabled={loading || !name.trim() || !runtimeProfile}>
             {loading && <Loader2 className="w-4 h-4 animate-spin" />}
             {loading ? '正在创建...' : '创建'}
           </Button>

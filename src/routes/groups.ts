@@ -59,6 +59,7 @@ import {
   getAgentLinkById,
 } from '../db.js';
 import { logger } from '../logger.js';
+import { listCustomBackends } from '../backends/custom-loader.js';
 import {
   getContainerEnvConfig,
   getSystemSettings,
@@ -144,6 +145,29 @@ function normalizeGroupName(name: unknown): string {
   return name.trim().slice(0, MAX_GROUP_NAME_LEN);
 }
 
+function isAgentLinkExecutionTarget(value: string | undefined): boolean {
+  return (
+    typeof value === 'string' &&
+    (/^cl_[0-9a-f]{16}$/.test(value) ||
+      /^runtime:cl_[0-9a-f]{16}:[^:]+$/.test(value) ||
+      /^cl_[0-9a-f]{16}:[^:]+$/.test(value) ||
+      /^provider:[^:]+$/.test(value))
+  );
+}
+
+function deviceLinkIdFromExecutionTarget(
+  value: string | undefined,
+): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const direct = /^(cl_[0-9a-f]{16})$/.exec(value);
+  if (direct) return direct[1];
+  const runtime = /^runtime:(cl_[0-9a-f]{16}):[^:]+$/.exec(value);
+  if (runtime) return runtime[1];
+  const legacyRuntime = /^(cl_[0-9a-f]{16}):[^:]+$/.exec(value);
+  if (legacyRuntime) return legacyRuntime[1];
+  return undefined;
+}
+
 interface GroupPayloadItem {
   name: string;
   folder: string;
@@ -153,7 +177,10 @@ interface GroupPayloadItem {
   deletable: boolean;
   lastMessage?: string;
   lastMessageTime?: string;
-  runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent';
+  runtime_profile?:
+    | 'server-agent'
+    | 'server-agent-device-tools'
+    | 'device-cli-agent';
   device_link_id?: string;
   agent_client_id?: string;
   execution_mode: 'container' | 'host';
@@ -167,7 +194,12 @@ interface GroupPayloadItem {
   member_role?: 'owner' | 'member';
   member_count?: number;
   pinned_at?: string;
-  activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';
+  activation_mode?:
+    | 'auto'
+    | 'always'
+    | 'when_mentioned'
+    | 'owner_mentioned'
+    | 'disabled';
   conversation_source?: 'manual' | 'feishu_thread';
   conversation_nav_mode?: 'horizontal' | 'vertical_threads';
   backend?: string;
@@ -289,7 +321,9 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       conversation_source: group.conversation_source ?? 'manual',
       conversation_nav_mode: group.conversation_nav_mode ?? 'horizontal',
       backend: group.backend,
-      execution_node: group.executionNode?.startsWith('cl_') ? group.executionNode : undefined,
+      execution_node: isAgentLinkExecutionTarget(group.executionNode)
+        ? group.executionNode
+        : undefined,
     };
   }
 
@@ -370,8 +404,10 @@ groupRoutes.post('/', authMiddleware, async (c) => {
   }
 
   const runtimeProfile = validation.data.runtime_profile ?? 'server-agent';
-  const deviceLinkId = validation.data.device_link_id ?? validation.data.execution_node;
+  const deviceLinkId =
+    validation.data.device_link_id ?? validation.data.execution_node;
   const agentClientId = validation.data.agent_client_id;
+  const backend = validation.data.backend;
   const executionMode = runtimeProfile === 'server-agent' ? 'host' : 'host';
   const executionNode = deviceLinkId;
   const customCwd = validation.data.custom_cwd; // Schema already trims and converts empty to undefined
@@ -385,9 +421,16 @@ groupRoutes.post('/', authMiddleware, async (c) => {
   if (repoId && (!selectedRepo || selectedRepo.createdBy !== authUser.id)) {
     return c.json({ error: 'repo_id not found' }, 400);
   }
-  const effectiveRepoGitUrl = selectedRepo?.kind === 'git' ? selectedRepo.gitUrl : repoGitUrl;
-  const effectiveRepoDevicePath = selectedRepo?.kind === 'device_path' ? selectedRepo.devicePath : repoDevicePath;
-  const effectiveExecutionNode = selectedRepo?.kind === 'device_path' ? selectedRepo.deviceLinkId : executionNode;
+  const effectiveRepoGitUrl =
+    selectedRepo?.kind === 'git' ? selectedRepo.gitUrl : repoGitUrl;
+  const effectiveRepoDevicePath =
+    selectedRepo?.kind === 'device_path'
+      ? selectedRepo.devicePath
+      : repoDevicePath;
+  const effectiveExecutionNode =
+    selectedRepo?.kind === 'device_path'
+      ? selectedRepo.deviceLinkId
+      : executionNode;
 
   // Billing: check group limit
   const groupLimit = checkGroupLimit(authUser.id, authUser.role);
@@ -403,12 +446,29 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     );
   }
 
-  if ([repoId, repoGitUrl, repoDevicePath, customCwd].filter(Boolean).length > 1) {
-    return c.json({ error: 'repo_id, repo_git_url, repo_device_path and custom_cwd are mutually exclusive' }, 400);
+  if (
+    [repoId, repoGitUrl, repoDevicePath, customCwd].filter(Boolean).length > 1
+  ) {
+    return c.json(
+      {
+        error:
+          'repo_id, repo_git_url, repo_device_path and custom_cwd are mutually exclusive',
+      },
+      400,
+    );
   }
 
-  if ((repoId || repoGitUrl || repoDevicePath) && runtimeProfile === 'server-agent') {
-    return c.json({ error: 'repo_id, repo_git_url and repo_device_path require a Device runtime profile' }, 400);
+  if (
+    (repoId || repoGitUrl || repoDevicePath) &&
+    runtimeProfile === 'server-agent'
+  ) {
+    return c.json(
+      {
+        error:
+          'repo_id, repo_git_url and repo_device_path require a Device runtime profile',
+      },
+      400,
+    );
   }
 
   // init_source_path / init_git_url 仅 container 模式可用
@@ -430,14 +490,45 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       );
     }
     if (!effectiveExecutionNode) {
-      return c.json({ error: 'device_link_id is required for Device runtime profiles' }, 400);
+      return c.json(
+        { error: 'device_link_id is required for Device runtime profiles' },
+        400,
+      );
     }
-    if (!/^cl_[0-9a-f]{16}$/.test(effectiveExecutionNode)) {
+    if (
+      effectiveRepoDevicePath &&
+      effectiveExecutionNode.startsWith('provider:')
+    ) {
+      return c.json(
+        {
+          error: 'repo_device_path workspaces require a pinned Device runtime',
+        },
+        400,
+      );
+    }
+    const resolvedExecutionNode = deviceLinkIdFromExecutionTarget(
+      effectiveExecutionNode,
+    );
+    if (
+      !resolvedExecutionNode &&
+      !effectiveExecutionNode.startsWith('provider:')
+    ) {
       return c.json({ error: 'Invalid execution_node format' }, 400);
     }
-    const link = getAgentLinkById(effectiveExecutionNode);
-    if (!link || link.userId !== authUser.id || link.revokedAt) {
-      return c.json({ error: 'execution_node not found' }, 400);
+    if (runtimeProfile === 'device-cli-agent' && !resolvedExecutionNode) {
+      return c.json(
+        {
+          error:
+            'device-cli-agent requires a pinned Device, not a runtime/provider target',
+        },
+        400,
+      );
+    }
+    if (resolvedExecutionNode) {
+      const link = getAgentLinkById(resolvedExecutionNode);
+      if (!link || link.userId !== authUser.id || link.revokedAt) {
+        return c.json({ error: 'execution_node not found' }, 400);
+      }
     }
     if (customCwd) {
       if (!path.isAbsolute(customCwd)) {
@@ -448,13 +539,64 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       // only validate syntax here; existence/allowlist are enforced by the device runtime.
     }
     if (effectiveRepoDevicePath && !path.isAbsolute(effectiveRepoDevicePath)) {
-      return c.json({ error: 'repo_device_path must be an absolute path' }, 400);
+      return c.json(
+        { error: 'repo_device_path must be an absolute path' },
+        400,
+      );
     }
-    if (runtimeProfile === 'device-cli-agent' && !agentClientId) {
-      return c.json({ error: 'agent_client_id is required for device-cli-agent' }, 400);
+    if (runtimeProfile === 'device-cli-agent') {
+      if (!agentClientId) {
+        return c.json(
+          { error: 'agent_client_id is required for device-cli-agent' },
+          400,
+        );
+      }
+      if (!backend) {
+        return c.json(
+          { error: 'backend is required for device-cli-agent' },
+          400,
+        );
+      }
+      const settings = getSystemSettings();
+      if (!settings.allowedBackends.includes(backend)) {
+        return c.json(
+          { error: `Backend "${backend}" is not in allowedBackends whitelist` },
+          400,
+        );
+      }
+      const selectedBackend = listCustomBackends().find(
+        (item) => item.id === backend,
+      );
+      if (!selectedBackend) {
+        return c.json({ error: 'Selected Agent backend not found' }, 400);
+      }
+      if (
+        selectedBackend.runtime !== 'local-device' &&
+        !selectedBackend.deviceLinkId
+      ) {
+        return c.json(
+          { error: 'Selected Agent is not a Device CLI Agent' },
+          400,
+        );
+      }
+      if (selectedBackend.deviceLinkId !== resolvedExecutionNode) {
+        return c.json(
+          { error: 'Selected Agent does not belong to the selected Device' },
+          400,
+        );
+      }
+      if (selectedBackend.agentClientId !== agentClientId) {
+        return c.json(
+          { error: 'agent_client_id does not match selected Agent backend' },
+          400,
+        );
+      }
     }
   } else if (customCwd) {
-    return c.json({ error: 'custom_cwd is only valid for Device runtime profiles' }, 400);
+    return c.json(
+      { error: 'custom_cwd is only valid for Device runtime profiles' },
+      400,
+    );
   }
 
   // 验证 init_source_path
@@ -574,14 +716,20 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     executionMode: executionMode as ExecutionMode,
     customCwd: runtimeProfile !== 'server-agent' ? customCwd : undefined,
     repoId: runtimeProfile !== 'server-agent' ? repoId : undefined,
-    repoGitUrl: runtimeProfile !== 'server-agent' ? effectiveRepoGitUrl : undefined,
-    repoDevicePath: runtimeProfile !== 'server-agent' ? effectiveRepoDevicePath : undefined,
+    repoGitUrl:
+      runtimeProfile !== 'server-agent' ? effectiveRepoGitUrl : undefined,
+    repoDevicePath:
+      runtimeProfile !== 'server-agent' ? effectiveRepoDevicePath : undefined,
     initSourcePath: executionMode !== 'host' ? initSourcePath : undefined,
     initGitUrl: executionMode !== 'host' ? initGitUrl : undefined,
     created_by: authUser.id,
-    deviceLinkId: runtimeProfile !== 'server-agent' ? effectiveExecutionNode : undefined,
-    agentClientId: runtimeProfile === 'device-cli-agent' ? agentClientId : undefined,
-    executionNode: runtimeProfile !== 'server-agent' ? effectiveExecutionNode : undefined,
+    deviceLinkId:
+      runtimeProfile !== 'server-agent' ? effectiveExecutionNode : undefined,
+    agentClientId:
+      runtimeProfile === 'device-cli-agent' ? agentClientId : undefined,
+    backend: runtimeProfile === 'device-cli-agent' ? backend : undefined,
+    executionNode:
+      runtimeProfile !== 'server-agent' ? effectiveExecutionNode : undefined,
   };
 
   setRegisteredGroup(jid, group);
@@ -642,9 +790,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       custom_cwd: hasHostExecutionPermission(authUser)
         ? group.customCwd
         : undefined,
-      repo_id: hasHostExecutionPermission(authUser)
-        ? group.repoId
-        : undefined,
+      repo_id: hasHostExecutionPermission(authUser) ? group.repoId : undefined,
       repo_git_url: hasHostExecutionPermission(authUser)
         ? group.repoGitUrl
         : undefined,
@@ -659,11 +805,14 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       runtime_profile: group.runtimeProfile,
       device_link_id: group.deviceLinkId,
       agent_client_id: group.agentClientId,
+      backend: group.backend,
       execution_mode: group.executionMode || 'host',
       member_role: 'owner',
       member_count: 1,
       is_shared: false,
-      execution_node: group.executionNode?.startsWith('cl_') ? group.executionNode : undefined,
+      execution_node: isAgentLinkExecutionTarget(group.executionNode)
+        ? group.executionNode
+        : undefined,
     },
   });
 });
@@ -729,15 +878,32 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   const nextDeviceLinkId = device_link_id ?? execution_node;
   // device_link_id / execution_node 校验：必须是当前用户拥有的、未吊销的 AgentLink ID
   if (nextDeviceLinkId !== undefined) {
-    if (!/^cl_[0-9a-f]{16}$/.test(nextDeviceLinkId)) {
+    const resolvedNextDeviceLinkId =
+      deviceLinkIdFromExecutionTarget(nextDeviceLinkId);
+    if (
+      !resolvedNextDeviceLinkId &&
+      !nextDeviceLinkId.startsWith('provider:')
+    ) {
       return c.json({ error: 'Invalid device_link_id format' }, 400);
     }
-    const link = getAgentLinkById(nextDeviceLinkId);
-    if (!link || link.userId !== authUser.id || link.revokedAt) {
-      return c.json({ error: 'device_link_id not found' }, 400);
+    if (resolvedNextDeviceLinkId) {
+      const link = getAgentLinkById(resolvedNextDeviceLinkId);
+      if (!link || link.userId !== authUser.id || link.revokedAt) {
+        return c.json({ error: 'device_link_id not found' }, 400);
+      }
     }
-    if (existing.repoDevicePath && existing.deviceLinkId && nextDeviceLinkId !== existing.deviceLinkId) {
-      return c.json({ error: 'repo_device_path workspaces can only run on their original Device' }, 400);
+    if (
+      existing.repoDevicePath &&
+      existing.deviceLinkId &&
+      resolvedNextDeviceLinkId !== existing.deviceLinkId
+    ) {
+      return c.json(
+        {
+          error:
+            'repo_device_path workspaces can only run on their original Device',
+        },
+        400,
+      );
     }
   }
 
@@ -1244,9 +1410,7 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
   //    with their cwd/session dirs pulled out from under them (ENOENT / undefined
   //    behavior in container mode).
   const descendantJids = Array.from(
-    new Set(
-      siblingJids.flatMap((j) => deps.queue.listActiveDescendantJids(j)),
-    ),
+    new Set(siblingJids.flatMap((j) => deps.queue.listActiveDescendantJids(j))),
   );
   const stopJids = [...siblingJids, ...descendantJids];
   try {
@@ -1778,7 +1942,11 @@ groupRoutes.put('/:jid/mcp', authMiddleware, async (c) => {
   const selected_mcps = body.selected_mcps;
 
   // Validate mcp_mode
-  if (mcp_mode !== undefined && mcp_mode !== 'inherit' && mcp_mode !== 'custom') {
+  if (
+    mcp_mode !== undefined &&
+    mcp_mode !== 'inherit' &&
+    mcp_mode !== 'custom'
+  ) {
     return c.json({ error: 'Invalid mcp_mode' }, 400);
   }
 
@@ -1798,7 +1966,8 @@ groupRoutes.put('/:jid/mcp', authMiddleware, async (c) => {
   const updatedGroup: RegisteredGroup = {
     ...group,
     mcp_mode: mcp_mode ?? group.mcp_mode ?? 'inherit',
-    selected_mcps: selected_mcps !== undefined ? selected_mcps : group.selected_mcps,
+    selected_mcps:
+      selected_mcps !== undefined ? selected_mcps : group.selected_mcps,
   };
 
   setRegisteredGroup(jid, updatedGroup);

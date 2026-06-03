@@ -105,9 +105,7 @@ export function extractRepliedMsg(
 
     default: {
       const summary =
-        typeof content === 'string'
-          ? content
-          : JSON.stringify(content ?? {});
+        typeof content === 'string' ? content : JSON.stringify(content ?? {});
       return {
         ...base,
         kind: 'other',

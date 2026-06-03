@@ -37,7 +37,9 @@ interface DeviceDirectoryPayload {
   hasAllowlist?: boolean;
 }
 
-function isUnsupportedListDirectories(error: string | null | undefined): boolean {
+function isUnsupportedListDirectories(
+  error: string | null | undefined,
+): boolean {
   return !!error && /unsupported tool:\s*ListDirectories/i.test(error);
 }
 
@@ -79,10 +81,17 @@ print(json.dumps({'currentPath': base, 'parentPath': parent, 'directories': dirs
 PY`;
 }
 
-async function listDeviceDirectoriesWithBashFallback(linkId: string, targetPath?: string) {
+async function listDeviceDirectoriesWithBashFallback(
+  linkId: string,
+  targetPath?: string,
+) {
   const session = getSession(linkId);
   if (!session || session.state !== 'open') {
-    return { ok: false as const, status: 409 as const, error: 'Device is offline' };
+    return {
+      ok: false as const,
+      status: 409 as const,
+      error: 'Device is offline',
+    };
   }
   try {
     const result = await invokeRemoteTool(session, {
@@ -94,22 +103,41 @@ async function listDeviceDirectoriesWithBashFallback(linkId: string, targetPath?
       maxOutputBytes: 128 * 1024,
     });
     if (!result.ok) {
-      return { ok: false as const, status: 400 as const, error: result.error || 'Failed to list device directories' };
+      return {
+        ok: false as const,
+        status: 400 as const,
+        error: result.error || 'Failed to list device directories',
+      };
     }
-    const stdout = typeof (result.result as { stdout?: unknown } | null)?.stdout === 'string'
-      ? (result.result as { stdout: string }).stdout
-      : '';
-    return { ok: true as const, payload: JSON.parse(stdout) as DeviceDirectoryPayload };
+    const stdout =
+      typeof (result.result as { stdout?: unknown } | null)?.stdout === 'string'
+        ? (result.result as { stdout: string }).stdout
+        : '';
+    return {
+      ok: true as const,
+      payload: JSON.parse(stdout) as DeviceDirectoryPayload,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return { ok: false as const, status: message === 'tool_timeout' ? 504 as const : 409 as const, error: message };
+    return {
+      ok: false as const,
+      status: message === 'tool_timeout' ? (504 as const) : (409 as const),
+      error: message,
+    };
   }
 }
 
-export async function listDeviceDirectories(linkId: string, targetPath?: string) {
+export async function listDeviceDirectories(
+  linkId: string,
+  targetPath?: string,
+) {
   const session = getSession(linkId);
   if (!session || session.state !== 'open') {
-    return { ok: false as const, status: 409 as const, error: 'Device is offline' };
+    return {
+      ok: false as const,
+      status: 409 as const,
+      error: 'Device is offline',
+    };
   }
   try {
     const result = await invokeRemoteTool(session, {
@@ -124,12 +152,23 @@ export async function listDeviceDirectories(linkId: string, targetPath?: string)
       if (isUnsupportedListDirectories(result.error)) {
         return listDeviceDirectoriesWithBashFallback(linkId, targetPath);
       }
-      return { ok: false as const, status: 400 as const, error: result.error || 'Failed to list device directories' };
+      return {
+        ok: false as const,
+        status: 400 as const,
+        error: result.error || 'Failed to list device directories',
+      };
     }
-    return { ok: true as const, payload: result.result as DeviceDirectoryPayload };
+    return {
+      ok: true as const,
+      payload: result.result as DeviceDirectoryPayload,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return { ok: false as const, status: message === 'tool_timeout' ? 504 as const : 409 as const, error: message };
+    return {
+      ok: false as const,
+      status: message === 'tool_timeout' ? (504 as const) : (409 as const),
+      error: message,
+    };
   }
 }
 
@@ -162,7 +201,8 @@ repoRoutes.post('/', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   const body = await c.req.json().catch(() => ({}));
   const validation = RepoCreateSchema.safeParse(body);
-  if (!validation.success) return c.json({ error: 'Invalid request body' }, 400);
+  if (!validation.success)
+    return c.json({ error: 'Invalid request body' }, 400);
 
   const { name, kind, git_url, device_link_id } = validation.data;
   let { device_path } = validation.data;
@@ -174,20 +214,24 @@ repoRoutes.post('/', authMiddleware, async (c) => {
     } catch {
       return c.json({ error: 'git_url is not a valid URL' }, 400);
     }
-    if (url.protocol !== 'https:') return c.json({ error: 'git_url must use https protocol' }, 400);
+    if (url.protocol !== 'https:')
+      return c.json({ error: 'git_url must use https protocol' }, 400);
   }
 
   if (kind === 'device_path') {
     if (!device_path) return c.json({ error: 'device_path is required' }, 400);
-    if (!path.isAbsolute(device_path)) return c.json({ error: 'device_path must be an absolute path' }, 400);
-    if (!device_link_id) return c.json({ error: 'device_link_id is required' }, 400);
+    if (!path.isAbsolute(device_path))
+      return c.json({ error: 'device_path must be an absolute path' }, 400);
+    if (!device_link_id)
+      return c.json({ error: 'device_link_id is required' }, 400);
     const link = getAgentLinkById(device_link_id);
     if (!link || link.userId !== user.id || link.revokedAt) {
       return c.json({ error: 'device_link_id not found' }, 400);
     }
     const result = await listDeviceDirectories(device_link_id, device_path);
     if (!result.ok) return c.json({ error: result.error }, result.status);
-    if (!result.payload.currentPath) return c.json({ error: 'device_path is not a directory' }, 400);
+    if (!result.payload.currentPath)
+      return c.json({ error: 'device_path is not a directory' }, 400);
     device_path = result.payload.currentPath;
   }
 

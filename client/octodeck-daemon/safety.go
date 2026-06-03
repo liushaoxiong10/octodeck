@@ -10,7 +10,8 @@ import (
 // validateRunRequest enforces client-side safety rules.
 //
 //  1. binary must be in cfg.AllowedBinaries (exact match, absolute path).
-//  2. cwd must be absolute.
+//  2. cwd must be absolute, or an octodeck-workspace:// URI that will be
+//     resolved to the device workspace before spawning.
 //  3. env keys must not include LD_PRELOAD, NODE_OPTIONS, DYLD_INSERT_LIBRARIES,
 //     LD_LIBRARY_PATH, PATH (we don't let server override $PATH wholesale).
 //  4. cwd must be under ~/.octodeck or the configured allowed roots.
@@ -27,7 +28,7 @@ func validateRunRequest(cfg *Config, req *RunRequestFrame) error {
 	if req.Cwd == "" {
 		return errors.New("cwd is required")
 	}
-	if !filepath.IsAbs(req.Cwd) {
+	if !filepath.IsAbs(req.Cwd) && !strings.HasPrefix(req.Cwd, deviceWorkspaceURIPrefix) {
 		return fmt.Errorf("cwd must be absolute: %q", req.Cwd)
 	}
 	for _, a := range req.Argv {

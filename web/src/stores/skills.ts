@@ -41,6 +41,11 @@ export interface SearchResultDetail {
   features: string[];
 }
 
+export interface InstallSkillOptions {
+  target?: 'cloud' | 'device';
+  deviceLinkId?: string;
+}
+
 interface SkillsState {
   skills: Skill[];
   loading: boolean;
@@ -54,7 +59,7 @@ interface SkillsState {
   loadSkills: () => Promise<void>;
   toggleSkill: (id: string, enabled: boolean) => Promise<void>;
   deleteSkill: (id: string) => Promise<void>;
-  installSkill: (pkg: string) => Promise<void>;
+  installSkill: (pkg: string, options?: InstallSkillOptions) => Promise<void>;
   reinstallSkill: (id: string) => Promise<void>;
   deleteAllUserSkills: () => Promise<number>;
   getSkillDetail: (id: string) => Promise<SkillDetail>;
@@ -103,10 +108,10 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  installSkill: async (pkg: string) => {
+  installSkill: async (pkg: string, options?: InstallSkillOptions) => {
     set({ installing: true, error: null });
     try {
-      await api.post('/api/skills/install', { package: pkg }, 60_000);
+      await api.post('/api/skills/install', { package: pkg, ...options }, 120_000);
       await get().loadSkills();
     } catch (err: any) {
       set({ error: err?.message || (err instanceof Error ? err.message : '安装失败，请稍后重试') });

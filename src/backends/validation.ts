@@ -25,7 +25,8 @@ const PLACEHOLDER_RE = /\{([a-zA-Z]+)\}/g;
 const BAD_BINARY_CHARS = /[\s;|&><`$"'\\]/;
 const PURE_COMMAND_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const AGENT_TEAM_MCP_CONFIG_PLACEHOLDER = '__OCTODECK_AGENT_TEAM_MCP_CONFIG__';
-const AGENT_TEAM_MCP_PROJECT_CONFIG_MARKER = '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__';
+const AGENT_TEAM_MCP_PROJECT_CONFIG_MARKER =
+  '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__';
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 const RESERVED_CLAUDE_ENV_KEYS = new Set([
@@ -162,11 +163,14 @@ export function validateArgvTemplate(template: unknown): ValidationResult {
   return { ok: true };
 }
 
-export function shouldDisableAgentTeamMcp(input: { chatJid?: string } | undefined, folder?: string): boolean {
+export function shouldDisableAgentTeamMcp(
+  input: { chatJid?: string } | undefined,
+  folder?: string,
+): boolean {
   return (
-    typeof input?.chatJid === 'string' && input.chatJid.startsWith('system:agent-team:')
-  ) || (
-    typeof folder === 'string' && folder.startsWith('agent-team-')
+    (typeof input?.chatJid === 'string' &&
+      input.chatJid.startsWith('system:agent-team:')) ||
+    (typeof folder === 'string' && folder.startsWith('agent-team-'))
   );
 }
 
@@ -191,7 +195,9 @@ export function stripAgentTeamMcpConfigArgs(argv: string[]): string[] {
   return out;
 }
 
-export function validateSessionArgvTemplate(template: unknown): ValidationResult {
+export function validateSessionArgvTemplate(
+  template: unknown,
+): ValidationResult {
   if (template === undefined || template === null) return { ok: true };
   if (!Array.isArray(template)) {
     return { ok: false, error: 'sessionArgvTemplate 必须是数组' };
@@ -228,7 +234,9 @@ export function validateSessionArgvTemplate(template: unknown): ValidationResult
   return { ok: true };
 }
 
-export function validateResumeArgvTemplate(template: unknown): ValidationResult {
+export function validateResumeArgvTemplate(
+  template: unknown,
+): ValidationResult {
   if (template === undefined || template === null) return { ok: true };
   if (!Array.isArray(template)) {
     return { ok: false, error: 'resumeArgvTemplate 必须是数组' };
@@ -281,9 +289,7 @@ export function validateResumeArgvTemplate(template: unknown): ValidationResult 
   return { ok: true };
 }
 
-export function validateBackendEnv(
-  env: unknown,
-): ValidationResult {
+export function validateBackendEnv(env: unknown): ValidationResult {
   if (env === undefined || env === null) return { ok: true };
   if (typeof env !== 'object' || Array.isArray(env)) {
     return { ok: false, error: 'env 必须是对象' };

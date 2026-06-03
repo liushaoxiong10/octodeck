@@ -27,10 +27,15 @@ import {
   getSystemSettings,
 } from '../runtime-config.js';
 import type { ContainerOutput } from '../container-runner.js';
-import { getSession } from '../agent-link/registry.js';
+import { getOnlineMeta, getSession } from '../agent-link/registry.js';
+import { listOnlineRuntimesByProvider } from '../agent-link/registry.js';
+import type { AgentLinkSession } from '../agent-link/session.js';
 import {
+  registerAgentRun,
   registerRun,
+  unregisterAgentRun,
   unregisterRun,
+  type AgentRunController,
   type RunController,
 } from '../agent-link/run-rpc.js';
 import type { BackendRunArgs } from './types.js';
@@ -94,9 +99,41 @@ interface ParseState {
 }
 
 const REMOTE_CWD_PLACEHOLDER = '__OCTODECK_REMOTE_CWD__';
+const DEVICE_WORKSPACE_URI_PREFIX = 'octodeck-workspace://';
 
 function newRunId(): string {
   return crypto.randomUUID();
+}
+
+export function parseAgentLinkTarget(
+  target: string,
+  userId?: string,
+): { linkId: string; agentClientId?: string } | null {
+  const trimmed = target.trim();
+  if (/^cl_[0-9a-f]{16}$/.test(trimmed)) return { linkId: trimmed };
+  const runtimeMatch = /^runtime:(cl_[0-9a-f]{16}):([^:]+)$/.exec(trimmed);
+  if (runtimeMatch)
+    return { linkId: runtimeMatch[1], agentClientId: runtimeMatch[2] };
+  const legacyRuntimeMatch = /^(cl_[0-9a-f]{16}):([^:]+)$/.exec(trimmed);
+  if (legacyRuntimeMatch)
+    return {
+      linkId: legacyRuntimeMatch[1],
+      agentClientId: legacyRuntimeMatch[2],
+    };
+  const providerMatch = /^provider:([^:]+)$/.exec(trimmed);
+  if (providerMatch) {
+    if (!userId) return null;
+    const selected = listOnlineRuntimesByProvider(
+      providerMatch[1],
+      userId,
+    ).find((runtime) => (runtime.availableSlots ?? 1) > 0);
+    if (selected)
+      return {
+        linkId: selected.deviceLinkId,
+        agentClientId: selected.agentClientId,
+      };
+  }
+  return null;
 }
 
 function buildRunContext(
@@ -167,6 +204,263 @@ function buildWorkspaceRepo(
   return undefined;
 }
 
+function supportsAgentRun(linkId: string, agentClientId?: string): boolean {
+  if (!agentClientId) return false;
+  const meta = getOnlineMeta(linkId);
+  return !!meta?.capabilities?.includes('agent.run');
+}
+
+async function runViaAgentRuntime(opts: {
+  args: BackendRunArgs;
+  cfg: HostCliDriverConfig;
+  linkId: string;
+  agentClientId: string;
+  session: AgentLinkSession;
+  groupDir: string;
+  logsDir: string;
+  workspaceRepo: ReturnType<typeof buildWorkspaceRepo>;
+  runContext: Record<string, unknown>;
+  timeoutMs: number;
+  maxOutputBytes: number;
+}): Promise<ContainerOutput> {
+  const {
+    args,
+    cfg,
+    linkId,
+    agentClientId,
+    session,
+    groupDir,
+    logsDir,
+    workspaceRepo,
+    runContext,
+    timeoutMs,
+    maxOutputBytes,
+  } = opts;
+  const { group, input, onProcess, onOutput } = args;
+  const startTime = Date.now();
+  const runId = newRunId();
+  const processId = `${cfg.backendId}-${group.folder}-${linkId}-${agentClientId}-${startTime}`;
+
+  return new Promise<ContainerOutput>((resolve) => {
+    let settled = false;
+    let textAccum = '';
+    let logAccum = '';
+    let lastStatusMessage = '';
+    let lastSessionId: string | undefined = input.sessionId;
+    const resolveOnce = (out: ContainerOutput): void => {
+      if (settled) return;
+      settled = true;
+      unregisterAgentRun(runId);
+      resolve(out);
+    };
+    const emitWrapped = async (output: ContainerOutput): Promise<void> => {
+      if (!onOutput) return;
+      try {
+        await onOutput(output);
+      } catch (err) {
+        logger.error(
+          { group: group.name, err },
+          `${cfg.backendId} onOutput callback failed (agent-run)`,
+        );
+      }
+    };
+
+    const fakeProc = new EventEmitter() as ChildProcess & EventEmitter;
+    Object.assign(fakeProc, {
+      pid: undefined,
+      stdin: null,
+      stdout: null,
+      stderr: null,
+      stdio: [null, null, null] as unknown as ChildProcess['stdio'],
+      killed: false,
+      kill: (_signal?: NodeJS.Signals | number): boolean => {
+        const s = getSession(linkId);
+        if (s && s.state === 'open') {
+          s.send({ type: 'agent.run.cancel', runId, reason: 'user_abort' });
+        }
+        return true;
+      },
+    });
+    onProcess(fakeProc, processId, null);
+
+    const finalize = async (
+      info:
+        | {
+            kind: 'result';
+            ok: boolean;
+            result?: string;
+            error: string | null;
+            sessionId?: string;
+            timedOut: boolean;
+            durationMs: number;
+          }
+        | { kind: 'fail'; reason: string },
+    ): Promise<void> => {
+      try {
+        const ts = new Date(startTime).toISOString().replace(/[:.]/g, '-');
+        const logFile = path.join(logsDir, `${cfg.backendId}-${ts}.log`);
+        fs.writeFileSync(
+          logFile,
+          [
+            `=== ${cfg.backendId} run ${processId} (via agent.run ${linkId}/${agentClientId}) ===`,
+            `Group: ${group.name} (${group.folder})`,
+            `Cwd: ${groupDir}`,
+            `Agent: ${agentClientId}`,
+            info.kind === 'result'
+              ? `Result: ok=${info.ok} duration=${info.durationMs}ms timedOut=${info.timedOut}`
+              : `Failed: ${info.reason}`,
+            ``,
+            `=== TEXT ===`,
+            textAccum,
+            ``,
+            `=== LOG ===`,
+            logAccum,
+          ].join('\n'),
+          { mode: 0o600 },
+        );
+      } catch (err) {
+        logger.warn(
+          { group: group.name, err },
+          `${cfg.backendId} failed to write run log (agent-run)`,
+        );
+      }
+
+      if (info.kind === 'fail') {
+        const out: ContainerOutput = {
+          status: 'error',
+          result: `Agent Link ${linkId} 失败：${info.reason}`,
+          error: `agent-run failed: ${info.reason}`,
+          newSessionId: lastSessionId,
+        };
+        await emitWrapped(out);
+        resolveOnce(out);
+        return;
+      }
+      if (info.sessionId) lastSessionId = info.sessionId;
+      if (info.timedOut) {
+        const out: ContainerOutput = {
+          status: 'error',
+          result: `${cfg.backendId} 执行超时（${Math.round(info.durationMs / 1000)}s）`,
+          error: `${cfg.backendId} timeout after ${info.durationMs}ms (agent-run)`,
+          newSessionId: lastSessionId,
+        };
+        await emitWrapped(out);
+        resolveOnce(out);
+        return;
+      }
+      const resultText =
+        (info.result ?? textAccum.trimEnd()) || lastStatusMessage;
+      const out: ContainerOutput = info.ok
+        ? { status: 'success', result: resultText, newSessionId: lastSessionId }
+        : {
+            status: 'error',
+            result: resultText || info.error || `${cfg.backendId} 返回错误`,
+            error:
+              info.error || resultText || `${cfg.backendId} reported failure`,
+            newSessionId: lastSessionId,
+          };
+      await emitWrapped(out);
+      resolveOnce(out);
+    };
+
+    const timer = setTimeout(() => {
+      logger.error(
+        { group: group.name, runId, linkId, agentClientId },
+        `${cfg.backendId} agent-run timeout, sending agent.run.cancel`,
+      );
+      const s = getSession(linkId);
+      if (s && s.state === 'open') {
+        s.send({ type: 'agent.run.cancel', runId, reason: 'timeout' });
+      }
+      setTimeout(() => {
+        if (!settled) void finalize({ kind: 'fail', reason: 'server_timeout' });
+      }, 5_000);
+    }, timeoutMs);
+
+    const controller: AgentRunController = {
+      runId,
+      linkId,
+      onEvent(frame) {
+        if (frame.sessionId) lastSessionId = frame.sessionId;
+        if (frame.eventType === 'log') {
+          if (frame.text && logAccum.length < 20000) {
+            logAccum += frame.text.slice(0, 20000 - logAccum.length);
+          }
+          return;
+        }
+        if (frame.text) {
+          if (textAccum.length < maxOutputBytes) {
+            textAccum += frame.text.slice(0, maxOutputBytes - textAccum.length);
+          }
+          void emitWrapped({
+            status: 'stream',
+            result: null,
+            newSessionId: lastSessionId,
+            streamEvent: {
+              eventType:
+                frame.eventType === 'thinking_delta'
+                  ? 'thinking_delta'
+                  : 'text_delta',
+              text: frame.text,
+              sessionId: lastSessionId,
+            },
+          });
+        }
+      },
+      onStatus(status) {
+        if (status.message) lastStatusMessage = status.message;
+      },
+      finish(result) {
+        clearTimeout(timer);
+        void finalize({
+          kind: 'result',
+          ok: result.ok,
+          result: result.result,
+          error: result.error,
+          sessionId: result.sessionId,
+          timedOut: result.timedOut,
+          durationMs: result.durationMs,
+        });
+      },
+      fail(reason) {
+        clearTimeout(timer);
+        void finalize({ kind: 'fail', reason });
+      },
+    };
+
+    registerAgentRun(controller);
+    const ok = session.send({
+      type: 'agent.run.request',
+      id: 0,
+      runId,
+      agentId: agentClientId,
+      workspace: {
+        kind: workspaceRepo?.kind ?? 'workspace',
+        cwd: groupDir,
+        folder: group.folder,
+        ...(workspaceRepo ? { repo: workspaceRepo } : {}),
+      },
+      input: {
+        prompt: input.prompt,
+        sessionId: input.sessionId,
+        metadata: { scheduledTask: !!input.isScheduledTask },
+      },
+      cwd: groupDir,
+      env: cfg.envOverrides,
+      timeoutMs,
+      maxOutputBytes,
+      policy: {},
+      context: runContext,
+      remoteCwdPlaceholder: REMOTE_CWD_PLACEHOLDER,
+      workspaceRepo,
+    });
+    if (!ok) {
+      clearTimeout(timer);
+      void finalize({ kind: 'fail', reason: 'send_failed' });
+    }
+  });
+}
+
 /**
  * Run a host-mode CLI on a remote octodeck-daemon and return a ContainerOutput.
  * Returns a synthetic `not online` error result if the link isn't connected,
@@ -175,9 +469,12 @@ function buildWorkspaceRepo(
 export async function runViaAgentLink(
   args: BackendRunArgs,
   cfg: HostCliDriverConfig,
-  linkId: string,
+  target: string,
 ): Promise<ContainerOutput> {
   const { group, input, onProcess, onOutput } = args;
+
+  const resolvedTarget = parseAgentLinkTarget(target, group.created_by);
+  const linkId = resolvedTarget?.linkId ?? target;
 
   const session = getSession(linkId);
   if (!session || session.state !== 'open') {
@@ -192,8 +489,15 @@ export async function runViaAgentLink(
   //    own cwd from this path. Only enforce absolute + existence on server.
   const defaultGroupDir = path.join(GROUPS_DIR, group.folder);
   fs.mkdirSync(defaultGroupDir, { recursive: true });
-  const groupDir = group.customCwd || defaultGroupDir;
-  if (!path.isAbsolute(groupDir)) {
+  const groupDir =
+    group.customCwd ||
+    (group.repoGitUrl || group.repoDevicePath
+      ? defaultGroupDir
+      : `${DEVICE_WORKSPACE_URI_PREFIX}${group.folder}`);
+  if (
+    !path.isAbsolute(groupDir) &&
+    !groupDir.startsWith(DEVICE_WORKSPACE_URI_PREFIX)
+  ) {
     return {
       status: 'error',
       result: `${cfg.backendId} 后端启动失败：工作目录必须是绝对路径：${groupDir}`,
@@ -203,8 +507,50 @@ export async function runViaAgentLink(
   const logsDir = path.join(defaultGroupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
+  const workspaceRepo = buildWorkspaceRepo(group);
+  const contextCwd =
+    workspaceRepo || groupDir.startsWith(DEVICE_WORKSPACE_URI_PREFIX)
+      ? REMOTE_CWD_PLACEHOLDER
+      : groupDir;
+  const runContext = buildRunContext(args, cfg, contextCwd);
+
+  const settings = getSystemSettings();
+  const configuredTimeoutMs =
+    group.containerConfig?.timeout && group.containerConfig.timeout > 0
+      ? group.containerConfig.timeout
+      : cfg.timeoutMs && cfg.timeoutMs > 0
+        ? cfg.timeoutMs
+        : undefined;
+  const timeoutMs =
+    configuredTimeoutMs ||
+    (input.isScheduledTask
+      ? Math.max(settings.containerTimeout, LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS)
+      : settings.containerTimeout);
+  const maxOutputBytes =
+    (cfg.maxOutputBytes && cfg.maxOutputBytes > 0 ? cfg.maxOutputBytes : 0) ||
+    settings.containerMaxOutputSize;
+
+  if (supportsAgentRun(linkId, resolvedTarget?.agentClientId)) {
+    return runViaAgentRuntime({
+      args,
+      cfg,
+      linkId,
+      agentClientId: resolvedTarget!.agentClientId!,
+      session,
+      groupDir,
+      logsDir,
+      workspaceRepo,
+      runContext,
+      timeoutMs,
+      maxOutputBytes,
+    });
+  }
+
   // 2. binary
-  const binary = cfg.resolveBinary();
+  // Remote runs must use the binary path as seen by the daemon/device. For
+  // device-discovered custom CLIs this can be an absolute path that does not
+  // exist on the server, so do not run the local existence check here.
+  const binary = cfg.resolveRemoteBinary?.() ?? cfg.resolveBinary();
   if (!binary) {
     return {
       status: 'error',
@@ -212,11 +558,6 @@ export async function runViaAgentLink(
       error: `${cfg.backendId} binary not found`,
     };
   }
-
-  const workspaceRepo = buildWorkspaceRepo(group);
-  const contextCwd = workspaceRepo ? REMOTE_CWD_PLACEHOLDER : groupDir;
-  const runContext = buildRunContext(args, cfg, contextCwd);
-
   // 3. argv
   let argv: string[];
   try {
@@ -238,23 +579,6 @@ export async function runViaAgentLink(
       error: `${cfg.backendId} buildArgv error: ${msg}`,
     };
   }
-
-  const settings = getSystemSettings();
-  const configuredTimeoutMs =
-    group.containerConfig?.timeout && group.containerConfig.timeout > 0
-      ? group.containerConfig.timeout
-      : cfg.timeoutMs && cfg.timeoutMs > 0
-        ? cfg.timeoutMs
-        : undefined;
-  const timeoutMs =
-    configuredTimeoutMs ||
-    (input.isScheduledTask
-      ? Math.max(settings.containerTimeout, LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS)
-      : settings.containerTimeout);
-  const maxOutputBytes =
-    (cfg.maxOutputBytes && cfg.maxOutputBytes > 0 ? cfg.maxOutputBytes : 0) ||
-    settings.containerMaxOutputSize;
-
   const startTime = Date.now();
   const runId = newRunId();
   const processId = `${cfg.backendId}-${group.folder}-${linkId}-${startTime}`;
@@ -271,6 +595,7 @@ export async function runViaAgentLink(
     let buf = '';
     let stdoutAccum = '';
     let stderrAccum = '';
+    let lastStatusMessage = '';
     const state: ParseState = {
       finalResultText: null,
       finalIsError: false,
@@ -419,10 +744,14 @@ export async function runViaAgentLink(
         state.finalResultText === null &&
         cfg.outputProtocol !== 'plain-text'
       ) {
-        const tail = stderrAccum.slice(-400) || stdoutAccum.slice(-400);
+        const tail =
+          stderrAccum.slice(-400) ||
+          stdoutAccum.slice(-400) ||
+          lastStatusMessage;
+        const suffix = tail ? `：${tail}` : '';
         const out: ContainerOutput = {
           status: 'error',
-          result: `${cfg.backendId} 进程退出 code=${exitCode}`,
+          result: `${cfg.backendId} 进程退出 code=${exitCode}${suffix}`,
           error: `${cfg.backendId} exit code=${exitCode} signal=${signal}: ${tail}`,
           newSessionId: state.lastSessionId,
         };
@@ -434,7 +763,8 @@ export async function runViaAgentLink(
       let text: string;
       let isErr: boolean;
       if (cfg.outputProtocol === 'plain-text') {
-        text = stdoutAccum.trimEnd();
+        text =
+          stdoutAccum.trimEnd() || stderrAccum.trimEnd() || lastStatusMessage;
         isErr = exitCode !== 0;
         if (isErr && !text) {
           text = `${cfg.backendId} 进程退出 code=${exitCode}`;
@@ -490,6 +820,9 @@ export async function runViaAgentLink(
         } else {
           handleStdoutChunk(data);
         }
+      },
+      onStatus(status) {
+        if (status.message) lastStatusMessage = status.message;
       },
       finish(result) {
         clearTimeout(timer);

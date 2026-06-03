@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { GroupInfo } from '../../stores/groups';
 import { api } from '../../api/client';
 import { useAgentLinksStore } from '../../stores/agentLinks';
+import type { AgentLink } from '../../stores/agentLinks';
 import type {
   BackendInfo,
   SystemSettings,
@@ -14,6 +15,30 @@ import { getErrorMessage } from '../settings/types';
 
 interface GroupDetailProps {
   group: GroupInfo & { jid: string };
+}
+
+function isAgentLinkExecutionTarget(target: string | null | undefined): target is string {
+  return !!target && (/^cl_[0-9a-f]{16}$/.test(target) || /^runtime:cl_[0-9a-f]{16}:[^:]+$/.test(target) || /^cl_[0-9a-f]{16}:[^:]+$/.test(target) || /^provider:[^:]+$/.test(target));
+}
+
+function agentClientIdFromExecutionTarget(target: string): string | undefined {
+  return target.match(/^provider:([^:]+)$/)?.[1]
+    ?? target.match(/^runtime:cl_[0-9a-f]{16}:([^:]+)$/)?.[1]
+    ?? target.match(/^cl_[0-9a-f]{16}:([^:]+)$/)?.[1];
+}
+
+function uniqueProviderIds(devices: AgentLink[]): string[] {
+  return [...new Set(devices.flatMap((device) => [
+    ...(device.runtimes ?? []).map((runtime) => runtime.agentClientId),
+    ...device.agentClients.map((client) => client.id),
+  ]).filter(Boolean))].sort();
+}
+
+function targetSummary(target: string): string {
+  if (target.startsWith('provider:')) return `Provider Pool ${target.slice('provider:'.length)}`;
+  if (target.startsWith('runtime:')) return `Runtime ${target.slice('runtime:'.length)}`;
+  if (target.includes(':')) return `Runtime ${target}`;
+  return `Device ${target}`;
 }
 
 export function GroupDetail({ group }: GroupDetailProps) {
@@ -43,12 +68,12 @@ export function GroupDetail({ group }: GroupDetailProps) {
   // Execution Device selection (<device_id>)
   const { links: agentLinks, load: loadAgentLinks } = useAgentLinksStore();
   const [currentExecNode, setCurrentExecNode] = useState<string>(
-    group.execution_node && group.execution_node.startsWith('cl_') ? group.execution_node : '',
+    isAgentLinkExecutionTarget(group.execution_node) ? group.execution_node : '',
   );
   const [savingExecNode, setSavingExecNode] = useState(false);
 
   useEffect(() => {
-    setCurrentExecNode(group.execution_node && group.execution_node.startsWith('cl_') ? group.execution_node : '');
+    setCurrentExecNode(isAgentLinkExecutionTarget(group.execution_node) ? group.execution_node : '');
   }, [group.execution_node, group.jid]);
 
   useEffect(() => {
@@ -60,8 +85,10 @@ export function GroupDetail({ group }: GroupDetailProps) {
     if (next === currentExecNode) return;
     setSavingExecNode(true);
     try {
+      const agentClientId = agentClientIdFromExecutionTarget(next);
       await api.patch(`/api/groups/${encodeURIComponent(group.jid)}`, {
         execution_node: next,
+        ...(agentClientId ? { agent_client_id: agentClientId } : {}),
       });
       setCurrentExecNode(next);
       toast.success('执行 Device 已更新，下一次执行生效');
@@ -135,6 +162,44 @@ export function GroupDetail({ group }: GroupDetailProps) {
         )
   );
 
+  const executionTargetOptions = [
+    ...uniqueProviderIds(agentLinks).map((providerId) => {
+      const onlineRuntimes = agentLinks.flatMap((device) => device.runtimes ?? [])
+        .filter((runtime) => runtime.agentClientId === providerId && runtime.status !== 'offline');
+      const bestSlots = onlineRuntimes.reduce((max, runtime) => Math.max(max, runtime.availableSlots ?? 0), 0);
+      return {
+        value: `provider:${providerId}`,
+        label: `⚡ Provider Pool · ${providerId} · ${onlineRuntimes.length} online · best slots ${bestSlots}`,
+        disabled: onlineRuntimes.length === 0,
+      };
+    }),
+    ...agentLinks.flatMap((device) => {
+      const runtimes = device.runtimes && device.runtimes.length > 0
+        ? device.runtimes
+        : device.agentClients.map((client) => ({
+            runtimeId: `${device.id}:${client.id}`,
+            deviceLinkId: device.id,
+            agentClientId: client.id,
+            displayName: client.displayName || client.id,
+            status: device.online ? 'idle' : 'offline',
+            availableSlots: device.availableSlots ?? undefined,
+            maxConcurrentRuns: device.maxConcurrentRuns ?? undefined,
+          }));
+      return [
+        {
+          value: device.id,
+          label: `${device.online ? '🟢' : '⚪️'} Device · ${device.displayName} (${device.id}) · slots ${typeof device.availableSlots === 'number' ? device.availableSlots : '—'}`,
+          disabled: !device.online,
+        },
+        ...runtimes.map((runtime) => ({
+          value: `runtime:${runtime.deviceLinkId}:${runtime.agentClientId}`,
+          label: `${runtime.status !== 'offline' ? '🟢' : '⚪️'} Runtime · ${device.displayName} · ${runtime.displayName ?? runtime.agentClientId} · ${runtime.status} · slots ${typeof runtime.availableSlots === 'number' ? runtime.availableSlots : '—'}`,
+          disabled: !device.online || runtime.status === 'offline' || runtime.status === 'draining',
+        })),
+      ];
+    }),
+  ];
+
   return (
     <div className="p-4 bg-background space-y-3">
       {/* JID */}
@@ -202,7 +267,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
       {/* Execution Device */}
       {canEditBackend && (
         <div>
-          <div className="text-xs text-muted-foreground mb-1">执行 Device</div>
+          <div className="text-xs text-muted-foreground mb-1">执行 Runtime / Provider</div>
           <select
             value={currentExecNode}
             disabled={savingExecNode}
@@ -210,15 +275,17 @@ export function GroupDetail({ group }: GroupDetailProps) {
             className="h-9 px-3 text-sm border border-border rounded-md bg-transparent w-full max-w-xs"
           >
             <option value="" disabled>未选择 Device</option>
-            {agentLinks.map((device) => (
-              <option key={device.id} value={device.id} disabled={!device.online}>
-                {device.online ? '🟢' : '⚪️'} {device.displayName} ({device.id})
-                {device.online ? '' : ' · 离线'}
+            {currentExecNode && !executionTargetOptions.some((target) => target.value === currentExecNode) && (
+              <option value={currentExecNode}>{targetSummary(currentExecNode)} · 当前配置</option>
+            )}
+            {executionTargetOptions.map((target) => (
+              <option key={target.value} value={target.value} disabled={target.disabled}>
+                {target.label}
               </option>
             ))}
           </select>
           <div className="text-xs text-muted-foreground mt-1">
-            {currentExecNode ? `转发到 Device ${currentExecNode}` : '尚未绑定执行 Device'}
+            {currentExecNode ? `当前：${targetSummary(currentExecNode)}` : '尚未绑定执行 Runtime / Provider'}
           </div>
         </div>
       )}

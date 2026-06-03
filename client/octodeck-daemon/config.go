@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Config holds octodeck-daemon configuration loaded from ~/.octodeck/daemon/config.json.
 type Config struct {
+	// Path is the loaded config file path. Runtime-only; not serialized.
+	Path string `json:"-"`
 	// Server base URL (https://...). The ws endpoint is derived as
 	// wss://<host>/api/agent-link/ws.
 	Server string `json:"server"`
@@ -23,6 +26,8 @@ type Config struct {
 	AllowedRoots []string `json:"allowedRoots,omitempty"`
 	// WorkspaceDir is the parent directory for per-run agent workspaces.
 	WorkspaceDir string `json:"workspaceDir,omitempty"`
+	// SessionDir stores provider-native session/config data for workspace runs.
+	SessionDir string `json:"sessionDir,omitempty"`
 	// TaskDir is the parent directory for one-off task workspaces.
 	TaskDir string `json:"taskDir,omitempty"`
 	// ReposDir stores shared git checkouts used to create per-run worktrees.
@@ -31,19 +36,65 @@ type Config struct {
 	MaxConcurrentRuns int `json:"maxConcurrentRuns"`
 	// Optional: client display version reported in hello.
 	Version string `json:"version,omitempty"`
+	// AgentRegistry defines local agent adapters the server may reference by ID.
+	AgentRegistry []AgentRegistryEntry `json:"agentRegistry,omitempty"`
+	// RuntimePolicy constrains agent-runtime behavior and remote policy requests.
+	RuntimePolicy RuntimePolicyConfig `json:"runtimePolicy,omitempty"`
 	// Runtime-discovered supported agent clients. Populated by octodeck-daemon on startup.
 	AgentClients []AgentClientInfo `json:"-"`
+}
+
+type AgentRegistryEntry struct {
+	ID                string            `json:"id"`
+	DisplayName       string            `json:"displayName,omitempty"`
+	Provider          string            `json:"provider,omitempty"`
+	Transport         string            `json:"transport,omitempty"`
+	Binary            string            `json:"binary,omitempty"`
+	Args              []string          `json:"args,omitempty"`
+	Env               map[string]string `json:"env,omitempty"`
+	URL               string            `json:"url,omitempty"`
+	VersionCommand    []string          `json:"versionCommand,omitempty"`
+	PermissionModes   []string          `json:"permissionModes,omitempty"`
+	Capabilities      []string          `json:"capabilities,omitempty"`
+	AllowedWorkspaces []string          `json:"allowedWorkspaces,omitempty"`
+	AllowedTools      []string          `json:"allowedTools,omitempty"`
+	DisallowedTools   []string          `json:"disallowedTools,omitempty"`
+	ToolPolicy        map[string]string `json:"toolPolicy,omitempty"`
+}
+
+type RuntimePolicyConfig struct {
+	AllowedWorkspaces   []string          `json:"allowedWorkspaces,omitempty"`
+	AllowedTools        []string          `json:"allowedTools,omitempty"`
+	DisallowedTools     []string          `json:"disallowedTools,omitempty"`
+	ToolPolicy          map[string]string `json:"toolPolicy,omitempty"`
+	PermissionModes     []string          `json:"permissionModes,omitempty"`
+	PermissionTimeoutMs int64             `json:"permissionTimeoutMs,omitempty"`
+	MaxRestarts         int               `json:"maxRestarts,omitempty"`
+	RestartBackoffMs    int64             `json:"restartBackoffMs,omitempty"`
+	DisableAutoDiscover bool              `json:"disableAutoDiscover,omitempty"`
 }
 
 func defaultConfigPath() (string, error) {
 	if p := os.Getenv("OCTODECK_DAEMON_CONFIG"); p != "" {
 		return p, nil
 	}
+	return defaultDaemonConfigPath()
+}
+
+func defaultDaemonConfigPath() (string, error) {
+	dir, err := defaultDaemonDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.json"), nil
+}
+
+func defaultDaemonDir() (string, error) {
 	home, err := octodeckHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "daemon", "config.json"), nil
+	return filepath.Join(home, "daemon"), nil
 }
 
 func octodeckHomeDir() (string, error) {
@@ -68,6 +119,14 @@ func defaultTaskDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, "task"), nil
+}
+
+func defaultSessionDir() (string, error) {
+	home, err := octodeckHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "session"), nil
 }
 
 func defaultReposDir() (string, error) {
@@ -102,6 +161,7 @@ func loadConfig(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	cfg.Path = path
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -122,6 +182,13 @@ func loadConfig(path string) (*Config, error) {
 		}
 		cfg.TaskDir = task
 	}
+	if cfg.SessionDir == "" {
+		session, err := defaultSessionDir()
+		if err != nil {
+			return nil, err
+		}
+		cfg.SessionDir = session
+	}
 	if cfg.ReposDir == "" {
 		repos, err := defaultReposDir()
 		if err != nil {
@@ -135,6 +202,9 @@ func loadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 		cfg.AllowedRoots = roots
+	}
+	if cfg.Version == "" || strings.HasPrefix(cfg.Version, "octodeck-daemon/") {
+		cfg.Version = daemonVersion
 	}
 	return &cfg, nil
 }
@@ -154,9 +224,45 @@ func (c *Config) validate() error {
 			return fmt.Errorf("allowedBinaries entry must be absolute: %q", b)
 		}
 	}
+	for _, a := range c.AgentRegistry {
+		if strings.TrimSpace(a.ID) == "" {
+			return errors.New("agentRegistry entry id is required")
+		}
+		if a.Transport == "" || a.Transport == "stdio" || a.Transport == "a2a" {
+			if a.Binary == "" {
+				return fmt.Errorf("agentRegistry[%s].binary is required for %s transport", a.ID, ifEmpty(a.Transport, "stdio"))
+			}
+			if !filepath.IsAbs(a.Binary) {
+				return fmt.Errorf("agentRegistry[%s].binary must be absolute: %q", a.ID, a.Binary)
+			}
+		} else if a.Transport == "http" {
+			if strings.TrimSpace(a.URL) == "" {
+				return fmt.Errorf("agentRegistry[%s].url is required for http transport", a.ID)
+			}
+		} else {
+			return fmt.Errorf("agentRegistry[%s].transport must be stdio, a2a or http", a.ID)
+		}
+		for k := range a.Env {
+			if isDangerousEnvKey(k) {
+				return fmt.Errorf("agentRegistry[%s].env key not allowed: %q", a.ID, k)
+			}
+		}
+	}
 	for _, r := range c.AllowedRoots {
 		if !filepath.IsAbs(r) {
 			return fmt.Errorf("allowedRoots entry must be absolute: %q", r)
+		}
+	}
+	for _, r := range c.RuntimePolicy.AllowedWorkspaces {
+		if !filepath.IsAbs(r) {
+			return fmt.Errorf("runtimePolicy.allowedWorkspaces entry must be absolute: %q", r)
+		}
+	}
+	for _, a := range c.AgentRegistry {
+		for _, r := range a.AllowedWorkspaces {
+			if !filepath.IsAbs(r) {
+				return fmt.Errorf("agentRegistry[%s].allowedWorkspaces entry must be absolute: %q", a.ID, r)
+			}
 		}
 	}
 	if c.WorkspaceDir != "" && !filepath.IsAbs(c.WorkspaceDir) {
@@ -164,6 +270,9 @@ func (c *Config) validate() error {
 	}
 	if c.TaskDir != "" && !filepath.IsAbs(c.TaskDir) {
 		return fmt.Errorf("taskDir must be absolute: %q", c.TaskDir)
+	}
+	if c.SessionDir != "" && !filepath.IsAbs(c.SessionDir) {
+		return fmt.Errorf("sessionDir must be absolute: %q", c.SessionDir)
 	}
 	if c.ReposDir != "" && !filepath.IsAbs(c.ReposDir) {
 		return fmt.Errorf("reposDir must be absolute: %q", c.ReposDir)

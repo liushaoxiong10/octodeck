@@ -78,20 +78,29 @@ export function invokeRemoteTool(
 export function deliverToolEvent(frame: ToolEventFrame): void {
   const req = pending.get(frame.requestId);
   if (!req) {
-    logger.debug({ requestId: frame.requestId }, 'tool-rpc: drop event for unknown request');
+    logger.debug(
+      { requestId: frame.requestId },
+      'tool-rpc: drop event for unknown request',
+    );
     return;
   }
   try {
     req.onEvent?.(frame);
   } catch (err) {
-    logger.warn({ requestId: frame.requestId, err }, 'tool-rpc event handler failed');
+    logger.warn(
+      { requestId: frame.requestId, err },
+      'tool-rpc event handler failed',
+    );
   }
 }
 
 export function deliverToolResult(frame: ToolResultFrame): void {
   const req = pending.get(frame.requestId);
   if (!req) {
-    logger.debug({ requestId: frame.requestId }, 'tool-rpc: drop result for unknown request');
+    logger.debug(
+      { requestId: frame.requestId },
+      'tool-rpc: drop result for unknown request',
+    );
     return;
   }
   pending.delete(frame.requestId);

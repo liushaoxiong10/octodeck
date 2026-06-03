@@ -24,6 +24,7 @@ var repoLocks sync.Map
 
 const agentTeamMCPConfigPlaceholder = "__OCTODECK_AGENT_TEAM_MCP_CONFIG__"
 const agentTeamMCPProjectConfigMarker = "__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__"
+const deviceWorkspaceURIPrefix = "octodeck-workspace://"
 
 // runner spawns a child process per run.request and pumps its stdout/stderr
 // back to the server as run.event frames.
@@ -49,6 +50,8 @@ func (r *runner) handle(ctx context.Context, req *RunRequestFrame) {
 		r.sendErr(req.RunID, errors.New("run pool full or duplicate runId"))
 		return
 	}
+	r.pool.noteAccepted(req.RunID, req.BackendID, req.Cwd)
+	r.sendStatus(req.RunID, "accepted", req.BackendID, req.Cwd, "")
 
 	go r.spawn(ctx, req)
 }
@@ -78,6 +81,7 @@ func (r *runner) spawn(parent context.Context, req *RunRequestFrame) {
 		req.Argv = replaceArgvPlaceholder(req.Argv, req.RemoteCwdPlaceholder, req.Cwd)
 		req.Context = replaceContextPlaceholder(req.Context, req.RemoteCwdPlaceholder, req.Cwd)
 	}
+	r.pool.noteAccepted(req.RunID, req.BackendID, req.Cwd)
 	if !isPathAllowedByRoots(req.Cwd, r.cfg.AllowedRoots, req.Cwd) {
 		r.sendErr(req.RunID, fmt.Errorf("cwd outside allowed roots: %s", req.Cwd))
 		return
@@ -91,7 +95,7 @@ func (r *runner) spawn(parent context.Context, req *RunRequestFrame) {
 
 	cmd := exec.CommandContext(ctx, req.Binary, req.Argv...)
 	cmd.Dir = req.Cwd
-	cmd.Env = buildEnv(req.Env, req.Context)
+	cmd.Env = buildEnv(r.cfg, req.Env, req.Context)
 	if req.StdinJSON != "" {
 		cmd.Stdin = strings.NewReader(req.StdinJSON)
 	}
@@ -113,6 +117,7 @@ func (r *runner) spawn(parent context.Context, req *RunRequestFrame) {
 		return
 	}
 	r.pool.attach(req.RunID, cmd, cancel)
+	r.sendStatus(req.RunID, "started", req.BackendID, req.Cwd, "")
 
 	var sentBytes atomic.Int64
 	pump := func(stream string, src io.Reader) {
@@ -121,6 +126,7 @@ func (r *runner) spawn(parent context.Context, req *RunRequestFrame) {
 		for {
 			n, rerr := reader.Read(buf)
 			if n > 0 {
+				r.pool.noteActivity(req.RunID)
 				if sentBytes.Load() >= req.MaxOutputBytes {
 					// silently drop further bytes; server will time out if final
 					// result never arrives
@@ -173,6 +179,11 @@ func (r *runner) spawn(parent context.Context, req *RunRequestFrame) {
 	}
 	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
 	durationMs := time.Since(startedAt).Milliseconds()
+	if exitCode == 0 && !timedOut {
+		r.sendStatus(req.RunID, "completed", req.BackendID, req.Cwd, "")
+	} else {
+		r.sendStatus(req.RunID, "failed", req.BackendID, req.Cwd, "")
+	}
 
 	exit := exitCode
 	_ = r.send(&RunResultFrame{
@@ -229,6 +240,9 @@ func resolveWorkspaceRepo(ctx context.Context, cfg *Config, spec *WorkspaceRepoS
 			return "", err
 		}
 		return worktreeDir, nil
+
+	case "workspace":
+		return ensureNamedWorkspaceDir(cfg, spec.GroupFolder)
 
 	case "device_path":
 		if spec.DevicePath == "" {
@@ -295,8 +309,20 @@ func replaceContextPlaceholder(ctx any, placeholder, cwd string) any {
 }
 
 func defaultRunCwd(cfg *Config, requestedCwd string) (string, error) {
+	if strings.HasPrefix(requestedCwd, deviceWorkspaceURIPrefix) {
+		folder := strings.TrimPrefix(requestedCwd, deviceWorkspaceURIPrefix)
+		return ensureNamedWorkspaceDir(cfg, folder)
+	}
 	base := filepath.Base(filepath.Clean(requestedCwd))
 	return createRandomDir(taskDir(cfg), safeGroupFolder(base))
+}
+
+func ensureNamedWorkspaceDir(cfg *Config, groupFolder string) (string, error) {
+	dir := filepath.Join(workspaceDir(cfg), safeGroupFolder(groupFolder))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 func createWorkspaceDir(cfg *Config, groupFolder string) (string, error) {
@@ -395,7 +421,7 @@ func prepareAgentTeamMCPConfig(cfg *Config, argv []string, cwd string) ([]string
 }
 
 func writeAgentTeamMCPConfig(cfg *Config) (string, error) {
-	dir := filepath.Join(workspaceDir(cfg), "mcp")
+	dir := daemonDir(cfg)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -464,18 +490,13 @@ func buildAgentTeamMCPServerConfig(cfg *Config) (map[string]any, error) {
 	if strings.TrimSpace(cfg.Server) == "" || strings.TrimSpace(cfg.Token) == "" {
 		return nil, errors.New("server and token are required")
 	}
-	configPath, err := defaultConfigPath()
+	configPath, err := daemonConfigPath(cfg)
 	if err != nil {
 		return nil, err
 	}
-	command, err := os.Executable()
-	if err != nil || command == "" {
-		command = os.Args[0]
-	}
-	if !filepath.IsAbs(command) {
-		if abs, absErr := filepath.Abs(command); absErr == nil {
-			command = abs
-		}
+	command, err := daemonCommandPath(cfg)
+	if err != nil {
+		return nil, err
 	}
 	return map[string]any{
 		"type":    "stdio",
@@ -499,6 +520,28 @@ func workspaceDir(cfg *Config) string {
 	return workspace
 }
 
+func daemonDir(cfg *Config) string {
+	if cfg != nil && cfg.WorkspaceDir != "" {
+		return filepath.Join(filepath.Dir(cfg.WorkspaceDir), "daemon")
+	}
+	dir, err := defaultDaemonDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "octodeck", "daemon")
+	}
+	return dir
+}
+
+func daemonConfigPath(cfg *Config) (string, error) {
+	if p := os.Getenv("OCTODECK_DAEMON_CONFIG"); p != "" && isPathWithinRoot(p, daemonDir(cfg)) {
+		return p, nil
+	}
+	return filepath.Join(daemonDir(cfg), "config.json"), nil
+}
+
+func daemonCommandPath(cfg *Config) (string, error) {
+	return filepath.Join(daemonDir(cfg), "bin", "octodeck-daemon"), nil
+}
+
 func taskDir(cfg *Config) string {
 	if cfg != nil && cfg.TaskDir != "" {
 		return cfg.TaskDir
@@ -511,6 +554,20 @@ func taskDir(cfg *Config) string {
 		return filepath.Join(os.TempDir(), "octodeck", "task")
 	}
 	return task
+}
+
+func sessionDir(cfg *Config) string {
+	if cfg != nil && cfg.SessionDir != "" {
+		return cfg.SessionDir
+	}
+	if cfg != nil && cfg.WorkspaceDir != "" {
+		return filepath.Join(filepath.Dir(cfg.WorkspaceDir), "session")
+	}
+	session, err := defaultSessionDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "octodeck", "session")
+	}
+	return session
 }
 
 func reposDir(cfg *Config) string {
@@ -589,6 +646,13 @@ func gitOutput(ctx context.Context, cwd string, args ...string) (string, error) 
 }
 
 func (r *runner) sendErr(runID string, err error) {
+	r.sendStatus(runID, "failed", "", "", err.Error())
+	_ = r.send(&RunEventFrame{
+		Type:   tRunEvent,
+		RunID:  runID,
+		Stream: "stderr",
+		Data:   err.Error(),
+	})
 	exit := -1
 	_ = r.send(&RunResultFrame{
 		Type:       tRunResult,
@@ -605,16 +669,44 @@ func (r *runner) sendErr(runID string, err error) {
 	})
 }
 
+func (r *runner) sendStatus(runID, status, backendID, cwd, message string) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_ = r.send(&RunStatusFrame{
+		Type:           tRunStatus,
+		RunID:          runID,
+		Status:         status,
+		BackendID:      backendID,
+		Cwd:            cwd,
+		Message:        message,
+		StartedAt:      now,
+		LastActivityAt: now,
+	})
+}
+
 // buildEnv returns the parent process environment with overrides applied.
 // Dangerous keys are dropped at validation time, but we also strip them here
 // as defense in depth.
-func buildEnv(overrides map[string]string, runContext any) []string {
+func buildEnv(cfg *Config, overrides map[string]string, runContext any) []string {
 	base := envSnapshot()
 	for k, v := range overrides {
 		if isDangerousEnvKey(k) {
 			continue
 		}
 		base[k] = v
+	}
+	if folder := groupFolderFromRunContext(runContext); folder != "" {
+		root := filepath.Join(sessionDir(cfg), safeGroupFolder(folder))
+		_ = os.MkdirAll(root, 0o700)
+		base["OCTODECK_SESSION_DIR"] = root
+		providerDirs := map[string]string{
+			"CLAUDE_CONFIG_DIR":  filepath.Join(root, "claude"),
+			"CODEX_HOME":         filepath.Join(root, "codex"),
+			"TRAECLI_CONFIG_DIR": filepath.Join(root, "traecli"),
+		}
+		for key, dir := range providerDirs {
+			_ = os.MkdirAll(dir, 0o700)
+			base[key] = dir
+		}
 	}
 	if runContext != nil {
 		if data, err := json.Marshal(runContext); err == nil {
@@ -631,6 +723,30 @@ func buildEnv(overrides map[string]string, runContext any) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+func groupFolderFromRunContext(runContext any) string {
+	if m, ok := runContext.(map[string]any); ok {
+		return groupFolderFromParsedContext(m)
+	}
+	data, err := json.Marshal(runContext)
+	if err != nil {
+		return ""
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return ""
+	}
+	return groupFolderFromParsedContext(parsed)
+}
+
+func groupFolderFromParsedContext(parsed map[string]any) string {
+	if group, ok := parsed["group"].(map[string]any); ok {
+		if folder, ok := group["folder"].(string); ok {
+			return folder
+		}
+	}
+	return ""
 }
 
 func repoContextFromRunContext(runContext any) any {

@@ -39,7 +39,7 @@ description: Installed in CLI home
 	t.Setenv("OCTODECK_DAEMON_EXTRA_PATH", "")
 	t.Setenv("HOME", home)
 
-	result, err := discoverProviderSkills(context.Background(), "claude-code", workspace)
+	result, err := discoverProviderSkills(context.Background(), &Config{}, "claude-code", workspace)
 	if err != nil {
 		t.Fatalf("discoverProviderSkills returned error: %v", err)
 	}

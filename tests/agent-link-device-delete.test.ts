@@ -28,6 +28,7 @@ vi.mock('../src/middleware/auth.ts', () => ({
     });
     return next();
   },
+  systemConfigMiddleware: async (_c: any, next: any) => next(),
 }));
 
 vi.mock('../src/logger.js', () => ({

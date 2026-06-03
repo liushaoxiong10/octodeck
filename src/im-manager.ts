@@ -25,7 +25,10 @@ import type {
   DiscordChannelInfo,
   DiscordGuildInfo,
 } from './discord.js';
-import { parseFeishuRouteTarget, type FeishuConnectionConfig } from './feishu.js';
+import {
+  parseFeishuRouteTarget,
+  type FeishuConnectionConfig,
+} from './feishu.js';
 import type { TelegramConnectionConfig } from './telegram.js';
 import type { QQConnectionConfig } from './qq.js';
 import type { WeChatConnectionConfig } from './wechat.js';
@@ -103,12 +106,25 @@ export type WhatsAppConnectionStateSnapshot = WhatsAppConnectionState;
 
 export interface ConnectFeishuOptions {
   ignoreMessagesBefore?: number;
-  onCommand?: (chatJid: string, command: string, senderImId?: string, mentions?: Array<{ key?: string; name?: string; id?: { open_id?: string } }>) => Promise<string | null>;
+  onCommand?: (
+    chatJid: string,
+    command: string,
+    senderImId?: string,
+    mentions?: Array<{
+      key?: string;
+      name?: string;
+      id?: { open_id?: string };
+    }>,
+  ) => Promise<string | null>;
   resolveGroupFolder?: (chatJid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
     messageMeta?: FeishuMessageMeta,
-  ) => { effectiveJid: string; agentId: string | null; sourceJid?: string } | null;
+  ) => {
+    effectiveJid: string;
+    agentId: string | null;
+    sourceJid?: string;
+  } | null;
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
   onBotRemovedFromGroup?: (chatJid: string) => void;
@@ -122,7 +138,10 @@ export interface ConnectFeishuOptions {
 class IMConnectionManager {
   private connections = new Map<string, UserIMConnection>();
   private adminUserIds = new Set<string>();
-  private lastWhatsAppState = new Map<string, WhatsAppConnectionStateSnapshot>();
+  private lastWhatsAppState = new Map<
+    string,
+    WhatsAppConnectionStateSnapshot
+  >();
 
   /** Register a user ID as admin (for fallback routing) */
   registerAdminUser(userId: string): void {
@@ -335,7 +354,12 @@ class IMConnectionManager {
     onCardCreated?: (messageId: string) => void,
   ): Promise<StreamingSession | undefined> {
     const channelType = getChannelType(jid);
-    if (channelType !== 'feishu' && channelType !== 'dingtalk' && channelType !== 'discord' && channelType !== 'qq')
+    if (
+      channelType !== 'feishu' &&
+      channelType !== 'dingtalk' &&
+      channelType !== 'discord' &&
+      channelType !== 'qq'
+    )
       return undefined;
 
     // Check DingTalk streaming mode: if text mode, skip streaming session creation
@@ -482,7 +506,11 @@ class IMConnectionManager {
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (
         chatJid: string,
-      ) => { effectiveJid: string; agentId: string | null; sourceJid?: string } | null;
+      ) => {
+        effectiveJid: string;
+        agentId: string | null;
+        sourceJid?: string;
+      } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
@@ -533,7 +561,11 @@ class IMConnectionManager {
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (
         chatJid: string,
-      ) => { effectiveJid: string; agentId: string | null; sourceJid?: string } | null;
+      ) => {
+        effectiveJid: string;
+        agentId: string | null;
+        sourceJid?: string;
+      } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
     },
   ): Promise<boolean> {
@@ -586,7 +618,11 @@ class IMConnectionManager {
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (
         chatJid: string,
-      ) => { effectiveJid: string; agentId: string | null; sourceJid?: string } | null;
+      ) => {
+        effectiveJid: string;
+        agentId: string | null;
+        sourceJid?: string;
+      } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
     },
   ): Promise<boolean> {
@@ -636,7 +672,11 @@ class IMConnectionManager {
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (
         chatJid: string,
-      ) => { effectiveJid: string; agentId: string | null; sourceJid?: string } | null;
+      ) => {
+        effectiveJid: string;
+        agentId: string | null;
+        sourceJid?: string;
+      } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
@@ -644,10 +684,7 @@ class IMConnectionManager {
         chatJid: string,
         senderImId?: string,
       ) => boolean;
-      isGroupOwnerMessage?: (
-        chatJid: string,
-        senderImId?: string,
-      ) => boolean;
+      isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
       isSenderAllowedInGroup?: (
         chatJid: string,
         senderImId?: string,
@@ -730,7 +767,11 @@ class IMConnectionManager {
     await this.disconnectChannel(userId, 'whatsapp');
     this.lastWhatsAppState.delete(userId);
 
-    const authDir = getWhatsAppAuthDir(DATA_DIR, userId, accountId || 'default');
+    const authDir = getWhatsAppAuthDir(
+      DATA_DIR,
+      userId,
+      accountId || 'default',
+    );
     try {
       await rm(authDir, { recursive: true, force: true });
       logger.info({ userId, authDir }, 'WhatsApp auth state wiped');
@@ -755,13 +796,22 @@ class IMConnectionManager {
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (
         chatJid: string,
-      ) => { effectiveJid: string; agentId: string | null; sourceJid?: string } | null;
+      ) => {
+        effectiveJid: string;
+        agentId: string | null;
+        sourceJid?: string;
+      } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
-      shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
+      shouldProcessGroupMessage?: (
+        chatJid: string,
+        senderImId?: string,
+      ) => boolean;
       isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
-      resolveRegisteredGroup?: (jid: string) => { activation_mode?: string } | undefined;
+      resolveRegisteredGroup?: (
+        jid: string,
+      ) => { activation_mode?: string } | undefined;
     },
   ): Promise<boolean> {
     if (!config.clientId || !config.clientSecret) {
@@ -808,11 +858,20 @@ class IMConnectionManager {
       isChatAuthorized?: (jid: string) => boolean;
       onCommand?: (chatJid: string, command: string) => Promise<string | null>;
       resolveGroupFolder?: (jid: string) => string | undefined;
-      resolveEffectiveChatJid?: (chatJid: string) => { effectiveJid: string; agentId: string | null; sourceJid?: string } | null;
+      resolveEffectiveChatJid?: (
+        chatJid: string,
+      ) => {
+        effectiveJid: string;
+        agentId: string | null;
+        sourceJid?: string;
+      } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
-      shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
+      shouldProcessGroupMessage?: (
+        chatJid: string,
+        senderImId?: string,
+      ) => boolean;
       isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
     },
   ): Promise<boolean> {

@@ -10,6 +10,9 @@ import type { Variables } from '../web-context.js';
 import type { AuthUser } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { DATA_DIR } from '../config.js';
+import { getAgentLinkById } from '../db.js';
+import { getSession } from '../agent-link/registry.js';
+import { invokeRemoteTool } from '../agent-link/tool-rpc.js';
 import {
   parseFrontmatter,
   validateSkillId,
@@ -63,6 +66,10 @@ interface SearchResult {
   skillId?: string;
   source?: string;
 }
+
+type SkillInstallTarget =
+  | { kind: 'cloud' }
+  | { kind: 'device'; deviceLinkId: string };
 
 // --- Utility Functions ---
 
@@ -160,10 +167,17 @@ function discoverSkills(userId: string, userRole?: string): Skill[] {
   return result;
 }
 
-function getSkillDetail(skillId: string, userId: string, userRole?: string): SkillDetail | null {
+function getSkillDetail(
+  skillId: string,
+  userId: string,
+  userRole?: string,
+): SkillDetail | null {
   if (!validateSkillId(skillId)) return null;
 
-  const searchDirs: Array<{ rootDir: string; source: 'user' | 'project' | 'external' }> = [
+  const searchDirs: Array<{
+    rootDir: string;
+    source: 'user' | 'project' | 'external';
+  }> = [
     { rootDir: getUserSkillsDir(userId), source: 'user' },
     { rootDir: getProjectSkillsDir(), source: 'project' },
   ];
@@ -568,7 +582,6 @@ skillsRoutes.get('/search/detail', authMiddleware, async (c) => {
   return c.json({ detail: null });
 });
 
-
 skillsRoutes.get('/:id', authMiddleware, (c) => {
   const id = c.req.param('id');
   const authUser = c.get('user') as AuthUser;
@@ -674,7 +687,9 @@ skillsRoutes.delete('/user-all', authMiddleware, (c) => {
         try {
           fs.rmSync(p, { recursive: true, force: true });
           deleted++;
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
     }
   } catch {
@@ -787,6 +802,52 @@ async function installSkillForUser(
   }
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function installSkillOnDevice(
+  userId: string,
+  deviceLinkId: string,
+  pkg: string,
+): Promise<{ success: boolean; installed?: string[]; error?: string }> {
+  if (
+    !/^[\w\-]+\/[\w\-.]+(?:[@#][\w\-.\/]+)?$/.test(pkg) &&
+    !/^https?:\/\//.test(pkg)
+  ) {
+    return { success: false, error: 'Invalid package name format' };
+  }
+  const link = getAgentLinkById(deviceLinkId);
+  if (!link || link.userId !== userId || link.revokedAt) {
+    return { success: false, error: 'device not found' };
+  }
+  const session = getSession(deviceLinkId);
+  if (!session || session.state !== 'open') {
+    return { success: false, error: 'device offline' };
+  }
+  try {
+    const result = await invokeRemoteTool(session, {
+      linkId: deviceLinkId,
+      toolName: 'Bash',
+      input: {
+        command: `npx -y skills add ${shellQuote(pkg)} --global --yes -a claude-code`,
+      },
+      cwd: 'octodeck-workspace://skills-install',
+      timeoutMs: 120_000,
+      maxOutputBytes: 1_048_576,
+    });
+    if (!result.ok) {
+      return { success: false, error: result.error || 'device install failed' };
+    }
+    return { success: true, installed: [] };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
 /**
  * Sync host-level skills (~/.claude/skills/) to a user's directory.
  * Standalone function usable from both the API route and the auto-sync timer.
@@ -800,7 +861,14 @@ skillsRoutes.post('/install', authMiddleware, async (c) => {
   }
 
   const pkg = body.package.trim();
-  const result = await installSkillForUser(authUser.id, pkg);
+  const target: SkillInstallTarget =
+    body.target === 'device' && typeof body.deviceLinkId === 'string'
+      ? { kind: 'device', deviceLinkId: body.deviceLinkId.trim() }
+      : { kind: 'cloud' };
+  const result =
+    target.kind === 'device'
+      ? await installSkillOnDevice(authUser.id, target.deviceLinkId, pkg)
+      : await installSkillForUser(authUser.id, pkg);
 
   if (!result.success) {
     return c.json(

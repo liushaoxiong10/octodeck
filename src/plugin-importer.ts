@@ -53,9 +53,7 @@ export interface ImportReport {
 }
 
 export interface ScanOptions {
-  source?:
-    | { type: 'host-claude-dir' }
-    | { type: 'directory'; path: string };
+  source?: { type: 'host-claude-dir' } | { type: 'directory'; path: string };
 }
 
 /** Names excluded from content hash + copy (caches / VCS / OS metadata). */
@@ -162,9 +160,7 @@ async function runScan(opts: ScanOptions): Promise<ImportReport> {
       pluginEntries = fs.readdirSync(pluginsRoot);
     } catch {
       // marketplace without `plugins/` is malformed but not fatal
-      report.warnings.push(
-        `Marketplace "${mpName}" has no plugins/ directory`,
-      );
+      report.warnings.push(`Marketplace "${mpName}" has no plugins/ directory`);
       continue;
     }
 

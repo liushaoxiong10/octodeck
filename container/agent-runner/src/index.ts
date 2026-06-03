@@ -1832,7 +1832,7 @@ async function main(): Promise<void> {
       ...(containerInput.remoteExecutionLinkId
         ? createRemoteMcpTools({
             linkId: containerInput.remoteExecutionLinkId,
-            cwd: WORKSPACE_GROUP,
+            cwd: containerInput.remoteToolCwd || WORKSPACE_GROUP,
             serverBaseUrl:
               containerInput.remoteToolServerUrl ||
               process.env.OCTODECK_SERVER_URL ||

@@ -66,7 +66,10 @@ export function requestProviderSkills(
 export function deliverSkillsResult(frame: SkillsResultFrame): void {
   const req = pending.get(frame.requestId);
   if (!req) {
-    logger.debug({ requestId: frame.requestId }, 'skills-rpc: drop result for unknown request');
+    logger.debug(
+      { requestId: frame.requestId },
+      'skills-rpc: drop result for unknown request',
+    );
     return;
   }
   pending.delete(frame.requestId);
@@ -80,7 +83,10 @@ export function deliverSkillsResult(frame: SkillsResultFrame): void {
   });
 }
 
-export function failSkillsRequestsForLink(linkId: string, reason: string): void {
+export function failSkillsRequestsForLink(
+  linkId: string,
+  reason: string,
+): void {
   for (const [requestId, req] of pending) {
     if (req.linkId !== linkId) continue;
     pending.delete(requestId);

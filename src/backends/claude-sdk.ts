@@ -20,8 +20,14 @@ export const claudeSdkBackend: AgentBackend = {
   },
 
   async run(args: BackendRunArgs) {
-    const { group, input, executionMode, onProcess, onOutput, ownerHomeFolder } =
-      args;
+    const {
+      group,
+      input,
+      executionMode,
+      onProcess,
+      onOutput,
+      ownerHomeFolder,
+    } = args;
     if (input.executionProfile === 'single-turn-json') {
       const sdkQueryOptions: { timeout?: number; userId?: string } = {
         timeout: group.containerConfig?.timeout,
@@ -37,7 +43,9 @@ export const claudeSdkBackend: AgentBackend = {
       }
       return { status: 'success', result };
     }
-    const runtimeProfile = group.runtimeProfile ?? (executionMode === 'host' ? 'server-agent' : undefined);
+    const runtimeProfile =
+      group.runtimeProfile ??
+      (executionMode === 'host' ? 'server-agent' : undefined);
     const sdkInput = {
       ...input,
       ...(runtimeProfile === 'server-agent'
@@ -51,8 +59,20 @@ export const claudeSdkBackend: AgentBackend = {
         : {}),
     };
     if (executionMode === 'host') {
-      return runHostAgent(group, sdkInput, onProcess, onOutput, ownerHomeFolder);
+      return runHostAgent(
+        group,
+        sdkInput,
+        onProcess,
+        onOutput,
+        ownerHomeFolder,
+      );
     }
-    return runContainerAgent(group, sdkInput, onProcess, onOutput, ownerHomeFolder);
+    return runContainerAgent(
+      group,
+      sdkInput,
+      onProcess,
+      onOutput,
+      ownerHomeFolder,
+    );
   },
 };

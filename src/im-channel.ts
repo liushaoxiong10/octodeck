@@ -90,7 +90,11 @@ export interface IMChannelConnectOpts {
   resolveEffectiveChatJid?: (
     chatJid: string,
     messageMeta?: FeishuMessageMeta,
-  ) => { effectiveJid: string; agentId: string | null; sourceJid?: string } | null;
+  ) => {
+    effectiveJid: string;
+    agentId: string | null;
+    sourceJid?: string;
+  } | null;
   /** 当 IM 消息被路由到 conversation agent 后调用，触发 agent 处理 */
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   /** Bot 被添加到群聊时调用 */
@@ -104,7 +108,9 @@ export interface IMChannelConnectOpts {
   /** 发言者白名单：返回 false 则丢弃（命令处理后、mention 门控前调用） */
   isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
   /** Resolve registered group for a jid */
-  resolveRegisteredGroup?: (jid: string) => { activation_mode?: string } | undefined;
+  resolveRegisteredGroup?: (
+    jid: string,
+  ) => { activation_mode?: string } | undefined;
   /** 飞书流式卡片按钮中断回调 */
   onCardInterrupt?: (chatJid: string) => void;
   /** P2P（私聊）消息到达时调用，用于自动检测 owner open_id（仅飞书） */
@@ -496,10 +502,7 @@ export function createQQChannel(config: QQConnectionConfig): IMChannel {
       fileName?: string,
     ): Promise<void> {
       if (!inner) {
-        logger.warn(
-          { chatId },
-          'QQ channel not connected, skip sending image',
-        );
+        logger.warn({ chatId }, 'QQ channel not connected, skip sending image');
         return;
       }
       await inner.sendImage(chatId, imageBuffer, mimeType, caption, fileName);
@@ -511,10 +514,7 @@ export function createQQChannel(config: QQConnectionConfig): IMChannel {
       fileName: string,
     ): Promise<void> {
       if (!inner) {
-        logger.warn(
-          { chatId },
-          'QQ channel not connected, skip sending file',
-        );
+        logger.warn({ chatId }, 'QQ channel not connected, skip sending file');
         return;
       }
       await inner.sendFile(chatId, filePath, fileName);
@@ -863,7 +863,9 @@ export function createDiscordChannel(
         if (!typingIntervals.has(chatId)) {
           await inner.setTyping(chatId, true);
           const interval = setInterval(async () => {
-            try { if (inner) await inner.setTyping(chatId, true); } catch {}
+            try {
+              if (inner) await inner.setTyping(chatId, true);
+            } catch {}
           }, 9000);
           typingIntervals.set(chatId, interval);
         }

@@ -29,7 +29,11 @@ import {
 } from '../agent-teams.js';
 import type { AgentMdDefinitionInput, AgentTeamInput } from '../agent-teams.js';
 import { executeAgentTeam } from '../agent-team-engine.js';
-import type { AgentTeamRoleResult, AgentTeamExecutionPhase, AgentTeamTraceEvent } from '../agent-team-engine.js';
+import type {
+  AgentTeamRoleResult,
+  AgentTeamExecutionPhase,
+  AgentTeamTraceEvent,
+} from '../agent-team-engine.js';
 import type { RegisteredGroup } from '../types.js';
 import {
   getAgentTeamApproval,
@@ -51,9 +55,21 @@ import {
 const router = new Hono<{ Variables: Variables }>();
 const AGENT_TEAM_GENERATION_TIMEOUT_MS = 600_000;
 
-const ShapeSchema = z.enum(['auto', 'pipeline', 'parallel', 'leader-worker', 'judge-route']);
+const ShapeSchema = z.enum([
+  'auto',
+  'pipeline',
+  'parallel',
+  'leader-worker',
+  'judge-route',
+]);
 const PermissionLevelSchema = z.enum(['L0', 'L1', 'L2', 'L3', 'L4', 'L5']);
-const WorkspacePolicySchema = z.enum(['none', 'read-only', 'sandbox', 'worktree', 'device']);
+const WorkspacePolicySchema = z.enum([
+  'none',
+  'read-only',
+  'sandbox',
+  'worktree',
+  'device',
+]);
 
 const RoleSchema = z.object({
   id: z.string().min(1).max(64),
@@ -64,16 +80,20 @@ const RoleSchema = z.object({
   outputs: z.array(z.string().max(500)).max(12).optional(),
   skills: z.array(z.string().max(500)).max(12).optional(),
   guardrails: z.array(z.string().max(500)).max(12).optional(),
-  policy: z.object({
-    permissionLevel: PermissionLevelSchema.optional(),
-    workspacePolicy: WorkspacePolicySchema.optional(),
-    requiresApproval: z.boolean().optional(),
-  }).optional(),
-  budget: z.object({
-    maxDurationMs: z.number().int().positive().optional(),
-    maxTokens: z.number().int().positive().optional(),
-    maxOutputBytes: z.number().int().positive().optional(),
-  }).optional(),
+  policy: z
+    .object({
+      permissionLevel: PermissionLevelSchema.optional(),
+      workspacePolicy: WorkspacePolicySchema.optional(),
+      requiresApproval: z.boolean().optional(),
+    })
+    .optional(),
+  budget: z
+    .object({
+      maxDurationMs: z.number().int().positive().optional(),
+      maxTokens: z.number().int().positive().optional(),
+      maxOutputBytes: z.number().int().positive().optional(),
+    })
+    .optional(),
 });
 
 const TeamInputSchema = z.object({
@@ -97,12 +117,17 @@ const AgentMdInputSchema = z.object({
 });
 
 const AgentMdPatchSchema = AgentMdInputSchema.partial();
-const GeneratedAgentMdInputSchema = AgentMdInputSchema.omit({ createdByAgentId: true });
+const GeneratedAgentMdInputSchema = AgentMdInputSchema.omit({
+  createdByAgentId: true,
+});
 const GeneratedTeamSchema = z.union([
   TeamInputSchema,
   z.object({
     team: TeamInputSchema,
-    agentMdDefinitionsToCreate: z.array(GeneratedAgentMdInputSchema).max(12).optional(),
+    agentMdDefinitionsToCreate: z
+      .array(GeneratedAgentMdInputSchema)
+      .max(12)
+      .optional(),
   }),
 ]);
 
@@ -115,11 +140,16 @@ const GenerateSchema = z.object({
 const ExecuteSchema = z.object({
   prompt: z.string().min(1).max(10000),
   runnerAgentId: z.string().min(1).max(128).optional(),
-  roleAssignments: z.record(z.string().min(1).max(64), z.object({
-    runnerAgentId: z.string().min(1).max(128),
-    linkId: z.string().min(1).max(128).optional(),
-    agentClientId: z.string().min(1).max(128).optional(),
-  })).optional(),
+  roleAssignments: z
+    .record(
+      z.string().min(1).max(64),
+      z.object({
+        runnerAgentId: z.string().min(1).max(128),
+        linkId: z.string().min(1).max(128).optional(),
+        agentClientId: z.string().min(1).max(128).optional(),
+      }),
+    )
+    .optional(),
   maxFeedbackIterations: z.number().int().min(0).max(5).optional(),
 });
 type ExecuteRequest = z.infer<typeof ExecuteSchema>;
@@ -130,7 +160,14 @@ const ApprovalDecisionSchema = z.object({
 
 const AgentTeamToolSchema = z.object({
   userId: z.string().min(1),
-  operation: z.enum(['list_teams', 'get_team', 'run_team', 'get_run', 'decide_approval', 'cancel_run']),
+  operation: z.enum([
+    'list_teams',
+    'get_team',
+    'run_team',
+    'get_run',
+    'decide_approval',
+    'cancel_run',
+  ]),
   teamId: z.string().min(1).optional(),
   runId: z.string().min(1).optional(),
   approvalId: z.string().min(1).optional(),
@@ -153,10 +190,19 @@ router.post('/', authMiddleware, systemConfigMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const parsed = TeamInputSchema.safeParse(body);
   if (!parsed.success) {
-    return c.json({ error: parsed.error.issues[0]?.message || 'invalid team' }, 400);
+    return c.json(
+      { error: parsed.error.issues[0]?.message || 'invalid team' },
+      400,
+    );
   }
   if (!isAbstractAgentTeamDefinition(parsed.data)) {
-    return c.json({ error: 'team must not bind concrete agent cli, provider, device, model, command or path' }, 400);
+    return c.json(
+      {
+        error:
+          'team must not bind concrete agent cli, provider, device, model, command or path',
+      },
+      400,
+    );
   }
   return c.json(createAgentTeam(parsed.data, user.id), 201);
 });
@@ -166,7 +212,12 @@ router.post('/generate', authMiddleware, systemConfigMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const parsed = GenerateSchema.safeParse(body);
   if (!parsed.success) {
-    return c.json({ error: parsed.error.issues[0]?.message || 'invalid generation request' }, 400);
+    return c.json(
+      {
+        error: parsed.error.issues[0]?.message || 'invalid generation request',
+      },
+      400,
+    );
   }
   const settings = getSystemSettings();
   if (!settings.allowedBackends.includes(parsed.data.generatorAgentId)) {
@@ -174,21 +225,37 @@ router.post('/generate', authMiddleware, systemConfigMiddleware, async (c) => {
   }
   const requestedBackend = getBackend(parsed.data.generatorAgentId);
   if (requestedBackend && !requestedBackend.supportsExecutionMode('host')) {
-    return c.json({ error: 'generator agent does not support host execution mode' }, 400);
+    return c.json(
+      { error: 'generator agent does not support host execution mode' },
+      400,
+    );
   }
   const fallback = buildAgentTeamDraft({
     generatorAgentId: parsed.data.generatorAgentId,
     goal: parsed.data.goal,
     shape: parsed.data.shape as AgentTeamShape,
   });
-  const generated = await generateDraftWithAgent(parsed.data.generatorAgentId, fallback, user.id).catch(() => null);
+  const generated = await generateDraftWithAgent(
+    parsed.data.generatorAgentId,
+    fallback,
+    user.id,
+  ).catch(() => null);
   if (!generated) {
-    return c.json({ error: 'agent team generator did not return a valid team definition' }, 502);
+    return c.json(
+      { error: 'agent team generator did not return a valid team definition' },
+      502,
+    );
   }
-  const createdAgentMdDefinitions = generated.agentMdDefinitionsToCreate.map((definition) => createAgentMdDefinition({
-    ...definition,
-    createdByAgentId: parsed.data.generatorAgentId,
-  }, user.id));
+  const createdAgentMdDefinitions = generated.agentMdDefinitionsToCreate.map(
+    (definition) =>
+      createAgentMdDefinition(
+        {
+          ...definition,
+          createdByAgentId: parsed.data.generatorAgentId,
+        },
+        user.id,
+      ),
+  );
   const team = createAgentTeam(generated.draft, user.id);
   return c.json({ team, agentMdDefinitions: createdAgentMdDefinitions }, 201);
 });
@@ -203,9 +270,17 @@ router.post('/agent-md', authMiddleware, systemConfigMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const parsed = AgentMdInputSchema.safeParse(body);
   if (!parsed.success) {
-    return c.json({ error: parsed.error.issues[0]?.message || 'invalid agent.md definition' }, 400);
+    return c.json(
+      {
+        error: parsed.error.issues[0]?.message || 'invalid agent.md definition',
+      },
+      400,
+    );
   }
-  return c.json({ definition: createAgentMdDefinition(parsed.data, user.id) }, 201);
+  return c.json(
+    { definition: createAgentMdDefinition(parsed.data, user.id) },
+    201,
+  );
 });
 
 router.get('/agent-md-summaries', authMiddleware, (c) => {
@@ -216,21 +291,35 @@ router.get('/agent-md-summaries', authMiddleware, (c) => {
 router.get('/agent-md/:id', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const definition = getAgentMdDefinition(c.req.param('id'), user.id);
-  if (!definition) return c.json({ error: 'agent.md definition not found' }, 404);
+  if (!definition)
+    return c.json({ error: 'agent.md definition not found' }, 404);
   return c.json({ definition });
 });
 
-router.patch('/agent-md/:id', authMiddleware, systemConfigMiddleware, async (c) => {
-  const user = c.get('user') as AuthUser;
-  const body = await c.req.json().catch(() => ({}));
-  const parsed = AgentMdPatchSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: parsed.error.issues[0]?.message || 'invalid agent.md patch' }, 400);
-  }
-  const definition = updateAgentMdDefinition(c.req.param('id'), parsed.data, user.id);
-  if (!definition) return c.json({ error: 'agent.md definition not found' }, 404);
-  return c.json({ definition });
-});
+router.patch(
+  '/agent-md/:id',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = AgentMdPatchSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: parsed.error.issues[0]?.message || 'invalid agent.md patch' },
+        400,
+      );
+    }
+    const definition = updateAgentMdDefinition(
+      c.req.param('id'),
+      parsed.data,
+      user.id,
+    );
+    if (!definition)
+      return c.json({ error: 'agent.md definition not found' }, 404);
+    return c.json({ definition });
+  },
+);
 
 router.delete('/agent-md/:id', authMiddleware, systemConfigMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
@@ -242,8 +331,16 @@ router.delete('/agent-md/:id', authMiddleware, systemConfigMiddleware, (c) => {
 router.get('/runs', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const status = c.req.query('status')?.trim();
-  const allowedStatuses = new Set(['running', 'waiting_approval', 'paused', 'success', 'error', 'cancelled']);
-  if (status && !allowedStatuses.has(status)) return c.json({ error: 'invalid run status' }, 400);
+  const allowedStatuses = new Set([
+    'running',
+    'waiting_approval',
+    'paused',
+    'success',
+    'error',
+    'cancelled',
+  ]);
+  if (status && !allowedStatuses.has(status))
+    return c.json({ error: 'invalid run status' }, 400);
   const limitValue = Number(c.req.query('limit') ?? 50);
   const limit = Number.isFinite(limitValue) ? limitValue : 50;
   return c.json({
@@ -325,79 +422,143 @@ router.post('/runs/:runId/cancel', authMiddleware, (c) => {
   return c.json({ run: getAgentTeamRun(run.id, user.id) });
 });
 
-router.post('/runs/:runId/approvals/:approvalId', authMiddleware, systemConfigMiddleware, async (c) => {
-  const user = c.get('user') as AuthUser;
-  const run = getAgentTeamRun(c.req.param('runId'), user.id);
-  if (!run) return c.json({ error: 'agent team run not found' }, 404);
-  const approval = getAgentTeamApproval(c.req.param('approvalId'), run.id);
-  if (!approval) return c.json({ error: 'agent team approval not found' }, 404);
-  const body = await c.req.json().catch(() => ({}));
-  const parsed = ApprovalDecisionSchema.safeParse(body);
-  if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message || 'invalid approval decision' }, 400);
-  recordAgentTeamApproval({
-    id: String(approval.id),
-    runId: run.id,
-    taskId: typeof approval.taskId === 'string' ? approval.taskId : undefined,
-    requestedBy: String(approval.requestedBy),
-    status: parsed.data.decision,
-    riskLevel: String(approval.riskLevel),
-    title: String(approval.title),
-    description: String(approval.description),
-    payload: approval.payload,
-    resolvedBy: user.id,
-    resolvedAt: new Date().toISOString(),
-    createdAt: String(approval.createdAt),
-  });
-  if (parsed.data.decision === 'rejected') {
-    recordAgentTeamRun({
-      id: run.id,
-      teamId: run.teamId,
-      userId: run.userId,
-      prompt: run.prompt,
-      status: 'cancelled',
-      traceId: run.traceId,
-      workflowShape: run.workflowShape,
-      roleAssignments: run.roleAssignments,
-      error: 'approval rejected',
-      completedAt: new Date().toISOString(),
+router.post(
+  '/runs/:runId/approvals/:approvalId',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    const run = getAgentTeamRun(c.req.param('runId'), user.id);
+    if (!run) return c.json({ error: 'agent team run not found' }, 404);
+    const approval = getAgentTeamApproval(c.req.param('approvalId'), run.id);
+    if (!approval)
+      return c.json({ error: 'agent team approval not found' }, 404);
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = ApprovalDecisionSchema.safeParse(body);
+    if (!parsed.success)
+      return c.json(
+        {
+          error: parsed.error.issues[0]?.message || 'invalid approval decision',
+        },
+        400,
+      );
+    recordAgentTeamApproval({
+      id: String(approval.id),
+      runId: run.id,
+      taskId: typeof approval.taskId === 'string' ? approval.taskId : undefined,
+      requestedBy: String(approval.requestedBy),
+      status: parsed.data.decision,
+      riskLevel: String(approval.riskLevel),
+      title: String(approval.title),
+      description: String(approval.description),
+      payload: approval.payload,
+      resolvedBy: user.id,
+      resolvedAt: new Date().toISOString(),
+      createdAt: String(approval.createdAt),
     });
-    return c.json({ run: getAgentTeamRun(run.id, user.id), approval: getAgentTeamApproval(String(approval.id), run.id) });
-  }
-  const result = await executeExistingRun(c, run.id, { bypassApproval: true });
-  if ('response' in result) return result.response;
-  return c.json({ run: getAgentTeamRun(run.id, user.id), approval: getAgentTeamApproval(String(approval.id), run.id), execution: result.execution });
-});
+    if (parsed.data.decision === 'rejected') {
+      recordAgentTeamRun({
+        id: run.id,
+        teamId: run.teamId,
+        userId: run.userId,
+        prompt: run.prompt,
+        status: 'cancelled',
+        traceId: run.traceId,
+        workflowShape: run.workflowShape,
+        roleAssignments: run.roleAssignments,
+        error: 'approval rejected',
+        completedAt: new Date().toISOString(),
+      });
+      return c.json({
+        run: getAgentTeamRun(run.id, user.id),
+        approval: getAgentTeamApproval(String(approval.id), run.id),
+      });
+    }
+    const result = await executeExistingRun(c, run.id, {
+      bypassApproval: true,
+    });
+    if ('response' in result) return result.response;
+    return c.json({
+      run: getAgentTeamRun(run.id, user.id),
+      approval: getAgentTeamApproval(String(approval.id), run.id),
+      execution: result.execution,
+    });
+  },
+);
 
 router.post('/:id/runs', authMiddleware, systemConfigMiddleware, async (c) => {
   const result = await executeTeamRequest(c, c.req.param('id'));
   if ('response' in result) return result.response;
-  return c.json({ run: getAgentTeamRun(result.execution.runId || '', (c.get('user') as AuthUser).id), execution: result.execution }, result.execution.status === 'success' ? 201 : 502);
+  return c.json(
+    {
+      run: getAgentTeamRun(
+        result.execution.runId || '',
+        (c.get('user') as AuthUser).id,
+      ),
+      execution: result.execution,
+    },
+    result.execution.status === 'success' ? 201 : 502,
+  );
 });
 
-router.post('/:id/execute', authMiddleware, systemConfigMiddleware, async (c) => {
-  const result = await executeTeamRequest(c, c.req.param('id'));
-  if ('response' in result) return result.response;
-  return c.json({ execution: result.execution }, result.execution.status === 'success' ? 200 : 502);
-});
+router.post(
+  '/:id/execute',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const result = await executeTeamRequest(c, c.req.param('id'));
+    if ('response' in result) return result.response;
+    return c.json(
+      { execution: result.execution },
+      result.execution.status === 'success' ? 200 : 502,
+    );
+  },
+);
 
-async function executeTeamRequest(c: any, teamId: string): Promise<{ execution: Awaited<ReturnType<typeof executeAgentTeam>> } | { response: Response }> {
+async function executeTeamRequest(
+  c: any,
+  teamId: string,
+): Promise<
+  | { execution: Awaited<ReturnType<typeof executeAgentTeam>> }
+  | { response: Response }
+> {
   const user = c.get('user') as AuthUser;
   const team = getAgentTeam(teamId, user.id);
   if (!team) return { response: c.json({ error: 'team not found' }, 404) };
   const body = await c.req.json().catch(() => ({}));
   const parsed = ExecuteSchema.safeParse(body);
   if (!parsed.success) {
-    return { response: c.json({ error: parsed.error.issues[0]?.message || 'invalid execution request' }, 400) };
+    return {
+      response: c.json(
+        {
+          error: parsed.error.issues[0]?.message || 'invalid execution request',
+        },
+        400,
+      ),
+    };
   }
   const settings = getSystemSettings();
   const runnerAgentId = parsed.data.runnerAgentId ?? team.createdByAgentId;
   if (!settings.allowedBackends.includes(runnerAgentId)) {
-    return { response: c.json({ error: 'team runner agent is not in allowedBackends' }, 403) };
+    return {
+      response: c.json(
+        { error: 'team runner agent is not in allowedBackends' },
+        403,
+      ),
+    };
   }
   const backend = getBackend(runnerAgentId);
-  if (!backend) return { response: c.json({ error: 'team runner backend not found' }, 404) };
+  if (!backend)
+    return {
+      response: c.json({ error: 'team runner backend not found' }, 404),
+    };
   if (!backend.supportsExecutionMode('host')) {
-    return { response: c.json({ error: 'team runner agent does not support host execution mode' }, 400) };
+    return {
+      response: c.json(
+        { error: 'team runner agent does not support host execution mode' },
+        400,
+      ),
+    };
   }
   const runId = `team_run_${crypto.randomBytes(8).toString('hex')}`;
   const traceId = `team_trace_${crypto.randomBytes(8).toString('hex')}`;
@@ -432,11 +593,14 @@ async function executeTeamRequest(c: any, teamId: string): Promise<{ execution: 
       roleAssignments: parsed.data.roleAssignments ?? {},
     });
     return {
-      response: c.json({
-        run: getAgentTeamRun(runId, user.id),
-        approval: getAgentTeamApproval(approval.id, runId),
-        checkpoint,
-      }, 202),
+      response: c.json(
+        {
+          run: getAgentTeamRun(runId, user.id),
+          approval: getAgentTeamApproval(approval.id, runId),
+          checkpoint,
+        },
+        202,
+      ),
     };
   }
   return executePreparedRun(c, {
@@ -455,18 +619,36 @@ async function executeTeamRequest(c: any, teamId: string): Promise<{ execution: 
 export async function handleAgentTeamToolRequest(c: any): Promise<Response> {
   const secret = process.env.OCTODECK_AGENT_RUNNER_SECRET;
   const auth = c.req.header('authorization') || '';
-  if (!secret || auth !== `Bearer ${secret}`) return c.json({ error: 'unauthorized' }, 401);
+  if (!secret || auth !== `Bearer ${secret}`)
+    return c.json({ error: 'unauthorized' }, 401);
   const body = await c.req.json().catch(() => ({}));
   return handleAgentTeamToolBody(c, body);
 }
 
-export async function handleAgentTeamLinkToolRequest(c: any, userId: string, body: unknown): Promise<Response> {
-  return handleAgentTeamToolBody(c, { ...(isRecord(body) ? body : {}), userId });
+export async function handleAgentTeamLinkToolRequest(
+  c: any,
+  userId: string,
+  body: unknown,
+): Promise<Response> {
+  return handleAgentTeamToolBody(c, {
+    ...(isRecord(body) ? body : {}),
+    userId,
+  });
 }
 
-async function handleAgentTeamToolBody(c: any, body: unknown): Promise<Response> {
+async function handleAgentTeamToolBody(
+  c: any,
+  body: unknown,
+): Promise<Response> {
   const parsed = AgentTeamToolSchema.safeParse(body);
-  if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message || 'invalid agent team tool request' }, 400);
+  if (!parsed.success)
+    return c.json(
+      {
+        error:
+          parsed.error.issues[0]?.message || 'invalid agent team tool request',
+      },
+      400,
+    );
   const user: AuthUser = {
     id: parsed.data.userId,
     username: parsed.data.userId,
@@ -482,19 +664,28 @@ async function handleAgentTeamToolBody(c: any, body: unknown): Promise<Response>
     case 'list_teams':
       return c.json({ teams: listAgentTeams(user.id) });
     case 'get_team': {
-      if (!parsed.data.teamId) return c.json({ error: 'teamId is required' }, 400);
+      if (!parsed.data.teamId)
+        return c.json({ error: 'teamId is required' }, 400);
       const team = getAgentTeam(parsed.data.teamId, user.id);
       if (!team) return c.json({ error: 'team not found' }, 404);
       return c.json({ team });
     }
     case 'run_team': {
-      if (!parsed.data.teamId || !parsed.data.prompt) return c.json({ error: 'teamId and prompt are required' }, 400);
+      if (!parsed.data.teamId || !parsed.data.prompt)
+        return c.json({ error: 'teamId and prompt are required' }, 400);
       const result = await executeTeamRequest(toolContext, parsed.data.teamId);
       if ('response' in result) return result.response;
-      return c.json({ run: getAgentTeamRun(result.execution.runId || '', user.id), execution: result.execution }, result.execution.status === 'success' ? 201 : 502);
+      return c.json(
+        {
+          run: getAgentTeamRun(result.execution.runId || '', user.id),
+          execution: result.execution,
+        },
+        result.execution.status === 'success' ? 201 : 502,
+      );
     }
     case 'get_run': {
-      if (!parsed.data.runId) return c.json({ error: 'runId is required' }, 400);
+      if (!parsed.data.runId)
+        return c.json({ error: 'runId is required' }, 400);
       const run = getAgentTeamRun(parsed.data.runId, user.id);
       if (!run) return c.json({ error: 'agent team run not found' }, 404);
       return c.json({
@@ -507,15 +698,25 @@ async function handleAgentTeamToolBody(c: any, body: unknown): Promise<Response>
       });
     }
     case 'decide_approval': {
-      if (!parsed.data.runId || !parsed.data.approvalId || !parsed.data.decision) return c.json({ error: 'runId, approvalId and decision are required' }, 400);
+      if (
+        !parsed.data.runId ||
+        !parsed.data.approvalId ||
+        !parsed.data.decision
+      )
+        return c.json(
+          { error: 'runId, approvalId and decision are required' },
+          400,
+        );
       const run = getAgentTeamRun(parsed.data.runId, user.id);
       if (!run) return c.json({ error: 'agent team run not found' }, 404);
       const approval = getAgentTeamApproval(parsed.data.approvalId, run.id);
-      if (!approval) return c.json({ error: 'agent team approval not found' }, 404);
+      if (!approval)
+        return c.json({ error: 'agent team approval not found' }, 404);
       recordAgentTeamApproval({
         id: String(approval.id),
         runId: run.id,
-        taskId: typeof approval.taskId === 'string' ? approval.taskId : undefined,
+        taskId:
+          typeof approval.taskId === 'string' ? approval.taskId : undefined,
         requestedBy: String(approval.requestedBy),
         status: parsed.data.decision,
         riskLevel: String(approval.riskLevel),
@@ -539,14 +740,24 @@ async function handleAgentTeamToolBody(c: any, body: unknown): Promise<Response>
           error: 'approval rejected',
           completedAt: new Date().toISOString(),
         });
-        return c.json({ run: getAgentTeamRun(run.id, user.id), approval: getAgentTeamApproval(String(approval.id), run.id) });
+        return c.json({
+          run: getAgentTeamRun(run.id, user.id),
+          approval: getAgentTeamApproval(String(approval.id), run.id),
+        });
       }
-      const result = await executeExistingRun(toolContext, run.id, { bypassApproval: true });
+      const result = await executeExistingRun(toolContext, run.id, {
+        bypassApproval: true,
+      });
       if ('response' in result) return result.response;
-      return c.json({ run: getAgentTeamRun(run.id, user.id), approval: getAgentTeamApproval(String(approval.id), run.id), execution: result.execution });
+      return c.json({
+        run: getAgentTeamRun(run.id, user.id),
+        approval: getAgentTeamApproval(String(approval.id), run.id),
+        execution: result.execution,
+      });
     }
     case 'cancel_run': {
-      if (!parsed.data.runId) return c.json({ error: 'runId is required' }, 400);
+      if (!parsed.data.runId)
+        return c.json({ error: 'runId is required' }, 400);
       const run = getAgentTeamRun(parsed.data.runId, user.id);
       if (!run) return c.json({ error: 'agent team run not found' }, 404);
       recordAgentTeamRun({
@@ -567,10 +778,14 @@ async function handleAgentTeamToolBody(c: any, body: unknown): Promise<Response>
   }
 }
 
-function createInternalToolContext(parent: any, user: AuthUser, data: z.infer<typeof AgentTeamToolSchema>) {
+function createInternalToolContext(
+  parent: any,
+  user: AuthUser,
+  data: z.infer<typeof AgentTeamToolSchema>,
+) {
   return {
     ...parent,
-    get: (key: string) => key === 'user' ? user : parent.get?.(key),
+    get: (key: string) => (key === 'user' ? user : parent.get?.(key)),
     req: {
       ...parent.req,
       json: async () => ({
@@ -583,28 +798,63 @@ function createInternalToolContext(parent: any, user: AuthUser, data: z.infer<ty
   };
 }
 
-async function executeExistingRun(c: any, runId: string, options: { bypassApproval?: boolean } = {}): Promise<{ execution: Awaited<ReturnType<typeof executeAgentTeam>> } | { response: Response }> {
+async function executeExistingRun(
+  c: any,
+  runId: string,
+  options: { bypassApproval?: boolean } = {},
+): Promise<
+  | { execution: Awaited<ReturnType<typeof executeAgentTeam>> }
+  | { response: Response }
+> {
   const user = c.get('user') as AuthUser;
   const run = getAgentTeamRun(runId, user.id);
-  if (!run) return { response: c.json({ error: 'agent team run not found' }, 404) };
-  if (run.status === 'cancelled') return { response: c.json({ error: 'agent team run is cancelled' }, 409) };
+  if (!run)
+    return { response: c.json({ error: 'agent team run not found' }, 404) };
+  if (run.status === 'cancelled')
+    return { response: c.json({ error: 'agent team run is cancelled' }, 409) };
   const team = getAgentTeam(run.teamId, user.id);
   if (!team) return { response: c.json({ error: 'team not found' }, 404) };
   const state = getLatestApprovalCheckpointState(run.id);
   if (!options.bypassApproval && findApprovalRequiredRole(team)) {
-    return { response: c.json({ error: 'agent team run is waiting for approval' }, 409) };
+    return {
+      response: c.json(
+        { error: 'agent team run is waiting for approval' },
+        409,
+      ),
+    };
   }
-  const runnerAgentId = typeof state.runnerAgentId === 'string' ? state.runnerAgentId : team.createdByAgentId;
-  const roleAssignments = isRecord(state.roleAssignments) ? state.roleAssignments as ExecuteRequest['roleAssignments'] : run.roleAssignments as ExecuteRequest['roleAssignments'];
-  const maxFeedbackIterations = typeof state.maxFeedbackIterations === 'number' ? state.maxFeedbackIterations : undefined;
+  const runnerAgentId =
+    typeof state.runnerAgentId === 'string'
+      ? state.runnerAgentId
+      : team.createdByAgentId;
+  const roleAssignments = isRecord(state.roleAssignments)
+    ? (state.roleAssignments as ExecuteRequest['roleAssignments'])
+    : (run.roleAssignments as ExecuteRequest['roleAssignments']);
+  const maxFeedbackIterations =
+    typeof state.maxFeedbackIterations === 'number'
+      ? state.maxFeedbackIterations
+      : undefined;
   const settings = getSystemSettings();
   if (!settings.allowedBackends.includes(runnerAgentId)) {
-    return { response: c.json({ error: 'team runner agent is not in allowedBackends' }, 403) };
+    return {
+      response: c.json(
+        { error: 'team runner agent is not in allowedBackends' },
+        403,
+      ),
+    };
   }
   const backend = getBackend(runnerAgentId);
-  if (!backend) return { response: c.json({ error: 'team runner backend not found' }, 404) };
+  if (!backend)
+    return {
+      response: c.json({ error: 'team runner backend not found' }, 404),
+    };
   if (!backend.supportsExecutionMode('host')) {
-    return { response: c.json({ error: 'team runner agent does not support host execution mode' }, 400) };
+    return {
+      response: c.json(
+        { error: 'team runner agent does not support host execution mode' },
+        400,
+      ),
+    };
   }
   return executePreparedRun(c, {
     team,
@@ -632,8 +882,21 @@ async function executePreparedRun(
     maxFeedbackIterations?: number;
     defaultBackend: NonNullable<ReturnType<typeof getBackend>>;
   },
-): Promise<{ execution: Awaited<ReturnType<typeof executeAgentTeam>> } | { response: Response }> {
-  const { team, user, runId, traceId, prompt, runnerAgentId, roleAssignments, maxFeedbackIterations, defaultBackend } = config;
+): Promise<
+  | { execution: Awaited<ReturnType<typeof executeAgentTeam>> }
+  | { response: Response }
+> {
+  const {
+    team,
+    user,
+    runId,
+    traceId,
+    prompt,
+    runnerAgentId,
+    roleAssignments,
+    maxFeedbackIterations,
+    defaultBackend,
+  } = config;
   const settings = getSystemSettings();
   recordAgentTeamRun({
     id: runId,
@@ -645,79 +908,107 @@ async function executePreparedRun(
     workflowShape: team.shape,
     roleAssignments: roleAssignments ?? {},
   });
-  const execution = await executeAgentTeam(team, {
-    prompt,
-    maxFeedbackIterations,
-    runId,
-    traceId,
-    sessionId: `system:agent-team:${team.id}`,
-  }, async ({ role, prompt, phase, previousResults, feedback }) => {
-    const assignment = roleAssignments?.[role.id];
-    const roleRunnerAgentId = assignment?.runnerAgentId ?? runnerAgentId;
-    if (!settings.allowedBackends.includes(roleRunnerAgentId)) {
-      return { status: 'error', result: '', error: `role runner ${roleRunnerAgentId} is not in allowedBackends` };
-    }
-    const roleBackend = roleRunnerAgentId === runnerAgentId ? defaultBackend : getBackend(roleRunnerAgentId);
-    if (!roleBackend) return { status: 'error', result: '', error: `role runner backend ${roleRunnerAgentId} not found` };
-    if (!roleBackend.supportsExecutionMode('host')) return { status: 'error', result: '', error: `role runner ${roleRunnerAgentId} does not support host execution mode` };
-    const rolePrompt = buildAgentTeamRolePrompt(team, role, prompt, phase, previousResults, feedback);
-    const taskId = `${runId}:${role.id}:${phase}`;
-    recordAgentTeamTask({
-      id: taskId,
+  const execution = await executeAgentTeam(
+    team,
+    {
+      prompt,
+      maxFeedbackIterations,
       runId,
-      roleId: role.id,
-      phase,
-      actorId: roleRunnerAgentId,
-      status: 'running',
-      input: rolePrompt,
-    });
-    const output = await roleBackend.run({
-      group: {
-        name: `Agent Team ${team.name}`,
-        folder: `agent-team-${team.id}-${role.id}`,
-        added_at: new Date().toISOString(),
-        containerConfig: { timeout: AGENT_TEAM_GENERATION_TIMEOUT_MS },
-        executionMode: 'host',
-        backend: roleRunnerAgentId,
-        created_by: user.id,
-      },
-      executionMode: 'host',
-      input: {
-        prompt: rolePrompt,
-        groupFolder: `agent-team-${team.id}-${role.id}`,
-        chatJid: `system:agent-team:${team.id}`,
-        isMain: false,
-        isHome: false,
-        isAdminHome: false,
-        executionProfile: 'single-turn-json',
-      },
-      onProcess: () => undefined,
-    });
-    recordAgentTeamTask({
-      id: taskId,
-      runId,
-      roleId: role.id,
-      phase,
-      actorId: roleRunnerAgentId,
-      status: output.status === 'success' ? 'success' : 'error',
-      output: output.result ?? undefined,
-      error: output.error ?? undefined,
-      completedAt: new Date().toISOString(),
-    });
-    if (output.status === 'success') {
-      recordAgentTeamBlackboard({
-        id: `${taskId}:output`,
+      traceId,
+      sessionId: `system:agent-team:${team.id}`,
+    },
+    async ({ role, prompt, phase, previousResults, feedback }) => {
+      const assignment = roleAssignments?.[role.id];
+      const roleRunnerAgentId = assignment?.runnerAgentId ?? runnerAgentId;
+      if (!settings.allowedBackends.includes(roleRunnerAgentId)) {
+        return {
+          status: 'error',
+          result: '',
+          error: `role runner ${roleRunnerAgentId} is not in allowedBackends`,
+        };
+      }
+      const roleBackend =
+        roleRunnerAgentId === runnerAgentId
+          ? defaultBackend
+          : getBackend(roleRunnerAgentId);
+      if (!roleBackend)
+        return {
+          status: 'error',
+          result: '',
+          error: `role runner backend ${roleRunnerAgentId} not found`,
+        };
+      if (!roleBackend.supportsExecutionMode('host'))
+        return {
+          status: 'error',
+          result: '',
+          error: `role runner ${roleRunnerAgentId} does not support host execution mode`,
+        };
+      const rolePrompt = buildAgentTeamRolePrompt(
+        team,
+        role,
+        prompt,
+        phase,
+        previousResults,
+        feedback,
+      );
+      const taskId = `${runId}:${role.id}:${phase}`;
+      recordAgentTeamTask({
+        id: taskId,
         runId,
-        taskId,
         roleId: role.id,
-        kind: 'role_output',
-        key: `${role.id}.${phase}.output`,
-        contentType: 'text/markdown',
-        value: output.result ?? '',
+        phase,
+        actorId: roleRunnerAgentId,
+        status: 'running',
+        input: rolePrompt,
       });
-    }
-    return output;
-  });
+      const output = await roleBackend.run({
+        group: {
+          name: `Agent Team ${team.name}`,
+          folder: `agent-team-${team.id}-${role.id}`,
+          added_at: new Date().toISOString(),
+          containerConfig: { timeout: AGENT_TEAM_GENERATION_TIMEOUT_MS },
+          executionMode: 'host',
+          backend: roleRunnerAgentId,
+          created_by: user.id,
+        },
+        executionMode: 'host',
+        input: {
+          prompt: rolePrompt,
+          groupFolder: `agent-team-${team.id}-${role.id}`,
+          chatJid: `system:agent-team:${team.id}`,
+          isMain: false,
+          isHome: false,
+          isAdminHome: false,
+          executionProfile: 'single-turn-json',
+        },
+        onProcess: () => undefined,
+      });
+      recordAgentTeamTask({
+        id: taskId,
+        runId,
+        roleId: role.id,
+        phase,
+        actorId: roleRunnerAgentId,
+        status: output.status === 'success' ? 'success' : 'error',
+        output: output.result ?? undefined,
+        error: output.error ?? undefined,
+        completedAt: new Date().toISOString(),
+      });
+      if (output.status === 'success') {
+        recordAgentTeamBlackboard({
+          id: `${taskId}:output`,
+          runId,
+          taskId,
+          roleId: role.id,
+          kind: 'role_output',
+          key: `${role.id}.${phase}.output`,
+          contentType: 'text/markdown',
+          value: output.result ?? '',
+        });
+      }
+      return output;
+    },
+  );
   for (const event of execution.traceEvents ?? []) {
     recordAgentTeamTraceEvent(toTraceEventRecord(event));
   }
@@ -737,14 +1028,26 @@ async function executePreparedRun(
   return { execution };
 }
 
-const PERMISSION_LEVEL_RANK: Record<string, number> = { L0: 0, L1: 1, L2: 2, L3: 3, L4: 4, L5: 5 };
+const PERMISSION_LEVEL_RANK: Record<string, number> = {
+  L0: 0,
+  L1: 1,
+  L2: 2,
+  L3: 3,
+  L4: 4,
+  L5: 5,
+};
 
-function findApprovalRequiredRole(team: AgentTeam): AgentTeam['roles'][number] | undefined {
+function findApprovalRequiredRole(
+  team: AgentTeam,
+): AgentTeam['roles'][number] | undefined {
   return team.roles.find((role) => {
     const policy = role.policy;
     if (!policy) return false;
     if (policy.requiresApproval) return true;
-    return (PERMISSION_LEVEL_RANK[policy.permissionLevel ?? 'L0'] ?? 0) >= PERMISSION_LEVEL_RANK.L4;
+    return (
+      (PERMISSION_LEVEL_RANK[policy.permissionLevel ?? 'L0'] ?? 0) >=
+      PERMISSION_LEVEL_RANK.L4
+    );
   });
 }
 
@@ -783,7 +1086,9 @@ function createApprovalRequest(input: {
   runnerAgentId: string;
   roleAssignments: ExecuteRequest['roleAssignments'];
 }) {
-  const riskLevel = input.role.policy?.permissionLevel ?? (input.role.policy?.requiresApproval ? 'L4' : 'L0');
+  const riskLevel =
+    input.role.policy?.permissionLevel ??
+    (input.role.policy?.requiresApproval ? 'L4' : 'L0');
   const approval = {
     id: `${input.runId}:approval:${input.role.id}`,
     runId: input.runId,
@@ -807,11 +1112,17 @@ function createApprovalRequest(input: {
   return approval;
 }
 
-function getLatestApprovalCheckpointState(runId: string): Record<string, unknown> {
+function getLatestApprovalCheckpointState(
+  runId: string,
+): Record<string, unknown> {
   const checkpoints = listAgentTeamCheckpoints(runId);
   for (let index = checkpoints.length - 1; index >= 0; index -= 1) {
     const checkpoint = checkpoints[index];
-    if (typeof checkpoint.nodeId === 'string' && checkpoint.nodeId.startsWith('approval:') && isRecord(checkpoint.state)) {
+    if (
+      typeof checkpoint.nodeId === 'string' &&
+      checkpoint.nodeId.startsWith('approval:') &&
+      isRecord(checkpoint.state)
+    ) {
       return checkpoint.state;
     }
   }
@@ -827,13 +1138,22 @@ router.patch('/:id', authMiddleware, systemConfigMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const parsed = TeamPatchSchema.safeParse(body);
   if (!parsed.success) {
-    return c.json({ error: parsed.error.issues[0]?.message || 'invalid patch' }, 400);
+    return c.json(
+      { error: parsed.error.issues[0]?.message || 'invalid patch' },
+      400,
+    );
   }
   const existing = getAgentTeam(c.req.param('id'), user.id);
   if (!existing) return c.json({ error: 'team not found' }, 404);
   const merged = { ...existing, ...parsed.data };
   if (!isAbstractAgentTeamDefinition(merged)) {
-    return c.json({ error: 'team must not bind concrete agent cli, provider, device, model, command or path' }, 400);
+    return c.json(
+      {
+        error:
+          'team must not bind concrete agent cli, provider, device, model, command or path',
+      },
+      400,
+    );
   }
   const team = updateAgentTeam(c.req.param('id'), parsed.data, user.id);
   if (!team) return c.json({ error: 'team not found' }, 404);
@@ -857,7 +1177,10 @@ async function generateDraftWithAgent(
   const backend = getBackend(generatorAgentId);
   if (!backend) throw new Error('agent team generator backend not found');
 
-  const prompt = buildAgentTeamGenerationPrompt(fallback, listAgentMdSummaries(ownerUserId));
+  const prompt = buildAgentTeamGenerationPrompt(
+    fallback,
+    listAgentMdSummaries(ownerUserId),
+  );
   let agentTeamGeneratorProc: ChildProcess | null = null;
   let streamText = '';
   let earlyGenerated: AgentTeamGenerationResult | null = null;
@@ -890,14 +1213,19 @@ async function generateDraftWithAgent(
       if (!text || earlyGenerated) return;
       streamText += text;
       earlyGenerated = parseGeneratedTeam(streamText, fallback);
-      if (earlyGenerated && agentTeamGeneratorProc && !agentTeamGeneratorProc.killed) {
+      if (
+        earlyGenerated &&
+        agentTeamGeneratorProc &&
+        !agentTeamGeneratorProc.killed
+      ) {
         agentTeamGeneratorProc.kill('SIGTERM');
       }
     },
   });
 
   if (earlyGenerated) return earlyGenerated;
-  if (output.status !== 'success' || !output.result) throw new Error(output.error || 'agent team generator failed');
+  if (output.status !== 'success' || !output.result)
+    throw new Error(output.error || 'agent team generator failed');
   const generated = parseGeneratedTeam(output.result, fallback);
   if (!generated) throw new Error('agent team generator returned invalid JSON');
   return generated;
@@ -921,7 +1249,8 @@ function parseGeneratedTeam(
           ...parsed.data.team,
           createdByAgentId: fallback.createdByAgentId,
         },
-        agentMdDefinitionsToCreate: parsed.data.agentMdDefinitionsToCreate ?? [],
+        agentMdDefinitionsToCreate:
+          parsed.data.agentMdDefinitionsToCreate ?? [],
       };
     }
     if (!isAbstractAgentTeamDefinition(parsed.data)) {
@@ -969,13 +1298,18 @@ function buildAgentTeamRolePrompt(
     `Responsibility: ${role.responsibility}`,
     role.inputs?.length ? `Inputs: ${role.inputs.join('; ')}` : '',
     role.outputs?.length ? `Expected outputs: ${role.outputs.join('; ')}` : '',
-    role.skills?.length ? `Suggested skills/agent.md: ${role.skills.join('; ')}` : '',
+    role.skills?.length
+      ? `Suggested skills/agent.md: ${role.skills.join('; ')}`
+      : '',
     role.guardrails?.length ? `Guardrails: ${role.guardrails.join('; ')}` : '',
     '',
     `Execution phase: ${phase}`,
     feedback ? `Feedback or upstream signal: ${feedback}` : '',
     previousResults.length ? 'Previous role results:' : '',
-    ...previousResults.map((result) => `- ${result.roleName} (${result.phase}, ${result.status}): ${result.result}`),
+    ...previousResults.map(
+      (result) =>
+        `- ${result.roleName} (${result.phase}, ${result.status}): ${result.result}`,
+    ),
     '',
     `User request: ${userPrompt}`,
     '',
@@ -984,7 +1318,9 @@ function buildAgentTeamRolePrompt(
     '- 如果当前角色是测试/QA，请明确写出“测试通过”或“测试不通过”，并说明原因。',
     '- 如果当前角色是 Judge，请用 “route: <role_id>” 指明下一步选择的角色。',
     '- 不要调用工具，不要声明自己无法执行；按角色给出可交付结果。',
-  ].filter(Boolean).join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function toTraceEventRecord(event: AgentTeamTraceEvent) {

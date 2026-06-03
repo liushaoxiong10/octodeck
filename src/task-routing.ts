@@ -140,9 +140,7 @@ export function resolveTaskRoutingDecision(
 
 export interface BroadcastToOwnerIMChannelsDeps {
   getConnectedChannelTypes: (userId: string) => string[];
-  getGroupsByOwner: (
-    userId: string,
-  ) => Array<{
+  getGroupsByOwner: (userId: string) => Array<{
     jid: string;
     folder: string;
     /**
@@ -253,7 +251,10 @@ export function broadcastToOwnerIMChannels(
       // Without this, ImBindingDialog-bound IM groups (whose own folder
       // stays at 'main') silently miss scheduled-task broadcasts from
       // non-home workspaces.
-      const effectiveFolder = resolveImGroupEffectiveFolder(g, deps.resolveJidFolder);
+      const effectiveFolder = resolveImGroupEffectiveFolder(
+        g,
+        deps.resolveJidFolder,
+      );
       return effectiveFolder === sourceFolder;
     });
     if (target) {

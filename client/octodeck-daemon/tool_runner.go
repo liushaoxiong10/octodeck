@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -49,6 +50,10 @@ func (r *toolRunner) execute(parent context.Context, req *ToolRequestFrame) *Too
 		return result
 	}
 
+	if err := r.normalizeCwd(req); err != nil {
+		return fail(err)
+	}
+
 	if err := r.validate(req); err != nil {
 		return fail(err)
 	}
@@ -68,6 +73,9 @@ func (r *toolRunner) execute(parent context.Context, req *ToolRequestFrame) *Too
 		if int64(len(data)) > req.MaxOutputBytes {
 			data = data[:req.MaxOutputBytes]
 		}
+		if boolArg(req.Input, "base64") {
+			return finish(map[string]any{"contentBase64": base64.StdEncoding.EncodeToString(data), "size": len(data)})
+		}
 		return finish(map[string]any{"content": string(data)})
 	case "Write":
 		p, err := r.resolvePath(req.Cwd, strArg(req.Input, "file_path"))
@@ -77,7 +85,15 @@ func (r *toolRunner) execute(parent context.Context, req *ToolRequestFrame) *Too
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return fail(err)
 		}
-		if err := os.WriteFile(p, []byte(strArg(req.Input, "content")), 0o644); err != nil {
+		content := []byte(strArg(req.Input, "content"))
+		if encoded := strArg(req.Input, "contentBase64"); encoded != "" {
+			decoded, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil {
+				return fail(err)
+			}
+			content = decoded
+		}
+		if err := os.WriteFile(p, content, 0o644); err != nil {
 			return fail(err)
 		}
 		return finish(map[string]any{"content": "written"})
@@ -117,10 +133,27 @@ func (r *toolRunner) execute(parent context.Context, req *ToolRequestFrame) *Too
 			return fail(err)
 		}
 		names := make([]string, 0, len(entries))
+		payloadEntries := make([]map[string]any, 0, len(entries))
 		for _, e := range entries {
 			names = append(names, e.Name())
+			entryPath := filepath.Join(p, e.Name())
+			info, statErr := os.Stat(entryPath)
+			if statErr != nil {
+				continue
+			}
+			entryType := "file"
+			if info.IsDir() {
+				entryType = "directory"
+			}
+			payloadEntries = append(payloadEntries, map[string]any{
+				"name":       e.Name(),
+				"path":       entryPath,
+				"type":       entryType,
+				"size":       info.Size(),
+				"modifiedAt": info.ModTime().Format(time.RFC3339Nano),
+			})
 		}
-		return finish(map[string]any{"content": strings.Join(names, "\n")})
+		return finish(map[string]any{"content": strings.Join(names, "\n"), "entries": payloadEntries})
 	case "ListDirectories":
 		payload, err := r.listDirectories(strArg(req.Input, "path"))
 		if err != nil {
@@ -152,6 +185,18 @@ func (r *toolRunner) execute(parent context.Context, req *ToolRequestFrame) *Too
 	default:
 		return fail(fmt.Errorf("unsupported tool: %s", req.ToolName))
 	}
+}
+
+func (r *toolRunner) normalizeCwd(req *ToolRequestFrame) error {
+	if strings.HasPrefix(req.Cwd, deviceWorkspaceURIPrefix) {
+		folder := strings.TrimPrefix(req.Cwd, deviceWorkspaceURIPrefix)
+		cwd, err := ensureNamedWorkspaceDir(r.cfg, folder)
+		if err != nil {
+			return err
+		}
+		req.Cwd = cwd
+	}
+	return nil
 }
 
 func (r *toolRunner) execBash(parent context.Context, req *ToolRequestFrame, started time.Time) *ToolResultFrame {
@@ -235,8 +280,8 @@ func (r *toolRunner) listDirectories(requestedPath string) (map[string]any, erro
 		}
 		return map[string]any{
 			"currentPath":  cleanHome,
-			"parentPath":    parentPathFor(cleanHome, false, nil),
-			"directories":   r.listVisibleSubdirectories(cleanHome),
+			"parentPath":   parentPathFor(cleanHome, false, nil),
+			"directories":  r.listVisibleSubdirectories(cleanHome),
 			"hasAllowlist": false,
 		}, nil
 	}
@@ -254,8 +299,8 @@ func (r *toolRunner) listDirectories(requestedPath string) (map[string]any, erro
 
 	return map[string]any{
 		"currentPath":  cleanPath,
-		"parentPath":    parentPathFor(cleanPath, hasAllowlist, r),
-		"directories":   r.listVisibleSubdirectories(cleanPath),
+		"parentPath":   parentPathFor(cleanPath, hasAllowlist, r),
+		"directories":  r.listVisibleSubdirectories(cleanPath),
 		"hasAllowlist": hasAllowlist,
 	}, nil
 }
