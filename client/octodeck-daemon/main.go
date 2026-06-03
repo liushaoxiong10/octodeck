@@ -86,8 +86,8 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("octodeck-daemon: starting, server=%s linkId=%s allowed=%d agentClients=%d max=%d",
-		cfg.Server, cfg.LinkID, len(cfg.AllowedBinaries), len(cfg.AgentClients), cfg.MaxConcurrentRuns)
+	log.Printf("octodeck-daemon: starting, server=%s linkId=%s allowed=%d agentClients=%d max=unlimited",
+		cfg.Server, cfg.LinkID, len(cfg.AllowedBinaries), len(cfg.AgentClients))
 
 	if err := runForever(ctx, cfg); err != nil {
 		log.Printf("octodeck-daemon: terminated: %v", err)

@@ -9,6 +9,11 @@ import type { AuthUser } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { DATA_DIR } from '../config.js';
 import { checkMcpServerLimit } from '../billing.js';
+import { getAgentLinkById } from '../db.js';
+import {
+  readDataObjectJson,
+  writeDataObjectJson,
+} from '../data-object-store.js';
 
 // --- Types ---
 
@@ -17,6 +22,7 @@ interface McpServerEntry {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  device_link_id?: string;
   // http/sse type
   type?: 'http' | 'sse';
   url?: string;
@@ -56,9 +62,16 @@ function validateServerId(id: string): boolean {
 }
 
 async function readMcpServersFile(userId: string): Promise<McpServersFile> {
+  const stored = readDataObjectJson<McpServersFile | null>(
+    getServersFilePath(userId),
+    null,
+  );
+  if (stored?.servers && typeof stored.servers === 'object') return stored;
   try {
     const data = await fs.readFile(getServersFilePath(userId), 'utf-8');
-    return JSON.parse(data);
+    const parsed = JSON.parse(data) as McpServersFile;
+    await writeDataObjectJson(getServersFilePath(userId), parsed);
+    return parsed;
   } catch {
     return { servers: {} };
   }
@@ -68,15 +81,23 @@ async function writeMcpServersFile(
   userId: string,
   data: McpServersFile,
 ): Promise<void> {
+  await writeDataObjectJson(getServersFilePath(userId), data);
   const dir = getUserMcpServersDir(userId);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(getServersFilePath(userId), JSON.stringify(data, null, 2));
 }
 
 async function readHostSyncManifest(userId: string): Promise<HostSyncManifest> {
+  const stored = readDataObjectJson<HostSyncManifest | null>(
+    getHostSyncManifestPath(userId),
+    null,
+  );
+  if (stored && Array.isArray(stored.syncedServers)) return stored;
   try {
     const data = await fs.readFile(getHostSyncManifestPath(userId), 'utf-8');
-    return JSON.parse(data);
+    const parsed = JSON.parse(data) as HostSyncManifest;
+    await writeDataObjectJson(getHostSyncManifestPath(userId), parsed);
+    return parsed;
   } catch {
     return { syncedServers: [], lastSyncAt: '' };
   }
@@ -86,6 +107,7 @@ async function writeHostSyncManifest(
   userId: string,
   manifest: HostSyncManifest,
 ): Promise<void> {
+  await writeDataObjectJson(getHostSyncManifestPath(userId), manifest);
   const dir = getUserMcpServersDir(userId);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(
@@ -114,11 +136,12 @@ mcpServersRoutes.post('/', authMiddleware, async (c) => {
   const authUser = c.get('user') as AuthUser;
   const body = await c.req.json().catch(() => ({}));
 
-  const { id, command, args, env, description, type, url, headers } = body as {
+  const { id, command, args, env, device_link_id, description, type, url, headers } = body as {
     id?: string;
     command?: string;
     args?: string[];
     env?: Record<string, string>;
+    device_link_id?: string;
     description?: string;
     type?: string;
     url?: string;
@@ -176,6 +199,13 @@ mcpServersRoutes.post('/', authMiddleware, async (c) => {
     ) {
       return c.json({ error: 'env must be a plain object' }, 400);
     }
+    if (!device_link_id || typeof device_link_id !== 'string') {
+      return c.json({ error: 'device_link_id is required for stdio type' }, 400);
+    }
+    const link = getAgentLinkById(device_link_id);
+    if (!link || link.userId !== authUser.id || link.revokedAt) {
+      return c.json({ error: 'Selected device not found' }, 400);
+    }
   }
 
   const file = await readMcpServersFile(authUser.id);
@@ -197,6 +227,7 @@ mcpServersRoutes.post('/', authMiddleware, async (c) => {
     entry.command = command;
     if (args && args.length > 0) entry.args = args;
     if (env && Object.keys(env).length > 0) entry.env = env;
+    entry.device_link_id = device_link_id;
   }
 
   file.servers[id] = entry;
@@ -215,10 +246,11 @@ mcpServersRoutes.patch('/:id', authMiddleware, async (c) => {
   }
 
   const body = await c.req.json().catch(() => ({}));
-  const { command, args, env, enabled, description, url, headers } = body as {
+  const { command, args, env, device_link_id, enabled, description, url, headers } = body as {
     command?: string;
     args?: string[];
     env?: Record<string, string>;
+    device_link_id?: string | null;
     enabled?: boolean;
     description?: string;
     url?: string;
@@ -249,6 +281,24 @@ mcpServersRoutes.patch('/:id', authMiddleware, async (c) => {
       return c.json({ error: 'env must be a plain object' }, 400);
     }
     entry.env = env;
+  }
+  if (device_link_id !== undefined) {
+    if (device_link_id === null || device_link_id === '') {
+      delete entry.device_link_id;
+    } else {
+      if (typeof device_link_id !== 'string') {
+        return c.json({ error: 'device_link_id must be a string' }, 400);
+      }
+      const link = getAgentLinkById(device_link_id);
+      if (!link || link.userId !== authUser.id || link.revokedAt) {
+        return c.json({ error: 'Selected device not found' }, 400);
+      }
+      entry.device_link_id = device_link_id;
+    }
+  }
+  const isStdioEntry = entry.type !== 'http' && entry.type !== 'sse';
+  if (isStdioEntry && !entry.device_link_id) {
+    return c.json({ error: 'device_link_id is required for stdio type' }, 400);
   }
   // http/sse fields
   if (url !== undefined) {

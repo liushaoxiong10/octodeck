@@ -10,17 +10,18 @@ import { logger } from './logger.js';
 const SNAPSHOT_ID = 'messages.db';
 const MYSQL_TABLE = 'octodeck_sqlite_snapshots';
 const MONGO_COLLECTION = 'octodeck_sqlite_snapshots';
+const POSTGRES_TABLE = 'octodeck_sqlite_snapshots';
 const DEFAULT_PERSIST_DEBOUNCE_MS = 250;
 
 export interface RemoteSqliteStore {
-  backend: 'mysql' | 'mongodb';
+  backend: 'mysql' | 'mongodb' | 'postgresql';
   prepareLocalDatabase(localPath: string): Promise<void>;
   persistLocalDatabase(localPath: string): Promise<void>;
   close(): Promise<void>;
 }
 
 export interface RemotePersistenceController {
-  backend: 'sqlite' | 'mysql' | 'mongodb';
+  backend: 'sqlite' | 'mysql' | 'mongodb' | 'postgresql';
   schedulePersist(): void;
   flush(): Promise<void>;
   close(): Promise<void>;
@@ -48,7 +49,7 @@ export class NoopPersistenceController implements RemotePersistenceController {
 }
 
 export class DebouncedRemotePersistenceController implements RemotePersistenceController {
-  readonly backend: 'mysql' | 'mongodb';
+  readonly backend: 'mysql' | 'mongodb' | 'postgresql';
   private timer: NodeJS.Timeout | null = null;
   private inFlight: Promise<void> | null = null;
   private dirty = false;
@@ -110,6 +111,8 @@ export async function createRemoteStoreFromConfig(
   }
   if (config.backend === 'mysql')
     return createMysqlRemoteStore(config.databaseUrl);
+  if (config.backend === 'postgresql')
+    return createPostgresqlRemoteStore(config.databaseUrl);
   return createMongoRemoteStore(config.databaseUrl);
 }
 
@@ -143,6 +146,48 @@ export async function prepareSqlitePathForBackend(
     }
     throw err;
   }
+}
+
+async function createPostgresqlRemoteStore(
+  databaseUrl: string,
+): Promise<RemoteSqliteStore> {
+  const pg = await import('pg');
+  const pool = new pg.Pool({ connectionString: databaseUrl });
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ${POSTGRES_TABLE} (
+      id VARCHAR(128) PRIMARY KEY,
+      data BYTEA NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  return {
+    backend: 'postgresql',
+    async prepareLocalDatabase(localPath: string): Promise<void> {
+      const result = await pool.query(
+        `SELECT data, updated_at AS "updatedAt" FROM ${POSTGRES_TABLE} WHERE id = $1 LIMIT 1`,
+        [SNAPSHOT_ID],
+      );
+      const record = firstPostgresqlSnapshot(result.rows);
+      if (!record) return;
+      writeSnapshot(localPath, record.data);
+    },
+    async persistLocalDatabase(localPath: string): Promise<void> {
+      const data = readSnapshot(localPath);
+      await pool.query(
+        `INSERT INTO ${POSTGRES_TABLE} (id, data, updated_at)
+         VALUES ($1, $2, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET
+           data = EXCLUDED.data,
+           updated_at = CURRENT_TIMESTAMP`,
+        [SNAPSHOT_ID, data],
+      );
+    },
+    async close(): Promise<void> {
+      await pool.end();
+    },
+  };
 }
 
 async function createMysqlRemoteStore(
@@ -227,6 +272,16 @@ async function createMongoRemoteStore(
 }
 
 function firstMysqlSnapshot(rows: unknown): SnapshotRecord | null {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const row = rows[0] as { data?: Buffer | Uint8Array; updatedAt?: Date };
+  if (!row.data) return null;
+  return {
+    data: Buffer.from(row.data),
+    updatedAt: row.updatedAt || new Date(),
+  };
+}
+
+function firstPostgresqlSnapshot(rows: unknown): SnapshotRecord | null {
   if (!Array.isArray(rows) || rows.length === 0) return null;
   const row = rows[0] as { data?: Buffer | Uint8Array; updatedAt?: Date };
   if (!row.data) return null;

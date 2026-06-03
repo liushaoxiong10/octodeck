@@ -1,6 +1,5 @@
 import { MonitorSmartphone, ShieldCheck, Zap } from 'lucide-react';
 
-import { Card, CardContent } from '@/components/ui/card';
 import { DevicesSection } from '../components/settings/AgentLinksSection';
 
 export function DevicesPage() {
@@ -36,11 +35,7 @@ export function DevicesPage() {
           </div>
         </div>
 
-        <Card className="overflow-hidden">
-          <CardContent className="p-4 lg:p-5">
-            <DevicesSection />
-          </CardContent>
-        </Card>
+        <DevicesSection />
       </div>
     </div>
   );

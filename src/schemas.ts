@@ -100,6 +100,61 @@ export const TaskCreateSchema = z
     }
   });
 
+export const IssueCreateSchema = z.object({
+  workspace_jid: z.string().min(1).optional(),
+  workspace_folder: z.string().min(1).optional(),
+  title: z.string().min(1).max(200),
+  description: z.string().max(20000).optional().default(''),
+  status: z
+    .enum(['todo', 'in_progress', 'review', 'done', 'canceled'])
+    .optional()
+    .default('todo'),
+  priority: z
+    .enum(['low', 'medium', 'high', 'urgent'])
+    .optional()
+    .default('medium'),
+  assignee_user_id: z.string().nullable().optional(),
+  due_date: z.string().nullable().optional(),
+  project_repo_id: z.string().nullable().optional(),
+  agent_link_id: z.string().nullable().optional(),
+  agent_client_id: z.string().nullable().optional(),
+  execution_node: z.string().nullable().optional(),
+  backend: z.string().nullable().optional(),
+  selected_skills: z.array(z.string()).optional().default([]),
+  start_agent: z.boolean().optional().default(false),
+  create_more: z.boolean().optional().default(false),
+});
+
+export const IssuePatchSchema = z.object({
+  title: z.string().min(1).max(200).optional(),
+  description: z.string().max(20000).optional(),
+  status: z.enum(['todo', 'in_progress', 'review', 'done', 'canceled']).optional(),
+  priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
+  assignee_user_id: z.string().nullable().optional(),
+  due_date: z.string().nullable().optional(),
+  project_repo_id: z.string().nullable().optional(),
+  agent_link_id: z.string().nullable().optional(),
+  agent_client_id: z.string().nullable().optional(),
+  execution_node: z.string().nullable().optional(),
+  backend: z.string().nullable().optional(),
+  selected_skills: z.array(z.string()).nullable().optional(),
+});
+
+export const IssueRunSchema = z.object({
+  agent_link_id: z.string().nullable().optional(),
+  agent_client_id: z.string().nullable().optional(),
+  execution_node: z.string().nullable().optional(),
+  backend: z.string().nullable().optional(),
+  selected_skills: z.array(z.string()).nullable().optional(),
+});
+
+export const IssueAttachmentCreateSchema = z.object({
+  filename: z.string().min(1).max(255),
+  mime_type: z.string().min(1).max(120),
+  size_bytes: z.number().int().min(0).max(10 * 1024 * 1024),
+  data_url: z.string().min(1).max(14 * 1024 * 1024),
+});
+
 // 单张图片附件上限 5MB（base64 编码后约 6.67MB）
 const MAX_IMAGE_BASE64_LENGTH = (5 * 1024 * 1024 * 4) / 3; // ~6.67M chars
 

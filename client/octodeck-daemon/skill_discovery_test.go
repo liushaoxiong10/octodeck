@@ -57,6 +57,67 @@ description: Installed in CLI home
 	}
 }
 
+func TestDiscoverProviderSkillsScansDaemonAgentSkillRoots(t *testing.T) {
+	root := t.TempDir()
+	workspaceDir := filepath.Join(root, "workspace-root", "workspace")
+	cfg := &Config{
+		WorkspaceDir: workspaceDir,
+		AgentClients: []AgentClientInfo{{
+			ID:          "seed",
+			DisplayName: "Seed CLI",
+			Provider:    "seed",
+			Transport:   "a2a",
+		}},
+	}
+	writeSkill(t, filepath.Join(root, "workspace-root", "daemon", "agents", "seed", "skills", "daemon-seed-skill", "SKILL.md"), `---
+name: Daemon Seed Skill
+description: Installed for daemon managed seed agent
+---
+# Daemon Seed Skill
+`)
+
+	result, err := discoverProviderSkills(context.Background(), cfg, "seed", filepath.Join(root, "worktree"))
+	if err != nil {
+		t.Fatalf("discoverProviderSkills returned error: %v", err)
+	}
+	if len(result.CLISkills) != 1 {
+		t.Fatalf("expected daemon agent skill to be discovered as cli skill, got %#v", result.CLISkills)
+	}
+	if got := result.CLISkills[0]; got.ID != "daemon-seed-skill" || got.Name != "Daemon Seed Skill" || got.Source != "cli" || !got.Enabled {
+		t.Fatalf("unexpected daemon agent skill: %#v", got)
+	}
+}
+
+func TestDiscoverProviderSkillsMatchesProviderAliasAndProviderSpecificWorkspaceRoot(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	cfg := &Config{
+		AgentClients: []AgentClientInfo{{
+			ID:          "custom-trae",
+			DisplayName: "Custom Trae",
+			Provider:    "traecli",
+			Transport:   "stdio",
+		}},
+	}
+	writeSkill(t, filepath.Join(workspace, ".traecli", "skills", "provider-skill", "SKILL.md"), `---
+name: Provider Skill
+description: Skill under provider-specific workspace root
+---
+# Provider Skill
+`)
+
+	result, err := discoverProviderSkills(context.Background(), cfg, "traecli", workspace)
+	if err != nil {
+		t.Fatalf("discoverProviderSkills returned error: %v", err)
+	}
+	if len(result.WorkspaceSkills) != 1 {
+		t.Fatalf("expected provider-specific workspace skill, got %#v", result.WorkspaceSkills)
+	}
+	if got := result.WorkspaceSkills[0]; got.ID != "provider-skill" || got.Name != "Provider Skill" || got.Source != "workspace" {
+		t.Fatalf("unexpected provider workspace skill: %#v", got)
+	}
+}
+
 func TestScanSkillDirectoryIncludesSymlinkedSkillDirectories(t *testing.T) {
 	root := t.TempDir()
 	skillsRoot := filepath.Join(root, "skills")

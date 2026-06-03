@@ -1,4 +1,4 @@
-export type DatabaseBackend = 'sqlite' | 'mysql' | 'mongodb';
+export type DatabaseBackend = 'sqlite' | 'mysql' | 'mongodb' | 'postgresql';
 
 export interface DatabaseBackendConfig {
   backend: DatabaseBackend;
@@ -6,13 +6,18 @@ export interface DatabaseBackendConfig {
   fallbackToSqlite: boolean;
 }
 
-const VALID_BACKENDS = new Set<DatabaseBackend>(['sqlite', 'mysql', 'mongodb']);
+const VALID_BACKENDS = new Set<DatabaseBackend>([
+  'sqlite',
+  'mysql',
+  'mongodb',
+  'postgresql',
+]);
 
 function normalizeBackend(value: string | undefined): DatabaseBackend {
   const normalized = (value || 'sqlite').trim().toLowerCase();
   if (!VALID_BACKENDS.has(normalized as DatabaseBackend)) {
     throw new Error(
-      `Unsupported OCTODECK_DB_BACKEND "${value}". Expected one of: sqlite, mysql, mongodb`,
+      `Unsupported OCTODECK_DB_BACKEND "${value}". Expected one of: sqlite, mysql, mongodb, postgresql`,
     );
   }
   return normalized as DatabaseBackend;

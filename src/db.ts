@@ -3,7 +3,7 @@ import Database from './sqlite-compat.js';
 import fs from 'fs';
 import path from 'path';
 
-import { STORE_DIR, GROUPS_DIR } from './config.js';
+import { DATA_DIR, STORE_DIR, GROUPS_DIR } from './config.js';
 import { getDatabaseBackendConfig } from './db-backend-config.js';
 import {
   NoopPersistenceController,
@@ -38,6 +38,10 @@ import {
   ManagedRepo,
   ManagedRepoKind,
   ImContextBinding,
+  IssueAgentRun,
+  IssueAttachment,
+  IssuePriority,
+  IssueStatus,
   RedeemCode,
   RegisteredGroup,
   ScheduledTask,
@@ -51,6 +55,7 @@ import {
   UserSubscription,
   UserSession,
   UserSessionWithUser,
+  WorkspaceIssue,
   Permission,
   PermissionTemplateKey,
 } from './types.js';
@@ -362,6 +367,72 @@ function initializeSqliteDatabase(
       FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id)
     );
     CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
+
+    CREATE TABLE IF NOT EXISTS issues (
+      id TEXT PRIMARY KEY,
+      workspace_jid TEXT NOT NULL,
+      workspace_folder TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'todo',
+      priority TEXT NOT NULL DEFAULT 'medium',
+      assignee_user_id TEXT,
+      due_date TEXT,
+      project_repo_id TEXT,
+      project_git_url TEXT,
+      project_device_path TEXT,
+      project_device_link_id TEXT,
+      agent_link_id TEXT,
+      agent_client_id TEXT,
+      execution_node TEXT,
+      backend TEXT,
+      selected_skills TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      closed_at TEXT,
+      last_run_id TEXT,
+      last_run_status TEXT,
+      last_run_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_issues_workspace_status ON issues(workspace_jid, status);
+    CREATE INDEX IF NOT EXISTS idx_issues_updated_at ON issues(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_issues_created_by ON issues(created_by, created_at);
+
+    CREATE TABLE IF NOT EXISTS issue_agent_runs (
+      id TEXT PRIMARY KEY,
+      issue_id TEXT NOT NULL,
+      workspace_jid TEXT NOT NULL,
+      workspace_folder TEXT NOT NULL,
+      agent_link_id TEXT,
+      agent_client_id TEXT,
+      execution_node TEXT,
+      backend TEXT,
+      selected_skills TEXT,
+      status TEXT NOT NULL DEFAULT 'queued',
+      result TEXT,
+      error TEXT,
+      session_id TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      run_started_at TEXT,
+      run_completed_at TEXT,
+      FOREIGN KEY (issue_id) REFERENCES issues(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_issue_agent_runs_issue ON issue_agent_runs(issue_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS issue_attachments (
+      id TEXT PRIMARY KEY,
+      issue_id TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      data_url TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (issue_id) REFERENCES issues(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_issue_attachments_issue ON issue_attachments(issue_id, created_at);
   `);
 
   // State tables (replacing JSON files)
@@ -375,6 +446,20 @@ function initializeSqliteDatabase(
       value TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS data_objects (
+      key TEXT PRIMARY KEY,
+      relative_path TEXT NOT NULL UNIQUE,
+      entry_type TEXT NOT NULL DEFAULT 'file',
+      content_type TEXT,
+      data BLOB,
+      size_bytes INTEGER NOT NULL DEFAULT 0,
+      mode INTEGER,
+      mtime_ms REAL,
+      deleted_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_data_objects_path ON data_objects(relative_path);
+    CREATE INDEX IF NOT EXISTS idx_data_objects_deleted ON data_objects(deleted_at);
     CREATE TABLE IF NOT EXISTS agent_team_runs (
       id TEXT PRIMARY KEY,
       team_id TEXT NOT NULL,
@@ -909,6 +994,25 @@ function initializeSqliteDatabase(
   ensureColumn('scheduled_tasks', 'claimed_by', 'TEXT');
   ensureColumn('scheduled_tasks', 'claimed_at', 'TEXT');
   ensureColumn('scheduled_tasks', 'lease_expires_at', 'TEXT');
+  ensureColumn('issues', 'assignee_user_id', 'TEXT');
+  ensureColumn('issues', 'due_date', 'TEXT');
+  ensureColumn('issues', 'project_repo_id', 'TEXT');
+  ensureColumn('issues', 'project_git_url', 'TEXT');
+  ensureColumn('issues', 'project_device_path', 'TEXT');
+  ensureColumn('issues', 'project_device_link_id', 'TEXT');
+  ensureColumn('issues', 'agent_link_id', 'TEXT');
+  ensureColumn('issues', 'agent_client_id', 'TEXT');
+  ensureColumn('issues', 'execution_node', 'TEXT');
+  ensureColumn('issues', 'backend', 'TEXT');
+  ensureColumn('issues', 'selected_skills', 'TEXT');
+  ensureColumn('issues', 'due_date', 'TEXT');
+  ensureColumn('issues', 'last_run_id', 'TEXT');
+  ensureColumn('issues', 'last_run_status', 'TEXT');
+  ensureColumn('issues', 'last_run_at', 'TEXT');
+  ensureColumn('issue_attachments', 'filename', 'TEXT');
+  ensureColumn('issue_attachments', 'mime_type', 'TEXT');
+  ensureColumn('issue_attachments', 'size_bytes', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('issue_attachments', 'data_url', 'TEXT');
   ensureColumn('registered_groups', 'selected_skills', 'TEXT');
   ensureColumn('sessions', 'agent_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('agents', 'kind', "TEXT NOT NULL DEFAULT 'task'");
@@ -1048,6 +1152,18 @@ function initializeSqliteDatabase(
     'execution_mode',
     'execution_node',
     'notify_channels',
+  ]);
+  assertSchema('issues', [
+    'id',
+    'workspace_jid',
+    'workspace_folder',
+    'title',
+    'description',
+    'status',
+    'priority',
+    'created_by',
+    'created_at',
+    'updated_at',
   ]);
   assertSchema(
     'registered_groups',
@@ -1570,6 +1686,188 @@ export function setMetadataValue(key: string, value: string): void {
        value = excluded.value,
        updated_at = excluded.updated_at`,
   ).run(key, value, new Date().toISOString());
+}
+
+export interface DataObjectRecord {
+  key: string;
+  relativePath: string;
+  entryType: 'file' | 'directory';
+  contentType?: string | null;
+  data?: Buffer | null;
+  sizeBytes: number;
+  mode?: number | null;
+  mtimeMs?: number | null;
+  deletedAt?: string | null;
+  updatedAt: string;
+}
+
+function normalizeDataObjectPath(relativePath: string): string {
+  const normalized = path.posix
+    .normalize(relativePath.replace(/\\/g, '/'))
+    .replace(/^\.\/?/, '')
+    .replace(/^\/+/g, '');
+  if (!normalized || normalized === '..' || normalized.startsWith('../')) {
+    throw new Error(`Invalid data object path: ${relativePath}`);
+  }
+  if (normalized === 'db' || normalized.startsWith('db/')) {
+    throw new Error('data/db is owned by the database backend and cannot be stored as a data object');
+  }
+  return normalized;
+}
+
+function dataObjectKey(relativePath: string): string {
+  return `data:${normalizeDataObjectPath(relativePath)}`;
+}
+
+function mapDataObjectRow(row: any): DataObjectRecord {
+  return {
+    key: String(row.key),
+    relativePath: String(row.relative_path),
+    entryType: row.entry_type === 'directory' ? 'directory' : 'file',
+    contentType: row.content_type ?? null,
+    data: row.data ? Buffer.from(row.data) : null,
+    sizeBytes: Number(row.size_bytes || 0),
+    mode: row.mode ?? null,
+    mtimeMs: row.mtime_ms ?? null,
+    deletedAt: row.deleted_at ?? null,
+    updatedAt: String(row.updated_at),
+  };
+}
+
+export function putDataObject(input: {
+  relativePath: string;
+  entryType?: 'file' | 'directory';
+  contentType?: string | null;
+  data?: Buffer | Uint8Array | string | null;
+  mode?: number | null;
+  mtimeMs?: number | null;
+}): void {
+  if (!db) throw new Error('Database not initialized');
+  const relativePath = normalizeDataObjectPath(input.relativePath);
+  const entryType = input.entryType || 'file';
+  const data =
+    entryType === 'directory'
+      ? null
+      : input.data == null
+        ? Buffer.alloc(0)
+        : Buffer.isBuffer(input.data)
+          ? input.data
+          : typeof input.data === 'string'
+            ? Buffer.from(input.data)
+            : Buffer.from(input.data);
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO data_objects (
+      key, relative_path, entry_type, content_type, data, size_bytes, mode, mtime_ms, deleted_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+    ON CONFLICT(key) DO UPDATE SET
+      relative_path = excluded.relative_path,
+      entry_type = excluded.entry_type,
+      content_type = excluded.content_type,
+      data = excluded.data,
+      size_bytes = excluded.size_bytes,
+      mode = excluded.mode,
+      mtime_ms = excluded.mtime_ms,
+      deleted_at = NULL,
+      updated_at = excluded.updated_at`,
+  ).run(
+    dataObjectKey(relativePath),
+    relativePath,
+    entryType,
+    input.contentType ?? null,
+    data,
+    data?.length ?? 0,
+    input.mode ?? null,
+    input.mtimeMs ?? null,
+    now,
+  );
+}
+
+export function getDataObject(relativePath: string): DataObjectRecord | null {
+  if (!db) throw new Error('Database not initialized');
+  const row = db
+    .prepare(
+      'SELECT * FROM data_objects WHERE key = ? AND deleted_at IS NULL LIMIT 1',
+    )
+    .get(dataObjectKey(relativePath));
+  return row ? mapDataObjectRow(row) : null;
+}
+
+export function deleteDataObject(relativePath: string): void {
+  if (!db) throw new Error('Database not initialized');
+  db.prepare(
+    'UPDATE data_objects SET deleted_at = ?, updated_at = ? WHERE key = ?',
+  ).run(new Date().toISOString(), new Date().toISOString(), dataObjectKey(relativePath));
+}
+
+export function listDataObjects(prefix = ''): DataObjectRecord[] {
+  if (!db) throw new Error('Database not initialized');
+  const normalizedPrefix = prefix ? normalizeDataObjectPath(prefix) : '';
+  const rows = normalizedPrefix
+    ? db
+        .prepare(
+          `SELECT * FROM data_objects
+           WHERE deleted_at IS NULL AND (relative_path = ? OR relative_path LIKE ?)
+           ORDER BY relative_path ASC`,
+        )
+        .all(normalizedPrefix, `${normalizedPrefix}/%`)
+    : db
+        .prepare(
+          `SELECT * FROM data_objects
+           WHERE deleted_at IS NULL
+           ORDER BY relative_path ASC`,
+        )
+        .all();
+  return rows.map(mapDataObjectRow);
+}
+
+export function importDataFileToDatabase(absPath: string): void {
+  const relativePath = path.relative(DATA_DIR, absPath).replace(/\\/g, '/');
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) return;
+  if (relativePath === 'db' || relativePath.startsWith('db/')) return;
+  const stat = fs.statSync(absPath);
+  if (stat.isDirectory()) {
+    putDataObject({
+      relativePath,
+      entryType: 'directory',
+      mode: stat.mode,
+      mtimeMs: stat.mtimeMs,
+    });
+    return;
+  }
+  if (!stat.isFile()) return;
+  putDataObject({
+    relativePath,
+    entryType: 'file',
+    data: fs.readFileSync(absPath),
+    mode: stat.mode,
+    mtimeMs: stat.mtimeMs,
+  });
+}
+
+export function migrateDataDirectoryToDatabase(): { files: number; directories: number } {
+  if (!db) throw new Error('Database not initialized');
+  if (!fs.existsSync(DATA_DIR)) return { files: 0, directories: 0 };
+  let files = 0;
+  let directories = 0;
+
+  const walk = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (dir === DATA_DIR && entry.name === 'db') continue;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        importDataFileToDatabase(abs);
+        directories += 1;
+        walk(abs);
+      } else if (entry.isFile()) {
+        importDataFileToDatabase(abs);
+        files += 1;
+      }
+    }
+  };
+  walk(DATA_DIR);
+  setMetadataValue('data_objects:last_import_at', new Date().toISOString());
+  return { files, directories };
 }
 
 export interface AgentTeamRunRecord {
@@ -3167,6 +3465,364 @@ export function cleanupOldTaskRunLogs(retentionDays = 30): number {
     .prepare(`DELETE FROM task_run_logs WHERE run_at < ?`)
     .run(cutoff);
   return result.changes;
+}
+
+type IssueRow = Omit<WorkspaceIssue, 'selected_skills'> & {
+  selected_skills?: string | null;
+};
+
+function parseIssueSkills(value: string | null | undefined): string[] | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function mapIssueRow(row: unknown): WorkspaceIssue {
+  const r = row as IssueRow;
+  return {
+    ...r,
+    title: toUtf8String(r.title),
+    description: toUtf8String(r.description),
+    status: r.status as IssueStatus,
+    priority: r.priority as IssuePriority,
+    selected_skills: parseIssueSkills(r.selected_skills),
+  };
+}
+
+function mapIssueRunRow(row: unknown): IssueAgentRun {
+  const r = row as Omit<IssueAgentRun, 'selected_skills'> & {
+    selected_skills?: string | null;
+  };
+  return {
+    ...r,
+    result: toUtf8StringOrNull(r.result),
+    error: toUtf8StringOrNull(r.error),
+    selected_skills: parseIssueSkills(r.selected_skills),
+  };
+}
+
+function mapIssueAttachmentRow(row: unknown): IssueAttachment {
+  const r = row as IssueAttachment;
+  return {
+    ...r,
+    filename: toUtf8String(r.filename),
+    mime_type: toUtf8String(r.mime_type),
+    data_url: toUtf8String(r.data_url),
+  };
+}
+
+export interface IssueListFilters {
+  workspaceJid?: string;
+  query?: string;
+  statuses?: IssueStatus[];
+  priorities?: IssuePriority[];
+  assigneeUserId?: string;
+  projectRepoId?: string;
+  showDone?: boolean;
+  sort?: 'status' | 'updated' | 'created' | 'priority' | 'due_date';
+  direction?: 'asc' | 'desc';
+  limit?: number;
+  offset?: number;
+}
+
+export function createIssue(
+  issue: Omit<WorkspaceIssue, 'selected_skills'> & { selected_skills?: string[] | null },
+): WorkspaceIssue {
+  db.prepare(
+    `
+    INSERT INTO issues (
+      id, workspace_jid, workspace_folder, title, description, status, priority,
+      assignee_user_id, due_date,
+      project_repo_id, project_git_url, project_device_path, project_device_link_id,
+      agent_link_id, agent_client_id, execution_node, backend, selected_skills,
+      created_by, created_at, updated_at, closed_at, last_run_id, last_run_status, last_run_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    issue.id,
+    issue.workspace_jid,
+    issue.workspace_folder,
+    toUtf8String(issue.title, 'issues.title'),
+    toUtf8String(issue.description, 'issues.description'),
+    issue.status,
+    issue.priority,
+    issue.assignee_user_id ?? null,
+    issue.due_date ?? null,
+    issue.project_repo_id ?? null,
+    issue.project_git_url ?? null,
+    issue.project_device_path ?? null,
+    issue.project_device_link_id ?? null,
+    issue.agent_link_id ?? null,
+    issue.agent_client_id ?? null,
+    issue.execution_node ?? null,
+    issue.backend ?? null,
+    issue.selected_skills ? JSON.stringify(issue.selected_skills) : null,
+    issue.created_by,
+    issue.created_at,
+    issue.updated_at,
+    issue.closed_at ?? null,
+    issue.last_run_id ?? null,
+    issue.last_run_status ?? null,
+    issue.last_run_at ?? null,
+  );
+  const created = getIssueById(issue.id);
+  if (!created) throw new Error('Failed to create issue');
+  return created;
+}
+
+export function getIssueById(id: string): WorkspaceIssue | undefined {
+  const row = db.prepare('SELECT * FROM issues WHERE id = ?').get(id);
+  return row ? mapIssueRow(row) : undefined;
+}
+
+export function listIssues(filters: IssueListFilters = {}): {
+  issues: WorkspaceIssue[];
+  total: number;
+} {
+  const where: string[] = [];
+  const values: unknown[] = [];
+  if (filters.workspaceJid) {
+    where.push('workspace_jid = ?');
+    values.push(filters.workspaceJid);
+  }
+  if (filters.query?.trim()) {
+    where.push('(title LIKE ? OR description LIKE ?)');
+    const q = `%${filters.query.trim()}%`;
+    values.push(q, q);
+  }
+  if (filters.statuses?.length) {
+    where.push(`status IN (${filters.statuses.map(() => '?').join(',')})`);
+    values.push(...filters.statuses);
+  } else if (!filters.showDone) {
+    where.push("status != 'done'");
+  }
+  if (filters.priorities?.length) {
+    where.push(`priority IN (${filters.priorities.map(() => '?').join(',')})`);
+    values.push(...filters.priorities);
+  }
+  if (filters.assigneeUserId) {
+    where.push('assignee_user_id = ?');
+    values.push(filters.assigneeUserId);
+  }
+  if (filters.projectRepoId) {
+    where.push('project_repo_id = ?');
+    values.push(filters.projectRepoId);
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const sortColumn =
+    filters.sort === 'status'
+      ? 'status'
+      : filters.sort === 'created'
+        ? 'created_at'
+        : filters.sort === 'priority'
+          ? `CASE priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END`
+          : filters.sort === 'due_date'
+            ? 'due_date'
+            : 'updated_at';
+  const direction = filters.direction === 'asc' ? 'ASC' : 'DESC';
+  const limit = Math.max(1, Math.min(200, filters.limit ?? 100));
+  const offset = Math.max(0, filters.offset ?? 0);
+  const total = (
+    db.prepare(`SELECT COUNT(*) as total FROM issues ${whereSql}`).get(...values) as {
+      total: number;
+    }
+  ).total;
+  const rows = db
+    .prepare(
+      `SELECT * FROM issues ${whereSql} ORDER BY ${sortColumn} ${direction}, updated_at DESC LIMIT ? OFFSET ?`,
+    )
+    .all(...values, limit, offset);
+  return { issues: rows.map(mapIssueRow), total };
+}
+
+export function updateIssue(
+  id: string,
+  updates: Partial<
+    Pick<
+      WorkspaceIssue,
+      | 'title'
+      | 'description'
+      | 'status'
+      | 'priority'
+      | 'assignee_user_id'
+      | 'due_date'
+      | 'project_repo_id'
+      | 'project_git_url'
+      | 'project_device_path'
+      | 'project_device_link_id'
+      | 'agent_link_id'
+      | 'agent_client_id'
+      | 'execution_node'
+      | 'backend'
+      | 'selected_skills'
+      | 'closed_at'
+    >
+  >,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  const add = (column: string, value: unknown) => {
+    fields.push(`${column} = ?`);
+    values.push(value);
+  };
+  if (updates.title !== undefined) add('title', toUtf8String(updates.title, 'issues.title'));
+  if (updates.description !== undefined)
+    add('description', toUtf8String(updates.description, 'issues.description'));
+  if (updates.status !== undefined) {
+    add('status', updates.status);
+    add('closed_at', updates.status === 'done' || updates.status === 'canceled' ? new Date().toISOString() : null);
+  }
+  if (updates.priority !== undefined) add('priority', updates.priority);
+  if (updates.assignee_user_id !== undefined) add('assignee_user_id', updates.assignee_user_id);
+  if (updates.due_date !== undefined) add('due_date', updates.due_date);
+  if (updates.project_repo_id !== undefined) add('project_repo_id', updates.project_repo_id);
+  if (updates.project_git_url !== undefined) add('project_git_url', updates.project_git_url);
+  if (updates.project_device_path !== undefined) add('project_device_path', updates.project_device_path);
+  if (updates.project_device_link_id !== undefined) add('project_device_link_id', updates.project_device_link_id);
+  if (updates.agent_link_id !== undefined) add('agent_link_id', updates.agent_link_id);
+  if (updates.agent_client_id !== undefined) add('agent_client_id', updates.agent_client_id);
+  if (updates.execution_node !== undefined) add('execution_node', updates.execution_node);
+  if (updates.backend !== undefined) add('backend', updates.backend);
+  if (updates.selected_skills !== undefined)
+    add('selected_skills', updates.selected_skills ? JSON.stringify(updates.selected_skills) : null);
+  if (updates.closed_at !== undefined) add('closed_at', updates.closed_at);
+  if (fields.length === 0) return;
+  add('updated_at', new Date().toISOString());
+  values.push(id);
+  db.prepare(`UPDATE issues SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export function updateIssueLastRun(
+  issueId: string,
+  runId: string,
+  status: IssueAgentRun['status'],
+): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE issues SET last_run_id = ?, last_run_status = ?, last_run_at = ?, updated_at = ? WHERE id = ?`,
+  ).run(runId, status, now, now, issueId);
+}
+
+export function deleteIssue(id: string): void {
+  db.prepare('DELETE FROM issue_attachments WHERE issue_id = ?').run(id);
+  db.prepare('DELETE FROM issue_agent_runs WHERE issue_id = ?').run(id);
+  db.prepare('DELETE FROM issues WHERE id = ?').run(id);
+}
+
+export function createIssueAgentRun(
+  run: Omit<IssueAgentRun, 'selected_skills'> & { selected_skills?: string[] | null },
+): IssueAgentRun {
+  db.prepare(
+    `
+    INSERT INTO issue_agent_runs (
+      id, issue_id, workspace_jid, workspace_folder, agent_link_id, agent_client_id,
+      execution_node, backend, selected_skills, status, result, error, session_id,
+      created_by, created_at, run_started_at, run_completed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    run.id,
+    run.issue_id,
+    run.workspace_jid,
+    run.workspace_folder,
+    run.agent_link_id ?? null,
+    run.agent_client_id ?? null,
+    run.execution_node ?? null,
+    run.backend ?? null,
+    run.selected_skills ? JSON.stringify(run.selected_skills) : null,
+    run.status,
+    run.result == null ? null : toUtf8String(run.result, 'issue_agent_runs.result'),
+    run.error == null ? null : toUtf8String(run.error, 'issue_agent_runs.error'),
+    run.session_id ?? null,
+    run.created_by,
+    run.created_at,
+    run.run_started_at ?? null,
+    run.run_completed_at ?? null,
+  );
+  const created = getIssueAgentRunById(run.id);
+  if (!created) throw new Error('Failed to create issue agent run');
+  return created;
+}
+
+export function getIssueAgentRunById(id: string): IssueAgentRun | undefined {
+  const row = db.prepare('SELECT * FROM issue_agent_runs WHERE id = ?').get(id);
+  return row ? mapIssueRunRow(row) : undefined;
+}
+
+export function listIssueAgentRuns(issueId: string): IssueAgentRun[] {
+  return db
+    .prepare('SELECT * FROM issue_agent_runs WHERE issue_id = ? ORDER BY created_at DESC')
+    .all(issueId)
+    .map(mapIssueRunRow);
+}
+
+export function updateIssueAgentRun(
+  id: string,
+  updates: Partial<
+    Pick<IssueAgentRun, 'status' | 'result' | 'error' | 'session_id' | 'run_started_at' | 'run_completed_at'>
+  >,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  const add = (column: string, value: unknown) => {
+    fields.push(`${column} = ?`);
+    values.push(value);
+  };
+  if (updates.status !== undefined) add('status', updates.status);
+  if (updates.result !== undefined)
+    add('result', updates.result == null ? null : toUtf8String(updates.result, 'issue_agent_runs.result'));
+  if (updates.error !== undefined)
+    add('error', updates.error == null ? null : toUtf8String(updates.error, 'issue_agent_runs.error'));
+  if (updates.session_id !== undefined) add('session_id', updates.session_id);
+  if (updates.run_started_at !== undefined) add('run_started_at', updates.run_started_at);
+  if (updates.run_completed_at !== undefined) add('run_completed_at', updates.run_completed_at);
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE issue_agent_runs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export function createIssueAttachment(input: Omit<IssueAttachment, 'created_at'> & { created_at?: string }): IssueAttachment {
+  const createdAt = input.created_at ?? new Date().toISOString();
+  db.prepare(
+    `INSERT INTO issue_attachments (id, issue_id, filename, mime_type, size_bytes, data_url, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.id,
+    input.issue_id,
+    toUtf8String(input.filename, 'issue_attachments.filename'),
+    input.mime_type,
+    input.size_bytes,
+    toUtf8String(input.data_url, 'issue_attachments.data_url'),
+    input.created_by,
+    createdAt,
+  );
+  const attachment = getIssueAttachmentById(input.id);
+  if (!attachment) throw new Error('Failed to create issue attachment');
+  return attachment;
+}
+
+export function getIssueAttachmentById(id: string): IssueAttachment | undefined {
+  const row = db.prepare('SELECT * FROM issue_attachments WHERE id = ?').get(id);
+  return row ? mapIssueAttachmentRow(row) : undefined;
+}
+
+export function listIssueAttachments(issueId: string): IssueAttachment[] {
+  return db
+    .prepare('SELECT * FROM issue_attachments WHERE issue_id = ? ORDER BY created_at DESC')
+    .all(issueId)
+    .map(mapIssueAttachmentRow);
+}
+
+export function deleteIssueAttachment(id: string): boolean {
+  const result = db.prepare('DELETE FROM issue_attachments WHERE id = ?').run(id);
+  return result.changes > 0;
 }
 
 export function cleanupOldDailyUsage(retentionDays = 90): number {
@@ -7051,6 +7707,36 @@ function parseAgentLinkRow(row: AgentLinkRow): AgentLink {
           : {}),
         ...(typeof parsed.diskUsedPercent === 'number'
           ? { diskUsedPercent: parsed.diskUsedPercent }
+          : {}),
+        ...(Array.isArray(parsed.disks)
+          ? {
+              disks: parsed.disks
+                .filter(
+                  (disk: unknown): disk is Record<string, unknown> =>
+                    !!disk && typeof disk === 'object',
+                )
+                .map((disk: Record<string, unknown>) => ({
+                  ...(typeof disk.filesystem === 'string'
+                    ? { filesystem: disk.filesystem }
+                    : {}),
+                  mountPoint:
+                    typeof disk.mountPoint === 'string'
+                      ? disk.mountPoint
+                      : typeof disk.mount_point === 'string'
+                        ? disk.mount_point
+                        : '—',
+                  ...(typeof disk.diskTotalBytes === 'number'
+                    ? { diskTotalBytes: disk.diskTotalBytes }
+                    : {}),
+                  ...(typeof disk.diskUsedBytes === 'number'
+                    ? { diskUsedBytes: disk.diskUsedBytes }
+                    : {}),
+                  ...(typeof disk.diskUsedPercent === 'number'
+                    ? { diskUsedPercent: disk.diskUsedPercent }
+                    : {}),
+                }))
+                .filter((disk: { mountPoint: string }) => disk.mountPoint !== '—'),
+            }
           : {}),
         ...(typeof parsed.collectedAt === 'string'
           ? { collectedAt: parsed.collectedAt }

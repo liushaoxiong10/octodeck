@@ -59,18 +59,16 @@ func discoverProviderSkills(ctx context.Context, cfg *Config, providerID string,
 	if providerID == "" {
 		return skillsDiscoveryResult{}, fmt.Errorf("providerId required")
 	}
-	clients := discoverAgentClients()
-	if cfg != nil && len(cfg.AgentClients) > 0 {
-		clients = cfg.AgentClients
-	}
-	var found bool
+	clients := skillDiscoveryAgentClients(cfg)
+	var foundClient *AgentClientInfo
 	for _, client := range clients {
-		if client.ID == providerID {
-			found = true
+		if client.ID == providerID || client.Provider == providerID {
+			c := client
+			foundClient = &c
 			break
 		}
 	}
-	if !found {
+	if foundClient == nil {
 		return skillsDiscoveryResult{}, fmt.Errorf("provider not found on device: %s", providerID)
 	}
 
@@ -92,11 +90,106 @@ func discoverProviderSkills(ctx context.Context, cfg *Config, providerID string,
 		}
 		cwd = resolved
 	}
-	home, _ := os.UserHomeDir()
+	workspaceRoots, cliRoots := skillSearchRoots(cfg, *foundClient, cwd)
 	return skillsDiscoveryResult{
-		WorkspaceSkills: scanSkillDirectory(filepath.Join(cwd, ".claude", "skills"), "workspace"),
-		CLISkills:       scanSkillDirectory(filepath.Join(home, ".claude", "skills"), "cli"),
+		WorkspaceSkills: scanSkillDirectories(workspaceRoots, "workspace"),
+		CLISkills:       scanSkillDirectories(cliRoots, "cli"),
 	}, nil
+}
+
+func skillDiscoveryAgentClients(cfg *Config) []AgentClientInfo {
+	if cfg != nil && len(cfg.AgentClients) > 0 {
+		return mergeAgentClients(cfg.AgentClients, registryAgentClients(cfg))
+	}
+	return discoverAgentClientsForConfig(cfg)
+}
+
+func skillSearchRoots(cfg *Config, client AgentClientInfo, cwd string) ([]string, []string) {
+	home, _ := os.UserHomeDir()
+	agentID := safePathSegment(ifEmpty(client.ID, client.Provider))
+	provider := safePathSegment(ifEmpty(client.Provider, client.ID))
+	providerDir := providerSkillDirName(client)
+
+	workspaceRoots := make([]string, 0, 4)
+	cliRoots := make([]string, 0, 6)
+	if strings.TrimSpace(cwd) != "" {
+		workspaceRoots = append(workspaceRoots, filepath.Join(cwd, ".claude", "skills"))
+		if providerDir != "claude" {
+			workspaceRoots = append(workspaceRoots, filepath.Join(cwd, "."+providerDir, "skills"))
+		}
+		if agentID != "" {
+			workspaceRoots = append(workspaceRoots, filepath.Join(cwd, ".octodeck", "agents", agentID, "skills"))
+		}
+	}
+	if home != "" {
+		cliRoots = append(cliRoots, filepath.Join(home, ".claude", "skills"))
+		if providerDir != "claude" {
+			cliRoots = append(cliRoots, filepath.Join(home, "."+providerDir, "skills"))
+		}
+	}
+	if agentID != "" {
+		cliRoots = append(cliRoots,
+			filepath.Join(daemonDir(cfg), "agents", agentID, "skills"),
+			filepath.Join(sessionDir(cfg), "agents", agentID, "skills"),
+		)
+	}
+	if provider != "" && provider != agentID {
+		cliRoots = append(cliRoots,
+			filepath.Join(daemonDir(cfg), "agents", provider, "skills"),
+			filepath.Join(sessionDir(cfg), "agents", provider, "skills"),
+		)
+	}
+	return dedupePaths(workspaceRoots), dedupePaths(cliRoots)
+}
+
+func providerSkillDirName(client AgentClientInfo) string {
+	switch client.ID {
+	case "claude-code":
+		return "claude"
+	case "traecli":
+		return "trae"
+	}
+	if provider := safePathSegment(client.Provider); provider != "" {
+		return provider
+	}
+	if id := safePathSegment(client.ID); id != "" {
+		return id
+	}
+	return "agent"
+}
+
+func dedupePaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	seen := map[string]struct{}{}
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		cleaned := filepath.Clean(p)
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		out = append(out, cleaned)
+	}
+	return out
+}
+
+func scanSkillDirectories(roots []string, source string) []SkillInfo {
+	merged := make([]SkillInfo, 0)
+	seen := map[string]struct{}{}
+	for _, root := range roots {
+		for _, skill := range scanSkillDirectory(root, source) {
+			if _, ok := seen[skill.ID]; ok {
+				continue
+			}
+			seen[skill.ID] = struct{}{}
+			merged = append(merged, skill)
+		}
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].ID < merged[j].ID })
+	return merged
 }
 
 func scanSkillDirectory(root string, source string) []SkillInfo {

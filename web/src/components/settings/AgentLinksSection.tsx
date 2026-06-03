@@ -7,19 +7,13 @@ import {
   ChevronDown,
   CircleDot,
   Copy,
-  Cpu,
   FolderKanban,
   HardDrive,
-  KeyRound,
   Layers3,
   Loader2,
   Plus,
   RefreshCw,
-  ShieldCheck,
-  Sparkles,
-  TerminalSquare,
   Trash2,
-  Wrench,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -185,6 +179,60 @@ function ResourceMeter({
   );
 }
 
+function DiskResourceList({ resources }: { resources: AgentLink['resources'] }) {
+  const disks = resources?.disks?.length
+    ? resources.disks
+    : resources
+      ? [
+          {
+            mountPoint: '/',
+            diskUsedBytes: resources.diskUsedBytes,
+            diskTotalBytes: resources.diskTotalBytes,
+            diskUsedPercent: resources.diskUsedPercent,
+          },
+        ]
+      : [];
+
+  if (disks.length === 0) {
+    return <ResourceMeter label="Disk" />;
+  }
+
+  return (
+    <div className="space-y-2">
+      {disks.map((disk, index) => (
+        <ResourceMeter
+          key={`${disk.mountPoint}-${disk.filesystem ?? index}`}
+          label={`Disk ${disk.mountPoint}`}
+          used={disk.diskUsedBytes}
+          total={disk.diskTotalBytes}
+          percent={disk.diskUsedPercent}
+          detail={disk.filesystem ? `${disk.filesystem} · ${formatBytes(disk.diskUsedBytes)} / ${formatBytes(disk.diskTotalBytes)}` : undefined}
+        />
+      ))}
+    </div>
+  );
+}
+
+function StatTile({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: ReactNode;
+  hint?: ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-border/70 bg-background/80 p-3">
+      <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+        {label}
+      </div>
+      <div className="mt-1 text-sm font-semibold text-foreground">{value}</div>
+      {hint ? <div className="mt-1 text-[11px] text-muted-foreground">{hint}</div> : null}
+    </div>
+  );
+}
+
 function uniqueValues(values: Array<string[] | undefined>): string[] {
   return [...new Set(values.flatMap((v) => v ?? []).filter(Boolean))];
 }
@@ -208,6 +256,21 @@ function DeviceInfoSection({
       </div>
       {children}
     </section>
+  );
+}
+
+function ActionButton({
+  icon: Icon,
+  children,
+  ...props
+}: React.ComponentProps<typeof Button> & {
+  icon: ComponentType<{ className?: string }>;
+}) {
+  return (
+    <Button size="sm" variant="outline" {...props}>
+      <Icon className="size-4" />
+      {children}
+    </Button>
   );
 }
 
@@ -248,64 +311,6 @@ function ServingAgents({ agents }: { agents: CustomBackendDef[] }) {
               serving
             </span>
           </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function RuntimeList({ link }: { link: AgentLink }) {
-  const runtimes = link.runtimes ?? [];
-  if (runtimes.length === 0) {
-    return (
-      <EmptyBlock>设备尚未上报 runtime 状态；等待 daemon 下次心跳。</EmptyBlock>
-    );
-  }
-  return (
-    <div className="space-y-2">
-      {runtimes.map((runtime) => (
-        <div
-          key={runtime.runtimeId}
-          className="rounded-xl border border-border bg-background/80 p-3 text-xs"
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="truncate font-medium text-foreground">
-                {runtime.displayName ?? runtime.agentClientId}
-              </div>
-              <div className="mt-1 break-all text-muted-foreground">
-                {runtime.runtimeId}
-              </div>
-            </div>
-            <span
-              className={`rounded-full border px-2 py-0.5 text-[10px] ${runtimeTone(runtime.status)}`}
-            >
-              {runtime.status}
-            </span>
-          </div>
-          <div className="mt-2 grid grid-cols-2 gap-2">
-            <DetailRow
-              label="available"
-              value={runtime.availableSlots ?? '—'}
-            />
-            <DetailRow
-              label="max runs"
-              value={runtime.maxConcurrentRuns ?? '—'}
-            />
-          </div>
-          {(runtime.runningRuns?.length ?? 0) > 0 ? (
-            <div className="mt-2 space-y-1">
-              {runtime.runningRuns!.slice(0, 3).map((run) => (
-                <div
-                  key={run.runId}
-                  className="rounded-lg bg-muted/40 px-2 py-1 text-[11px] text-muted-foreground"
-                >
-                  {run.backendId ?? 'run'} · {run.status ?? 'running'} ·{' '}
-                  {run.runId.slice(0, 8)}
-                </div>
-              ))}
-            </div>
-          ) : null}
         </div>
       ))}
     </div>
@@ -398,6 +403,148 @@ function RuntimeSessions({
   );
 }
 
+function ProvidersPanel({ link }: { link: AgentLink }) {
+  const permissionModes = uniqueValues(
+    link.agentClients.map((c) => c.permissionModes),
+  );
+  const runtimesByAgentClient = new Map(
+    (link.runtimes ?? []).map((runtime) => [runtime.agentClientId, runtime]),
+  );
+  const onlineRuntimes = (link.runtimes ?? []).filter(
+    (runtime) => runtime.status !== 'offline',
+  );
+  const runningCount = (link.runtimes ?? []).reduce(
+    (sum, runtime) => sum + (runtime.runningRuns?.length ?? 0),
+    0,
+  );
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-2 sm:grid-cols-3">
+        <StatTile label="Providers" value={link.agentClients.length} />
+        <StatTile label="Online runtimes" value={onlineRuntimes.length} />
+        <StatTile label="Running" value={runningCount} />
+      </div>
+
+      {link.agentClients.length > 0 ? (
+        <div className="overflow-x-auto rounded-2xl border border-border bg-background/80 shadow-sm">
+          <div className="min-w-[960px]">
+            <div className="grid grid-cols-[minmax(180px,1.3fr)_minmax(280px,2fr)_96px_96px_minmax(220px,1.2fr)] gap-3 border-b border-border bg-muted/30 px-4 py-2 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+              <div>Provider</div>
+              <div>Runtime</div>
+              <div>Running</div>
+              <div>Caps</div>
+              <div>Binary</div>
+            </div>
+            {link.agentClients.map((client) => {
+              const runtime = runtimesByAgentClient.get(client.id);
+              const runningRuns = runtime?.runningRuns ?? [];
+              return (
+                <div
+                  key={client.id}
+                  className="grid grid-cols-[minmax(180px,1.3fr)_minmax(280px,2fr)_96px_96px_minmax(220px,1.2fr)] items-center gap-3 border-b border-border/70 px-4 py-3 text-xs last:border-b-0"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold text-foreground">
+                      {client.displayName}
+                    </div>
+                    <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                      {client.id}
+                    </div>
+                  </div>
+
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 items-center gap-2">
+                      {runtime ? (
+                        <span
+                          className={`shrink-0 rounded-full border px-2.5 py-1 text-[11px] ${runtimeTone(runtime.status)}`}
+                        >
+                          {runtime.status}
+                        </span>
+                      ) : (
+                        <span className="shrink-0 rounded-full border border-border bg-background px-2.5 py-1 text-[11px] text-muted-foreground">
+                          no runtime
+                        </span>
+                      )}
+                      <span className="truncate font-mono text-[11px] text-muted-foreground">
+                        {runtime?.runtimeId ?? 'daemon 尚未上报'}
+                      </span>
+                    </div>
+                    <div className="mt-1 truncate text-[11px] text-muted-foreground">
+                      Device link · {runtime?.deviceLinkId ?? link.id}
+                    </div>
+                  </div>
+
+                  <div className="font-semibold text-foreground">
+                    {runningRuns.length}
+                    {runningRuns.length > 0 ? (
+                      <div className="mt-1 truncate text-[11px] font-normal text-muted-foreground">
+                        {runningRuns
+                          .slice(0, 2)
+                          .map((run) => run.backendId ?? run.runId.slice(0, 8))
+                          .join('、')}
+                        {runningRuns.length > 2 ? ` +${runningRuns.length - 2}` : ''}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="font-semibold text-foreground">
+                    {client.capabilities?.length ?? 0}
+                    {(client.capabilities?.length ?? 0) > 0 ? (
+                      <div className="mt-1 truncate text-[11px] font-normal text-muted-foreground">
+                        {client.capabilities!.slice(0, 2).join('、')}
+                        {client.capabilities!.length > 2
+                          ? ` +${client.capabilities!.length - 2}`
+                          : ''}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="min-w-0">
+                    <div className="truncate font-mono text-[11px] text-foreground">
+                      {client.binary}
+                    </div>
+                    <div className="mt-1 truncate text-[11px] text-muted-foreground">
+                      {client.version ?? '—'}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : (
+        <EmptyBlock>未发现 runtime。</EmptyBlock>
+      )}
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <div className="rounded-xl border border-border/70 bg-background/70 p-3">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            Permission modes
+          </div>
+          {permissionModes.length > 0 ? (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {permissionModes.map((mode) => (
+                <Pill key={mode}>{mode}</Pill>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-2 text-xs text-muted-foreground">尚未上报</div>
+          )}
+        </div>
+        <div className="rounded-xl border border-border/70 bg-background/70 p-3">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            Runtime note
+          </div>
+          <div className="mt-2 text-xs leading-5 text-muted-foreground">
+            Provider 与 Runtime 按单行列表展示；横向列出状态、running 数、capabilities 与 binary 信息。
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DeviceDetails({
   link,
   servingAgents,
@@ -429,13 +576,6 @@ function DeviceDetails({
   const agentClientNames = link.agentClients
     .map((c) => c.displayName)
     .join('、');
-  const permissionModes = uniqueValues(
-    link.agentClients.map((c) => c.permissionModes),
-  );
-  const providerCapabilities = uniqueValues(
-    link.agentClients.map((c) => c.capabilities),
-  );
-
   return (
     <div className="space-y-4">
       <div className="relative overflow-hidden rounded-3xl border border-border bg-gradient-to-br from-card via-card to-muted/30 p-5 shadow-sm">
@@ -457,9 +597,6 @@ function DeviceDetails({
               {link.updateAvailable ? (
                 <Pill>可更新到 {link.latestVersion ?? 'latest'}</Pill>
               ) : null}
-              {typeof link.availableSlots === 'number' ? (
-                <Pill>{link.availableSlots} slots available</Pill>
-              ) : null}
             </div>
             <h3 className="truncate text-2xl font-semibold tracking-tight text-foreground">
               {link.displayName}
@@ -470,41 +607,10 @@ function DeviceDetails({
             </p>
           </div>
           <div className="grid grid-cols-2 gap-2 sm:min-w-64">
-            <div className="rounded-2xl border border-border/70 bg-background/80 p-3">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                在线时长
-              </div>
-              <div className="mt-1 text-sm font-semibold text-foreground">
-                {uptime}
-              </div>
-            </div>
-            <div className="rounded-2xl border border-border/70 bg-background/80 p-3">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                Agents
-              </div>
-              <div className="mt-1 text-sm font-semibold text-foreground">
-                {servingAgents.length}
-              </div>
-            </div>
-            <div className="rounded-2xl border border-border/70 bg-background/80 p-3">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                Running
-              </div>
-              <div className="mt-1 text-sm font-semibold text-foreground">
-                {link.runningRuns?.length ?? 0}
-              </div>
-            </div>
-            <div className="rounded-2xl border border-border/70 bg-background/80 p-3">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                Capacity
-              </div>
-              <div className="mt-1 text-sm font-semibold text-foreground">
-                {typeof link.availableSlots === 'number' &&
-                typeof link.maxConcurrentRuns === 'number'
-                  ? `${link.availableSlots}/${link.maxConcurrentRuns}`
-                  : '—'}
-              </div>
-            </div>
+            <StatTile label="在线时长" value={uptime} />
+            <StatTile label="Agents" value={servingAgents.length} />
+            <StatTile label="Running" value={link.runningRuns?.length ?? 0} />
+            <StatTile label="Runtimes" value={link.runtimes?.length ?? 0} />
           </div>
         </div>
         <div className="relative mt-4 flex flex-wrap gap-2">
@@ -522,43 +628,35 @@ function DeviceDetails({
             重置 token
           </Button>
           {link.updateAvailable ? (
-            <Button
-              size="sm"
-              variant="outline"
+            <ActionButton
+              icon={Copy}
               onClick={() => onCopyUpdateCommand(link)}
               disabled={busy}
             >
-              <Copy className="size-4" />
               复制更新命令
-            </Button>
+            </ActionButton>
           ) : null}
-          <Button
-            size="sm"
-            variant="outline"
+          <ActionButton
+            icon={Copy}
             onClick={() => onCopyUninstallCommand(link)}
             disabled={busy}
           >
-            <Copy className="size-4" />
             复制卸载命令
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
+          </ActionButton>
+          <ActionButton
+            icon={RefreshCw}
             onClick={() => onDiscoverAgents(link)}
             disabled={busy || !link.online}
           >
-            <RefreshCw className="size-4" />
             Rediscover agents
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
+          </ActionButton>
+          <ActionButton
+            icon={Layers3}
             onClick={() => onRefreshSessions(link)}
             disabled={busy || !link.online}
           >
-            <Layers3 className="size-4" />
             刷新 sessions
-          </Button>
+          </ActionButton>
           <Button
             size="sm"
             variant="outline"
@@ -576,216 +674,103 @@ function DeviceDetails({
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-medium text-foreground">
           <span className="flex items-center gap-2">
             <HardDrive className="size-4 text-primary" />
-            Device 详情
+            基础信息与命令
           </span>
           <ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" />
         </summary>
-        <div className="grid gap-2 border-t border-border p-4 sm:grid-cols-2">
+        <div className="grid gap-2 border-t border-border p-4 md:grid-cols-2 xl:grid-cols-3">
           <DetailRow label="Device ID" value={link.id} />
-          <DetailRow
-            label="Start time"
-            value={formatTime(link.lastConnectedAt)}
-          />
-          <DetailRow
-            label="Last heartbeat"
-            value={formatTime(link.lastSeenAt)}
-          />
           <DetailRow label="Created at" value={formatTime(link.createdAt)} />
           <DetailRow label="Hostname" value={link.hostname} />
-          <DetailRow
-            label="Platform"
-            value={`${link.os ?? '?'} / ${link.arch ?? '?'}`}
-          />
-          <DetailRow
-            label="Client version"
-            value={link.clientVersion ? `v${link.clientVersion}` : null}
-          />
-          <DetailRow
-            label="Latest daemon"
-            value={link.latestVersion ?? 'unknown'}
-          />
+          <DetailRow label="Platform" value={`${link.os ?? '?'} / ${link.arch ?? '?'}`} />
           <DetailRow label="Reported clients" value={agentClientNames || '—'} />
+          <DetailRow label="Latest daemon" value={link.latestVersion ?? 'unknown'} />
+          {link.updateAvailable ? (
+            <DetailRow
+              label="Update command"
+              value={link.updateCommand ?? buildDaemonUpdateCommand()}
+            />
+          ) : null}
+          <DetailRow
+            label="Uninstall command"
+            value={link.uninstallCommand ?? buildDaemonUninstallCommand()}
+          />
         </div>
       </details>
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <DeviceInfoSection icon={FolderKanban} title="Serving Agents 信息">
-          <ServingAgents agents={servingAgents} />
-        </DeviceInfoSection>
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
+        <div className="space-y-4">
+          <DeviceInfoSection icon={FolderKanban} title="Serving Agents">
+            <ServingAgents agents={servingAgents} />
+          </DeviceInfoSection>
 
-        <DeviceInfoSection icon={Cpu} title="Runtimes">
-          <RuntimeList link={link} />
-        </DeviceInfoSection>
-
-        <DeviceInfoSection icon={Layers3} title="Provider Sessions">
-          <RuntimeSessions
-            sessions={sessions}
-            loading={sessionsLoading}
-            onDelete={(session) => onDeleteSession(link, session)}
-          />
-        </DeviceInfoSection>
-
-        <DeviceInfoSection icon={Activity} title="Activity">
-          <div className="grid gap-2">
-            <p className="rounded-xl border border-dashed border-border bg-muted/20 px-3 py-2 text-xs leading-5 text-muted-foreground">
-              Task activity is shown from current task runs. Token/cost usage
-              appears when daemons report usage events.
-            </p>
-            <RunningRuns link={link} />
-            <DetailRow
-              label="最近连接"
-              value={formatTime(link.lastConnectedAt)}
-            />
-            <DetailRow label="最近心跳" value={formatTime(link.lastSeenAt)} />
-          </div>
-        </DeviceInfoSection>
-
-        <DeviceInfoSection icon={ShieldCheck} title="Attribution">
-          <div className="space-y-2 text-xs text-muted-foreground">
-            <Pill>当前账户创建</Pill>
-            <Pill>Token 授权接入</Pill>
-          </div>
-        </DeviceInfoSection>
-
-        <DeviceInfoSection icon={Layers3} title="Capabilities">
-          {providerCapabilities.length > 0 ? (
-            <div className="space-y-3">
-              <div className="text-xs text-muted-foreground">
-                provider CLI capability matrix
-              </div>
-              {link.agentClients.map((client) => (
-                <div
-                  key={client.id}
-                  className="rounded-xl border border-border bg-background/80 p-3"
-                >
-                  <div className="text-xs font-medium text-foreground">
-                    {client.displayName}
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {(client.capabilities ?? []).map((capability) => (
-                      <Pill key={`${client.id}-${capability}`}>
-                        {capability}
-                      </Pill>
-                    ))}
-                  </div>
+          <DeviceInfoSection icon={Activity} title="运行与会话">
+            <div className="grid gap-4 lg:grid-cols-2">
+              <div>
+                <div className="mb-2 text-xs font-medium text-muted-foreground">
+                  Running runs
                 </div>
-              ))}
-            </div>
-          ) : (
-            <EmptyBlock>设备尚未上报 provider CLI capabilities。</EmptyBlock>
-          )}
-        </DeviceInfoSection>
-
-        <DeviceInfoSection icon={TerminalSquare} title="CLI Providers">
-          {link.agentClients.length > 0 ? (
-            <div className="space-y-2">
-              {link.agentClients.map((client) => (
-                <div
-                  key={client.id}
-                  className="rounded-xl border border-border bg-background/80 p-3 text-xs"
-                >
-                  <div className="font-medium text-foreground">
-                    {client.displayName}
-                  </div>
-                  <div className="mt-1 break-all text-muted-foreground">
-                    {client.id} · {client.binary}
-                    {client.version ? ` · ${client.version}` : ''}
-                  </div>
+                <RunningRuns link={link} />
+              </div>
+              <div>
+                <div className="mb-2 text-xs font-medium text-muted-foreground">
+                  Provider sessions
                 </div>
-              ))}
-            </div>
-          ) : (
-            <EmptyBlock>未发现 claude / codex / traecli。</EmptyBlock>
-          )}
-        </DeviceInfoSection>
-
-        <DeviceInfoSection icon={KeyRound} title="Permission modes">
-          {permissionModes.length > 0 ? (
-            <div className="space-y-3">
-              <div className="flex flex-wrap gap-2">
-                {permissionModes.map((mode) => (
-                  <Pill key={mode}>{mode}</Pill>
-                ))}
-              </div>
-              <div className="text-xs leading-5 text-muted-foreground">
-                Permission modes 指 default、acceptEdits 等 provider CLI
-                自身支持的权限模式。
+                <RuntimeSessions
+                  sessions={sessions}
+                  loading={sessionsLoading}
+                  onDelete={(session) => onDeleteSession(link, session)}
+                />
               </div>
             </div>
-          ) : (
-            <EmptyBlock>设备尚未上报 CLI permission modes。</EmptyBlock>
-          )}
-        </DeviceInfoSection>
+          </DeviceInfoSection>
 
-        <DeviceInfoSection icon={Sparkles} title="Local skills">
-          <EmptyBlock>
-            当前协议尚未上报本地 skills；后续可在 hello frame 中扩展。
-          </EmptyBlock>
-        </DeviceInfoSection>
+          <DeviceInfoSection icon={Layers3} title="Runtime">
+            <ProvidersPanel link={link} />
+          </DeviceInfoSection>
+        </div>
 
-        <DeviceInfoSection icon={Boxes} title="Resources">
-          <div className="grid gap-2 sm:grid-cols-2">
-            <ResourceMeter
-              label="CPU"
-              percent={link.resources?.cpuUsedPercent}
-              detail={`${link.resources?.cpuCount ?? '—'} cores`}
-            />
-            <ResourceMeter
-              label="Memory"
-              used={link.resources?.memoryUsedBytes}
-              total={link.resources?.memoryTotalBytes}
-              percent={link.resources?.memoryUsedPercent}
-            />
-            <ResourceMeter
-              label="Disk"
-              used={link.resources?.diskUsedBytes}
-              total={link.resources?.diskTotalBytes}
-              percent={link.resources?.diskUsedPercent}
-            />
-            <DetailRow label="CPU cores" value={link.resources?.cpuCount} />
-            <DetailRow
-              label="Collected at"
-              value={formatTime(link.resources?.collectedAt ?? null)}
-            />
-            <DetailRow label="Host" value={link.hostname} />
-          </div>
-        </DeviceInfoSection>
-
-        <DeviceInfoSection icon={Wrench} title="Diagnostics">
-          <div className="grid gap-2">
-            <DetailRow
-              label="Connection"
-              value={link.online ? 'online' : 'offline'}
-            />
-            <DetailRow
-              label="Runtime status"
-              value={statusLabel(link.status, link.online)}
-            />
-            <DetailRow
-              label="Available slots"
-              value={link.availableSlots ?? '—'}
-            />
-            <DetailRow
-              label="Max concurrent runs"
-              value={link.maxConcurrentRuns ?? '—'}
-            />
-            <DetailRow label="Heartbeat" value={formatTime(link.lastSeenAt)} />
-            <DetailRow
-              label="Version"
-              value={link.clientVersion ? `v${link.clientVersion}` : 'unknown'}
-            />
-            {link.updateAvailable ? (
-              <DetailRow
-                label="Update command"
-                value={link.updateCommand ?? buildDaemonUpdateCommand()}
+        <aside className="space-y-4">
+          <DeviceInfoSection icon={Boxes} title="资源状态">
+            <div className="grid gap-2">
+              <ResourceMeter
+                label="CPU"
+                percent={link.resources?.cpuUsedPercent}
+                detail={`${link.resources?.cpuCount ?? '—'} cores`}
               />
-            ) : null}
-            <DetailRow
-              label="Uninstall command"
-              value={link.uninstallCommand ?? buildDaemonUninstallCommand()}
-            />
-          </div>
-        </DeviceInfoSection>
+              <ResourceMeter
+                label="Memory"
+                used={link.resources?.memoryUsedBytes}
+                total={link.resources?.memoryTotalBytes}
+                percent={link.resources?.memoryUsedPercent}
+              />
+              <DiskResourceList resources={link.resources} />
+            </div>
+          </DeviceInfoSection>
+
+          <DeviceInfoSection icon={HardDrive} title="状态摘要">
+            <div className="grid gap-2">
+              <DetailRow
+                label="Connection"
+                value={link.online ? 'online' : 'offline'}
+              />
+              <DetailRow
+                label="Runtime status"
+                value={statusLabel(link.status, link.online)}
+              />
+              <DetailRow label="最近连接" value={formatTime(link.lastConnectedAt)} />
+              <DetailRow label="最近心跳" value={formatTime(link.lastSeenAt)} />
+              <DetailRow
+                label="Version"
+                value={link.clientVersion ? `v${link.clientVersion}` : 'unknown'}
+              />
+              <div className="flex flex-wrap gap-2 pt-1 text-xs text-muted-foreground">
+                <Pill>当前账户创建</Pill>
+                <Pill>Token 授权接入</Pill>
+              </div>
+            </div>
+          </DeviceInfoSection>
+        </aside>
       </div>
     </div>
   );
@@ -1101,12 +1086,6 @@ export function DevicesSection() {
                       <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-muted-foreground">
                         <span className="rounded-full bg-background/80 px-2 py-0.5">
                           runs {l.runningRuns?.length ?? 0}
-                        </span>
-                        <span className="rounded-full bg-background/80 px-2 py-0.5">
-                          slots{' '}
-                          {typeof l.availableSlots === 'number'
-                            ? l.availableSlots
-                            : '—'}
                         </span>
                         <span className="rounded-full bg-background/80 px-2 py-0.5">
                           runtimes {l.runtimes?.length ?? 0}

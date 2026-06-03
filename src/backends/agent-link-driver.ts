@@ -40,6 +40,7 @@ import {
 } from '../agent-link/run-rpc.js';
 import type { BackendRunArgs } from './types.js';
 import type { HostCliDriverConfig } from './host-cli-driver.js';
+import { loadUserMcpServers } from '../mcp-utils.js';
 import {
   shouldDisableAgentTeamMcp,
   stripAgentTeamMcpConfigArgs,
@@ -126,7 +127,7 @@ export function parseAgentLinkTarget(
     const selected = listOnlineRuntimesByProvider(
       providerMatch[1],
       userId,
-    ).find((runtime) => (runtime.availableSlots ?? 1) > 0);
+    )[0];
     if (selected)
       return {
         linkId: selected.deviceLinkId,
@@ -208,6 +209,21 @@ function supportsAgentRun(linkId: string, agentClientId?: string): boolean {
   if (!agentClientId) return false;
   const meta = getOnlineMeta(linkId);
   return !!meta?.capabilities?.includes('agent.run');
+}
+
+function buildRemoteEnv(
+  baseEnv: Record<string, string> | undefined,
+  userId: string | undefined,
+  deviceLinkId: string,
+): Record<string, string> | undefined {
+  const env: Record<string, string> = { ...(baseEnv ?? {}) };
+  if (userId) {
+    const mcpServers = loadUserMcpServers(userId, { deviceLinkId });
+    if (Object.keys(mcpServers).length > 0) {
+      env.OCTODECK_USER_MCP_SERVERS_JSON = JSON.stringify(mcpServers);
+    }
+  }
+  return Object.keys(env).length > 0 ? env : undefined;
 }
 
 async function runViaAgentRuntime(opts: {
@@ -429,6 +445,7 @@ async function runViaAgentRuntime(opts: {
     };
 
     registerAgentRun(controller);
+    const remoteEnv = buildRemoteEnv(cfg.envOverrides, group.created_by, linkId);
     const ok = session.send({
       type: 'agent.run.request',
       id: 0,
@@ -446,7 +463,7 @@ async function runViaAgentRuntime(opts: {
         metadata: { scheduledTask: !!input.isScheduledTask },
       },
       cwd: groupDir,
-      env: cfg.envOverrides,
+      env: remoteEnv,
       timeoutMs,
       maxOutputBytes,
       policy: {},
@@ -836,6 +853,7 @@ export async function runViaAgentLink(
 
     registerRun(controller);
 
+    const remoteEnv = buildRemoteEnv(cfg.envOverrides, group.created_by, linkId);
     const ok = session.send({
       type: 'run.request',
       id: 0,
@@ -844,7 +862,7 @@ export async function runViaAgentLink(
       binary,
       argv,
       cwd: groupDir,
-      env: cfg.envOverrides,
+      env: remoteEnv,
       outputProtocol: cfg.outputProtocol,
       timeoutMs,
       maxOutputBytes,

@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Loader2, Plus, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { useAgentLinksStore } from '../../stores/agentLinks';
 
 interface AddMcpServerDialogProps {
   open: boolean;
@@ -14,6 +15,7 @@ interface AddMcpServerDialogProps {
     command?: string;
     args?: string[];
     env?: Record<string, string>;
+    device_link_id?: string;
     type?: 'http' | 'sse';
     url?: string;
     headers?: Record<string, string>;
@@ -29,17 +31,26 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
   const [id, setId] = useState('');
   const [serverType, setServerType] = useState<ServerType>('stdio');
   const [command, setCommand] = useState('');
+  const [deviceLinkId, setDeviceLinkId] = useState('');
   const [args, setArgs] = useState<string[]>([]);
   const [env, setEnv] = useState<Array<{ key: string; value: string }>>([]);
   const [url, setUrl] = useState('');
   const [headers, setHeaders] = useState<Array<{ key: string; value: string }>>([]);
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const { links, load: loadDevices } = useAgentLinksStore();
+
+  useEffect(() => {
+    if (open) loadDevices();
+  }, [open, loadDevices]);
+
+  const deviceOptions = useMemo(() => links.filter((link) => !link.builtin), [links]);
 
   const reset = () => {
     setId('');
     setServerType('stdio');
     setCommand('');
+    setDeviceLinkId('');
     setArgs([]);
     setEnv([]);
     setUrl('');
@@ -64,6 +75,7 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
       if (!url.trim()) return 'URL 不能为空';
     } else {
       if (!command.trim()) return '命令不能为空';
+      if (!deviceLinkId) return 'STDIO 类型必须绑定执行设备';
     }
     return null;
   };
@@ -101,6 +113,7 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
         await onAdd({
           id: id.trim(),
           command: command.trim(),
+          device_link_id: deviceLinkId,
           args: args.length > 0 ? args : undefined,
           env: Object.keys(envObj).length > 0 ? envObj : undefined,
           description: description.trim() || undefined,
@@ -234,6 +247,35 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
             <>
               {/* Command */}
               <div>
+                <Label htmlFor="mcp-device" className="mb-1">
+                  执行设备 <span className="text-error">*</span>
+                </Label>
+                <select
+                  id="mcp-device"
+                  value={deviceLinkId}
+                  onChange={(e) => setDeviceLinkId(e.target.value)}
+                  disabled={submitting}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm disabled:opacity-50"
+                >
+                  <option value="">选择执行设备</option>
+                  {deviceOptions.map((device) => (
+                    <option key={device.id} value={device.id}>
+                      {device.displayName || device.id}{device.online ? ' · 在线' : ' · 离线'}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  STDIO MCP 会在绑定设备上执行命令，只会注入到该设备上的 Agent 运行中。
+                </p>
+                {deviceOptions.length === 0 && (
+                  <p className="mt-1 text-xs text-error">
+                    暂无可绑定设备，请先在设备页面连接 OctoDeck daemon。
+                  </p>
+                )}
+              </div>
+
+              {/* Command */}
+              <div>
                 <Label htmlFor="mcp-command" className="mb-1">
                   命令 <span className="text-error">*</span>
                 </Label>
@@ -359,7 +401,7 @@ export function AddMcpServerDialog({ open, onClose, onAdd }: AddMcpServerDialogP
             <Button type="button" variant="ghost" onClick={handleClose} disabled={submitting}>
               取消
             </Button>
-            <Button type="submit" disabled={submitting || !id.trim() || (isHttpType ? !url.trim() : !command.trim())}>
+            <Button type="submit" disabled={submitting || !id.trim() || (isHttpType ? !url.trim() : !command.trim() || !deviceLinkId)}>
               {submitting && <Loader2 className="size-4 animate-spin" />}
               添加
             </Button>

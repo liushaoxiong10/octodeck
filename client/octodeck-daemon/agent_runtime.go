@@ -390,7 +390,7 @@ type agentRuntimeProcess struct {
 
 type agentAdapter interface {
 	Discover(ctx context.Context) AgentClientInfo
-	BuildRunCommand(req *AgentRunRequestFrame) (argv []string, outputJSON bool, err error)
+	BuildRunCommand(cfg *Config, req *AgentRunRequestFrame) (argv []string, outputJSON bool, err error)
 	ListSessions(ctx context.Context, cfg *Config, workspace string) ([]AgentSessionInfo, error)
 	DeleteSession(ctx context.Context, cfg *Config, workspace, sessionID string) (bool, error)
 }
@@ -653,6 +653,10 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 		rt.finishErr(out, req, started, fmt.Errorf("agent adapter not found: %s", req.AgentID), false)
 		return
 	}
+	if err := prepareAgentRuntimeMCPConfig(rt.cfg, req, cwd); err != nil {
+		rt.finishErr(out, req, started, fmt.Errorf("agent runtime mcp config: %w", err), false)
+		return
+	}
 	if direct, ok := adapter.(agentDirectRunner); ok {
 		result, err := direct.RunDirect(ctx, rt.cfg, req, func(frame AgentRunEventFrame) { rt.notify(out, "agent.run.event", frame) })
 		if err != nil {
@@ -680,7 +684,7 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 		rt.notify(out, "agent.run.result", result)
 		return
 	}
-	argv, outputJSON, err := adapter.BuildRunCommand(req)
+	argv, outputJSON, err := adapter.BuildRunCommand(rt.cfg, req)
 	if err != nil {
 		rt.finishErr(out, req, started, err, false)
 		return
@@ -943,7 +947,7 @@ type customHTTPAdapter struct {
 	entry AgentRegistryEntry
 }
 
-func (a *claudeCodeAdapter) BuildRunCommand(req *AgentRunRequestFrame) ([]string, bool, error) {
+func (a *claudeCodeAdapter) BuildRunCommand(cfg *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
 	argv := []string{"-p", req.Input.Prompt, "--output-format", "stream-json", "--verbose"}
 	if req.Input.SessionID != "" {
 		argv = append(argv, "--resume", req.Input.SessionID)
@@ -963,10 +967,15 @@ func (a *claudeCodeAdapter) BuildRunCommand(req *AgentRunRequestFrame) ([]string
 	if len(req.Policy.DisallowedTools) > 0 {
 		argv = append(argv, "--disallowedTools", strings.Join(req.Policy.DisallowedTools, ","))
 	}
+	mcpConfig, err := writeAgentTeamMCPConfig(cfg, req.Env)
+	if err != nil {
+		return nil, false, err
+	}
+	argv = append(argv, "--mcp-config", mcpConfig)
 	return argv, true, nil
 }
 
-func (a *codexAdapter) BuildRunCommand(req *AgentRunRequestFrame) ([]string, bool, error) {
+func (a *codexAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
 	argv := []string{"exec"}
 	if req.Policy.Model != "" {
 		argv = append(argv, "-m", req.Policy.Model)
@@ -978,15 +987,29 @@ func (a *codexAdapter) BuildRunCommand(req *AgentRunRequestFrame) ([]string, boo
 	return argv, false, nil
 }
 
-func (a *traecliAdapter) BuildRunCommand(req *AgentRunRequestFrame) ([]string, bool, error) {
+func (a *traecliAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
 	return []string{"-p", req.Input.Prompt}, false, nil
 }
 
-func (a *plainCLIAdapter) BuildRunCommand(req *AgentRunRequestFrame) ([]string, bool, error) {
+func prepareAgentRuntimeMCPConfig(cfg *Config, req *AgentRunRequestFrame, cwd string) error {
+	switch req.AgentID {
+	case "claude-code":
+		_, err := writeAgentTeamMCPConfig(cfg, req.Env)
+		return err
+	case "codex":
+		return writeCodexMCPConfig(cfg, req, cwd)
+	case "traecli":
+		return writeAgentTeamMCPProjectConfig(cfg, cwd, req.Env)
+	default:
+		return nil
+	}
+}
+
+func (a *plainCLIAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
 	return []string{req.Input.Prompt}, false, nil
 }
 
-func (a *customStdioAdapter) BuildRunCommand(req *AgentRunRequestFrame) ([]string, bool, error) {
+func (a *customStdioAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
 	args := append([]string(nil), a.entry.Args...)
 	if len(args) == 0 {
 		args = []string{"{{prompt}}"}
@@ -1003,7 +1026,7 @@ func (a *customStdioAdapter) BuildRunCommand(req *AgentRunRequestFrame) ([]strin
 	return args, containsString(a.client.Capabilities, "stream-json"), nil
 }
 
-func (a *customA2AAdapter) BuildRunCommand(req *AgentRunRequestFrame) ([]string, bool, error) {
+func (a *customA2AAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
 	return nil, false, fmt.Errorf("a2a agent adapter %s runs via protocol transport", a.client.ID)
 }
 
@@ -1047,6 +1070,9 @@ func (a *customA2AAdapter) RunDirect(ctx context.Context, cfg *Config, req *Agen
 		"policy":    req.Policy,
 		"context":   req.Context,
 		"cwd":       req.Cwd,
+	}
+	if server, err := buildAgentTeamMCPServerConfig(cfg); err == nil {
+		params["mcpServers"] = map[string]any{"octodeck_agent_team": server}
 	}
 	paramsJSON, _ := json.Marshal(params)
 	id := int64(1)
@@ -1183,7 +1209,7 @@ func readA2AAgentResult(ctx context.Context, r io.Reader, req *AgentRunRequestFr
 	return final, nil
 }
 
-func (a *customHTTPAdapter) BuildRunCommand(req *AgentRunRequestFrame) ([]string, bool, error) {
+func (a *customHTTPAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
 	return nil, false, fmt.Errorf("http agent adapter %s runs via direct transport", a.entry.ID)
 }
 

@@ -32,7 +32,7 @@ type Config struct {
 	TaskDir string `json:"taskDir,omitempty"`
 	// ReposDir stores shared git checkouts used to create per-run worktrees.
 	ReposDir string `json:"reposDir,omitempty"`
-	// Optional: cap concurrent runs (default 4).
+	// Optional: cap concurrent runs. <=0 or omitted means unlimited.
 	MaxConcurrentRuns int `json:"maxConcurrentRuns"`
 	// Optional: client display version reported in hello.
 	Version string `json:"version,omitempty"`
@@ -164,9 +164,6 @@ func loadConfig(path string) (*Config, error) {
 	cfg.Path = path
 	if err := cfg.validate(); err != nil {
 		return nil, err
-	}
-	if cfg.MaxConcurrentRuns <= 0 {
-		cfg.MaxConcurrentRuns = 4
 	}
 	if cfg.WorkspaceDir == "" {
 		workspace, err := defaultWorkspaceDir()

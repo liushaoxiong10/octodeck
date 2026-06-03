@@ -16,6 +16,10 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR } from './config.js';
+import {
+  readDataObjectJson,
+  writeDataObjectJsonSync,
+} from './data-object-store.js';
 import { logger } from './logger.js';
 import { isValidNameSegment } from './plugin-manifest.js';
 
@@ -81,6 +85,10 @@ export function getUserPluginRuntimePath(
 export function readUserPluginsV2(userId: string): UserPluginsV2 | null {
   if (!isValidNameSegment(userId)) return null;
   const file = getUserPluginsFileV2(userId);
+  const stored = readDataObjectJson<unknown | null>(file, null);
+  if (stored !== null) {
+    return parseUserPluginsV2(stored, userId, file);
+  }
   let raw: string;
   try {
     raw = fs.readFileSync(file, 'utf-8');
@@ -91,13 +99,21 @@ export function readUserPluginsV2(userId: string): UserPluginsV2 | null {
     return null;
   }
 
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    writeDataObjectJsonSync(file, parsed);
+    return parseUserPluginsV2(parsed, userId, file);
   } catch (err) {
     logger.warn({ userId, file, err }, 'readUserPluginsV2: JSON parse failed');
     return { schemaVersion: 1, enabled: {} };
   }
+}
+
+function parseUserPluginsV2(
+  parsed: unknown,
+  userId: string,
+  file: string,
+): UserPluginsV2 | null {
   const rec = (parsed && typeof parsed === 'object' ? parsed : {}) as Record<
     string,
     unknown
@@ -147,6 +163,7 @@ export function writeUserPluginsV2(
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
   const content = JSON.stringify(config, null, 2) + '\n';
+  writeDataObjectJsonSync(file, config);
   fs.writeFileSync(tmp, content, { mode: 0o644 });
   try {
     fs.renameSync(tmp, file);

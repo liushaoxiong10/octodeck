@@ -166,10 +166,10 @@ export function GroupDetail({ group }: GroupDetailProps) {
     ...uniqueProviderIds(agentLinks).map((providerId) => {
       const onlineRuntimes = agentLinks.flatMap((device) => device.runtimes ?? [])
         .filter((runtime) => runtime.agentClientId === providerId && runtime.status !== 'offline');
-      const bestSlots = onlineRuntimes.reduce((max, runtime) => Math.max(max, runtime.availableSlots ?? 0), 0);
+      const runningCount = onlineRuntimes.reduce((sum, runtime) => sum + (runtime.runningRuns?.length ?? 0), 0);
       return {
         value: `provider:${providerId}`,
-        label: `⚡ Provider Pool · ${providerId} · ${onlineRuntimes.length} online · best slots ${bestSlots}`,
+        label: `⚡ Provider Pool · ${providerId} · ${onlineRuntimes.length} online · running ${runningCount}`,
         disabled: onlineRuntimes.length === 0,
       };
     }),
@@ -182,18 +182,17 @@ export function GroupDetail({ group }: GroupDetailProps) {
             agentClientId: client.id,
             displayName: client.displayName || client.id,
             status: device.online ? 'idle' : 'offline',
-            availableSlots: device.availableSlots ?? undefined,
-            maxConcurrentRuns: device.maxConcurrentRuns ?? undefined,
+            runningRuns: device.runningRuns ?? [],
           }));
       return [
         {
           value: device.id,
-          label: `${device.online ? '🟢' : '⚪️'} Device · ${device.displayName} (${device.id}) · slots ${typeof device.availableSlots === 'number' ? device.availableSlots : '—'}`,
+          label: `${device.online ? '🟢' : '⚪️'} Device · ${device.displayName} (${device.id}) · running ${device.runningRuns?.length ?? 0}`,
           disabled: !device.online,
         },
         ...runtimes.map((runtime) => ({
           value: `runtime:${runtime.deviceLinkId}:${runtime.agentClientId}`,
-          label: `${runtime.status !== 'offline' ? '🟢' : '⚪️'} Runtime · ${device.displayName} · ${runtime.displayName ?? runtime.agentClientId} · ${runtime.status} · slots ${typeof runtime.availableSlots === 'number' ? runtime.availableSlots : '—'}`,
+          label: `${runtime.status !== 'offline' ? '🟢' : '⚪️'} Runtime · ${device.displayName} · ${runtime.displayName ?? runtime.agentClientId} · ${runtime.status} · running ${runtime.runningRuns?.length ?? 0}`,
           disabled: !device.online || runtime.status === 'offline' || runtime.status === 'draining',
         })),
       ];

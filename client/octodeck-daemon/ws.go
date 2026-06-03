@@ -76,7 +76,7 @@ func dial(ctx context.Context, cfg *Config) (*wsClient, error) {
 	conn.SetReadLimit(1 << 20) // 1 MiB
 
 	c := &wsClient{cfg: cfg, conn: conn}
-	c.pool = newRunnerPool(cfg.MaxConcurrentRuns)
+	c.pool = newRunnerPool(0)
 	c.runner = newRunner(cfg, c.pool, c.send)
 	c.agents = newAgentRuntimeSupervisor(cfg, c.pool, c.send)
 	c.tools = newToolRunner(cfg, c.send)

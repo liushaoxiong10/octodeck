@@ -10,18 +10,27 @@ import (
 )
 
 type ResourceSnapshot struct {
-	CPUCount          int     `json:"cpuCount"`
-	CPUUsedPercent    float64 `json:"cpuUsedPercent,omitempty"`
-	Load1             float64 `json:"load1,omitempty"`
-	Load5             float64 `json:"load5,omitempty"`
-	Load15            float64 `json:"load15,omitempty"`
-	MemoryTotalBytes  uint64  `json:"memoryTotalBytes,omitempty"`
-	MemoryUsedBytes   uint64  `json:"memoryUsedBytes,omitempty"`
-	MemoryUsedPercent float64 `json:"memoryUsedPercent,omitempty"`
-	DiskTotalBytes    uint64  `json:"diskTotalBytes,omitempty"`
-	DiskUsedBytes     uint64  `json:"diskUsedBytes,omitempty"`
-	DiskUsedPercent   float64 `json:"diskUsedPercent,omitempty"`
-	CollectedAt       string  `json:"collectedAt"`
+	CPUCount          int         `json:"cpuCount"`
+	CPUUsedPercent    float64     `json:"cpuUsedPercent,omitempty"`
+	Load1             float64     `json:"load1,omitempty"`
+	Load5             float64     `json:"load5,omitempty"`
+	Load15            float64     `json:"load15,omitempty"`
+	MemoryTotalBytes  uint64      `json:"memoryTotalBytes,omitempty"`
+	MemoryUsedBytes   uint64      `json:"memoryUsedBytes,omitempty"`
+	MemoryUsedPercent float64     `json:"memoryUsedPercent,omitempty"`
+	DiskTotalBytes    uint64      `json:"diskTotalBytes,omitempty"`
+	DiskUsedBytes     uint64      `json:"diskUsedBytes,omitempty"`
+	DiskUsedPercent   float64     `json:"diskUsedPercent,omitempty"`
+	Disks             []DiskUsage `json:"disks,omitempty"`
+	CollectedAt       string      `json:"collectedAt"`
+}
+
+type DiskUsage struct {
+	Filesystem      string  `json:"filesystem,omitempty"`
+	MountPoint      string  `json:"mountPoint"`
+	DiskTotalBytes  uint64  `json:"diskTotalBytes,omitempty"`
+	DiskUsedBytes   uint64  `json:"diskUsedBytes,omitempty"`
+	DiskUsedPercent float64 `json:"diskUsedPercent,omitempty"`
 }
 
 func collectResourceSnapshot() ResourceSnapshot {
@@ -208,9 +217,9 @@ func parseDarwinVMStatUsedBytes(input string, total uint64) (uint64, bool) {
 }
 
 func readDiskUsage() (ResourceSnapshot, bool) {
-	out, err := exec.Command("/bin/df", "-k", "/").Output()
+	out, err := exec.Command("/bin/df", "-k").Output()
 	if err != nil {
-		out, err = exec.Command("df", "-k", "/").Output()
+		out, err = exec.Command("df", "-k").Output()
 	}
 	if err != nil {
 		return ResourceSnapshot{}, false
@@ -219,18 +228,41 @@ func readDiskUsage() (ResourceSnapshot, bool) {
 }
 
 func parseDfOutput(input string) (ResourceSnapshot, bool) {
+	var disks []DiskUsage
 	for _, line := range strings.Split(input, "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
 		if len(fields) < 4 || strings.EqualFold(fields[0], "Filesystem") {
 			continue
 		}
-		offset := 0
-		if len(fields) >= 6 {
-			offset = 1
+		totalIndex := 0
+		filesystem := ""
+		if _, err := strconv.ParseUint(fields[0], 10, 64); err != nil {
+			totalIndex = 1
+			filesystem = fields[0]
 		}
-		totalBlocks, err1 := strconv.ParseUint(fields[offset], 10, 64)
-		usedBlocks, err2 := strconv.ParseUint(fields[offset+1], 10, 64)
-		percentText := strings.TrimSuffix(fields[offset+3], "%")
+		if len(fields) <= totalIndex+3 {
+			continue
+		}
+		percentIndex := -1
+		for i := totalIndex + 3; i < len(fields); i++ {
+			if strings.HasSuffix(fields[i], "%") {
+				percentIndex = i
+				break
+			}
+		}
+		if percentIndex == -1 {
+			continue
+		}
+		mountIndex := percentIndex + 1
+		if len(fields) > percentIndex+3 && strings.HasSuffix(fields[percentIndex+3], "%") {
+			mountIndex = percentIndex + 4
+		}
+		if mountIndex >= len(fields) {
+			continue
+		}
+		totalBlocks, err1 := strconv.ParseUint(fields[totalIndex], 10, 64)
+		usedBlocks, err2 := strconv.ParseUint(fields[totalIndex+1], 10, 64)
+		percentText := strings.TrimSuffix(fields[percentIndex], "%")
 		usedPercent, err3 := strconv.ParseFloat(percentText, 64)
 		if err1 != nil || err2 != nil || err3 != nil {
 			continue
@@ -241,13 +273,30 @@ func parseDfOutput(input string) (ResourceSnapshot, bool) {
 		} else if !strings.Contains(input, "1K-blocks") && !strings.Contains(input, "1024-blocks") {
 			blockSize = 1
 		}
-		return ResourceSnapshot{
+		disks = append(disks, DiskUsage{
+			Filesystem:      filesystem,
+			MountPoint:      strings.Join(fields[mountIndex:], " "),
 			DiskTotalBytes:  totalBlocks * blockSize,
 			DiskUsedBytes:   usedBlocks * blockSize,
 			DiskUsedPercent: clampPercentValue(usedPercent),
-		}, true
+		})
 	}
-	return ResourceSnapshot{}, false
+	if len(disks) == 0 {
+		return ResourceSnapshot{}, false
+	}
+	primary := disks[0]
+	for _, disk := range disks {
+		if disk.MountPoint == "/" {
+			primary = disk
+			break
+		}
+	}
+	return ResourceSnapshot{
+		DiskTotalBytes:  primary.DiskTotalBytes,
+		DiskUsedBytes:   primary.DiskUsedBytes,
+		DiskUsedPercent: primary.DiskUsedPercent,
+		Disks:           disks,
+	}, true
 }
 
 func percent(used uint64, total uint64) float64 {

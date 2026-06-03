@@ -50,6 +50,9 @@ func TestParseDfOutputDarwinBlocks(t *testing.T) {
 	if disk.DiskUsedPercent != 49 {
 		t.Fatalf("unexpected disk percent: %#v", disk)
 	}
+	if len(disk.Disks) != 1 || disk.Disks[0].MountPoint != "/" || disk.Disks[0].Filesystem != "/dev/disk3s1s1" {
+		t.Fatalf("unexpected disk list: %#v", disk)
+	}
 }
 
 func TestParseLinuxMemInfo(t *testing.T) {
@@ -90,5 +93,25 @@ func TestParseDfOutputClampsPercent(t *testing.T) {
 	}
 	if disk.DiskUsedPercent != 100 {
 		t.Fatalf("expected percent to be clamped for protocol safety: %#v", disk)
+	}
+}
+
+func TestParseDfOutputAllDisks(t *testing.T) {
+	disk, ok := parseDfOutput(`Filesystem     1K-blocks    Used Available Use% Mounted on
+/dev/root      104857600 41943040  62914560  40% /
+/dev/data      209715200 52428800 157286400  25% /data
+tmpfs            1024000        0   1024000   0% /run
+`)
+	if !ok {
+		t.Fatal("expected df output to parse")
+	}
+	if len(disk.Disks) != 3 {
+		t.Fatalf("expected all disks, got %#v", disk.Disks)
+	}
+	if disk.DiskTotalBytes != 104857600*1024 || disk.DiskUsedBytes != 41943040*1024 {
+		t.Fatalf("expected root disk to remain primary: %#v", disk)
+	}
+	if disk.Disks[1].MountPoint != "/data" || disk.Disks[1].Filesystem != "/dev/data" {
+		t.Fatalf("unexpected second disk: %#v", disk.Disks[1])
 	}
 }

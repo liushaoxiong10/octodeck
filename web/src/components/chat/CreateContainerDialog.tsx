@@ -307,7 +307,7 @@ export function CreateContainerDialog({
                         <option value="" disabled>请选择 Device</option>
                         {deviceTargetOptions.map((device) => (
                           <option key={device.id} value={device.id} disabled={!device.online}>
-                            {device.online ? '🟢' : '⚪️'} {device.displayName} ({device.id}) · slots {typeof device.availableSlots === 'number' ? device.availableSlots : '—'}{device.online ? '' : ' · 离线'}
+                            {device.online ? '🟢' : '⚪️'} {device.displayName} ({device.id}) · running {device.runningRuns?.length ?? 0}{device.online ? '' : ' · 离线'}
                           </option>
                         ))}
                       </select>

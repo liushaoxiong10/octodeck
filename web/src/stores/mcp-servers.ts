@@ -7,6 +7,7 @@ export interface McpServer {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  device_link_id?: string;
   // http/sse type
   type?: 'http' | 'sse';
   url?: string;
@@ -37,6 +38,7 @@ interface McpServersState {
     command?: string;
     args?: string[];
     env?: Record<string, string>;
+    device_link_id?: string;
     type?: 'http' | 'sse';
     url?: string;
     headers?: Record<string, string>;

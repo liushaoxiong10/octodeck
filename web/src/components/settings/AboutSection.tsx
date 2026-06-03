@@ -30,7 +30,7 @@ export function AboutSection() {
         </div>
         <div className="flex items-center gap-3">
           <Code2 className="w-4 h-4 text-muted-foreground shrink-0" />
-          <span className="text-sm text-foreground">作者：riba2534</span>
+          <span className="text-sm text-foreground">作者：liushaoxiong10 / riba2534</span>
         </div>
         <div className="flex items-center gap-3">
           <Bug className="w-4 h-4 text-muted-foreground shrink-0" />
@@ -71,6 +71,12 @@ export function AboutSection() {
             </a>
             <p className="mt-1 leading-relaxed">
               我接触到的第一个类似项目。它是 Claude Code 的网页 Web 版，让你可以在任何地方通过浏览器使用 Claude Code，不再受限于本地终端。这个理念深深吸引了我，但遗憾的是项目维护更新不够及时，许多问题长期得不到修复。
+            </p>
+          </div>
+          <div>
+            <span className="text-primary font-medium">HappyClaw</span>
+            <p className="mt-1 leading-relaxed">
+              它进一步证明了个人 Agent 产品可以同时兼顾易用性、远程调度与持续运行体验，也启发了 OctoDeck 在工作区、设备运行时和任务编排上的产品化方向。
             </p>
           </div>
           <div>

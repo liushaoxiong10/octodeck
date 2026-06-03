@@ -24,6 +24,7 @@ var repoLocks sync.Map
 
 const agentTeamMCPConfigPlaceholder = "__OCTODECK_AGENT_TEAM_MCP_CONFIG__"
 const agentTeamMCPProjectConfigMarker = "__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__"
+const userMCPServersEnv = "OCTODECK_USER_MCP_SERVERS_JSON"
 const deviceWorkspaceURIPrefix = "octodeck-workspace://"
 
 // runner spawns a child process per run.request and pumps its stdout/stderr
@@ -86,7 +87,7 @@ func (r *runner) spawn(parent context.Context, req *RunRequestFrame) {
 		r.sendErr(req.RunID, fmt.Errorf("cwd outside allowed roots: %s", req.Cwd))
 		return
 	}
-	argv, err := prepareAgentTeamMCPConfig(r.cfg, req.Argv, req.Cwd)
+	argv, err := prepareAgentTeamMCPConfig(r.cfg, req.Argv, req.Cwd, req.Env)
 	if err != nil {
 		r.sendErr(req.RunID, fmt.Errorf("agent team mcp config: %w", err))
 		return
@@ -382,7 +383,7 @@ func syncRepoDefaultBranch(ctx context.Context, repoDir string) (string, error) 
 	return "HEAD", nil
 }
 
-func prepareAgentTeamMCPConfig(cfg *Config, argv []string, cwd string) ([]string, error) {
+func prepareAgentTeamMCPConfig(cfg *Config, argv []string, cwd string, env ...map[string]string) ([]string, error) {
 	hasPlaceholder := false
 	hasProjectConfigMarker := false
 	for _, arg := range argv {
@@ -398,14 +399,14 @@ func prepareAgentTeamMCPConfig(cfg *Config, argv []string, cwd string) ([]string
 	}
 	out := argv
 	if hasPlaceholder {
-		path, err := writeAgentTeamMCPConfig(cfg)
+		path, err := writeAgentTeamMCPConfig(cfg, env...)
 		if err != nil {
 			return nil, err
 		}
 		out = replaceArgvPlaceholder(out, agentTeamMCPConfigPlaceholder, path)
 	}
 	if hasProjectConfigMarker {
-		if err := writeAgentTeamMCPProjectConfig(cfg, cwd); err != nil {
+		if err := writeAgentTeamMCPProjectConfig(cfg, cwd, env...); err != nil {
 			return nil, err
 		}
 		filtered := make([]string, 0, len(out))
@@ -420,13 +421,13 @@ func prepareAgentTeamMCPConfig(cfg *Config, argv []string, cwd string) ([]string
 	return out, nil
 }
 
-func writeAgentTeamMCPConfig(cfg *Config) (string, error) {
+func writeAgentTeamMCPConfig(cfg *Config, env ...map[string]string) (string, error) {
 	dir := daemonDir(cfg)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, "agent-team-mcp.json")
-	data, err := buildAgentTeamMCPConfigJSON(cfg)
+	data, err := buildAgentTeamMCPConfigJSON(cfg, env...)
 	if err != nil {
 		return "", err
 	}
@@ -436,7 +437,7 @@ func writeAgentTeamMCPConfig(cfg *Config) (string, error) {
 	return path, nil
 }
 
-func writeAgentTeamMCPProjectConfig(cfg *Config, cwd string) error {
+func writeAgentTeamMCPProjectConfig(cfg *Config, cwd string, env ...map[string]string) error {
 	if strings.TrimSpace(cwd) == "" {
 		return errors.New("cwd is required")
 	}
@@ -461,6 +462,9 @@ func writeAgentTeamMCPProjectConfig(cfg *Config, cwd string) error {
 	if !ok {
 		mcpServers = map[string]any{}
 	}
+	for name, userServer := range loadUserMCPServersFromEnv(env...) {
+		mcpServers[name] = userServer
+	}
 	mcpServers["octodeck_agent_team"] = server
 	payload["mcpServers"] = mcpServers
 	data, err := json.MarshalIndent(payload, "", "  ")
@@ -470,17 +474,192 @@ func writeAgentTeamMCPProjectConfig(cfg *Config, cwd string) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-func buildAgentTeamMCPConfigJSON(cfg *Config) ([]byte, error) {
+func writeCodexMCPConfig(cfg *Config, req *AgentRunRequestFrame, cwd string) error {
+	folder := groupFolderFromRunContext(req.Context)
+	if folder == "" && req.Workspace != nil {
+		folder = req.Workspace.Folder
+	}
+	if folder == "" {
+		folder = filepath.Base(filepath.Clean(cwd))
+	}
+	codexHome := filepath.Join(sessionDir(cfg), safeGroupFolder(folder), "codex")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		return err
+	}
+	server, err := buildAgentTeamMCPServerConfig(cfg)
+	if err != nil {
+		return err
+	}
+	command, _ := server["command"].(string)
+	args, _ := server["args"].([]string)
+	env, _ := server["env"].(map[string]string)
+	if len(args) == 0 {
+		if raw, ok := server["args"].([]any); ok {
+			for _, item := range raw {
+				if s, ok := item.(string); ok {
+					args = append(args, s)
+				}
+			}
+		}
+	}
+	if env == nil {
+		env = map[string]string{"OCTODECK_AGENT_TEAM_MCP": "1"}
+	}
+	blocks := []string{}
+	for name, userServer := range loadUserMCPServersFromEnv(req.Env) {
+		if block, ok := buildCodexMCPServerBlockFromAny(name, userServer); ok {
+			blocks = append(blocks, block)
+		}
+	}
+	blocks = append(blocks, buildCodexMCPServerBlock("octodeck_agent_team", command, args, env))
+	path := filepath.Join(codexHome, "config.toml")
+	existing := ""
+	if data, err := os.ReadFile(path); err == nil {
+		existing = string(data)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	next := existing
+	for _, block := range blocks {
+		name := managedMCPBlockName(block)
+		if name == "" {
+			continue
+		}
+		next = replaceManagedBlock(next, name, block)
+	}
+	return os.WriteFile(path, []byte(next), 0o600)
+}
+
+func buildCodexMCPServerBlock(name string, command string, args []string, env map[string]string) string {
+	var b strings.Builder
+	b.WriteString("[mcp_servers.")
+	b.WriteString(name)
+	b.WriteString("]\n")
+	b.WriteString("command = ")
+	b.WriteString(tomlString(command))
+	b.WriteByte('\n')
+	b.WriteString("args = ")
+	b.WriteString(tomlStringArray(args))
+	b.WriteByte('\n')
+	if len(env) > 0 {
+		b.WriteString("env = {")
+		i := 0
+		for k, v := range env {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(k)
+			b.WriteString(" = ")
+			b.WriteString(tomlString(v))
+			i++
+		}
+		b.WriteString("}\n")
+	}
+	b.WriteString("startup_timeout_sec = 30\n")
+	return b.String()
+}
+
+func managedMCPBlockName(block string) string {
+	line, _, _ := strings.Cut(block, "\n")
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "[mcp_servers.") || !strings.HasSuffix(line, "]") {
+		return ""
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(line, "[mcp_servers."), "]")
+}
+
+func buildCodexMCPServerBlockFromAny(name string, server any) (string, bool) {
+	m, ok := server.(map[string]any)
+	if !ok || m["type"] == "http" || m["type"] == "sse" {
+		return "", false
+	}
+	command, _ := m["command"].(string)
+	if strings.TrimSpace(command) == "" {
+		return "", false
+	}
+	args := []string{}
+	if rawArgs, ok := m["args"].([]any); ok {
+		for _, item := range rawArgs {
+			if s, ok := item.(string); ok {
+				args = append(args, s)
+			}
+		}
+	}
+	env := map[string]string{}
+	if rawEnv, ok := m["env"].(map[string]any); ok {
+		for k, v := range rawEnv {
+			if s, ok := v.(string); ok {
+				env[k] = s
+			}
+		}
+	}
+	return buildCodexMCPServerBlock(name, command, args, env), true
+}
+
+func replaceManagedBlock(existing, name, block string) string {
+	startMarker := "# BEGIN OCTODECK MANAGED MCP " + name
+	endMarker := "# END OCTODECK MANAGED MCP " + name
+	managed := startMarker + "\n" + strings.TrimSpace(block) + "\n" + endMarker + "\n"
+	start := strings.Index(existing, startMarker)
+	if start >= 0 {
+		end := strings.Index(existing[start:], endMarker)
+		if end >= 0 {
+			end += start + len(endMarker)
+			for end < len(existing) && (existing[end] == '\n' || existing[end] == '\r') {
+				end++
+			}
+			return strings.TrimRight(existing[:start], "\r\n") + "\n\n" + managed + strings.TrimLeft(existing[end:], "\r\n")
+		}
+	}
+	if strings.TrimSpace(existing) == "" {
+		return managed
+	}
+	return strings.TrimRight(existing, "\r\n") + "\n\n" + managed
+}
+
+func tomlString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+func tomlStringArray(items []string) string {
+	b, _ := json.Marshal(items)
+	return string(b)
+}
+
+func buildAgentTeamMCPConfigJSON(cfg *Config, env ...map[string]string) ([]byte, error) {
 	server, err := buildAgentTeamMCPServerConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
+	mcpServers := map[string]any{}
+	for name, userServer := range loadUserMCPServersFromEnv(env...) {
+		mcpServers[name] = userServer
+	}
+	mcpServers["octodeck_agent_team"] = server
 	payload := map[string]any{
-		"mcpServers": map[string]any{
-			"octodeck_agent_team": server,
-		},
+		"mcpServers": mcpServers,
 	}
 	return json.MarshalIndent(payload, "", "  ")
+}
+
+func loadUserMCPServersFromEnv(env ...map[string]string) map[string]any {
+	rawValue := ""
+	if len(env) > 0 && env[0] != nil {
+		rawValue = env[0][userMCPServersEnv]
+	}
+	if rawValue == "" {
+		rawValue = os.Getenv(userMCPServersEnv)
+	}
+	raw := strings.TrimSpace(rawValue)
+	if raw == "" {
+		return nil
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return nil
+	}
+	return parsed
 }
 
 func buildAgentTeamMCPServerConfig(cfg *Config) (map[string]any, error) {

@@ -41,7 +41,6 @@ export function buildDaemonInstallScript(
         '/usr/local/bin/claude',
         '/opt/homebrew/bin/claude',
       ],
-      maxConcurrentRuns: 4,
       version: DAEMON_VERSION,
     },
     null,

@@ -381,6 +381,70 @@ func TestPrepareAgentTeamMCPConfigWritesTraeProjectConfigAndRemovesMarker(t *tes
 	}
 }
 
+func TestPrepareAgentRuntimeMCPConfigWritesTraeProjectConfig(t *testing.T) {
+	root := t.TempDir()
+	legacyConfigPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(legacyConfigPath, []byte(`{"server":"https://octodeck.example","token":"link-token","linkId":"cl_123"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OCTODECK_DAEMON_CONFIG", legacyConfigPath)
+	originalArgs := os.Args
+	os.Args = []string{"octodeck-daemon"}
+	t.Cleanup(func() { os.Args = originalArgs })
+
+	cwd := t.TempDir()
+	cfg := &Config{Server: "https://octodeck.example", Token: "link-token", LinkID: "cl_123", WorkspaceDir: filepath.Join(root, "workspace")}
+	req := &AgentRunRequestFrame{AgentID: "traecli", Context: map[string]any{"group": map[string]any{"folder": "demo"}}}
+	if err := prepareAgentRuntimeMCPConfig(cfg, req, cwd); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(cwd, ".trae", "mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "octodeck_agent_team") {
+		t.Fatalf("missing octodeck MCP server in Trae config: %s", string(data))
+	}
+}
+
+func TestPrepareAgentRuntimeMCPConfigWritesClaudeAndCodexConfig(t *testing.T) {
+	root := t.TempDir()
+	legacyConfigPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(legacyConfigPath, []byte(`{"server":"https://octodeck.example","token":"link-token","linkId":"cl_123"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OCTODECK_DAEMON_CONFIG", legacyConfigPath)
+	originalArgs := os.Args
+	os.Args = []string{"octodeck-daemon"}
+	t.Cleanup(func() { os.Args = originalArgs })
+
+	cwd := t.TempDir()
+	cfg := &Config{Server: "https://octodeck.example", Token: "link-token", LinkID: "cl_123", WorkspaceDir: filepath.Join(root, "workspace"), SessionDir: filepath.Join(root, "session")}
+	claudeReq := &AgentRunRequestFrame{AgentID: "claude-code", Context: map[string]any{"group": map[string]any{"folder": "demo"}}}
+	if err := prepareAgentRuntimeMCPConfig(cfg, claudeReq, cwd); err != nil {
+		t.Fatal(err)
+	}
+	claudeData, err := os.ReadFile(filepath.Join(root, "daemon", "agent-team-mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(claudeData), "octodeck_agent_team") {
+		t.Fatalf("missing octodeck MCP server in Claude config: %s", string(claudeData))
+	}
+
+	codexReq := &AgentRunRequestFrame{AgentID: "codex", Context: map[string]any{"group": map[string]any{"folder": "demo"}}}
+	if err := prepareAgentRuntimeMCPConfig(cfg, codexReq, cwd); err != nil {
+		t.Fatal(err)
+	}
+	codexData, err := os.ReadFile(filepath.Join(root, "session", "demo", "codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(codexData), "[mcp_servers.octodeck_agent_team]") || !strings.Contains(string(codexData), "mcp-agent-team") {
+		t.Fatalf("missing octodeck MCP server in Codex config: %s", string(codexData))
+	}
+}
+
 func TestReadAndWriteMCPMessageSupportsNDJSON(t *testing.T) {
 	input := `{"jsonrpc":"2.0","id":1,"method":"initialize"}` + "\n"
 	body, framed, err := readMCPMessage(bufio.NewReader(strings.NewReader(input)))

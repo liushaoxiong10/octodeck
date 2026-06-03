@@ -15,7 +15,6 @@ import { GroupsPage } from './GroupsPage';
 import { MemoryPage } from './MemoryPage';
 import { McpServersPage } from './McpServersPage';
 import { PluginsPage } from './PluginsPage';
-import { AgentDefinitionsPage } from './AgentDefinitionsPage';
 import { UsersPage } from './UsersPage';
 import { BindingsSection } from '../components/settings/BindingsSection';
 import { UsagePage } from './UsagePage';
@@ -23,9 +22,9 @@ import { MonitorPage } from './MonitorPage';
 import { Card, CardContent } from '@/components/ui/card';
 import type { SettingsTab } from '../components/settings/types';
 
-const VALID_TABS: SettingsTab[] = ['registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'about', 'bindings', 'usage', 'monitor'];
+const VALID_TABS: SettingsTab[] = ['registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'mcp-servers', 'plugins', 'users', 'about', 'bindings', 'usage', 'monitor'];
 const SYSTEM_TABS: SettingsTab[] = ['registration', 'appearance', 'system'];
-const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'mcp-servers', 'plugins', 'agent-definitions', 'users', 'bindings', 'usage', 'monitor'];
+const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'mcp-servers', 'plugins', 'users', 'bindings', 'usage', 'monitor'];
 
 export function SettingsPage() {
   const { user: currentUser } = useAuthStore();
@@ -75,7 +74,6 @@ export function SettingsPage() {
     tabs.push({ key: 'groups', label: '会话' });
     tabs.push({ key: 'memory', label: '记忆' });
     tabs.push({ key: 'mcp-servers', label: 'MCP' });
-    tabs.push({ key: 'agent-definitions', label: 'Agent' });
     tabs.push({ key: 'bindings', label: 'IM 绑定' });
     tabs.push({ key: 'usage', label: '用量' });
     if (canManageSystemConfig) {
@@ -99,7 +97,7 @@ export function SettingsPage() {
     }
   }, [activeTab]);
 
-  const sectionTitle: Record<SettingsTab, string> = {
+  const sectionTitle: Partial<Record<SettingsTab, string>> = {
     registration: '注册管理',
     appearance: '全局外观',
     system: '系统参数',
@@ -110,7 +108,6 @@ export function SettingsPage() {
     memory: '记忆管理',
     'mcp-servers': 'MCP 服务器',
     plugins: '插件 (Plugins)',
-    'agent-definitions': 'Agent 管理',
     users: '用户管理',
     about: '关于',
     bindings: 'IM 绑定',
@@ -131,7 +128,7 @@ export function SettingsPage() {
         >
           <Menu className="w-5 h-5 text-muted-foreground" />
         </button>
-        <span className="ml-3 text-sm font-semibold text-foreground truncate">{sectionTitle[activeTab]}</span>
+        <span className="ml-3 text-sm font-semibold text-foreground truncate">{sectionTitle[activeTab] ?? '设置'}</span>
       </div>
 
       {/* Mobile horizontal tab bar */}
@@ -180,7 +177,6 @@ export function SettingsPage() {
             {activeTab === 'memory' && <MemoryPage />}
             {activeTab === 'mcp-servers' && <McpServersPage />}
             {activeTab === 'plugins' && <PluginsPage />}
-            {activeTab === 'agent-definitions' && <AgentDefinitionsPage />}
             {activeTab === 'users' && <UsersPage />}
             {activeTab === 'bindings' && <BindingsSection />}
             {activeTab === 'usage' && <UsagePage />}
@@ -190,7 +186,7 @@ export function SettingsPage() {
           <div className="p-4 lg:p-8">
             <div className="max-w-3xl mx-auto space-y-6">
               <div>
-                <h1 className="text-2xl font-bold text-foreground">{sectionTitle[activeTab]}</h1>
+                <h1 className="text-2xl font-bold text-foreground">{sectionTitle[activeTab] ?? '设置'}</h1>
               </div>
 
               {mustChangePassword && (

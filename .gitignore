@@ -50,6 +50,7 @@ bun.lockb
 .coco/
 .agent/
 .agents/
+restart.sh
 skills-lock.json
 --connect
 log/

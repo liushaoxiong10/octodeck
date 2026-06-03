@@ -25,6 +25,13 @@ export interface AgentLink {
     diskTotalBytes?: number;
     diskUsedBytes?: number;
     diskUsedPercent?: number;
+    disks?: Array<{
+      filesystem?: string;
+      mountPoint: string;
+      diskTotalBytes?: number;
+      diskUsedBytes?: number;
+      diskUsedPercent?: number;
+    }>;
     collectedAt?: string;
   } | null;
   os: string | null;

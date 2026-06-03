@@ -163,9 +163,8 @@ export function handleFrame(
         meta.resources = frame.resources;
         meta.status = frame.status ?? meta.status;
         meta.runningRuns = frame.runningRuns ?? meta.runningRuns ?? [];
-        meta.maxConcurrentRuns =
-          frame.maxConcurrentRuns ?? meta.maxConcurrentRuns;
-        meta.availableSlots = frame.availableSlots ?? meta.availableSlots;
+        meta.maxConcurrentRuns = frame.maxConcurrentRuns;
+        meta.availableSlots = frame.availableSlots;
         meta.runtimes = frame.runtimes ?? meta.runtimes;
         sessionMeta.set(session.linkId, meta);
       }
@@ -393,7 +392,9 @@ export function listOnlineRuntimesByProvider(
       }
     }
   }
-  return out.sort((a, b) => (b.availableSlots ?? 0) - (a.availableSlots ?? 0));
+  return out.sort(
+    (a, b) => (a.runningRuns?.length ?? 0) - (b.runningRuns?.length ?? 0),
+  );
 }
 
 export function listOnlineByUser(userId: string): OnlineLinkInfo[] {

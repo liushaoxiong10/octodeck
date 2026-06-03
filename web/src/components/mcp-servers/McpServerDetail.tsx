@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Download, Eye, EyeOff, Pencil, Save, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -6,6 +6,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import type { McpServer } from '../../stores/mcp-servers';
 import { useMcpServersStore } from '../../stores/mcp-servers';
+import { useAgentLinksStore } from '../../stores/agentLinks';
 
 interface McpServerDetailProps {
   server: McpServer | null;
@@ -15,6 +16,7 @@ interface McpServerDetailProps {
 export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
   const updateServer = useMcpServersStore((s) => s.updateServer);
   const deleteServer = useMcpServersStore((s) => s.deleteServer);
+  const { links, load: loadDevices } = useAgentLinksStore();
 
   const [deleting, setDeleting] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -22,12 +24,23 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
 
   // Edit form state
   const [editCommand, setEditCommand] = useState('');
+  const [editDeviceLinkId, setEditDeviceLinkId] = useState('');
   const [editArgs, setEditArgs] = useState<string[]>([]);
   const [editEnv, setEditEnv] = useState<Array<{ key: string; value: string }>>([]);
   const [editUrl, setEditUrl] = useState('');
   const [editHeaders, setEditHeaders] = useState<Array<{ key: string; value: string }>>([]);
   const [editDescription, setEditDescription] = useState('');
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    loadDevices();
+  }, [loadDevices]);
+
+  const deviceOptions = useMemo(() => links.filter((link) => !link.builtin), [links]);
+  const deviceName = useMemo(() => {
+    const found = links.find((link) => link.id === server?.device_link_id);
+    return found ? `${found.displayName || found.id}${found.online ? ' · 在线' : ' · 离线'}` : server?.device_link_id;
+  }, [links, server?.device_link_id]);
 
   if (!server) {
     return (
@@ -43,6 +56,7 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
 
   const startEdit = () => {
     setEditCommand(server.command || '');
+    setEditDeviceLinkId(server.device_link_id || '');
     setEditArgs(server.args ? [...server.args] : []);
     setEditEnv(
       server.env
@@ -85,6 +99,7 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
         }
         await updateServer(server.id, {
           command: editCommand,
+          device_link_id: editDeviceLinkId,
           args: editArgs.length > 0 ? editArgs : undefined,
           env: Object.keys(envObj).length > 0 ? envObj : undefined,
           description: editDescription || undefined,
@@ -235,6 +250,23 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
             <>
               {/* Command */}
               <div>
+                <Label className="mb-1">执行设备</Label>
+                <select
+                  value={editDeviceLinkId}
+                  onChange={(e) => setEditDeviceLinkId(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                >
+                  <option value="">选择执行设备</option>
+                  {deviceOptions.map((device) => (
+                    <option key={device.id} value={device.id}>
+                      {device.displayName || device.id}{device.online ? ' · 在线' : ' · 离线'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Command */}
+              <div>
                 <Label className="mb-1">命令</Label>
                 <Input
                   value={editCommand}
@@ -338,7 +370,7 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
 
           {/* Actions */}
           <div className="flex items-center gap-3 pt-2">
-            <Button onClick={saveEdit} disabled={saving || (isHttpType ? !editUrl.trim() : !editCommand.trim())}>
+            <Button onClick={saveEdit} disabled={saving || (isHttpType ? !editUrl.trim() : !editCommand.trim() || !editDeviceLinkId)}>
               <Save size={16} />
               {saving ? '保存中...' : '保存'}
             </Button>
@@ -399,6 +431,14 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
               </>
             ) : (
               <>
+                {/* Device */}
+                <div>
+                  <span className="text-sm text-muted-foreground">执行设备</span>
+                  <p className="font-mono text-sm text-foreground mt-1 bg-muted rounded px-3 py-2 break-all">
+                    {deviceName || '未绑定'}
+                  </p>
+                </div>
+
                 {/* Command */}
                 <div>
                   <span className="text-sm text-muted-foreground">命令</span>

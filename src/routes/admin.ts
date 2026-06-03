@@ -29,6 +29,7 @@ import {
   getWebDeps,
 } from '../web-context.js';
 import { imManager } from '../im-manager.js';
+import { deleteDataObjectPath } from '../data-object-store.js';
 import {
   listUsers,
   getUserById,
@@ -499,6 +500,7 @@ adminRoutes.delete('/users/:id', authMiddleware, usersManageMiddleware, (c) => {
         .filter((f) => f.startsWith(`${id}-`));
       for (const file of files) {
         fs.unlinkSync(path.join(avatarsDir, file));
+        deleteDataObjectPath(path.join(avatarsDir, file));
       }
     }
   } catch (e) {

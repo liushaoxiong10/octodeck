@@ -63,12 +63,16 @@ COPY container/agent-runner/ ./container/agent-runner/
 # Build all projects (backend + web + agent-runner)
 RUN npm run build:all
 
+# -----------------------------------------------------------------------------
+# Stage 2b: Go daemon builder - Compile octodeck-daemon with go.mod version
+# -----------------------------------------------------------------------------
+FROM golang:1.21-bookworm AS daemon-builder
+
+WORKDIR /app/client/octodeck-daemon
+
 # Build Go daemon
-COPY client/octodeck-daemon/ ./client/octodeck-daemon/
-RUN apt-get update && apt-get install -y --no-install-recommends golang-go && \
-    cd client/octodeck-daemon && GOPROXY=https://goproxy.cn,direct go build -o octodeck-daemon . && \
-    apt-get remove -y golang-go && apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/* /root/go
+COPY client/octodeck-daemon/ ./
+RUN GOPROXY=https://goproxy.cn,direct go build -o octodeck-daemon .
 
 # -----------------------------------------------------------------------------
 # Stage 3: Production - Minimal runtime image
@@ -113,7 +117,7 @@ COPY --from=builder /app/container/agent-runner/package.json ./container/agent-r
 COPY --from=builder /app/config ./config
 
 # Copy Go daemon binary
-COPY --from=builder /app/client/octodeck-daemon/octodeck-daemon ./client/octodeck-daemon/octodeck-daemon
+COPY --from=daemon-builder /app/client/octodeck-daemon/octodeck-daemon ./client/octodeck-daemon/octodeck-daemon
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \

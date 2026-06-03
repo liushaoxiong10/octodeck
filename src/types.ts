@@ -146,6 +146,13 @@ export interface AgentLink {
     diskTotalBytes?: number;
     diskUsedBytes?: number;
     diskUsedPercent?: number;
+    disks?: Array<{
+      filesystem?: string;
+      mountPoint: string;
+      diskTotalBytes?: number;
+      diskUsedBytes?: number;
+      diskUsedPercent?: number;
+    }>;
     collectedAt?: string;
   };
   os?: string;
@@ -247,6 +254,74 @@ export interface TaskRunLog {
   status: 'running' | 'success' | 'error';
   result: string | null;
   error: string | null;
+}
+
+export type IssueStatus =
+  | 'todo'
+  | 'in_progress'
+  | 'review'
+  | 'done'
+  | 'canceled';
+
+export type IssuePriority = 'low' | 'medium' | 'high' | 'urgent';
+
+export interface WorkspaceIssue {
+  id: string;
+  workspace_jid: string;
+  workspace_folder: string;
+  title: string;
+  description: string;
+  status: IssueStatus;
+  priority: IssuePriority;
+  assignee_user_id?: string | null;
+  due_date?: string | null;
+  project_repo_id?: string | null;
+  project_git_url?: string | null;
+  project_device_path?: string | null;
+  project_device_link_id?: string | null;
+  agent_link_id?: string | null;
+  agent_client_id?: string | null;
+  execution_node?: string | null;
+  backend?: string | null;
+  selected_skills?: string[] | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  closed_at?: string | null;
+  last_run_id?: string | null;
+  last_run_status?: string | null;
+  last_run_at?: string | null;
+}
+
+export interface IssueAgentRun {
+  id: string;
+  issue_id: string;
+  workspace_jid: string;
+  workspace_folder: string;
+  agent_link_id?: string | null;
+  agent_client_id?: string | null;
+  execution_node?: string | null;
+  backend?: string | null;
+  selected_skills?: string[] | null;
+  status: 'queued' | 'running' | 'success' | 'error' | 'canceled';
+  result?: string | null;
+  error?: string | null;
+  session_id?: string | null;
+  created_by: string;
+  created_at: string;
+  run_started_at?: string | null;
+  run_completed_at?: string | null;
+}
+
+export interface IssueAttachment {
+  id: string;
+  issue_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  data_url: string;
+  created_by: string;
+  created_at: string;
 }
 
 // --- Auth types ---

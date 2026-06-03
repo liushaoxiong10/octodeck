@@ -8757,6 +8757,17 @@ async function main(): Promise<void> {
   await initDatabase();
   logger.info('Database initialized');
 
+  try {
+    const { migrateDataDirectoryToDatabase } = await import('./db.js');
+    const migrated = migrateDataDirectoryToDatabase();
+    logger.info(
+      migrated,
+      'Imported non-database data directory objects into database',
+    );
+  } catch (err) {
+    logger.warn({ err }, 'Failed to import data directory objects into database');
+  }
+
   // Load custom backends from disk and register into the backend registry
   try {
     loadCustomBackendsFromDisk();

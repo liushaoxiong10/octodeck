@@ -21,8 +21,9 @@ type runEntry struct {
 
 // runnerPool keeps track of currently running children.
 type runnerPool struct {
-	mu      sync.Mutex
-	runs    map[string]*runEntry // runId → entry
+	mu   sync.Mutex
+	runs map[string]*runEntry // runId → entry
+	// maxRuns <= 0 means unlimited concurrent runs.
 	maxRuns int
 }
 
@@ -37,7 +38,7 @@ func (p *runnerPool) reserve(runID string) bool {
 	if _, exists := p.runs[runID]; exists {
 		return false
 	}
-	if len(p.runs) >= p.maxRuns {
+	if p.maxRuns > 0 && len(p.runs) >= p.maxRuns {
 		return false
 	}
 	now := time.Now()
@@ -148,6 +149,9 @@ func (p *runnerPool) snapshot() []RunningRunInfo {
 func (p *runnerPool) availableSlots() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.maxRuns <= 0 {
+		return 0
+	}
 	available := p.maxRuns - len(p.runs)
 	if available < 0 {
 		return 0

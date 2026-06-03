@@ -7,6 +7,14 @@
  */
 import { z } from 'zod';
 
+export const DiskUsageSchema = z.object({
+  filesystem: z.string().max(256).optional(),
+  mountPoint: z.string().max(4096),
+  diskTotalBytes: z.number().nonnegative().optional(),
+  diskUsedBytes: z.number().nonnegative().optional(),
+  diskUsedPercent: z.number().min(0).max(100).optional(),
+});
+
 export const ResourceSnapshotSchema = z.object({
   cpuCount: z.number().int().nonnegative().optional(),
   cpuUsedPercent: z.number().min(0).max(100).optional(),
@@ -19,6 +27,7 @@ export const ResourceSnapshotSchema = z.object({
   diskTotalBytes: z.number().nonnegative().optional(),
   diskUsedBytes: z.number().nonnegative().optional(),
   diskUsedPercent: z.number().min(0).max(100).optional(),
+  disks: z.array(DiskUsageSchema).max(256).optional(),
   collectedAt: z.string().max(64).optional(),
 });
 export type ResourceSnapshot = z.infer<typeof ResourceSnapshotSchema>;

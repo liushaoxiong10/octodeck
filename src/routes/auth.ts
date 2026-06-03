@@ -10,6 +10,11 @@ import { authMiddleware } from '../middleware/auth.js';
 import { getClientIp } from '../utils.js';
 import { DATA_DIR } from '../config.js';
 import {
+  deleteDataObjectPath,
+  readDataObjectBuffer,
+  writeDataObjectBufferSync,
+} from '../data-object-store.js';
+import {
   LoginSchema,
   RegisterSchema,
   ProfileUpdateSchema,
@@ -791,6 +796,7 @@ authRoutes.post('/avatar', authMiddleware, async (c) => {
       .filter((f) => f.startsWith(`${user.id}-`));
     for (const f of existing) {
       fs.unlinkSync(path.join(AVATARS_DIR, f));
+      deleteDataObjectPath(path.join(AVATARS_DIR, f));
     }
   } catch {
     /* ignore */
@@ -799,6 +805,7 @@ authRoutes.post('/avatar', authMiddleware, async (c) => {
   const filename = `${user.id}-${crypto.randomBytes(4).toString('hex')}${ext}`;
   const filePath = path.join(AVATARS_DIR, filename);
   const buffer = Buffer.from(await file.arrayBuffer());
+  writeDataObjectBufferSync(filePath, buffer, file.type);
   const tmpPath = filePath + '.tmp';
   fs.writeFileSync(tmpPath, buffer);
   fs.renameSync(tmpPath, filePath);
@@ -824,10 +831,6 @@ authRoutes.get('/avatars/:filename', async (c) => {
   }
 
   const filePath = path.join(AVATARS_DIR, filename);
-  if (!fs.existsSync(filePath)) {
-    return c.json({ error: 'Avatar not found' }, 404);
-  }
-
   const ext = path.extname(filename).toLowerCase();
   const mimeTypes: Record<string, string> = {
     '.jpg': 'image/jpeg',
@@ -837,7 +840,14 @@ authRoutes.get('/avatars/:filename', async (c) => {
     '.webp': 'image/webp',
   };
   const contentType = mimeTypes[ext] || 'application/octet-stream';
-  const data = await readFile(filePath);
+  let data = readDataObjectBuffer(filePath);
+  if (!data && fs.existsSync(filePath)) {
+    data = await readFile(filePath);
+    writeDataObjectBufferSync(filePath, data, contentType);
+  }
+  if (!data) {
+    return c.json({ error: 'Avatar not found' }, 404);
+  }
 
   return new Response(data, {
     status: 200,
