@@ -31,6 +31,8 @@ interface RemoteBridgeResponse {
   durationMs?: number;
 }
 
+const REMOTE_TOOL_FETCH_GRACE_MS = 5_000;
+
 function remoteToolTimeoutMs(defaultTimeoutMs: number, input: unknown): number {
   if (!input || typeof input !== 'object') return defaultTimeoutMs;
   const timeout = (input as { timeout_ms?: unknown }).timeout_ms;
@@ -56,22 +58,49 @@ export function createRemoteMcpTools(opts: RemoteMcpToolOptions): SdkMcpToolDefi
   const fetcher = opts.fetchImpl ?? fetch;
   const callRemote = async (toolName: string, input: unknown) => {
     const url = new URL('/api/agent-link/tool', opts.serverBaseUrl).toString();
-    const res = await fetcher(url, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${opts.secret}`,
-      },
-      body: JSON.stringify({
-        linkId: opts.linkId,
-        toolName,
-        input,
-        cwd: opts.cwd,
-        timeoutMs: remoteToolTimeoutMs(opts.timeoutMs, input),
-        maxOutputBytes: opts.maxOutputBytes,
-      }),
-    });
-    const body = (await res.json()) as RemoteBridgeResponse;
+    const timeoutMs = remoteToolTimeoutMs(opts.timeoutMs, input);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs + REMOTE_TOOL_FETCH_GRACE_MS);
+    let res: Awaited<ReturnType<typeof fetcher>>;
+    try {
+      res = await fetcher(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${opts.secret}`,
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          linkId: opts.linkId,
+          toolName,
+          input,
+          cwd: opts.cwd,
+          timeoutMs,
+          maxOutputBytes: opts.maxOutputBytes,
+        }),
+      });
+    } catch (err) {
+      const aborted = controller.signal.aborted;
+      const message = aborted
+        ? `remote ${toolName} timed out waiting for server bridge after ${Math.round((timeoutMs + REMOTE_TOOL_FETCH_GRACE_MS) / 1000)}s`
+        : `remote ${toolName} failed to reach server bridge: ${err instanceof Error ? err.message : String(err)}`;
+      return {
+        content: [{ type: 'text' as const, text: message }],
+        isError: true,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+
+    let body: RemoteBridgeResponse;
+    try {
+      body = (await res.json()) as RemoteBridgeResponse;
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `remote ${toolName} returned invalid JSON: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
     if (!res.ok || body.ok === false) {
       return {
         content: [{ type: 'text' as const, text: body.error || `remote ${toolName} failed` }],

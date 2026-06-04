@@ -237,6 +237,9 @@ func resolveWorkspaceRepo(ctx context.Context, cfg *Config, spec *WorkspaceRepoS
 		if err != nil {
 			return "", err
 		}
+		if isGitDir(worktreeDir) {
+			return worktreeDir, nil
+		}
 		if err := runGit(ctx, cacheDir, "worktree", "add", "--force", worktreeDir, ref); err != nil {
 			_ = os.RemoveAll(worktreeDir)
 			return "", err
@@ -273,6 +276,9 @@ func resolveWorkspaceRepo(ctx context.Context, cfg *Config, spec *WorkspaceRepoS
 		worktreeDir, err := createWorkspaceRepoDir(cfg, spec)
 		if err != nil {
 			return "", err
+		}
+		if isGitDir(worktreeDir) {
+			return worktreeDir, nil
 		}
 		if err := runGit(ctx, devicePath, "worktree", "add", "--force", worktreeDir, "HEAD"); err != nil {
 			_ = os.RemoveAll(worktreeDir)

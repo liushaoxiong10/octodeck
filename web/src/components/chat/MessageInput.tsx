@@ -391,14 +391,14 @@ export function MessageInput({
 
   return (
     <div
-      className="pt-1 pb-3 bg-surface dark:bg-background max-lg:bg-background/60 max-lg:backdrop-blur-xl max-lg:saturate-[1.8] max-lg:border-t max-lg:border-border/40"
-      style={{ paddingBottom: `max(0.75rem, env(safe-area-inset-bottom, 0px), var(--keyboard-height, 0px))` }}
+      className="pt-2 pb-6 bg-background ios-pwa-bottom-safe max-lg:bg-background/60 max-lg:backdrop-blur-xl max-lg:saturate-[1.8] max-lg:border-t max-lg:border-border/40"
+      style={{ paddingBottom: `max(1.5rem, var(--keyboard-height, 0px))` }}
     >
       {/* lg:pl-[60px] = avatar w-8 (32px) + gap-3 (12px) + visual balance (16px), aligns input left edge with message card content */}
       <div className={isCompact ? 'mx-auto px-4' : 'max-w-4xl mx-auto px-4 lg:pl-[60px]'}>
         {/* Upload progress bar */}
         {uploading && uploadProgress && (
-          <div className={`mb-2 px-4 py-2.5 ${isCompact ? 'bg-surface border border-border' : 'bg-surface rounded-xl border border-border shadow-sm'}`}>
+          <div className={`mb-2 px-4 py-2.5 ${isCompact ? 'bg-card border border-border' : 'bg-card rounded-xl border border-border shadow-sm'}`}>
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-xs text-foreground/70 truncate max-w-[65%]">
                 {uploadProgress.currentFile || '完成'}
@@ -417,7 +417,7 @@ export function MessageInput({
         )}
 
         {/* Main input card */}
-        <div className={isCompact ? 'bg-surface border border-border rounded-lg' : 'bg-surface rounded-2xl border border-border shadow-sm'}>
+        <div className={isCompact ? 'bg-card border border-border rounded-lg' : 'bg-card rounded-2xl border border-border shadow-sm'}>
           {/* Send error banner */}
           {sendError && (
             <div className={`px-4 py-2 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 text-xs font-medium border-b border-red-100 dark:border-red-800 flex items-center gap-2 ${isCompact ? 'rounded-t-lg' : 'rounded-t-2xl'}`}>

@@ -88,6 +88,29 @@ func TestNormalizeAgentJSONLineCapturesToolEvents(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentJSONLineCapturesReasoningEvents(t *testing.T) {
+	lines := []string{
+		`{"type":"reasoning","session_id":"sess-1","reasoning":"需要先检查文件"}`,
+		`{"type":"stream_event","session_id":"sess-1","delta":{"type":"reasoning_delta","reasoning":"然后修改实现"}}`,
+		`{"type":"assistant","session_id":"sess-1","message":{"content":[{"type":"reasoning","reasoning":"最后验证"}]}}`,
+	}
+	for _, line := range lines {
+		eventType, text, sessionID, payload := normalizeAgentJSONLine(line)
+		if eventType != "thinking_delta" {
+			t.Fatalf("expected thinking_delta, got %s for %s", eventType, line)
+		}
+		if text == "" {
+			t.Fatalf("expected reasoning text for %s", line)
+		}
+		if sessionID != "sess-1" {
+			t.Fatalf("expected session sess-1, got %q", sessionID)
+		}
+		if payload == nil {
+			t.Fatal("expected raw payload for reasoning")
+		}
+	}
+}
+
 func TestRunnerReplacesRemoteCwdPlaceholderInRepoContextEnv(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "capture_repo.py")

@@ -47,9 +47,36 @@ describe('remote MCP tools', () => {
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({ authorization: 'Bearer secret' }),
+        signal: expect.any(AbortSignal),
       }),
     );
     expect(result.content[0].text).toContain('hi');
+  });
+
+  test('remote_bash aborts instead of hanging when server bridge is unresponsive', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    }));
+
+    const tools = createRemoteMcpTools({
+      linkId: 'cl_1234567890abcdef',
+      cwd: '/workspace/project',
+      serverBaseUrl: 'http://127.0.0.1:3000',
+      secret: 'secret',
+      timeoutMs: 100,
+      maxOutputBytes: 4096,
+      fetchImpl: fetchMock as any,
+    });
+    const bash = tools.find((t: any) => t.name === 'remote_bash') as any;
+
+    const pending = bash.handler({ command: 'sleep 999' });
+    await vi.advanceTimersByTimeAsync(5_100);
+    const result = await pending;
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('timed out waiting for server bridge');
+    vi.useRealTimers();
   });
 
   test('remote_bash forwards per-call long timeout to server bridge', async () => {

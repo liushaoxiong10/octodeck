@@ -1540,6 +1540,11 @@ func normalizeAgentJSONLine(line string) (string, string, string, map[string]any
 	}
 	sessionID, _ := evt["session_id"].(string)
 	rawType, _ := evt["type"].(string)
+	if rawType == "thinking" || rawType == "reasoning" || rawType == "reasoning_delta" {
+		if text := firstString(evt, "thinking", "reasoning", "reason", "text", "content"); text != "" {
+			return "thinking_delta", text, sessionID, evt
+		}
+	}
 	if rawType == "tool_use" || rawType == "tool_call" {
 		return "tool_call", "", sessionID, evt
 	}
@@ -1555,8 +1560,11 @@ func normalizeAgentJSONLine(line string) (string, string, string, map[string]any
 	if result, ok := evt["result"].(string); ok && result != "" {
 		return "text_delta", result, sessionID, evt
 	}
+	if text := firstString(evt, "thinking", "reasoning", "reason"); text != "" {
+		return "thinking_delta", text, sessionID, evt
+	}
 	if delta, ok := evt["delta"].(map[string]any); ok {
-		if thinking, _ := delta["thinking"].(string); thinking != "" {
+		if thinking := firstString(delta, "thinking", "reasoning", "reason", "text"); thinking != "" {
 			return "thinking_delta", thinking, sessionID, evt
 		}
 		if role, _ := delta["role"].(string); role == "assistant" {
@@ -1580,8 +1588,8 @@ func normalizeAgentJSONLine(line string) (string, string, string, map[string]any
 				if typ == "tool_result" {
 					return "tool_result", "", sessionID, evt
 				}
-				if typ == "thinking" {
-					if text, _ := m["text"].(string); text != "" {
+				if typ == "thinking" || typ == "reasoning" {
+					if text := firstString(m, "thinking", "reasoning", "reason", "text", "content"); text != "" {
 						return "thinking_delta", text, sessionID, evt
 					}
 				}
@@ -1601,6 +1609,15 @@ func normalizeAgentJSONLine(line string) (string, string, string, map[string]any
 		return "usage", "", sessionID, evt
 	}
 	return "log", "", sessionID, evt
+}
+
+func firstString(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, _ := m[key].(string); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func validateAgentRunRequest(cfg *Config, req *AgentRunRequestFrame) error {
