@@ -20,6 +20,7 @@ interface MessageBubbleProps {
   thinkingContent?: string;
   thinkingDurationMs?: number;
   isShared?: boolean;
+  classic?: boolean;
 }
 
 interface MessageAttachment {
