@@ -248,8 +248,8 @@ interface ChatState {
   agentHasMore: Record<string, boolean>;             // agentId → has more messages
   loadGroups: () => Promise<void>;
   selectGroup: (jid: string) => void;
-  loadMessages: (jid: string, loadMore?: boolean) => Promise<void>;
-  refreshMessages: (jid: string) => Promise<void>;
+  loadMessages: (jid: string, loadMore?: boolean, sessionId?: string | null) => Promise<void>;
+  refreshMessages: (jid: string, sessionId?: string | null) => Promise<void>;
   sendMessage: (jid: string, content: string, attachments?: Array<{ data: string; mimeType: string }>) => Promise<boolean>;
   stopGroup: (jid: string) => Promise<boolean>;
   interruptQuery: (jid: string) => Promise<boolean>;
@@ -1123,16 +1123,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  loadMessages: async (jid: string, loadMore = false) => {
+  loadMessages: async (jid: string, loadMore = false, sessionId?: string | null) => {
     const state = get();
     const existing = state.messages[jid] || [];
     const before = loadMore && existing.length > 0 ? existing[0].timestamp : undefined;
 
     try {
+      const params = new URLSearchParams(before ? { before: String(before), limit: '50' } : { limit: '50' });
+      if (sessionId) params.set('session', sessionId);
       const data = await api.get<{ messages: Message[]; hasMore: boolean }>(
-        `/api/groups/${encodeURIComponent(jid)}/messages?${new URLSearchParams(
-          before ? { before: String(before), limit: '50' } : { limit: '50' }
-        )}`
+        `/api/groups/${encodeURIComponent(jid)}/messages?${params}`
       );
       // Messages come in DESC order from API, reverse to chronological for display
       const sorted = [...data.messages].reverse();
@@ -1165,7 +1165,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  refreshMessages: async (jid: string) => {
+  refreshMessages: async (jid: string, sessionId?: string | null) => {
     // Skip polling while clearHistory is in-flight to prevent race re-injection
     if (get().clearing[jid]) return;
 
@@ -1177,6 +1177,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Fetch messages newer than the last one we have
       const params = new URLSearchParams({ limit: '50' });
       if (lastTs) params.set('after', lastTs);
+      if (sessionId) params.set('session', sessionId);
 
       const data = await api.get<{ messages: Message[] }>(
         `/api/groups/${encodeURIComponent(jid)}/messages?${params}`

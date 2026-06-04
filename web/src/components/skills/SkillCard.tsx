@@ -10,16 +10,17 @@ interface SkillCardProps {
 }
 
 const SOURCE_LABELS: Record<Skill['source'], string> = {
-  user: '用户级',
-  project: '项目级',
-  external: '本地/系统',
+  cloud: 'Cloud',
+  user: 'Cloud',
+  project: 'Workspace',
+  external: 'Cloud',
   cli: 'Device CLI',
   workspace: 'Workspace',
 };
 
 export function SkillCard({ skill, selected, onSelect }: SkillCardProps) {
   const toggleSkill = useSkillsStore((s) => s.toggleSkill);
-  const isReadonly = skill.source !== 'user';
+  const isReadonly = !['cloud', 'user'].includes(skill.source);
   const packageName = normalizeSkillDisplayText(skill.packageName).trim();
 
   return (
@@ -37,13 +38,18 @@ export function SkillCard({ skill, selected, onSelect }: SkillCardProps) {
             <h3 className="font-medium text-foreground truncate">{skill.name}</h3>
             <span
               className={`px-2 py-0.5 rounded text-xs font-medium ${
-                skill.source === 'user'
+                ['cloud', 'user'].includes(skill.source)
                   ? 'bg-brand-100 text-primary'
                   : 'bg-muted text-muted-foreground'
               }`}
             >
               {SOURCE_LABELS[skill.source]}
             </span>
+            {skill.sourceProvider && (
+              <span className="px-2 py-0.5 rounded text-xs font-medium bg-primary/10 text-primary">
+                {skill.sourceProvider}
+              </span>
+            )}
             {skill.userInvocable && (
               <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300">
                 可调用
@@ -73,7 +79,7 @@ export function SkillCard({ skill, selected, onSelect }: SkillCardProps) {
           </div>
         )}
 
-        {skill.source === 'user' && (
+        {['cloud', 'user'].includes(skill.source) && (
           <div
             className="flex items-center"
             onClick={(e) => {

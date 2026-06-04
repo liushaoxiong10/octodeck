@@ -104,6 +104,40 @@ describe('device-backed agent backend', () => {
     expect(runContainerAgentMock).not.toHaveBeenCalled();
   });
 
+  test('server runtime profiles resolve the cloud SDK even when default backend is device CLI', async () => {
+    vi.resetModules();
+    vi.doMock('../src/runtime-config.js', () => ({
+      getSystemSettings: () => ({
+        defaultBackend: 'mac-codex',
+        allowedBackends: ['claude-sdk', 'mac-codex'],
+      }),
+    }));
+
+    try {
+      const { registerBackend, resolveBackend } = await import('../src/backends/registry.js');
+      registerBackend({
+        id: 'mac-codex',
+        displayName: 'Mac Codex',
+        usesProviderPool: false,
+        supportsExecutionMode: () => true,
+        run: vi.fn(),
+      } as any);
+
+      const backend = resolveBackend({
+        name: 'Server With Device',
+        folder: 'server-with-device',
+        runtimeProfile: 'server-agent-device-tools',
+        backend: 'mac-codex',
+        deviceLinkId: 'cl_1234567890abcdef',
+      } as any);
+
+      expect(backend.id).toBe('claude-sdk');
+    } finally {
+      vi.doUnmock('../src/runtime-config.js');
+      vi.resetModules();
+    }
+  });
+
   test('does not expose TraeCLI/coco as a builtin backend', async () => {
     const { listBackends, isBuiltinBackend } = await import('../src/backends/registry.js');
     const backendIds = listBackends().map((backend) => backend.id);
@@ -117,7 +151,6 @@ describe('device-backed agent backend', () => {
     const { CustomBackendCreateSchema } = await import('../src/schemas.js');
 
     const parsed = CustomBackendCreateSchema.parse({
-      id: 'mac-codex',
       displayName: 'Mac Codex',
       runtime: 'local-device',
       deviceLinkId: 'cl_1234567890abcdef',
@@ -133,11 +166,43 @@ describe('device-backed agent backend', () => {
     expect(parsed.workdir).toBe('/Users/lsx/code/app/octodeck');
   });
 
+  test('accepts agent create schema without binding a workdir', async () => {
+    const { CustomBackendCreateSchema } = await import('../src/schemas.js');
+
+    const parsed = CustomBackendCreateSchema.parse({
+      displayName: 'Mac Codex',
+      runtime: 'local-device',
+      deviceLinkId: 'cl_1234567890abcdef',
+      agentClientId: 'codex',
+      model: 'gpt-5',
+    });
+
+    expect(parsed.runtime).toBe('local-device');
+    expect(parsed.model).toBe('gpt-5');
+    expect(parsed.workdirMode).toBeUndefined();
+    expect(parsed.workdir).toBeUndefined();
+  });
+
+  test('rejects client supplied id on custom backend create schema', async () => {
+    const { CustomBackendCreateSchema } = await import('../src/schemas.js');
+
+    const result = CustomBackendCreateSchema.safeParse({
+      id: 'mac-codex',
+      displayName: 'Mac Codex',
+      runtime: 'local-device',
+      deviceLinkId: 'cl_1234567890abcdef',
+      agentClientId: 'codex',
+      model: 'gpt-5',
+    });
+
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.error?.format())).toContain('id');
+  });
+
   test('rejects custom workdir unless it is an absolute path', async () => {
     const { CustomBackendCreateSchema } = await import('../src/schemas.js');
 
     const result = CustomBackendCreateSchema.safeParse({
-      id: 'bad-workdir',
       displayName: 'Bad Workdir',
       runtime: 'local-device',
       deviceLinkId: 'cl_1234567890abcdef',

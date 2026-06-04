@@ -27,8 +27,8 @@ describe('auth cookie migration', () => {
     });
 
     expect(cookies).toEqual([
-      'octodeck_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0',
-      'happyclaw_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0',
+      'octodeck_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0',
+      'happyclaw_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0',
     ]);
   });
 });

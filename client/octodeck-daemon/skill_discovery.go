@@ -24,7 +24,14 @@ type skillsDiscoveryResult struct {
 type skillsManifest struct {
 	Skills map[string]struct {
 		PackageName string `json:"packageName"`
+		InstalledAt string `json:"installedAt"`
+		Source      string `json:"source"`
 	} `json:"skills"`
+}
+
+type skillScanContext struct {
+	Source         string
+	SourceProvider string
 }
 
 const maxSkillContentBytes = 200_000
@@ -89,11 +96,19 @@ func discoverProviderSkills(ctx context.Context, cfg *Config, providerID string,
 			return skillsDiscoveryResult{}, err
 		}
 		cwd = resolved
+	} else if strings.HasPrefix(cwd, deviceTmpURIPrefix) {
+		folder := strings.TrimPrefix(cwd, deviceTmpURIPrefix)
+		resolved, err := ensureNamedTmpDir(cfg, folder)
+		if err != nil {
+			return skillsDiscoveryResult{}, err
+		}
+		cwd = resolved
 	}
 	workspaceRoots, cliRoots := skillSearchRoots(cfg, *foundClient, cwd)
+	provider := skillSourceProvider(*foundClient)
 	return skillsDiscoveryResult{
-		WorkspaceSkills: scanSkillDirectories(workspaceRoots, "workspace"),
-		CLISkills:       scanSkillDirectories(cliRoots, "cli"),
+		WorkspaceSkills: scanSkillDirectories(workspaceRoots, skillScanContext{Source: "workspace", SourceProvider: provider}),
+		CLISkills:       scanSkillDirectories(cliRoots, skillScanContext{Source: "cli", SourceProvider: provider}),
 	}, nil
 }
 
@@ -113,6 +128,7 @@ func skillSearchRoots(cfg *Config, client AgentClientInfo, cwd string) ([]string
 	workspaceRoots := make([]string, 0, 4)
 	cliRoots := make([]string, 0, 6)
 	if strings.TrimSpace(cwd) != "" {
+		workspaceRoots = append(workspaceRoots, filepath.Join(cwd, "skills"))
 		workspaceRoots = append(workspaceRoots, filepath.Join(cwd, ".claude", "skills"))
 		if providerDir != "claude" {
 			workspaceRoots = append(workspaceRoots, filepath.Join(cwd, "."+providerDir, "skills"))
@@ -158,6 +174,24 @@ func providerSkillDirName(client AgentClientInfo) string {
 	return "agent"
 }
 
+func skillSourceProvider(client AgentClientInfo) string {
+	provider := strings.ToLower(strings.TrimSpace(ifEmpty(client.Provider, client.ID)))
+	id := strings.ToLower(strings.TrimSpace(client.ID))
+	if id == "claude-code" || provider == "claude" || provider == "claude-code" {
+		return "claude"
+	}
+	if id == "traecli" || provider == "traecli" || provider == "trae" {
+		return "traecli"
+	}
+	if id == "codex" || provider == "codex" {
+		return "codex"
+	}
+	if provider != "" {
+		return provider
+	}
+	return id
+}
+
 func dedupePaths(paths []string) []string {
 	out := make([]string, 0, len(paths))
 	seen := map[string]struct{}{}
@@ -176,11 +210,11 @@ func dedupePaths(paths []string) []string {
 	return out
 }
 
-func scanSkillDirectories(roots []string, source string) []SkillInfo {
+func scanSkillDirectories(roots []string, scanCtx skillScanContext) []SkillInfo {
 	merged := make([]SkillInfo, 0)
 	seen := map[string]struct{}{}
 	for _, root := range roots {
-		for _, skill := range scanSkillDirectory(root, source) {
+		for _, skill := range scanSkillDirectoryWithContext(root, scanCtx) {
 			if _, ok := seen[skill.ID]; ok {
 				continue
 			}
@@ -193,6 +227,10 @@ func scanSkillDirectories(roots []string, source string) []SkillInfo {
 }
 
 func scanSkillDirectory(root string, source string) []SkillInfo {
+	return scanSkillDirectoryWithContext(root, skillScanContext{Source: source})
+}
+
+func scanSkillDirectoryWithContext(root string, scanCtx skillScanContext) []SkillInfo {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -227,14 +265,26 @@ func scanSkillDirectory(root string, source string) []SkillInfo {
 		if name == "" {
 			name = entry.Name()
 		}
+		packageName := manifest.packageNameFor(entry.Name())
+		level := "skill"
+		levelKey := entry.Name()
+		if packageName != "" {
+			level = "package"
+			levelKey = packageName
+		}
 		skills = append(skills, SkillInfo{
-			ID:          entry.Name(),
-			Name:        name,
-			Description: description,
-			Source:      source,
-			Enabled:     enabled,
-			PackageName: manifest.packageNameFor(entry.Name()),
-			Content:     string(content),
+			ID:             entry.Name(),
+			Name:           name,
+			Description:    description,
+			Source:         scanCtx.Source,
+			SourceProvider: scanCtx.SourceProvider,
+			Level:          level,
+			LevelKey:       levelKey,
+			Enabled:        enabled,
+			PackageName:    packageName,
+			PackageSource:  manifest.packageSourceFor(entry.Name()),
+			InstalledAt:    manifest.installedAtFor(entry.Name()),
+			Content:        string(content),
 		})
 	}
 	sort.Slice(skills, func(i, j int) bool { return skills[i].ID < skills[j].ID })
@@ -265,6 +315,20 @@ func (m skillsManifest) packageNameFor(skillID string) string {
 		return ""
 	}
 	return m.Skills[skillID].PackageName
+}
+
+func (m skillsManifest) packageSourceFor(skillID string) string {
+	if m.Skills == nil {
+		return ""
+	}
+	return m.Skills[skillID].Source
+}
+
+func (m skillsManifest) installedAtFor(skillID string) string {
+	if m.Skills == nil {
+		return ""
+	}
+	return m.Skills[skillID].InstalledAt
 }
 
 func isSkillDirectory(entry os.DirEntry, path string) bool {

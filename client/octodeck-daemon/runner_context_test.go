@@ -56,6 +56,38 @@ func TestRunnerInjectsContextEnvAndStdin(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentJSONLineCapturesToolEvents(t *testing.T) {
+	callLine := `{"type":"assistant","session_id":"sess-1","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"pwd"}}]}}`
+	eventType, text, sessionID, payload := normalizeAgentJSONLine(callLine)
+	if eventType != "tool_call" {
+		t.Fatalf("expected tool_call, got %s", eventType)
+	}
+	if text != "" {
+		t.Fatalf("expected empty text for tool_call, got %q", text)
+	}
+	if sessionID != "sess-1" {
+		t.Fatalf("expected session sess-1, got %q", sessionID)
+	}
+	if payload == nil {
+		t.Fatal("expected raw payload for tool_call")
+	}
+
+	resultLine := `{"type":"user","session_id":"sess-1","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"/repo"}]}}`
+	eventType, text, sessionID, payload = normalizeAgentJSONLine(resultLine)
+	if eventType != "tool_result" {
+		t.Fatalf("expected tool_result, got %s", eventType)
+	}
+	if text != "" {
+		t.Fatalf("expected empty text for tool_result, got %q", text)
+	}
+	if sessionID != "sess-1" {
+		t.Fatalf("expected session sess-1, got %q", sessionID)
+	}
+	if payload == nil {
+		t.Fatal("expected raw payload for tool_result")
+	}
+}
+
 func TestRunnerReplacesRemoteCwdPlaceholderInRepoContextEnv(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "capture_repo.py")
@@ -203,18 +235,133 @@ func TestResolveWorkspaceRepoUsesSharedReposAndFreshWorkspace(t *testing.T) {
 	}
 }
 
+func TestResolveWorkspaceRepoCreatesStableGitWorktreeInsideAgentSession(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	mustRun(t, root, "git", "init", source)
+	mustRun(t, source, "git", "branch", "-M", "main")
+	mustRun(t, source, "git", "config", "user.email", "test@example.com")
+	mustRun(t, source, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("session-v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, source, "git", "add", "README.md")
+	mustRun(t, source, "git", "commit", "-m", "v1")
+
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	spec := &WorkspaceRepoSpec{
+		Kind:        "git",
+		GitURL:      source,
+		GroupFolder: "demo",
+		AgentID:     "agent-abc",
+		Scope:       "session",
+		ScopeID:     "sess-123",
+	}
+	first, err := resolveWorkspaceRepo(context.Background(), cfg, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(cfg.WorkspaceDir, "agent-abc", "sessions", "sess-123", "repo")
+	if first != expected {
+		t.Fatalf("expected session worktree %q, got %q", expected, first)
+	}
+	data, err := os.ReadFile(filepath.Join(first, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "session-v1" {
+		t.Fatalf("expected initial main content, got %q", string(data))
+	}
+
+	second, err := resolveWorkspaceRepo(context.Background(), cfg, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("expected existing session worktree to be reused, first=%q second=%q", first, second)
+	}
+}
+
 func TestResolveWorkspaceRepoUsesDeviceDirectoryWhenNotGit(t *testing.T) {
+	root := t.TempDir()
 	dir := t.TempDir()
-	realDir, err := filepath.EvalSymlinks(dir)
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	cwd, err := resolveWorkspaceRepo(context.Background(), cfg, &WorkspaceRepoSpec{Kind: "device_path", DevicePath: dir, GroupFolder: "demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cwd, err := resolveWorkspaceRepo(context.Background(), &Config{}, &WorkspaceRepoSpec{Kind: "device_path", DevicePath: dir, GroupFolder: "demo"})
+	expected := filepath.Join(cfg.WorkspaceDir, "demo")
+	if cwd != expected {
+		t.Fatalf("expected managed workspace cwd %q, got %q", expected, cwd)
+	}
+	link := filepath.Join(cwd, filepath.Base(dir))
+	target, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("expected symlink at %s: %v", link, err)
+	}
+	if target != dir {
+		t.Fatalf("expected symlink target %q, got %q", dir, target)
+	}
+}
+
+func TestResolveWorkspaceRepoSymlinksDeviceDirectoryInsideAgentSession(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	cwd, err := resolveWorkspaceRepo(context.Background(), cfg, &WorkspaceRepoSpec{
+		Kind:        "device_path",
+		DevicePath:  dir,
+		GroupFolder: "demo",
+		AgentID:     "agent-abc",
+		Scope:       "session",
+		ScopeID:     "sess-123",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cwd != realDir {
-		t.Fatalf("expected non-git device directory to be used directly, got %s", cwd)
+	expected := filepath.Join(cfg.WorkspaceDir, "agent-abc", "sessions", "sess-123")
+	if cwd != expected {
+		t.Fatalf("expected agent session cwd %q, got %q", expected, cwd)
+	}
+	link := filepath.Join(cwd, filepath.Base(dir))
+	target, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("expected symlink at %s: %v", link, err)
+	}
+	if target != dir {
+		t.Fatalf("expected symlink target %q, got %q", dir, target)
+	}
+}
+
+func TestResolveAgentWorkspaceCwdUsesAgentTaskScope(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	cwd, err := resolveAgentWorkspaceCwd(cfg, &AgentRunWorkspace{AgentID: "agent-abc", Scope: "task", ScopeID: "task-001"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(cfg.WorkspaceDir, "agent-abc", "tasks", "task-001")
+	if cwd != expected {
+		t.Fatalf("expected task cwd %q, got %q", expected, cwd)
+	}
+	if _, err := os.Stat(cwd); err != nil {
+		t.Fatalf("expected cwd created: %v", err)
+	}
+}
+
+func TestResolveAgentWorkspaceCwdUsesDirectSessionRoot(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	cwd, err := resolveAgentWorkspaceCwd(cfg, &AgentRunWorkspace{AgentID: "agent-abc", Scope: "direct_session", ScopeID: "sess-standalone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(root, "session", "sess-standalone")
+	if cwd != expected {
+		t.Fatalf("expected direct session cwd %q, got %q", expected, cwd)
+	}
+	if _, err := os.Stat(cwd); err != nil {
+		t.Fatalf("expected cwd created: %v", err)
 	}
 }
 
@@ -248,6 +395,36 @@ func TestValidateRunRequestAllowsDeviceWorkspaceURI(t *testing.T) {
 	}
 	if err := validateRunRequest(&Config{AllowedBinaries: []string{"/usr/bin/python3"}}, req); err != nil {
 		t.Fatalf("expected workspace URI cwd to pass validation, got %v", err)
+	}
+}
+
+func TestDefaultRunCwdUsesManagedTmpURI(t *testing.T) {
+	root := t.TempDir()
+	cwd, err := defaultRunCwd(&Config{WorkspaceDir: filepath.Join(root, "workspace")}, "octodeck-tmp://skills-install")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(root, "tmp", "skills-install")
+	if cwd != expected {
+		t.Fatalf("expected tmp cwd %q, got %q", expected, cwd)
+	}
+	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+		t.Fatalf("expected tmp cwd to be created, info=%v err=%v", info, err)
+	}
+}
+
+func TestValidateRunRequestAllowsDeviceTmpURI(t *testing.T) {
+	req := &RunRequestFrame{
+		RunID:          "run-tmp-uri",
+		Binary:         "/usr/bin/python3",
+		Argv:           []string{"-c", "print('ok')"},
+		Cwd:            "octodeck-tmp://skills-install",
+		OutputProtocol: "plain-text",
+		TimeoutMs:      int64(5 * time.Second / time.Millisecond),
+		MaxOutputBytes: 4096,
+	}
+	if err := validateRunRequest(&Config{AllowedBinaries: []string{"/usr/bin/python3"}}, req); err != nil {
+		t.Fatalf("expected tmp URI cwd to pass validation, got %v", err)
 	}
 }
 

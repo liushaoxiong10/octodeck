@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Loader2, Search, ExternalLink, Download, ChevronDown, ChevronUp } from 'lucide-react';
+import { Loader2, Search, ExternalLink, Download, ChevronDown, ChevronUp, PackagePlus } from 'lucide-react';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -8,6 +8,7 @@ import { useSkillsStore, type SearchResult } from '@/stores/skills';
 import { MarkdownRenderer } from '../chat/MarkdownRenderer';
 import type { AgentLink } from '@/stores/agentLinks';
 import type { InstallSkillOptions } from '@/stores/skills';
+import type { CustomBackendDef } from '@/stores/customBackends';
 
 interface InstallSkillDialogProps {
   open: boolean;
@@ -15,9 +16,14 @@ interface InstallSkillDialogProps {
   onInstall: (pkg: string, options?: InstallSkillOptions) => Promise<void>;
   installing: boolean;
   devices?: AgentLink[];
+  agents?: CustomBackendDef[];
 }
 
 type Tab = 'search' | 'manual';
+
+function packageBase(pkg: string): string {
+  return pkg.split('@')[0]?.split('#')[0] ?? pkg;
+}
 
 function formatInstalls(n?: number): string {
   if (n === undefined || n === null) return '';
@@ -152,13 +158,16 @@ export function InstallSkillDialog({
   onInstall,
   installing,
   devices = [],
+  agents = [],
 }: InstallSkillDialogProps) {
   const [tab, setTab] = useState<Tab>('search');
   const [pkg, setPkg] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [installingPkg, setInstallingPkg] = useState<string | null>(null);
-  const [target, setTarget] = useState<'cloud' | 'device'>('cloud');
+  const [target, setTarget] = useState<'cloud' | 'device' | 'device-agent-workspace'>('cloud');
   const [deviceLinkId, setDeviceLinkId] = useState('');
+  const [agentId, setAgentId] = useState('');
+  const [selectedPackages, setSelectedPackages] = useState<string[]>([]);
 
   const { searching, searchResults, searchSkills } = useSkillsStore();
 
@@ -173,6 +182,26 @@ export function InstallSkillDialog({
     try {
       setInstallingPkg(result.package);
       await onInstall(result.package, buildInstallOptions());
+      setInstallingPkg(null);
+      onClose();
+    } catch (err) {
+      setInstallingPkg(null);
+      toast.error(err instanceof Error ? err.message : '安装失败');
+    }
+  };
+
+  const handleInstallSelectedPackages = async () => {
+    if (selectedPackages.length === 0) {
+      toast.error('请选择要安装的技能包');
+      return;
+    }
+    try {
+      setInstallingPkg('__selected__');
+      const options = buildInstallOptions();
+      for (const selectedPkg of selectedPackages) {
+        await onInstall(selectedPkg, options);
+      }
+      setSelectedPackages([]);
       setInstallingPkg(null);
       onClose();
     } catch (err) {
@@ -205,6 +234,8 @@ export function InstallSkillDialog({
       setInstallingPkg(null);
       setTarget('cloud');
       setDeviceLinkId('');
+      setAgentId('');
+      setSelectedPackages([]);
       onClose();
     }
   };
@@ -212,11 +243,21 @@ export function InstallSkillDialog({
   const isInstalling = installing || !!installingPkg;
 
   const onlineDevices = devices.filter((device) => device.online);
+  const onlineDeviceIds = new Set(onlineDevices.map((device) => device.id));
+  const workspaceAgents = agents.filter((agent) => agent.deviceLinkId && onlineDeviceIds.has(agent.deviceLinkId));
   const buildInstallOptions = (): InstallSkillOptions => {
-    if (target !== 'device') return { target: 'cloud' };
+    if (target === 'cloud') return { target: 'cloud' };
+    if (target === 'device-agent-workspace') {
+      if (!agentId) throw new Error('请选择安装目标 Agent Workspace');
+      return { target: 'device-agent-workspace', agentId };
+    }
     if (!deviceLinkId) throw new Error('请选择安装目标 Device');
     return { target: 'device', deviceLinkId };
   };
+
+  const packageResults = Array.from(
+    new Map(searchResults.map((result) => [packageBase(result.package), result])).values(),
+  );
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
@@ -227,7 +268,7 @@ export function InstallSkillDialog({
 
         <div className="space-y-2 rounded-lg border border-border p-3">
           <label className="block text-sm font-medium text-foreground">安装目标</label>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             <label className="flex items-center gap-2 rounded-md border p-2 text-sm">
               <input type="radio" name="skill-target" checked={target === 'cloud'} onChange={() => setTarget('cloud')} disabled={isInstalling} />
               云端
@@ -235,6 +276,10 @@ export function InstallSkillDialog({
             <label className="flex items-center gap-2 rounded-md border p-2 text-sm">
               <input type="radio" name="skill-target" checked={target === 'device'} onChange={() => setTarget('device')} disabled={isInstalling || onlineDevices.length === 0} />
               指定 Device
+            </label>
+            <label className="flex items-center gap-2 rounded-md border p-2 text-sm">
+              <input type="radio" name="skill-target" checked={target === 'device-agent-workspace'} onChange={() => setTarget('device-agent-workspace')} disabled={isInstalling || workspaceAgents.length === 0} />
+              Agent Workspace
             </label>
           </div>
           {target === 'device' && (
@@ -249,6 +294,29 @@ export function InstallSkillDialog({
                 <option key={device.id} value={device.id}>{device.displayName} ({device.id})</option>
               ))}
             </select>
+          )}
+          {target === 'device-agent-workspace' && (
+            <select
+              value={agentId}
+              onChange={(e) => setAgentId(e.target.value)}
+              disabled={isInstalling}
+              className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+            >
+              <option value="" disabled>请选择绑定在线 Device 的 Agent</option>
+              {workspaceAgents.map((agent) => {
+                const device = devices.find((item) => item.id === agent.deviceLinkId);
+                return (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.displayName} ({agent.id}) · {device?.displayName || agent.deviceLinkId}
+                  </option>
+                );
+              })}
+            </select>
+          )}
+          {target === 'cloud' && (
+            <p className="rounded-md bg-muted/40 px-3 py-2 text-xs leading-5 text-muted-foreground">
+              云端 Skill 会安装为 Claude SDK / Claude Code 可用的格式，并保存到 OctoDeck Cloud Skills。
+            </p>
           )}
         </div>
 
@@ -304,6 +372,45 @@ export function InstallSkillDialog({
 
             {/* Results */}
             <div className="overflow-y-auto space-y-2 min-h-0 flex-1">
+              {!searching && packageResults.length > 0 && (
+                <div className="rounded-lg border border-border bg-muted/20 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="text-xs font-medium text-muted-foreground">包级别多选安装</div>
+                    <Button
+                      size="sm"
+                      type="button"
+                      onClick={handleInstallSelectedPackages}
+                      disabled={isInstalling || selectedPackages.length === 0}
+                    >
+                      {installingPkg === '__selected__' ? <Loader2 className="size-3.5 animate-spin" /> : <PackagePlus className="size-3.5" />}
+                      安装选中 ({selectedPackages.length})
+                    </Button>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {packageResults.map((result) => {
+                      const pkg = packageBase(result.package);
+                      const checked = selectedPackages.includes(pkg);
+                      return (
+                        <label key={pkg} className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={isInstalling}
+                            onChange={(event) => {
+                              setSelectedPackages((current) =>
+                                event.target.checked
+                                  ? [...new Set([...current, pkg])]
+                                  : current.filter((item) => item !== pkg),
+                              );
+                            }}
+                          />
+                          <span className="font-mono">{pkg}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               {searching && (
                 <div className="flex items-center justify-center py-8 text-muted-foreground">
                   <Loader2 className="size-4 animate-spin mr-2" />

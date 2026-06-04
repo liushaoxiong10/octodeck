@@ -20,9 +20,9 @@ describe('agent client adapter', () => {
       id: 'mac-codex',
       displayName: 'Mac Codex',
       binary: '/opt/homebrew/bin/codex',
-      outputProtocol: 'plain-text',
+      outputProtocol: 'jsonline-stream-json',
       supportsNativeSessions: true,
-      resumeArgvTemplate: ['exec', 'resume', '--skip-git-repo-check', '-m', '{model}', '{sessionId}', '{prompt}'],
+      resumeArgvTemplate: ['exec', 'resume', '--json', '--skip-git-repo-check', '-m', '{model}', '{sessionId}', '{prompt}'],
       deviceLinkId: 'cl_1234567890abcdef',
       agentClientId: 'codex',
     });
@@ -98,6 +98,7 @@ describe('agent client adapter', () => {
     expect(def.supportsNativeSessions).toBe(true);
     expect(def.argvTemplate).toEqual([
       'exec',
+      '--json',
       '--skip-git-repo-check',
       '-m',
       '{model}',
@@ -106,6 +107,7 @@ describe('agent client adapter', () => {
     expect(def.resumeArgvTemplate).toEqual([
       'exec',
       'resume',
+      '--json',
       '--skip-git-repo-check',
       '-m',
       '{model}',

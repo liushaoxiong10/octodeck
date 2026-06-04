@@ -117,6 +117,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   // the URL value into the store for consumers that read it directly.
   const [searchParams, setSearchParams] = useSearchParams();
   const urlAgentId = searchParams.get('agent') || null;
+  const urlSessionId = searchParams.get('session') || null;
   const selectTab = useCallback((id: string | null) => {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
@@ -195,9 +196,14 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const hasMessages = !!groupMessages;
   useEffect(() => {
     if (groupJid && !hasMessages) {
-      loadMessages(groupJid);
+      loadMessages(groupJid, false, urlSessionId);
     }
-  }, [groupJid, hasMessages, loadMessages]);
+  }, [groupJid, hasMessages, loadMessages, urlSessionId]);
+
+  useEffect(() => {
+    if (!groupJid || !urlSessionId) return;
+    loadMessages(groupJid, false, urlSessionId);
+  }, [groupJid, urlSessionId, loadMessages]);
 
   // Poll for new messages — use setTimeout recursion to avoid request piling up
   // Pauses when the page is not visible to save resources
@@ -212,7 +218,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     const poll = async () => {
       if (!active) return;
       try {
-        await refreshMessages(groupJid);
+        await refreshMessages(groupJid, urlSessionId);
       } catch { /* handled in store */ }
       schedulePoll();
     };
@@ -234,7 +240,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       if (pollRef.current) clearTimeout(pollRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupJid]);
+  }, [groupJid, urlSessionId]);
 
   // WS 重连时恢复正在运行的 agent 状态（独立于 groupJid，避免切换会话时重复调用）
   // wsManager.connect() 已提升到 AppLayout 级别
@@ -427,7 +433,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
 
   const handleLoadMore = () => {
     if (hasMoreMessages && !loading) {
-      loadMessages(groupJid, true);
+      loadMessages(groupJid, true, urlSessionId);
     }
   };
 
@@ -793,7 +799,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           ) : (
             <>
               <MessageList
-                key={`main-${groupJid}`}
+                key={`main-${groupJid}-${urlSessionId || 'all'}`}
                 messages={groupMessages || []}
                 loading={loading}
                 hasMore={hasMoreMessages}

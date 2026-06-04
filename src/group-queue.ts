@@ -22,6 +22,8 @@ interface GroupState {
   active: boolean;
   /** True when the active runner is executing a scheduled task (not user messages). */
   activeRunnerIsTask: boolean;
+  /** ID of the dynamic/scheduled task currently occupying this runner. */
+  activeTaskId: string | null;
   /** Last time this runner produced any observable output. */
   lastActivityAt: number | null;
   /** True while the runner is inside an active query turn. */
@@ -83,6 +85,7 @@ export class GroupQueue {
       state = {
         active: false,
         activeRunnerIsTask: false,
+        activeTaskId: null,
         lastActivityAt: null,
         queryInFlight: false,
         pendingMessages: false,
@@ -901,6 +904,31 @@ export class GroupQueue {
     }
   }
 
+  async cancelTaskRun(groupJid: string, taskRunId: string): Promise<'pending_canceled' | 'stopped' | 'not_found'> {
+    const taskId = `issue:${taskRunId}`;
+    const requestedState = this.getGroup(groupJid);
+    const pendingBefore = requestedState.pendingTasks.length;
+    requestedState.pendingTasks = requestedState.pendingTasks.filter((task) => task.id !== taskId);
+    if (requestedState.pendingTasks.length !== pendingBefore) {
+      if (requestedState.pendingTasks.length === 0 && !requestedState.pendingMessages) {
+        this.waitingGroups.delete(groupJid);
+      }
+      return 'pending_canceled';
+    }
+
+    const activeRunner = this.findActiveRunnerFor(groupJid);
+    const targetJid = activeRunner || groupJid;
+    const state = this.getGroup(targetJid);
+    const isMatchingActiveTask =
+      state.active &&
+      state.activeRunnerIsTask &&
+      (state.activeTaskId === taskId || state.taskRunId === taskRunId);
+    if (!isMatchingActiveTask) return 'not_found';
+
+    await this.stopGroup(groupJid);
+    return 'stopped';
+  }
+
   /**
    * Stop the running container, wait for it to finish, then start a new one.
    */
@@ -1112,6 +1140,7 @@ export class GroupQueue {
     const isHostMode = this.isHostMode(groupJid);
     state.active = true;
     state.activeRunnerIsTask = true;
+    state.activeTaskId = task.id;
     state.lastActivityAt = Date.now();
     state.queryInFlight = false;
     this.waitingGroups.delete(groupJid);
@@ -1158,6 +1187,7 @@ export class GroupQueue {
       }
       state.active = false;
       state.activeRunnerIsTask = false;
+      state.activeTaskId = null;
       state.drainSentinelWritten = false;
       state.lastActivityAt = null;
       state.queryInFlight = false;
@@ -1346,6 +1376,8 @@ export class GroupQueue {
       containerName: string | null;
       displayName: string | null;
       groupFolder: string | null;
+      taskRunId: string | null;
+      activeTaskId: string | null;
       selectedProviderId: string | null;
     }>;
   } {
@@ -1357,6 +1389,8 @@ export class GroupQueue {
       containerName: string | null;
       displayName: string | null;
       groupFolder: string | null;
+      taskRunId: string | null;
+      activeTaskId: string | null;
       selectedProviderId: string | null;
     }> = [];
 
@@ -1369,6 +1403,8 @@ export class GroupQueue {
         containerName: state.containerName,
         displayName: state.displayName,
         groupFolder: state.groupFolder,
+        taskRunId: state.taskRunId,
+        activeTaskId: state.activeTaskId,
         selectedProviderId: state.selectedProviderId,
       });
     }

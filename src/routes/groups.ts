@@ -1537,6 +1537,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
 
   const before = c.req.query('before');
   const after = c.req.query('after');
+  const sessionId = c.req.query('session');
   const agentIdParam = c.req.query('agentId');
   const limitRaw = parseInt(c.req.query('limit') || '50', 10);
   const limit = Math.min(
@@ -1553,10 +1554,10 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
 
     const virtualJid = `${jid}#agent:${agentIdParam}`;
     if (after) {
-      const messages = getMessagesAfter(virtualJid, after, limit);
+      const messages = getMessagesAfter(virtualJid, after, limit, sessionId);
       return c.json({ messages });
     }
-    const rows = getMessagesPage(virtualJid, before, limit + 1);
+    const rows = getMessagesPage(virtualJid, before, limit + 1, sessionId);
     const hasMore = rows.length > limit;
     const messages = hasMore ? rows.slice(0, limit) : rows;
     return c.json({ messages, hasMore });
@@ -1586,10 +1587,10 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   if (queryJids.length === 1) {
     // 单 JID 走原路径
     if (after) {
-      const messages = getMessagesAfter(jid, after, limit);
+      const messages = getMessagesAfter(jid, after, limit, sessionId);
       return c.json({ messages });
     }
-    const rows = getMessagesPage(jid, before, limit + 1);
+    const rows = getMessagesPage(jid, before, limit + 1, sessionId);
     const hasMore = rows.length > limit;
     const messages = hasMore ? rows.slice(0, limit) : rows;
     return c.json({ messages, hasMore });
@@ -1597,10 +1598,10 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
 
   // 多 JID 合并查询
   if (after) {
-    const messages = getMessagesAfterMulti(queryJids, after, limit);
+    const messages = getMessagesAfterMulti(queryJids, after, limit, sessionId);
     return c.json({ messages });
   }
-  const rows = getMessagesPageMulti(queryJids, before, limit + 1);
+  const rows = getMessagesPageMulti(queryJids, before, limit + 1, sessionId);
   const hasMore = rows.length > limit;
   const messages = hasMore ? rows.slice(0, limit) : rows;
   return c.json({ messages, hasMore });

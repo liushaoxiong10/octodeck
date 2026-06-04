@@ -56,9 +56,7 @@ export default function CustomBackendList() {
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-foreground">
-            自定义 Agent
-          </h3>
+          <h3 className="text-sm font-semibold text-foreground">Agent</h3>
           <p className="text-xs text-muted-foreground mt-0.5">
             把任意 CLI（codex / aider / coco fork…）注册成 OctoDeck Agent。
             可选择服务端本机或指定设备运行；保存即生效。
@@ -76,7 +74,7 @@ export default function CustomBackendList() {
         </div>
       ) : backends.length === 0 ? (
         <div className="text-xs text-muted-foreground border border-dashed border-border rounded-md py-6 text-center">
-          还没有自定义 Agent，点右上角「新增 Agent」。
+          还没有 Agent，点右上角「新增 Agent」。
         </div>
       ) : (
         <div className="border border-border rounded-md divide-y divide-border">
@@ -113,6 +111,9 @@ export default function CustomBackendList() {
                     运行设备：{deviceName(b.deviceLinkId)}
                   </div>
                 ) : null}
+                <div className="text-xs text-muted-foreground mt-0.5 truncate">
+                  默认运行位置：{b.workdirMode === 'custom' && b.workdir ? b.workdir : '自动继承任务/Workspace'}
+                </div>
               </div>
               <div className="flex items-center gap-1">
                 <Button

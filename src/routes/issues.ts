@@ -15,6 +15,7 @@ import {
   createIssue,
   createIssueAttachment,
   createIssueAgentRun,
+  createIssueAgentRunEvent,
   deleteIssueAttachment,
   deleteIssue,
   getAgentLinkById,
@@ -24,6 +25,7 @@ import {
   getRegisteredGroup,
   getUserHomeGroup,
   listIssueAgentRuns,
+  listIssueAgentRunEvents,
   listIssueAttachments,
   listIssues,
   updateIssue,
@@ -131,6 +133,29 @@ function updateIssueAgentRunError(issueId: string, runId: string, error: string)
   const now = new Date().toISOString();
   updateIssueAgentRun(runId, { status: 'error', error, run_completed_at: now });
   updateIssueLastRun(issueId, runId, 'error');
+  recordIssueRunEvent(issueId, runId, 'run_failed', 'Run failed', error, error);
+}
+
+function recordIssueRunEvent(
+  issueId: string,
+  runId: string,
+  eventType: string,
+  title: string,
+  summary?: string | null,
+  detail?: string | null,
+  payload?: Record<string, unknown> | null,
+): void {
+  createIssueAgentRunEvent({
+    id: `irev_${crypto.randomBytes(8).toString('hex')}`,
+    issue_id: issueId,
+    run_id: runId,
+    event_type: eventType,
+    title,
+    summary: summary ?? null,
+    detail: detail ?? null,
+    payload: payload ?? null,
+    created_at: new Date().toISOString(),
+  });
 }
 
 issueRoutes.get('/', authMiddleware, async (c) => {
@@ -231,6 +256,10 @@ issueRoutes.post('/', authMiddleware, async (c) => {
         created_at: new Date().toISOString(),
       });
       updateIssueLastRun(issue.id, run.id, 'queued');
+      recordIssueRunEvent(issue.id, run.id, 'run_queued', 'Run queued', 'Created from issue creation', null, {
+        trigger: 'issue_create',
+        issueId: issue.id,
+      });
       enqueueIssueRun(issue.id, run.id);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -288,6 +317,15 @@ issueRoutes.get('/:id/runs', authMiddleware, async (c) => {
   const authUser = c.get('user') as AuthUser;
   if (!issue || !ensureIssueAccess(issue, authUser)) return c.json({ error: 'Issue not found' }, 404);
   return c.json({ runs: listIssueAgentRuns(issue.id) });
+});
+
+issueRoutes.get('/:id/runs/:runId/events', authMiddleware, async (c) => {
+  const issue = getIssueById(c.req.param('id'));
+  const authUser = c.get('user') as AuthUser;
+  if (!issue || !ensureIssueAccess(issue, authUser)) return c.json({ error: 'Issue not found' }, 404);
+  const run = listIssueAgentRuns(issue.id).find((item) => item.id === c.req.param('runId'));
+  if (!run) return c.json({ error: 'Run not found' }, 404);
+  return c.json({ events: listIssueAgentRunEvents(run.id) });
 });
 
 issueRoutes.get('/:id/attachments', authMiddleware, async (c) => {
@@ -350,11 +388,49 @@ issueRoutes.post('/:id/run', authMiddleware, async (c) => {
       created_at: new Date().toISOString(),
     });
     updateIssueLastRun(issue.id, run.id, 'queued');
+    recordIssueRunEvent(issue.id, run.id, 'run_queued', 'Run queued', 'Started manually', null, {
+      trigger: 'manual',
+      issueId: issue.id,
+    });
     enqueueIssueRun(issue.id, run.id);
     return c.json({ run });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
   }
+});
+
+issueRoutes.post('/:id/runs/:runId/cancel', authMiddleware, async (c) => {
+  const issue = getIssueById(c.req.param('id'));
+  const authUser = c.get('user') as AuthUser;
+  if (!issue || !ensureIssueAccess(issue, authUser)) return c.json({ error: 'Issue not found' }, 404);
+
+  const run = listIssueAgentRuns(issue.id).find((item) => item.id === c.req.param('runId'));
+  if (!run) return c.json({ error: 'Run not found' }, 404);
+  if (run.status === 'success' || run.status === 'error' || run.status === 'canceled') {
+    return c.json({ run });
+  }
+
+  const now = new Date().toISOString();
+  const deps = getWebDeps();
+  if (deps?.queue) {
+    try {
+      await deps.queue.cancelTaskRun(issue.workspace_jid, run.id);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  }
+
+  updateIssueAgentRun(run.id, {
+    status: 'canceled',
+    error: 'Canceled by user',
+    run_completed_at: now,
+  });
+  updateIssueLastRun(issue.id, run.id, 'canceled');
+  recordIssueRunEvent(issue.id, run.id, 'run_canceled', 'Run canceled', 'Canceled by user', null, {
+    userId: authUser.id,
+  });
+  const updatedRun = listIssueAgentRuns(issue.id).find((item) => item.id === run.id) ?? run;
+  return c.json({ run: updatedRun });
 });
 
 export default issueRoutes;

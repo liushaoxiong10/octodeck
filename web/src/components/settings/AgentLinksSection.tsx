@@ -517,7 +517,7 @@ function ProvidersPanel({ link }: { link: AgentLink }) {
         <EmptyBlock>未发现 runtime。</EmptyBlock>
       )}
 
-      <div className="grid gap-2 sm:grid-cols-2">
+      <div className="grid gap-2">
         <div className="rounded-xl border border-border/70 bg-background/70 p-3">
           <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
             Permission modes
@@ -531,14 +531,6 @@ function ProvidersPanel({ link }: { link: AgentLink }) {
           ) : (
             <div className="mt-2 text-xs text-muted-foreground">尚未上报</div>
           )}
-        </div>
-        <div className="rounded-xl border border-border/70 bg-background/70 p-3">
-          <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-            Runtime note
-          </div>
-          <div className="mt-2 text-xs leading-5 text-muted-foreground">
-            Provider 与 Runtime 按单行列表展示；横向列出状态、running 数、capabilities 与 binary 信息。
-          </div>
         </div>
       </div>
     </div>
@@ -745,29 +737,6 @@ function DeviceDetails({
                 percent={link.resources?.memoryUsedPercent}
               />
               <DiskResourceList resources={link.resources} />
-            </div>
-          </DeviceInfoSection>
-
-          <DeviceInfoSection icon={HardDrive} title="状态摘要">
-            <div className="grid gap-2">
-              <DetailRow
-                label="Connection"
-                value={link.online ? 'online' : 'offline'}
-              />
-              <DetailRow
-                label="Runtime status"
-                value={statusLabel(link.status, link.online)}
-              />
-              <DetailRow label="最近连接" value={formatTime(link.lastConnectedAt)} />
-              <DetailRow label="最近心跳" value={formatTime(link.lastSeenAt)} />
-              <DetailRow
-                label="Version"
-                value={link.clientVersion ? `v${link.clientVersion}` : 'unknown'}
-              />
-              <div className="flex flex-wrap gap-2 pt-1 text-xs text-muted-foreground">
-                <Pill>当前账户创建</Pill>
-                <Pill>Token 授权接入</Pill>
-              </div>
             </div>
           </DeviceInfoSection>
         </aside>

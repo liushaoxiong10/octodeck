@@ -71,10 +71,23 @@ registerBackend(claudeSdkBackend);
 export function resolveBackend(group: RegisteredGroup): AgentBackend {
   const settings = getSystemSettings();
   const allowedSet = new Set(settings.allowedBackends);
+  const cloudSdkBackend = registry.get(FALLBACK_BACKEND_ID) ?? claudeSdkBackend;
+
+  // Product runtime profiles are authoritative:
+  // - server-agent: cloud SDK loop on server, no local tools
+  // - server-agent-device-tools: cloud SDK loop on server, tools routed to Device
+  // These profiles must not inherit SystemSettings.defaultBackend; otherwise a
+  // default Device CLI/custom backend would move the model loop off the cloud.
+  if (
+    group.runtimeProfile === 'server-agent' ||
+    group.runtimeProfile === 'server-agent-device-tools'
+  ) {
+    return cloudSdkBackend;
+  }
+
   const fallback =
     registry.get(settings.defaultBackend) ??
-    registry.get(FALLBACK_BACKEND_ID) ??
-    claudeSdkBackend;
+    cloudSdkBackend;
 
   const requestedId = group.backend?.trim();
   if (!requestedId) return fallback;

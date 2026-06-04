@@ -21,8 +21,12 @@ describe('daemon install script', () => {
     expect(script).toContain('WORKSPACE_DIR="${OCTODECK_HOME}/workspace"');
     expect(script).toContain('TASK_DIR="${OCTODECK_HOME}/task"');
     expect(script).toContain('REPOS_DIR="${OCTODECK_HOME}/repos"');
+    expect(script).toContain('SESSION_DIR="${OCTODECK_HOME}/session"');
+    expect(script).toContain('CACHE_DIR="${OCTODECK_HOME}/cache"');
+    expect(script).toContain('TMP_DIR="${OCTODECK_HOME}/tmp"');
+    expect(script).toContain('STATE_DIR="${OCTODECK_HOME}/state"');
     expect(script).toContain(
-      'mkdir -p "${INSTALL_DIR}/bin" "${WORKSPACE_DIR}" "${TASK_DIR}" "${REPOS_DIR}"',
+      'mkdir -p "${INSTALL_DIR}/bin" "${WORKSPACE_DIR}" "${TASK_DIR}" "${REPOS_DIR}" "${SESSION_DIR}" "${CACHE_DIR}/downloads" "${CACHE_DIR}/npm" "${CACHE_DIR}/models" "${TMP_DIR}/updates" "${TMP_DIR}/runs" "${TMP_DIR}/skills-install" "${STATE_DIR}/locks"',
     );
     const bootoutIndex = script.indexOf(
       'launchctl bootout "gui/$(id -u)/com.octodeck.octodeck-daemon"',

@@ -59,6 +59,9 @@ WORKSPACE_DIR="${'${OCTODECK_HOME}'}/workspace"
 TASK_DIR="${'${OCTODECK_HOME}'}/task"
 REPOS_DIR="${'${OCTODECK_HOME}'}/repos"
 SESSION_DIR="${'${OCTODECK_HOME}'}/session"
+CACHE_DIR="${'${OCTODECK_HOME}'}/cache"
+TMP_DIR="${'${OCTODECK_HOME}'}/tmp"
+STATE_DIR="${'${OCTODECK_HOME}'}/state"
 LEGACY_INSTALL_DIR="${'${HOME}'}/.hcagent"
 LEGACY_OCTODECK_INSTALL_DIR="${'${HOME}'}/.octodeck-daemon"
 CONFIG_FILE="${'${INSTALL_DIR}'}/config.json"
@@ -75,7 +78,7 @@ need() { command -v "$1" >/dev/null 2>&1 || { printf 'missing required command: 
 
 need curl
 
-mkdir -p "${'${INSTALL_DIR}'}/bin" "${'${WORKSPACE_DIR}'}" "${'${TASK_DIR}'}" "${'${REPOS_DIR}'}" "${'${SESSION_DIR}'}"
+mkdir -p "${'${INSTALL_DIR}'}/bin" "${'${WORKSPACE_DIR}'}" "${'${TASK_DIR}'}" "${'${REPOS_DIR}'}" "${'${SESSION_DIR}'}" "${'${CACHE_DIR}'}/downloads" "${'${CACHE_DIR}'}/npm" "${'${CACHE_DIR}'}/models" "${'${TMP_DIR}'}/updates" "${'${TMP_DIR}'}/runs" "${'${TMP_DIR}'}/skills-install" "${'${STATE_DIR}'}/locks"
 
 if [ "${'${OS}'}" = "Darwin" ]; then
   log "stopping existing octodeck-daemon launch agent if present"

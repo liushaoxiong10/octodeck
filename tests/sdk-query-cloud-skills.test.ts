@@ -41,22 +41,17 @@ describe('sdkQuery cloud skills', () => {
     fs.mkdirSync(tmpDataDir, { recursive: true });
   });
 
-  test('exposes server-side user skills to Claude SDK Skill tool', async () => {
-    const skillDir = path.join(tmpDataDir, 'skills', 'alice', 'cloud-skill');
-    fs.mkdirSync(skillDir, { recursive: true });
-    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: Cloud Skill\n---\n# Cloud Skill\n');
-
+  test('exposes cloud skills via DB-backed MCP tools only', async () => {
     const { sdkQuery } = await import('../src/sdk-query.js');
     await expect(sdkQuery('use cloud skill', { userId: 'alice' })).resolves.toBe('cloud skill ok');
 
     expect(queryMock).toHaveBeenCalledTimes(1);
-    expect(queryCalls[0].args.options).toMatchObject({
-      skills: 'all',
-      allowedTools: ['Skill'],
-      settingSources: ['project', 'user'],
-    });
-    const configDir = queryCalls[0].claudeConfigDir;
-    expect(configDir).toBe(path.join(tmpDataDir, 'sdk-query', 'alice', '.claude'));
-    expect(fs.readlinkSync(path.join(configDir!, 'skills', 'cloud-skill'))).toBe(skillDir);
+    expect(queryCalls[0].args.options.allowedTools).toEqual([]);
+    expect(queryCalls[0].args.options.skills).toBeUndefined();
+    expect(queryCalls[0].args.options.settingSources).toBeUndefined();
+    expect(queryCalls[0].args.options.mcpServers.octodeck_cloud_tools.tools.map((tool: any) => tool.name)).toEqual(
+      expect.arrayContaining(['cloud_skill_search', 'cloud_skill_get']),
+    );
+    expect(queryCalls[0].claudeConfigDir).toBeUndefined();
   });
 });

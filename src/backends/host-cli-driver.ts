@@ -14,13 +14,14 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { GROUPS_DIR } from '../config.js';
+import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import { logger } from '../logger.js';
 import {
   LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS,
   getSystemSettings,
 } from '../runtime-config.js';
 import type { ContainerOutput } from '../container-runner.js';
+import type { StreamEvent } from '../stream-event.types.js';
 import { runViaAgentLink } from './agent-link-driver.js';
 import type { BackendRunArgs } from './types.js';
 import {
@@ -55,6 +56,33 @@ export interface HostCliDriverConfig {
   maxOutputBytes?: number;
   /** 额外 env，键值会覆盖 process.env 的同名项。 */
   envOverrides?: Record<string, string>;
+  runtime?: 'local-device' | 'server-side';
+  model?: string;
+  workdirMode?: 'auto' | 'custom';
+  workdir?: string;
+}
+
+function safePathSegment(value: string | undefined, fallback: string): string {
+  const cleaned = (value || '').replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 96);
+  return cleaned || fallback;
+}
+
+function resolveServerSideInternalCwd(args: BackendRunArgs, cfg: HostCliDriverConfig): string {
+  const { input, group } = args;
+  const scope = input.isScheduledTask
+    ? 'tasks'
+    : input.sessionId
+      ? 'sessions'
+      : 'workspaces';
+  const scopeId = input.taskRunId || input.messageTaskId || input.sessionId || group.folder;
+  return path.join(
+    DATA_DIR,
+    'runtime',
+    'server-side',
+    safePathSegment(cfg.backendId, 'backend'),
+    scope,
+    safePathSegment(scopeId, 'run'),
+  );
 }
 
 interface CocoEvent {
@@ -63,14 +91,79 @@ interface CocoEvent {
   session_id?: string;
   result?: string;
   is_error?: boolean;
+  name?: string;
+  id?: string;
+  tool_use_id?: string;
+  input?: unknown;
+  content?: unknown;
   delta?: {
     role?: string;
     content?: string;
   };
   message?: {
     role?: string;
-    content?: string | Array<{ type?: string; text?: string }>;
+    content?: string | Array<Record<string, unknown>>;
   };
+}
+
+function compactJson(value: unknown, max = 2000): string | null {
+  if (value === undefined || value === null) return null;
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function summarizeToolInput(input: unknown): string | undefined {
+  if (!input || typeof input !== 'object') return compactJson(input, 240) ?? undefined;
+  const record = input as Record<string, unknown>;
+  for (const key of ['description', 'command', 'file_path', 'path', 'pattern', 'query', 'url', 'prompt']) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) return `${key}: ${value.slice(0, 220)}`;
+  }
+  return compactJson(record, 240) ?? undefined;
+}
+
+function firstContentBlock(evt: CocoEvent, type: string): Record<string, unknown> | null {
+  const content = evt.message?.content;
+  if (!Array.isArray(content)) return null;
+  return content.find((block) => block?.type === type) ?? null;
+}
+
+function streamEventFromCocoEvent(evt: CocoEvent): StreamEvent | null {
+  const sessionId = evt.session_id;
+  const toolUseBlock = firstContentBlock(evt, 'tool_use');
+  const toolResultBlock = firstContentBlock(evt, 'tool_result');
+  if (evt.type === 'tool_use' || evt.type === 'tool_call' || toolUseBlock) {
+    const source = toolUseBlock ?? (evt as unknown as Record<string, unknown>);
+    const input = source.input;
+    const toolInput = input && typeof input === 'object' && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : undefined;
+    return {
+      eventType: 'tool_use_start',
+      sessionId,
+      toolName: typeof source.name === 'string' ? source.name : 'unknown',
+      toolUseId: typeof source.id === 'string' ? source.id : typeof source.tool_use_id === 'string' ? source.tool_use_id : undefined,
+      toolInputSummary: summarizeToolInput(input),
+      toolInput,
+      detail: compactJson(input) ?? undefined,
+      rawEvent: evt as unknown as Record<string, unknown>,
+    };
+  }
+  if (evt.type === 'tool_result' || toolResultBlock) {
+    const source = toolResultBlock ?? (evt as unknown as Record<string, unknown>);
+    const content = source.content ?? source.result ?? source.text;
+    const isError = Boolean(source.is_error ?? evt.is_error);
+    return {
+      eventType: 'tool_use_end',
+      sessionId,
+      toolUseId: typeof source.tool_use_id === 'string' ? source.tool_use_id : typeof source.id === 'string' ? source.id : undefined,
+      statusText: isError ? 'error' : 'completed',
+      summary: isError ? 'Tool returned error' : 'Tool response received',
+      detail: compactJson(content) ?? undefined,
+      rawEvent: evt as unknown as Record<string, unknown>,
+    };
+  }
+  return null;
 }
 
 function extractAssistantText(evt: CocoEvent): string | null {
@@ -196,10 +289,15 @@ export async function runHostCli(
     return runViaAgentLink(args, cfg, execNode);
   }
 
-  // 1. 工作目录
+  // 1. 工作目录。纯 server-side backend 不暴露业务 Workdir；这里只使用
+  // data/runtime/server-side 下的内部运行目录承载 CLI cwd / 临时文件。
   const defaultGroupDir = path.join(GROUPS_DIR, group.folder);
   fs.mkdirSync(defaultGroupDir, { recursive: true });
-  let groupDir = group.customCwd || defaultGroupDir;
+  let groupDir =
+    cfg.runtime === 'server-side' && !group.customCwd
+      ? resolveServerSideInternalCwd(args, cfg)
+      : group.customCwd || defaultGroupDir;
+  fs.mkdirSync(groupDir, { recursive: true });
   if (!path.isAbsolute(groupDir)) {
     return {
       status: 'error',
@@ -340,6 +438,15 @@ export async function runHostCli(
           const evt = parseEvent(line);
           if (evt) {
             if (evt.session_id) state.lastSessionId = evt.session_id;
+            const structuredEvent = streamEventFromCocoEvent(evt);
+            if (structuredEvent) {
+              void emitWrapped({
+                status: 'stream',
+                result: null,
+                newSessionId: state.lastSessionId,
+                streamEvent: structuredEvent,
+              });
+            }
             const assistantText = extractAssistantText(evt);
             if (assistantText) {
               state.lastAssistantText = `${state.lastAssistantText ?? ''}${assistantText}`;

@@ -26,6 +26,7 @@ const agentTeamMCPConfigPlaceholder = "__OCTODECK_AGENT_TEAM_MCP_CONFIG__"
 const agentTeamMCPProjectConfigMarker = "__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__"
 const userMCPServersEnv = "OCTODECK_USER_MCP_SERVERS_JSON"
 const deviceWorkspaceURIPrefix = "octodeck-workspace://"
+const deviceTmpURIPrefix = "octodeck-tmp://"
 
 // runner spawns a child process per run.request and pumps its stdout/stderr
 // back to the server as run.event frames.
@@ -232,18 +233,18 @@ func resolveWorkspaceRepo(ctx context.Context, cfg *Config, spec *WorkspaceRepoS
 		if err != nil {
 			return "", err
 		}
-		worktreeDir, err := createWorkspaceDir(cfg, spec.GroupFolder)
+		worktreeDir, err := createWorkspaceRepoDir(cfg, spec)
 		if err != nil {
 			return "", err
 		}
-		if err := runGit(ctx, cacheDir, "worktree", "add", worktreeDir, ref); err != nil {
+		if err := runGit(ctx, cacheDir, "worktree", "add", "--force", worktreeDir, ref); err != nil {
 			_ = os.RemoveAll(worktreeDir)
 			return "", err
 		}
 		return worktreeDir, nil
 
 	case "workspace":
-		return ensureNamedWorkspaceDir(cfg, spec.GroupFolder)
+		return ensureWorkspaceRepoBaseDir(cfg, spec)
 
 	case "device_path":
 		if spec.DevicePath == "" {
@@ -260,13 +261,20 @@ func resolveWorkspaceRepo(ctx context.Context, cfg *Config, spec *WorkspaceRepoS
 			return "", fmt.Errorf("devicePath outside allowed roots: %s", devicePath)
 		}
 		if !isGitDir(devicePath) {
-			return devicePath, nil
+			baseDir, err := ensureWorkspaceRepoBaseDir(cfg, spec)
+			if err != nil {
+				return "", err
+			}
+			if err := ensureDevicePathSymlink(baseDir, devicePath); err != nil {
+				return "", err
+			}
+			return baseDir, nil
 		}
-		worktreeDir, err := createWorkspaceDir(cfg, spec.GroupFolder)
+		worktreeDir, err := createWorkspaceRepoDir(cfg, spec)
 		if err != nil {
 			return "", err
 		}
-		if err := runGit(ctx, devicePath, "worktree", "add", worktreeDir, "HEAD"); err != nil {
+		if err := runGit(ctx, devicePath, "worktree", "add", "--force", worktreeDir, "HEAD"); err != nil {
 			_ = os.RemoveAll(worktreeDir)
 			return "", err
 		}
@@ -274,6 +282,132 @@ func resolveWorkspaceRepo(ctx context.Context, cfg *Config, spec *WorkspaceRepoS
 	default:
 		return "", fmt.Errorf("unknown workspace repo kind: %q", spec.Kind)
 	}
+}
+
+func agentRootDir(cfg *Config, agentID string, customRoot string) (string, error) {
+	if customRoot != "" {
+		if !filepath.IsAbs(customRoot) {
+			return "", fmt.Errorf("agentRoot must be absolute: %q", customRoot)
+		}
+		return filepath.Clean(customRoot), nil
+	}
+	return filepath.Join(workspaceDir(cfg), safeGroupFolder(agentID)), nil
+}
+
+func agentScopedDir(cfg *Config, agentID, customRoot, scope, scopeID string) (string, error) {
+	root, err := agentRootDir(cfg, agentID, customRoot)
+	if err != nil {
+		return "", err
+	}
+	switch scope {
+	case "direct_session":
+		if scopeID == "" {
+			scopeID = "new"
+		}
+		return filepath.Join(sessionDir(cfg), safeGroupFolder(scopeID)), nil
+	case "session":
+		if scopeID == "" {
+			scopeID = "new"
+		}
+		return filepath.Join(root, "sessions", safeGroupFolder(scopeID)), nil
+	case "task":
+		if scopeID == "" {
+			scopeID = "run"
+		}
+		return filepath.Join(root, "tasks", safeGroupFolder(scopeID)), nil
+	case "skills":
+		return filepath.Join(root, "skills"), nil
+	case "workspace", "":
+		return root, nil
+	default:
+		return "", fmt.Errorf("unknown workspace scope: %q", scope)
+	}
+}
+
+func workspaceSpecAgentID(spec *WorkspaceRepoSpec) string {
+	if spec.AgentID != "" {
+		return spec.AgentID
+	}
+	return spec.GroupFolder
+}
+
+func ensureWorkspaceRepoBaseDir(cfg *Config, spec *WorkspaceRepoSpec) (string, error) {
+	if spec.AgentID != "" || spec.AgentRoot != "" || spec.Scope != "" || spec.ScopeID != "" {
+		dir, err := agentScopedDir(cfg, workspaceSpecAgentID(spec), spec.AgentRoot, spec.Scope, spec.ScopeID)
+		if err != nil {
+			return "", err
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+		return dir, nil
+	}
+	return ensureNamedWorkspaceDir(cfg, spec.GroupFolder)
+}
+
+func createWorkspaceRepoDir(cfg *Config, spec *WorkspaceRepoSpec) (string, error) {
+	if spec.AgentID != "" || spec.AgentRoot != "" || spec.Scope != "" || spec.ScopeID != "" {
+		base, err := ensureWorkspaceRepoBaseDir(cfg, spec)
+		if err != nil {
+			return "", err
+		}
+		return ensureScopedRepoDir(base, spec)
+	}
+	return createWorkspaceDir(cfg, spec.GroupFolder)
+}
+
+func ensureScopedRepoDir(baseDir string, spec *WorkspaceRepoSpec) (string, error) {
+	name := "repo"
+	if spec.Kind == "device_path" && spec.DevicePath != "" {
+		name = filepath.Base(filepath.Clean(spec.DevicePath))
+	}
+	name = safePathSegment(name)
+	if name == "" {
+		name = "repo"
+	}
+	dir := filepath.Join(baseDir, name)
+	if info, err := os.Stat(dir); err == nil {
+		if !info.IsDir() {
+			return "", fmt.Errorf("repo workspace path exists and is not directory: %s", dir)
+		}
+		if isGitDir(dir) {
+			return dir, nil
+		}
+		entries, readErr := os.ReadDir(dir)
+		if readErr != nil {
+			return "", readErr
+		}
+		if len(entries) > 0 {
+			return "", fmt.Errorf("repo workspace path exists and is not empty: %s", dir)
+		}
+		if err := os.Remove(dir); err != nil {
+			return "", err
+		}
+		return dir, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	return dir, nil
+}
+
+func ensureDevicePathSymlink(baseDir, devicePath string) error {
+	name := safePathSegment(filepath.Base(filepath.Clean(devicePath)))
+	if name == "" {
+		name = "repo"
+	}
+	linkPath := filepath.Join(baseDir, name)
+	if existing, err := os.Readlink(linkPath); err == nil {
+		if existing == devicePath {
+			return nil
+		}
+		return fmt.Errorf("symlink already exists with different target: %s -> %s", linkPath, existing)
+	}
+	if _, err := os.Lstat(linkPath); err == nil {
+		return fmt.Errorf("path already exists and is not symlink: %s", linkPath)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.Symlink(devicePath, linkPath)
 }
 
 func lockRepoSpec(spec *WorkspaceRepoSpec) func() {
@@ -314,13 +448,43 @@ func defaultRunCwd(cfg *Config, requestedCwd string) (string, error) {
 		folder := strings.TrimPrefix(requestedCwd, deviceWorkspaceURIPrefix)
 		return ensureNamedWorkspaceDir(cfg, folder)
 	}
+	if strings.HasPrefix(requestedCwd, deviceTmpURIPrefix) {
+		folder := strings.TrimPrefix(requestedCwd, deviceTmpURIPrefix)
+		return ensureNamedTmpDir(cfg, folder)
+	}
 	base := filepath.Base(filepath.Clean(requestedCwd))
 	return createRandomDir(taskDir(cfg), safeGroupFolder(base))
+}
+
+func resolveAgentWorkspaceCwd(cfg *Config, ws *AgentRunWorkspace) (string, error) {
+	if ws == nil || (ws.AgentID == "" && ws.AgentRoot == "" && ws.Scope == "" && ws.ScopeID == "") {
+		return "", errors.New("agent workspace metadata is required")
+	}
+	agentID := ws.AgentID
+	if agentID == "" {
+		agentID = ws.Folder
+	}
+	dir, err := agentScopedDir(cfg, agentID, ws.AgentRoot, ws.Scope, ws.ScopeID)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 func ensureNamedWorkspaceDir(cfg *Config, groupFolder string) (string, error) {
 	dir := filepath.Join(workspaceDir(cfg), safeGroupFolder(groupFolder))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func ensureNamedTmpDir(cfg *Config, groupFolder string) (string, error) {
+	dir := filepath.Join(tmpDir(cfg), safeGroupFolder(groupFolder))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -761,6 +925,48 @@ func reposDir(cfg *Config) string {
 		return filepath.Join(os.TempDir(), "octodeck", "repos")
 	}
 	return repos
+}
+
+func cacheDir(cfg *Config) string {
+	if cfg != nil && cfg.CacheDir != "" {
+		return cfg.CacheDir
+	}
+	if cfg != nil && cfg.WorkspaceDir != "" {
+		return filepath.Join(filepath.Dir(cfg.WorkspaceDir), "cache")
+	}
+	cache, err := defaultCacheDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "octodeck", "cache")
+	}
+	return cache
+}
+
+func tmpDir(cfg *Config) string {
+	if cfg != nil && cfg.TmpDir != "" {
+		return cfg.TmpDir
+	}
+	if cfg != nil && cfg.WorkspaceDir != "" {
+		return filepath.Join(filepath.Dir(cfg.WorkspaceDir), "tmp")
+	}
+	tmp, err := defaultTmpDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "octodeck", "tmp")
+	}
+	return tmp
+}
+
+func stateDir(cfg *Config) string {
+	if cfg != nil && cfg.StateDir != "" {
+		return cfg.StateDir
+	}
+	if cfg != nil && cfg.WorkspaceDir != "" {
+		return filepath.Join(filepath.Dir(cfg.WorkspaceDir), "state")
+	}
+	state, err := defaultStateDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "octodeck", "state")
+	}
+	return state
 }
 
 func repoCacheName(gitURL string) string {

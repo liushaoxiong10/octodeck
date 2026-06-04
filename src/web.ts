@@ -47,6 +47,7 @@ import memoryRoutes from './routes/memory.js';
 import configRoutes, { injectConfigDeps } from './routes/config.js';
 import tasksRoutes from './routes/tasks.js';
 import issueRoutes from './routes/issues.js';
+import historyRoutes from './routes/history.js';
 import adminRoutes from './routes/admin.js';
 import fileRoutes from './routes/files.js';
 import monitorRoutes, { injectMonitorDeps } from './routes/monitor.js';
@@ -70,6 +71,7 @@ import agentLinkRoutes, {
 import {
   handleAgentLinkToolHttpRequest,
   handleCloudMemoryToolHttpRequest,
+  handleCloudSkillToolHttpRequest,
 } from './routes/agent-link-tool.js';
 import {
   checkBillingAccess,
@@ -116,6 +118,7 @@ import { PLUGIN_EXPANSION_ATTACHMENT_TYPE } from './plugin-expander-sentinel.js'
 import { resolvePerMessageRuntimeOwner } from './runtime-owner.js';
 import { persistPluginExpansion } from './plugin-expander-store.js';
 import { logger } from './logger.js';
+import { IssueAutoDriver } from './issue-auto-driver.js';
 import {
   executeSessionReset,
   isClearCommand,
@@ -256,6 +259,7 @@ app.route('/api/memory', memoryRoutes);
 app.route('/api/config', configRoutes);
 app.route('/api/tasks', tasksRoutes);
 app.route('/api/issues', issueRoutes);
+app.route('/api/history', historyRoutes);
 app.route('/api/skills', skillsRoutes);
 app.route('/api/admin', adminRoutes);
 app.route('/api/browse', browseRoutes);
@@ -279,6 +283,9 @@ app.post('/api/agent-link/tool', async (c) => {
 });
 app.post('/api/cloud-memory/tool', async (c) => {
   return handleCloudMemoryToolHttpRequest(c.req.raw);
+});
+app.post('/api/cloud-skills/tool', async (c) => {
+  return handleCloudSkillToolHttpRequest(c.req.raw);
 });
 app.route('/api/devices', agentLinkRoutes);
 app.route('/api/agent-link', agentLinkRoutes);
@@ -2496,6 +2503,7 @@ function broadcastStatus(): void {
 let statusInterval: ReturnType<typeof setInterval> | null = null;
 let httpServer: ReturnType<typeof serve> | null = null;
 let wss: WebSocketServer | null = null;
+let issueAutoDriver: IssueAutoDriver | null = null;
 
 export function startWebServer(webDeps: WebDeps): void {
   webDeps.broadcastStreamEvent = broadcastStreamEvent;
@@ -2542,6 +2550,10 @@ export function startWebServer(webDeps: WebDeps): void {
   // Register runner state change callback for sidebar indicators
   webDeps.queue.setOnRunnerStateChange(broadcastRunnerState);
 
+  issueAutoDriver?.stop();
+  issueAutoDriver = new IssueAutoDriver(webDeps);
+  issueAutoDriver.start();
+
   // Broadcast status every 5 seconds
   if (statusInterval) clearInterval(statusInterval);
   statusInterval = setInterval(broadcastStatus, 5000);
@@ -2558,6 +2570,8 @@ export async function shutdownWebServer(): Promise<void> {
     clearInterval(statusInterval);
     statusInterval = null;
   }
+  issueAutoDriver?.stop();
+  issueAutoDriver = null;
   // Close all WebSocket connections
   for (const client of wsClients.keys()) {
     try {

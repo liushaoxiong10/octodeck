@@ -24,7 +24,7 @@ import (
 func goos() string   { return runtime.GOOS }
 func goarch() string { return runtime.GOARCH }
 
-const daemonVersion = "octodeck-daemon/1.0.0"
+const daemonVersion = "octodeck-daemon/1.0.2"
 
 func hostname() string {
 	h, err := os.Hostname()

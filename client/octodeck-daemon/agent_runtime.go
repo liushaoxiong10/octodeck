@@ -778,16 +778,24 @@ func (rt *agentRuntimeProcess) resolveCwd(ctx context.Context, req *AgentRunRequ
 		req.Cwd = cwd
 	} else {
 		requested := req.Cwd
-		if req.Workspace != nil && req.Workspace.Cwd != "" {
+		if req.Workspace != nil && (req.Workspace.AgentID != "" || req.Workspace.AgentRoot != "" || req.Workspace.Scope != "" || req.Workspace.ScopeID != "") {
+			cwd, err := resolveAgentWorkspaceCwd(rt.cfg, req.Workspace)
+			if err != nil {
+				return "", err
+			}
+			req.Cwd = cwd
+		} else if req.Workspace != nil && req.Workspace.Cwd != "" {
 			requested = req.Workspace.Cwd
 		} else if req.Workspace != nil && req.Workspace.Folder != "" {
 			requested = deviceWorkspaceURIPrefix + req.Workspace.Folder
 		}
-		cwd, err := defaultRunCwd(rt.cfg, requested)
-		if err != nil {
-			return "", err
+		if req.Cwd == "" {
+			cwd, err := defaultRunCwd(rt.cfg, requested)
+			if err != nil {
+				return "", err
+			}
+			req.Cwd = cwd
 		}
-		req.Cwd = cwd
 	}
 	if req.RemoteCwdPlaceholder != "" {
 		req.Context = replaceContextPlaceholder(req.Context, req.RemoteCwdPlaceholder, req.Cwd)
@@ -976,7 +984,7 @@ func (a *claudeCodeAdapter) BuildRunCommand(cfg *Config, req *AgentRunRequestFra
 }
 
 func (a *codexAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
-	argv := []string{"exec"}
+	argv := []string{"exec", "--json"}
 	if req.Policy.Model != "" {
 		argv = append(argv, "-m", req.Policy.Model)
 	}
@@ -984,7 +992,7 @@ func (a *codexAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]
 		argv = append(argv, "--sandbox", req.Policy.PermissionMode)
 	}
 	argv = append(argv, req.Input.Prompt)
-	return argv, false, nil
+	return argv, true, nil
 }
 
 func (a *traecliAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
@@ -1608,10 +1616,10 @@ func validateAgentRunRequest(cfg *Config, req *AgentRunRequestFrame) error {
 	if req.Cwd == "" && (req.Workspace == nil || (req.Workspace.Cwd == "" && req.Workspace.Folder == "" && req.Workspace.Repo == nil)) {
 		return errors.New("cwd is required")
 	}
-	if req.Cwd != "" && !filepath.IsAbs(req.Cwd) && !strings.HasPrefix(req.Cwd, deviceWorkspaceURIPrefix) {
+	if req.Cwd != "" && !filepath.IsAbs(req.Cwd) && !isDeviceManagedURI(req.Cwd) {
 		return fmt.Errorf("cwd must be absolute: %q", req.Cwd)
 	}
-	if req.Workspace != nil && req.Workspace.Cwd != "" && !filepath.IsAbs(req.Workspace.Cwd) && !strings.HasPrefix(req.Workspace.Cwd, deviceWorkspaceURIPrefix) {
+	if req.Workspace != nil && req.Workspace.Cwd != "" && !filepath.IsAbs(req.Workspace.Cwd) && !isDeviceManagedURI(req.Workspace.Cwd) {
 		return fmt.Errorf("workspace.cwd must be absolute: %q", req.Workspace.Cwd)
 	}
 	for k := range req.Env {

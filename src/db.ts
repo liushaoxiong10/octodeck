@@ -39,6 +39,7 @@ import {
   ManagedRepoKind,
   ImContextBinding,
   IssueAgentRun,
+  IssueAgentRunEvent,
   IssueAttachment,
   IssuePriority,
   IssueStatus,
@@ -307,7 +308,9 @@ function initializeSqliteDatabase(
     CREATE TABLE IF NOT EXISTS chats (
       jid TEXT PRIMARY KEY,
       name TEXT,
-      last_message_time TEXT
+      last_message_time TEXT,
+      archived_at TEXT,
+      archive_reason TEXT
     );
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT,
@@ -420,6 +423,22 @@ function initializeSqliteDatabase(
       FOREIGN KEY (issue_id) REFERENCES issues(id)
     );
     CREATE INDEX IF NOT EXISTS idx_issue_agent_runs_issue ON issue_agent_runs(issue_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS issue_agent_run_events (
+      id TEXT PRIMARY KEY,
+      issue_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      title TEXT,
+      summary TEXT,
+      detail TEXT,
+      payload TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (issue_id) REFERENCES issues(id),
+      FOREIGN KEY (run_id) REFERENCES issue_agent_runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_issue_run_events_run ON issue_agent_run_events(run_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_issue_run_events_issue ON issue_agent_run_events(issue_id, created_at);
 
     CREATE TABLE IF NOT EXISTS issue_attachments (
       id TEXT PRIMARY KEY,
@@ -933,6 +952,26 @@ function initializeSqliteDatabase(
     CREATE INDEX IF NOT EXISTS idx_agent_links_active
       ON agent_links(user_id) WHERE revoked_at IS NULL;
 
+    CREATE TABLE IF NOT EXISTS cloud_skills (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      skill_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      content TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      package_name TEXT,
+      package_source TEXT,
+      source_provider TEXT,
+      installed_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      files_json TEXT NOT NULL DEFAULT '[]',
+      UNIQUE(user_id, skill_id),
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cloud_skills_user ON cloud_skills(user_id, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_cloud_skills_package ON cloud_skills(user_id, package_name);
+
     CREATE TABLE IF NOT EXISTS repos (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -957,6 +996,8 @@ function initializeSqliteDatabase(
   ensureColumn('invite_codes', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
+  ensureColumn('chats', 'archived_at', 'TEXT');
+  ensureColumn('chats', 'archive_reason', 'TEXT');
   ensureColumn(
     'registered_groups',
     'execution_mode',
@@ -1009,6 +1050,10 @@ function initializeSqliteDatabase(
   ensureColumn('issues', 'last_run_id', 'TEXT');
   ensureColumn('issues', 'last_run_status', 'TEXT');
   ensureColumn('issues', 'last_run_at', 'TEXT');
+  ensureColumn('issue_agent_run_events', 'title', 'TEXT');
+  ensureColumn('issue_agent_run_events', 'summary', 'TEXT');
+  ensureColumn('issue_agent_run_events', 'detail', 'TEXT');
+  ensureColumn('issue_agent_run_events', 'payload', 'TEXT');
   ensureColumn('issue_attachments', 'filename', 'TEXT');
   ensureColumn('issue_attachments', 'mime_type', 'TEXT');
   ensureColumn('issue_attachments', 'size_bytes', 'INTEGER NOT NULL DEFAULT 0');
@@ -2332,7 +2377,9 @@ export function storeChatMetadata(
       INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
       ON CONFLICT(jid) DO UPDATE SET
         name = excluded.name,
-        last_message_time = MAX(last_message_time, excluded.last_message_time)
+        last_message_time = MAX(last_message_time, excluded.last_message_time),
+        archived_at = NULL,
+        archive_reason = NULL
     `,
     ).run(chatJid, name, timestamp);
   } else {
@@ -2341,7 +2388,9 @@ export function storeChatMetadata(
       `
       INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
       ON CONFLICT(jid) DO UPDATE SET
-        last_message_time = MAX(last_message_time, excluded.last_message_time)
+        last_message_time = MAX(last_message_time, excluded.last_message_time),
+        archived_at = NULL,
+        archive_reason = NULL
     `,
     ).run(chatJid, chatJid, timestamp);
   }
@@ -2376,6 +2425,7 @@ export function getAllChats(): ChatInfo[] {
       `
     SELECT jid, name, last_message_time
     FROM chats
+    WHERE archived_at IS NULL
     ORDER BY last_message_time DESC
   `,
     )
@@ -3507,6 +3557,26 @@ function mapIssueRunRow(row: unknown): IssueAgentRun {
   };
 }
 
+function mapIssueRunEventRow(row: unknown): IssueAgentRunEvent {
+  const r = row as Omit<IssueAgentRunEvent, 'payload'> & { payload?: string | null };
+  let payload: Record<string, unknown> | null = null;
+  if (r.payload) {
+    try {
+      const parsed = JSON.parse(r.payload);
+      payload = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { value: parsed };
+    } catch {
+      payload = { raw: r.payload };
+    }
+  }
+  return {
+    ...r,
+    title: toUtf8StringOrNull(r.title),
+    summary: toUtf8StringOrNull(r.summary),
+    detail: toUtf8StringOrNull(r.detail),
+    payload,
+  };
+}
+
 function mapIssueAttachmentRow(row: unknown): IssueAttachment {
   const r = row as IssueAttachment;
   return {
@@ -3640,6 +3710,34 @@ export function listIssues(filters: IssueListFilters = {}): {
     )
     .all(...values, limit, offset);
   return { issues: rows.map(mapIssueRow), total };
+}
+
+export function listAutoDrivableIssues(limit = 20): WorkspaceIssue[] {
+  const rows = db
+    .prepare(
+      `
+      SELECT i.*
+      FROM issues i
+      WHERE i.status = 'todo'
+        AND i.closed_at IS NULL
+        AND (
+          i.execution_node IS NOT NULL OR
+          i.agent_link_id IS NOT NULL OR
+          i.agent_client_id IS NOT NULL OR
+          i.backend IS NOT NULL
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM issue_agent_runs r
+          WHERE r.issue_id = i.id AND r.status IN ('queued', 'running')
+        )
+      ORDER BY
+        CASE i.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC,
+        i.created_at ASC
+      LIMIT ?
+      `,
+    )
+    .all(Math.max(1, Math.min(100, limit)));
+  return rows.map(mapIssueRow);
 }
 
 export function updateIssue(
@@ -3786,6 +3884,38 @@ export function updateIssueAgentRun(
   if (fields.length === 0) return;
   values.push(id);
   db.prepare(`UPDATE issue_agent_runs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export function createIssueAgentRunEvent(
+  event: Omit<IssueAgentRunEvent, 'payload'> & { payload?: Record<string, unknown> | null },
+): IssueAgentRunEvent {
+  db.prepare(
+    `
+    INSERT INTO issue_agent_run_events (
+      id, issue_id, run_id, event_type, title, summary, detail, payload, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    event.id,
+    event.issue_id,
+    event.run_id,
+    event.event_type,
+    event.title == null ? null : toUtf8String(event.title, 'issue_agent_run_events.title'),
+    event.summary == null ? null : toUtf8String(event.summary, 'issue_agent_run_events.summary'),
+    event.detail == null ? null : toUtf8String(event.detail, 'issue_agent_run_events.detail'),
+    event.payload == null ? null : JSON.stringify(event.payload),
+    event.created_at,
+  );
+  const created = db.prepare('SELECT * FROM issue_agent_run_events WHERE id = ?').get(event.id);
+  if (!created) throw new Error('Failed to create issue agent run event');
+  return mapIssueRunEventRow(created);
+}
+
+export function listIssueAgentRunEvents(runId: string): IssueAgentRunEvent[] {
+  return db
+    .prepare('SELECT * FROM issue_agent_run_events WHERE run_id = ? ORDER BY created_at ASC')
+    .all(runId)
+    .map(mapIssueRunEventRow);
 }
 
 export function createIssueAttachment(input: Omit<IssueAttachment, 'created_at'> & { created_at?: string }): IssueAttachment {
@@ -4615,8 +4745,7 @@ export function ensureUserHomeGroup(
 
 export function deleteChatHistory(chatJid: string): void {
   const tx = db.transaction((jid: string) => {
-    db.prepare('DELETE FROM messages WHERE chat_jid = ?').run(jid);
-    db.prepare('DELETE FROM chats WHERE jid = ?').run(jid);
+    archiveChatRecord(jid, 'chat_history_deleted');
   });
   tx(chatJid);
 }
@@ -4634,8 +4763,7 @@ export function deleteChatHistory(chatJid: string): void {
 export function deleteImGroupRecord(jid: string): void {
   const tx = db.transaction(() => {
     db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
-    db.prepare('DELETE FROM messages WHERE chat_jid = ?').run(jid);
-    db.prepare('DELETE FROM chats WHERE jid = ?').run(jid);
+    archiveChatRecord(jid, 'im_group_deleted');
     db.prepare('DELETE FROM user_pinned_groups WHERE jid = ?').run(jid);
     // Feishu thread agents (source_kind='feishu_thread') and other chat-scoped
     // agents reference this jid via agents.chat_jid — without this, deleting
@@ -4664,8 +4792,7 @@ export function deleteGroupData(jid: string, folder: string): void {
     // 4. 删除会话
     db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(folder);
     // 5. 删除聊天记录
-    db.prepare('DELETE FROM messages WHERE chat_jid = ?').run(jid);
-    db.prepare('DELETE FROM chats WHERE jid = ?').run(jid);
+    archiveChatRecord(jid, 'group_deleted');
     // 6. 删除 pin 记录
     db.prepare('DELETE FROM user_pinned_groups WHERE jid = ?').run(jid);
     // 7. 清除定时任务的工作区关联（任务本身不删，只断开绑定）
@@ -4711,9 +4838,29 @@ export function getMessagesPage(
   chatJid: string,
   before?: string,
   limit = 50,
+  sessionId?: string,
 ): Array<NewMessage & { is_from_me: boolean }> {
-  const sql = before
-    ? `
+  const sessionFilter = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
+  const sql = sessionFilter
+    ? before
+      ? `
+      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+             turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+      FROM messages
+      WHERE chat_jid = ? AND timestamp < ? AND session_id = ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `
+      : `
+      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+             turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+      FROM messages
+      WHERE chat_jid = ? AND session_id = ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `
+    : before
+      ? `
       SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
       FROM messages
@@ -4721,7 +4868,7 @@ export function getMessagesPage(
       ORDER BY timestamp DESC
       LIMIT ?
     `
-    : `
+      : `
       SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
       FROM messages
@@ -4730,7 +4877,13 @@ export function getMessagesPage(
       LIMIT ?
     `;
 
-  const params = before ? [chatJid, before, limit] : [chatJid, limit];
+  const params = sessionFilter
+    ? before
+      ? [chatJid, before, sessionFilter, limit]
+      : [chatJid, sessionFilter, limit]
+    : before
+      ? [chatJid, before, limit]
+      : [chatJid, limit];
   const rows = db.prepare(sql).all(...params) as Array<
     NewMessage & { is_from_me: number }
   >;
@@ -4746,17 +4899,26 @@ export function getMessagesAfter(
   chatJid: string,
   after: string,
   limit = 50,
+  sessionId?: string,
 ): Array<NewMessage & { is_from_me: boolean }> {
+  const sessionFilter = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
   const rows = db
     .prepare(
-      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+      sessionFilter
+        ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+       FROM messages
+       WHERE chat_jid = ? AND timestamp > ? AND session_id = ?
+       ORDER BY timestamp ASC
+       LIMIT ?`
+        : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid = ? AND timestamp > ?
        ORDER BY timestamp ASC
        LIMIT ?`,
     )
-    .all(chatJid, after, limit) as Array<NewMessage & { is_from_me: number }>;
+    .all(...(sessionFilter ? [chatJid, after, sessionFilter, limit] : [chatJid, after, limit])) as Array<NewMessage & { is_from_me: number }>;
 
   return rows.map((row) => normalizeMessageRow(row));
 }
@@ -4768,26 +4930,48 @@ export function getMessagesPageMulti(
   chatJids: string[],
   before?: string,
   limit = 50,
+  sessionId?: string,
 ): Array<NewMessage & { is_from_me: boolean }> {
   if (chatJids.length === 0) return [];
-  if (chatJids.length === 1) return getMessagesPage(chatJids[0], before, limit);
+  if (chatJids.length === 1) return getMessagesPage(chatJids[0], before, limit, sessionId);
 
   const placeholders = chatJids.map(() => '?').join(',');
-  const sql = before
-    ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+  const sessionFilter = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
+  const sql = sessionFilter
+    ? before
+      ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+       FROM messages
+       WHERE chat_jid IN (${placeholders}) AND timestamp < ? AND session_id = ?
+       ORDER BY timestamp DESC
+       LIMIT ?`
+      : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+       FROM messages
+       WHERE chat_jid IN (${placeholders}) AND session_id = ?
+       ORDER BY timestamp DESC
+       LIMIT ?`
+    : before
+      ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp < ?
        ORDER BY timestamp DESC
        LIMIT ?`
-    : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+      : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid IN (${placeholders})
        ORDER BY timestamp DESC
        LIMIT ?`;
 
-  const params = before ? [...chatJids, before, limit] : [...chatJids, limit];
+  const params = sessionFilter
+    ? before
+      ? [...chatJids, before, sessionFilter, limit]
+      : [...chatJids, sessionFilter, limit]
+    : before
+      ? [...chatJids, before, limit]
+      : [...chatJids, limit];
   const rows = db.prepare(sql).all(...params) as Array<
     NewMessage & { is_from_me: number }
   >;
@@ -4802,21 +4986,30 @@ export function getMessagesAfterMulti(
   chatJids: string[],
   after: string,
   limit = 50,
+  sessionId?: string,
 ): Array<NewMessage & { is_from_me: boolean }> {
   if (chatJids.length === 0) return [];
-  if (chatJids.length === 1) return getMessagesAfter(chatJids[0], after, limit);
+  if (chatJids.length === 1) return getMessagesAfter(chatJids[0], after, limit, sessionId);
 
   const placeholders = chatJids.map(() => '?').join(',');
+  const sessionFilter = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
   const rows = db
     .prepare(
-      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+      sessionFilter
+        ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
+       FROM messages
+       WHERE chat_jid IN (${placeholders}) AND timestamp > ? AND session_id = ?
+       ORDER BY timestamp ASC
+       LIMIT ?`
+        : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp > ?
        ORDER BY timestamp ASC
        LIMIT ?`,
     )
-    .all(...chatJids, after, limit) as Array<
+    .all(...(sessionFilter ? [...chatJids, after, sessionFilter, limit] : [...chatJids, after, limit])) as Array<
     NewMessage & { is_from_me: number }
   >;
 
@@ -4838,6 +5031,596 @@ export function getTaskRunLogs(taskId: string, limit = 20): TaskRunLog[] {
   `,
     )
     .all(taskId, limit) as TaskRunLog[];
+}
+
+export interface SystemHistoryFilters {
+  type?: 'task' | 'issue' | 'team' | 'message' | 'all';
+  query?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface SystemHistoryItem {
+  id: string;
+  type: 'task' | 'issue' | 'team' | 'message';
+  title: string;
+  status?: string | null;
+  actor?: string | null;
+  workspace?: string | null;
+  summary?: string | null;
+  detail?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  createdAt: string;
+  targetUrl?: string | null;
+  payload?: Record<string, unknown> | null;
+}
+
+export interface SystemHistoryFlowStage {
+  id: string;
+  type: string;
+  title: string;
+  status?: string | null;
+  at: string;
+  summary?: string | null;
+  detail?: string | null;
+  payload?: Record<string, unknown> | null;
+}
+
+export interface SystemHistoryFlow {
+  id: string;
+  type: 'task' | 'issue' | 'team' | 'conversation';
+  title: string;
+  status?: string | null;
+  archivedAt?: string | null;
+  actor?: string | null;
+  workspace?: string | null;
+  startedAt: string;
+  updatedAt: string;
+  summary?: string | null;
+  targetUrl?: string | null;
+  metrics: { stages: number; messages?: number; durationMs?: number | null };
+  stages: SystemHistoryFlowStage[];
+}
+
+export function listSystemHistory(filters: SystemHistoryFilters = {}): SystemHistoryItem[] {
+  const limit = Math.max(1, Math.min(200, filters.limit ?? 100));
+  const offset = Math.max(0, filters.offset ?? 0);
+  const type = filters.type ?? 'all';
+  const query = filters.query?.trim().toLowerCase();
+  const items: SystemHistoryItem[] = [];
+
+  if (type === 'all' || type === 'task') {
+    const rows = db
+      .prepare(
+        `SELECT l.id, l.task_id, l.run_at, l.duration_ms, l.status, l.result, l.error,
+                t.prompt, t.group_folder, t.chat_jid, t.execution_type
+         FROM task_run_logs l
+         LEFT JOIN scheduled_tasks t ON t.id = l.task_id
+         ORDER BY l.run_at DESC
+         LIMIT ?`,
+      )
+      .all(limit * 2) as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      items.push({
+        id: `task:${row.id}`,
+        type: 'task',
+        title: String(row.prompt || row.task_id || 'Scheduled task'),
+        status: String(row.status || ''),
+        actor: String(row.execution_type || 'task'),
+        workspace: String(row.group_folder || row.chat_jid || ''),
+        summary: typeof row.result === 'string' ? row.result.slice(0, 240) : null,
+        detail: typeof row.error === 'string' && row.error ? row.error : typeof row.result === 'string' ? row.result : null,
+        startedAt: String(row.run_at || ''),
+        completedAt: row.duration_ms ? new Date(new Date(String(row.run_at)).getTime() + Number(row.duration_ms)).toISOString() : null,
+        createdAt: String(row.run_at || ''),
+        targetUrl: '/tasks',
+        payload: { taskId: row.task_id, durationMs: row.duration_ms },
+      });
+    }
+  }
+
+  if (type === 'all' || type === 'issue') {
+    const rows = db
+      .prepare(
+        `SELECT r.*, i.title AS issue_title, i.priority AS issue_priority
+         FROM issue_agent_runs r
+         LEFT JOIN issues i ON i.id = r.issue_id
+         ORDER BY r.created_at DESC
+         LIMIT ?`,
+      )
+      .all(limit * 2) as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      items.push({
+        id: `issue:${row.id}`,
+        type: 'issue',
+        title: String(row.issue_title || row.issue_id || 'Issue run'),
+        status: String(row.status || ''),
+        actor: String(row.backend || row.agent_client_id || row.execution_node || 'issue-agent'),
+        workspace: String(row.workspace_folder || row.workspace_jid || ''),
+        summary: typeof row.result === 'string' ? row.result.slice(0, 240) : null,
+        detail: typeof row.error === 'string' && row.error ? row.error : typeof row.result === 'string' ? row.result : null,
+        startedAt: typeof row.run_started_at === 'string' ? row.run_started_at : null,
+        completedAt: typeof row.run_completed_at === 'string' ? row.run_completed_at : null,
+        createdAt: String(row.created_at || ''),
+        targetUrl: '/issues',
+        payload: { issueId: row.issue_id, runId: row.id, priority: row.issue_priority },
+      });
+    }
+  }
+
+  if (type === 'all' || type === 'team') {
+    const rows = db
+      .prepare(
+        `SELECT * FROM agent_team_runs ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(limit * 2) as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      items.push({
+        id: `team:${row.id}`,
+        type: 'team',
+        title: String(row.prompt || row.team_id || 'Agent team run'),
+        status: String(row.status || ''),
+        actor: String(row.team_id || 'agent-team'),
+        workspace: null,
+        summary: typeof row.final_result === 'string' ? row.final_result.slice(0, 240) : null,
+        detail: typeof row.error === 'string' && row.error ? row.error : typeof row.final_result === 'string' ? row.final_result : null,
+        startedAt: typeof row.started_at === 'string' ? row.started_at : null,
+        completedAt: typeof row.completed_at === 'string' ? row.completed_at : null,
+        createdAt: String(row.created_at || ''),
+        targetUrl: '/agents',
+        payload: { teamId: row.team_id, runId: row.id, traceId: row.trace_id },
+      });
+    }
+  }
+
+  if (type === 'all' || type === 'message') {
+    const rows = db
+      .prepare(
+        `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
+                m.is_from_me, m.session_id, m.turn_id, m.source_kind, c.name AS chat_name,
+                c.archived_at AS chat_archived_at, c.archive_reason AS chat_archive_reason, c.jid AS chat_exists
+         FROM messages m
+         LEFT JOIN chats c ON c.jid = m.chat_jid
+         ORDER BY m.timestamp DESC
+         LIMIT ?`,
+      )
+      .all(limit * 2) as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      items.push({
+        id: `message:${row.chat_jid}:${row.id}`,
+        type: 'message',
+        title: String(row.chat_name || row.chat_jid || 'Conversation message'),
+        status: row.is_from_me ? 'agent' : 'user',
+        actor: String(row.sender_name || row.sender || ''),
+        workspace: String(row.chat_jid || ''),
+        summary: typeof row.content === 'string' ? row.content.slice(0, 240) : null,
+        detail: typeof row.content === 'string' ? row.content : null,
+        startedAt: String(row.timestamp || ''),
+        completedAt: null,
+        createdAt: String(row.timestamp || ''),
+        targetUrl: '/chat',
+        payload: { chatJid: row.chat_jid, messageId: row.id, sessionId: row.session_id, turnId: row.turn_id, sourceKind: row.source_kind },
+      });
+    }
+  }
+
+  const filtered = query
+    ? items.filter((item) =>
+        [item.title, item.status, item.actor, item.workspace, item.summary, item.detail]
+          .filter(Boolean)
+          .join('\n')
+          .toLowerCase()
+          .includes(query),
+      )
+    : items;
+  return filtered
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(offset, offset + limit);
+}
+
+function parseHistoryPayload(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { value: parsed };
+  } catch {
+    return { raw: value };
+  }
+}
+
+function shortHistorySession(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const trimmed = value.trim();
+  return trimmed.length > 18 ? `${trimmed.slice(0, 8)}…${trimmed.slice(-6)}` : trimmed;
+}
+
+function compactHistoryJson(value: unknown, max = 4000): string | null {
+  if (value === undefined || value === null) return null;
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function nestedHistoryValue(source: Record<string, unknown> | null | undefined, keys: string[]): unknown {
+  if (!source) return undefined;
+  for (const key of keys) {
+    const value = source[key];
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  const rawEvent = source.rawEvent && typeof source.rawEvent === 'object'
+    ? (source.rawEvent as Record<string, unknown>)
+    : null;
+  if (rawEvent) {
+    for (const key of keys) {
+      const value = rawEvent[key];
+      if (value !== undefined && value !== null && value !== '') return value;
+    }
+    const message = rawEvent.message && typeof rawEvent.message === 'object'
+      ? (rawEvent.message as Record<string, unknown>)
+      : null;
+    const blocks = message?.content;
+    if (Array.isArray(blocks)) {
+      for (const block of blocks) {
+        if (!block || typeof block !== 'object') continue;
+        const record = block as Record<string, unknown>;
+        for (const key of keys) {
+          const value = record[key];
+          if (value !== undefined && value !== null && value !== '') return value;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+function historyToolPayload(streamEvent: Record<string, unknown> | null, toolNames: Map<string, string>): Record<string, unknown> | null {
+  if (!streamEvent) return null;
+  const eventType = String(streamEvent.eventType || '');
+  if (!eventType.includes('tool_') && !eventType.includes('permission_denied')) return null;
+  const toolUseId = typeof streamEvent.toolUseId === 'string' ? streamEvent.toolUseId : null;
+  const toolName = typeof streamEvent.toolName === 'string'
+    ? streamEvent.toolName
+    : toolUseId
+      ? toolNames.get(toolUseId) ?? null
+      : null;
+  const input = streamEvent.toolInput ?? nestedHistoryValue(streamEvent, ['input', 'arguments', 'params']);
+  const response = streamEvent.detail ?? nestedHistoryValue(streamEvent, ['content', 'result', 'output', 'text', 'error']);
+  return {
+    toolName,
+    toolUseId,
+    parentToolUseId: streamEvent.parentToolUseId ?? null,
+    input,
+    response,
+    status: streamEvent.statusText ?? null,
+    rawEvent: streamEvent.rawEvent ?? null,
+  };
+}
+
+function historyToolTitle(eventType: string, streamEvent: Record<string, unknown> | null, toolNames: Map<string, string>): string | null {
+  if (!streamEvent) return null;
+  const toolUseId = typeof streamEvent.toolUseId === 'string' ? streamEvent.toolUseId : null;
+  const toolName = typeof streamEvent.toolName === 'string' ? streamEvent.toolName : toolUseId ? toolNames.get(toolUseId) : null;
+  const label = toolName || (toolUseId ? `#${toolUseId.slice(0, 8)}` : 'Tool');
+  if (eventType.includes('tool_use_start')) return `工具调用 · ${label}`;
+  if (eventType.includes('tool_use_end')) return `工具响应 · ${label}`;
+  if (eventType.includes('tool_progress')) return `工具进度 · ${label}`;
+  if (eventType.includes('permission_denied')) return `工具权限拒绝 · ${label}`;
+  return null;
+}
+
+function chatHistoryTargetUrl(chatJid: unknown, sessionId?: unknown, groupFolder?: unknown): string {
+  const jid = typeof chatJid === 'string' ? chatJid : '';
+  const agentMarker = '#agent:';
+  const agentIndex = jid.indexOf(agentMarker);
+  const baseJid = agentIndex >= 0 ? jid.slice(0, agentIndex) : jid;
+  const agentId = agentIndex >= 0 ? jid.slice(agentIndex + agentMarker.length) : '';
+  const folder = typeof groupFolder === 'string' && groupFolder
+    ? groupFolder
+    : baseJid.startsWith('web:')
+      ? baseJid.slice(4)
+      : '';
+  const base = folder ? `/chat/${encodeURIComponent(folder)}` : '/chat';
+  const params = new URLSearchParams();
+  if (agentId) params.set('agent', agentId);
+  const session = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : '';
+  if (session) params.set('session', session);
+  const query = params.toString();
+  return query ? `${base}?${query}` : base;
+}
+
+function archiveChatRecord(chatJid: string, reason: string): void {
+  const now = new Date().toISOString();
+  const existing = db
+    .prepare('SELECT jid FROM chats WHERE jid = ?')
+    .get(chatJid) as { jid: string } | undefined;
+  if (existing) {
+    db.prepare(
+      `UPDATE chats
+       SET archived_at = COALESCE(archived_at, ?), archive_reason = ?
+       WHERE jid = ?`,
+    ).run(now, reason, chatJid);
+    return;
+  }
+  db.prepare(
+    `INSERT INTO chats (jid, name, last_message_time, archived_at, archive_reason)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(chatJid, chatJid, now, now, reason);
+}
+
+export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): SystemHistoryFlow[] {
+  const limit = Math.max(1, Math.min(100, filters.limit ?? 50));
+  const offset = Math.max(0, filters.offset ?? 0);
+  const type = filters.type ?? 'all';
+  const query = filters.query?.trim().toLowerCase();
+  const flows: SystemHistoryFlow[] = [];
+
+  if (type === 'all' || type === 'task') {
+    const rows = db
+      .prepare(
+        `SELECT l.id, l.task_id, l.run_at, l.duration_ms, l.status, l.result, l.error,
+                t.prompt, t.group_folder, t.chat_jid, t.execution_type
+         FROM task_run_logs l
+         LEFT JOIN scheduled_tasks t ON t.id = l.task_id
+         ORDER BY l.run_at DESC
+         LIMIT ?`,
+      )
+      .all(limit * 2) as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      const title = String(row.prompt || row.task_id || 'Scheduled task');
+      const at = String(row.run_at || '');
+      flows.push({
+        id: `task:${row.id}`,
+        type: 'task',
+        title,
+        status: String(row.status || ''),
+        actor: String(row.execution_type || 'task'),
+        workspace: String(row.group_folder || row.chat_jid || ''),
+        startedAt: at,
+        updatedAt: row.duration_ms ? new Date(new Date(at).getTime() + Number(row.duration_ms)).toISOString() : at,
+        summary: typeof row.error === 'string' && row.error ? row.error : typeof row.result === 'string' ? row.result.slice(0, 240) : null,
+        targetUrl: row.group_folder ? `/tasks?workspace=${encodeURIComponent(String(row.group_folder))}&task=${encodeURIComponent(String(row.task_id || ''))}` : '/tasks',
+        metrics: { stages: 1, durationMs: Number(row.duration_ms || 0) },
+        stages: [
+          {
+            id: `task-stage:${row.id}`,
+            type: 'task_run',
+            title: `Task ${row.status || 'run'}`,
+            status: String(row.status || ''),
+            at,
+            summary: typeof row.result === 'string' ? row.result.slice(0, 240) : null,
+            detail: typeof row.error === 'string' && row.error ? row.error : typeof row.result === 'string' ? row.result : null,
+            payload: { taskId: row.task_id, durationMs: row.duration_ms },
+          },
+        ],
+      });
+    }
+  }
+
+  if (type === 'all' || type === 'issue') {
+    const rows = db
+      .prepare(
+        `SELECT r.*, i.title AS issue_title, i.priority AS issue_priority
+         FROM issue_agent_runs r
+         LEFT JOIN issues i ON i.id = r.issue_id
+         ORDER BY r.created_at DESC
+         LIMIT ?`,
+      )
+      .all(limit * 2) as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      const sessionLabel = shortHistorySession(row.session_id) || String(row.id || '').slice(0, 12);
+      const eventRows = db
+        .prepare('SELECT * FROM issue_agent_run_events WHERE run_id = ? ORDER BY created_at ASC LIMIT 500')
+        .all(row.id) as Array<Record<string, unknown>>;
+      const toolNames = new Map<string, string>();
+      for (const event of eventRows) {
+        const payload = parseHistoryPayload(event.payload);
+        const streamEvent = payload?.streamEvent && typeof payload.streamEvent === 'object'
+          ? (payload.streamEvent as Record<string, unknown>)
+          : null;
+        if (typeof streamEvent?.toolUseId === 'string' && typeof streamEvent.toolName === 'string') {
+          toolNames.set(streamEvent.toolUseId, streamEvent.toolName);
+        }
+      }
+      const stages = eventRows.map((event) => {
+        const payload = parseHistoryPayload(event.payload);
+        const streamEvent = payload?.streamEvent && typeof payload.streamEvent === 'object'
+          ? (payload.streamEvent as Record<string, unknown>)
+          : null;
+        const eventType = String(event.event_type || 'event');
+        const toolName = typeof streamEvent?.toolName === 'string' ? streamEvent.toolName : null;
+        const toolSummary = typeof streamEvent?.toolInputSummary === 'string' ? streamEvent.toolInputSummary : null;
+        const toolPayload = historyToolPayload(streamEvent, toolNames);
+        const toolResponse = toolPayload?.response;
+        const title = historyToolTitle(eventType, streamEvent, toolNames)
+          ?? (eventType.includes('tool_')
+            ? `${toolName || 'Tool'} · ${eventType.replace('stream:', '')}`
+            : String(event.title || event.event_type || 'Event'));
+        return {
+          id: String(event.id),
+          type: eventType,
+          title,
+          status: null,
+          at: String(event.created_at || row.created_at || ''),
+          summary: toolSummary || (typeof event.summary === 'string' ? event.summary : null) || (toolResponse ? compactHistoryJson(toolResponse, 240) : null),
+          detail: typeof event.detail === 'string' ? event.detail : toolResponse ? compactHistoryJson(toolResponse) : null,
+          payload: toolPayload ? { ...payload, toolAudit: toolPayload } : payload,
+        };
+      });
+      flows.push({
+        id: `issue:${row.id}`,
+        type: 'issue',
+        title: `${String(row.issue_title || row.issue_id || 'Issue run')} · ${sessionLabel}`,
+        status: String(row.status || ''),
+        actor: String(row.backend || row.agent_client_id || row.execution_node || 'issue-agent'),
+        workspace: String(row.workspace_folder || row.workspace_jid || ''),
+        startedAt: String(row.run_started_at || row.created_at || ''),
+        updatedAt: String(row.run_completed_at || row.run_started_at || row.created_at || ''),
+        summary: typeof row.error === 'string' && row.error ? row.error : typeof row.result === 'string' ? row.result.slice(0, 240) : null,
+        targetUrl: `/issues/${encodeURIComponent(String(row.workspace_folder || ''))}?issue=${encodeURIComponent(String(row.issue_id || ''))}&run=${encodeURIComponent(String(row.id || ''))}`,
+        metrics: { stages: stages.length, durationMs: row.run_started_at && row.run_completed_at ? new Date(String(row.run_completed_at)).getTime() - new Date(String(row.run_started_at)).getTime() : null },
+        stages: stages.length
+          ? stages
+          : [
+              {
+                id: `issue-stage:${row.id}`,
+                type: 'run',
+                title: `Issue run ${row.status || ''}`,
+                status: String(row.status || ''),
+                at: String(row.created_at || ''),
+                summary: typeof row.result === 'string' ? row.result.slice(0, 240) : typeof row.error === 'string' ? row.error : null,
+                detail: typeof row.error === 'string' && row.error ? row.error : typeof row.result === 'string' ? row.result : null,
+                payload: { issueId: row.issue_id, runId: row.id, sessionId: row.session_id, priority: row.issue_priority },
+              },
+            ],
+      });
+    }
+  }
+
+  if (type === 'all' || type === 'team') {
+    const rows = db.prepare('SELECT * FROM agent_team_runs ORDER BY created_at DESC LIMIT ?').all(limit * 2) as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      const eventRows = db
+        .prepare('SELECT * FROM agent_team_events WHERE run_id = ? ORDER BY timestamp ASC LIMIT 80')
+        .all(row.id) as Array<Record<string, unknown>>;
+      const sessionIds = [
+        ...new Set(
+          eventRows
+            .map((event) => (typeof event.session_id === 'string' ? event.session_id : null))
+            .filter((value): value is string => !!value),
+        ),
+      ];
+      const sessionLabel = sessionIds.length ? sessionIds.map(shortHistorySession).filter(Boolean).join(', ') : String(row.trace_id || row.id || '').slice(0, 12);
+      const stages = eventRows.map((event) => ({
+        id: `team-event:${event.id}`,
+        type: String(event.type || 'event'),
+        title: String(event.type || 'Team event'),
+        status: null,
+        at: String(event.timestamp || row.created_at || ''),
+        summary: String(event.actor || ''),
+        detail: typeof event.payload === 'string' ? event.payload : null,
+        payload: parseHistoryPayload(event.payload),
+      }));
+      flows.push({
+        id: `team:${row.id}`,
+        type: 'team',
+        title: `${String(row.prompt || row.team_id || 'Agent team run')} · ${sessionLabel}`,
+        status: String(row.status || ''),
+        actor: String(row.team_id || 'agent-team'),
+        workspace: null,
+        startedAt: String(row.started_at || row.created_at || ''),
+        updatedAt: String(row.completed_at || row.updated_at || row.created_at || ''),
+        summary: typeof row.error === 'string' && row.error ? row.error : typeof row.final_result === 'string' ? row.final_result.slice(0, 240) : null,
+        targetUrl: `/agents?run=${encodeURIComponent(String(row.id || ''))}&team=${encodeURIComponent(String(row.team_id || ''))}`,
+        metrics: { stages: stages.length, durationMs: row.started_at && row.completed_at ? new Date(String(row.completed_at)).getTime() - new Date(String(row.started_at)).getTime() : null },
+        stages,
+      });
+    }
+  }
+
+  if (type === 'all' || type === 'message') {
+    const rows = db
+      .prepare(
+        `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
+                m.is_from_me, m.session_id, m.turn_id, m.source_kind,
+                c.name AS chat_name, c.archived_at AS chat_archived_at, c.archive_reason AS chat_archive_reason,
+                CASE WHEN c.jid IS NULL THEN 0 ELSE 1 END AS chat_exists,
+                g.name AS group_name, g.folder AS group_folder
+         FROM messages m
+         LEFT JOIN chats c ON c.jid = m.chat_jid
+         LEFT JOIN registered_groups g ON g.jid = CASE
+           WHEN instr(m.chat_jid, '#agent:') > 0 THEN substr(m.chat_jid, 1, instr(m.chat_jid, '#agent:') - 1)
+           ELSE m.chat_jid
+         END
+         ORDER BY m.timestamp DESC
+         LIMIT ?`, 
+      )
+      .all(limit * 8) as Array<Record<string, unknown>>;
+    const byChat = new Map<string, Array<Record<string, unknown>>>();
+    for (const row of rows) {
+      const key = String(row.chat_jid || 'unknown');
+      const arr = byChat.get(key) ?? [];
+      arr.push(row);
+      byChat.set(key, arr);
+    }
+    const grouped: Array<{ key: string; chatJid: string; sessionId: string | null; messages: Array<Record<string, unknown>> }> = [];
+    for (const [chatJid, chatMessages] of byChat) {
+      chatMessages.sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
+      const bySession = new Map<string, Array<Record<string, unknown>>>();
+      const sessionOrder: string[] = [];
+      let pendingNoSession: Array<Record<string, unknown>> = [];
+      let index = 0;
+      for (const message of chatMessages) {
+        const sessionId = typeof message.session_id === 'string' && message.session_id.trim() ? message.session_id.trim() : null;
+        if (!sessionId) {
+          pendingNoSession.push(message);
+          continue;
+        }
+        if (!bySession.has(sessionId)) {
+          bySession.set(sessionId, []);
+          sessionOrder.push(sessionId);
+        }
+        const bucket = bySession.get(sessionId)!;
+        if (pendingNoSession.length > 0) {
+          bucket.push(...pendingNoSession);
+          pendingNoSession = [];
+        }
+        bucket.push(message);
+      }
+      if (pendingNoSession.length > 0) {
+        grouped.push({ key: `${chatJid}:local:${index++}`, chatJid, sessionId: null, messages: pendingNoSession });
+      }
+      for (const sessionId of sessionOrder) {
+        grouped.push({ key: `${chatJid}:session:${sessionId}`, chatJid, sessionId, messages: bySession.get(sessionId) ?? [] });
+      }
+    }
+    for (const { key, sessionId, messages } of grouped) {
+      if (messages.length === 0) continue;
+      const first = messages[0];
+      const last = messages[messages.length - 1];
+      const userCount = messages.filter((message) => Number(message.is_from_me || 0) !== 1).length;
+      const agentCount = messages.length - userCount;
+      const sessionLabel = shortHistorySession(sessionId) || 'local';
+      const workspaceLabel = String(last.group_name || last.chat_name || last.group_folder || last.chat_jid || 'Workspace');
+      const archivedAt = typeof last.chat_archived_at === 'string' && last.chat_archived_at
+        ? last.chat_archived_at
+        : null;
+      flows.push({
+        id: `conversation:${key}`,
+        type: 'conversation',
+        title: `${workspaceLabel} · ${sessionLabel}`,
+        status: `${userCount} user / ${agentCount} agent`,
+        archivedAt,
+        actor: String(last.sender_name || last.sender || ''),
+        workspace: String(last.chat_jid || ''),
+        startedAt: String(first.timestamp || ''),
+        updatedAt: String(last.timestamp || ''),
+        summary: typeof last.content === 'string' ? last.content.slice(0, 240) : null,
+        targetUrl: chatHistoryTargetUrl(last.chat_jid, sessionId, last.group_folder),
+        metrics: { stages: messages.length, messages: messages.length },
+        stages: messages.map((message) => ({
+          id: `message:${message.chat_jid}:${message.id}`,
+          type: message.is_from_me ? 'agent_message' : 'user_message',
+          title: message.is_from_me ? 'Agent output' : 'User input',
+          status: message.is_from_me ? 'agent' : 'user',
+          at: String(message.timestamp || ''),
+          summary: typeof message.content === 'string' ? message.content.slice(0, 240) : null,
+          detail: typeof message.content === 'string' ? message.content : null,
+          payload: { chatJid: message.chat_jid, messageId: message.id, sessionId: message.session_id, turnId: message.turn_id, sourceKind: message.source_kind, archivedAt, archiveReason: last.chat_archive_reason },
+        })),
+      });
+    }
+  }
+
+  const filtered = query
+    ? flows.filter((flow) =>
+        [flow.title, flow.status, flow.actor, flow.workspace, flow.summary, ...flow.stages.flatMap((stage) => [stage.title, stage.summary, stage.detail])]
+          .filter(Boolean)
+          .join('\n')
+          .toLowerCase()
+          .includes(query),
+      )
+    : flows;
+  return filtered.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(offset, offset + limit);
 }
 
 // ===================== Daily Summary Queries =====================
@@ -6187,8 +6970,7 @@ function mapAgentRow(row: Record<string, unknown>): SubAgent {
 }
 
 export function deleteMessagesForChatJid(chatJid: string): void {
-  db.prepare('DELETE FROM messages WHERE chat_jid = ?').run(chatJid);
-  db.prepare('DELETE FROM chats WHERE jid = ?').run(chatJid);
+  archiveChatRecord(chatJid, 'chat_messages_deleted');
 }
 
 export function getMessage(
@@ -7921,4 +8703,161 @@ export function rotateAgentLinkToken(
     )
     .run(newTokenHash, id, userId);
   return result.changes > 0;
+}
+
+export interface CloudSkillRecord {
+  id: string;
+  userId: string;
+  skillId: string;
+  name: string;
+  description: string;
+  content: string;
+  enabled: boolean;
+  packageName?: string;
+  packageSource?: string;
+  sourceProvider?: string;
+  installedAt: string;
+  updatedAt: string;
+  files: Array<{ name: string; type: 'file' | 'directory'; size: number }>;
+}
+
+interface CloudSkillRow {
+  id: string;
+  user_id: string;
+  skill_id: string;
+  name: string;
+  description: string | null;
+  content: string;
+  enabled: number;
+  package_name: string | null;
+  package_source: string | null;
+  source_provider: string | null;
+  installed_at: string;
+  updated_at: string;
+  files_json: string;
+}
+
+function parseCloudSkillRow(row: CloudSkillRow): CloudSkillRecord {
+  let files: CloudSkillRecord['files'] = [];
+  try {
+    const parsed = JSON.parse(row.files_json || '[]');
+    if (Array.isArray(parsed)) files = parsed;
+  } catch {
+    files = [];
+  }
+  return {
+    id: row.id,
+    userId: row.user_id,
+    skillId: row.skill_id,
+    name: row.name,
+    description: row.description ?? '',
+    content: row.content,
+    enabled: row.enabled !== 0,
+    packageName: row.package_name ?? undefined,
+    packageSource: row.package_source ?? undefined,
+    sourceProvider: row.source_provider ?? undefined,
+    installedAt: row.installed_at,
+    updatedAt: row.updated_at,
+    files,
+  };
+}
+
+function cloudSkillDbId(userId: string, skillId: string): string {
+  return `cloud_skill_${crypto
+    .createHash('sha1')
+    .update(`${userId}:${skillId}`)
+    .digest('hex')}`;
+}
+
+export function upsertCloudSkill(input: {
+  userId: string;
+  skillId: string;
+  name: string;
+  description?: string;
+  content: string;
+  enabled?: boolean;
+  packageName?: string;
+  packageSource?: string;
+  sourceProvider?: string;
+  installedAt?: string;
+  files?: CloudSkillRecord['files'];
+}): CloudSkillRecord {
+  const now = new Date().toISOString();
+  const id = cloudSkillDbId(input.userId, input.skillId);
+  const installedAt = input.installedAt ?? now;
+  db.prepare(
+    `INSERT INTO cloud_skills (
+       id, user_id, skill_id, name, description, content, enabled,
+       package_name, package_source, source_provider, installed_at, updated_at, files_json
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id, skill_id) DO UPDATE SET
+       name = excluded.name,
+       description = excluded.description,
+       content = excluded.content,
+       enabled = excluded.enabled,
+       package_name = excluded.package_name,
+       package_source = excluded.package_source,
+       source_provider = excluded.source_provider,
+       updated_at = excluded.updated_at,
+       files_json = excluded.files_json`,
+  ).run(
+    id,
+    input.userId,
+    input.skillId,
+    input.name,
+    input.description ?? '',
+    input.content,
+    input.enabled === false ? 0 : 1,
+    input.packageName ?? null,
+    input.packageSource ?? null,
+    input.sourceProvider ?? null,
+    installedAt,
+    now,
+    JSON.stringify(input.files ?? []),
+  );
+  return getCloudSkill(input.userId, input.skillId)!;
+}
+
+export function listCloudSkillsByUser(userId: string): CloudSkillRecord[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM cloud_skills WHERE user_id = ? ORDER BY updated_at DESC`,
+    )
+    .all(userId) as CloudSkillRow[];
+  return rows.map(parseCloudSkillRow);
+}
+
+export function getCloudSkill(
+  userId: string,
+  skillId: string,
+): CloudSkillRecord | undefined {
+  const row = db
+    .prepare('SELECT * FROM cloud_skills WHERE user_id = ? AND skill_id = ?')
+    .get(userId, skillId) as CloudSkillRow | undefined;
+  return row ? parseCloudSkillRow(row) : undefined;
+}
+
+export function setCloudSkillEnabled(
+  userId: string,
+  skillId: string,
+  enabled: boolean,
+): boolean {
+  const result = db
+    .prepare(
+      'UPDATE cloud_skills SET enabled = ?, updated_at = ? WHERE user_id = ? AND skill_id = ?',
+    )
+    .run(enabled ? 1 : 0, new Date().toISOString(), userId, skillId);
+  return result.changes > 0;
+}
+
+export function deleteCloudSkill(userId: string, skillId: string): boolean {
+  const result = db
+    .prepare('DELETE FROM cloud_skills WHERE user_id = ? AND skill_id = ?')
+    .run(userId, skillId);
+  return result.changes > 0;
+}
+
+export function deleteCloudSkillsByUser(userId: string): number {
+  const result = db.prepare('DELETE FROM cloud_skills WHERE user_id = ?').run(userId);
+  return result.changes;
 }

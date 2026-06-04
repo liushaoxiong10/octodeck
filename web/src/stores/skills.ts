@@ -5,9 +5,13 @@ export interface Skill {
   id: string;
   name: string;
   description: string;
-  source: 'user' | 'project' | 'external' | 'cli' | 'workspace';
+  source: 'cloud' | 'user' | 'project' | 'external' | 'cli' | 'workspace';
   enabled: boolean;
   packageName?: string;
+  packageSource?: string;
+  sourceProvider?: string;
+  level?: 'package' | 'skill';
+  levelKey?: string;
   installedAt?: string;
   content?: string;
   deviceId?: string;
@@ -42,8 +46,11 @@ export interface SearchResultDetail {
 }
 
 export interface InstallSkillOptions {
-  target?: 'cloud' | 'device';
+  target?: 'cloud' | 'device' | 'device-agent-workspace';
   deviceLinkId?: string;
+  agentId?: string;
+  sourceProvider?: 'claude' | 'codex' | 'traecli';
+  selectedSkillIds?: string[];
 }
 
 interface SkillsState {

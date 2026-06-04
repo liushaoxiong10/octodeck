@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ChevronDown,
@@ -20,6 +20,7 @@ interface TaskCardProps {
   onResume: (id: string) => void;
   onDelete: (id: string) => void;
   onRunNow?: (id: string) => void;
+  initialExpanded?: boolean;
 }
 
 export function TaskCard({
@@ -28,10 +29,18 @@ export function TaskCard({
   onResume,
   onDelete,
   onRunNow,
+  initialExpanded = false,
 }: TaskCardProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(initialExpanded);
   const [runningNow, setRunningNow] = useState(false);
+  const cardRef = useRef<HTMLDivElement | null>(null);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!initialExpanded) return;
+    setExpanded(true);
+    cardRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [initialExpanded]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -90,7 +99,7 @@ export function TaskCard({
   };
 
   return (
-    <div className="bg-card rounded-xl border border-border hover:border-primary/60 transition-colors duration-200">
+    <div ref={cardRef} className={`bg-card rounded-xl border transition-colors duration-200 ${initialExpanded ? 'border-primary ring-2 ring-primary/20' : 'border-border hover:border-primary/60'}`}>
       {/* Card Header - Clickable */}
       <button
         onClick={() => setExpanded(!expanded)}

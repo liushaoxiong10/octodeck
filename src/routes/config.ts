@@ -117,6 +117,7 @@ import {
   buildAgentBackendFromClient,
   resolveDeviceAgentClient,
 } from '../backends/agent-client-adapter.js';
+import type { CustomBackendDef } from '../backends/dynamic.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -1414,6 +1415,14 @@ configRoutes.get('/backends', authMiddleware, (c) => {
 });
 
 // ─── Custom CLI backends (admin only) ───────────────────────────────
+function generateCustomBackendId(): string {
+  for (let i = 0; i < 16; i += 1) {
+    const id = `agent-${randomBytes(6).toString('hex')}`;
+    if (!getCustomBackend(id)) return id;
+  }
+  throw new Error('Failed to generate unique agent id');
+}
+
 configRoutes.get(
   '/custom-backends',
   authMiddleware,
@@ -1443,12 +1452,14 @@ configRoutes.post(
     }
     const user = c.get('user') as AuthUser;
     try {
-      if (getCustomBackend(validation.data.id)) {
-        return c.json({ error: `id ${validation.data.id} 已存在` }, 409);
-      }
+      const backendId = generateCustomBackendId();
+      const workdirMode: CustomBackendDef['workdirMode'] =
+        validation.data.workdirMode === 'custom' ? 'custom' : undefined;
+      const workdir =
+        workdirMode === 'custom' ? validation.data.workdir : undefined;
       const payload = validation.data.agentClientId
         ? buildAgentBackendFromClient({
-            id: validation.data.id,
+            id: backendId,
             displayName: validation.data.displayName,
             deviceLinkId: validation.data.deviceLinkId!,
             agentClientId: validation.data.agentClientId,
@@ -1460,11 +1471,12 @@ configRoutes.post(
             maxOutputBytes: validation.data.maxOutputBytes,
             runtime: validation.data.runtime,
             model: validation.data.model,
-            workdirMode: validation.data.workdirMode,
-            workdir: validation.data.workdir,
+            providerId: validation.data.providerId ?? null,
+            workdirMode,
+            workdir,
           })
         : {
-            id: validation.data.id,
+            id: backendId,
             displayName: validation.data.displayName,
             binary: validation.data.binary!,
             argvTemplate: validation.data.argvTemplate!,
@@ -1477,8 +1489,9 @@ configRoutes.post(
             env: validation.data.env,
             runtime: validation.data.runtime,
             model: validation.data.model,
-            workdirMode: validation.data.workdirMode,
-            workdir: validation.data.workdir,
+            providerId: validation.data.providerId ?? null,
+            workdirMode,
+            workdir,
             deviceLinkId: validation.data.deviceLinkId ?? null,
             agentClientId: validation.data.agentClientId ?? null,
           };
@@ -1519,6 +1532,9 @@ configRoutes.patch(
         id,
         supportsContainer: false,
       };
+      const workdirMode: CustomBackendDef['workdirMode'] =
+        merged.workdirMode === 'custom' ? 'custom' : undefined;
+      const workdir = workdirMode === 'custom' ? merged.workdir : undefined;
       const payload = merged.agentClientId
         ? buildAgentBackendFromClient({
             id,
@@ -1533,10 +1549,16 @@ configRoutes.patch(
             maxOutputBytes: merged.maxOutputBytes,
             runtime: merged.runtime,
             model: merged.model,
-            workdirMode: merged.workdirMode,
-            workdir: merged.workdir,
+            providerId: merged.providerId ?? null,
+            workdirMode,
+            workdir,
           })
-        : merged;
+        : {
+            ...merged,
+            providerId: merged.providerId ?? null,
+            workdirMode,
+            workdir,
+          };
       const def = upsertCustomBackend(payload, user.username);
       return c.json(def);
     } catch (err) {

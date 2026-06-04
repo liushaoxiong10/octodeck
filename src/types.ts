@@ -313,6 +313,18 @@ export interface IssueAgentRun {
   run_completed_at?: string | null;
 }
 
+export interface IssueAgentRunEvent {
+  id: string;
+  issue_id: string;
+  run_id: string;
+  event_type: string;
+  title?: string | null;
+  summary?: string | null;
+  detail?: string | null;
+  payload?: Record<string, unknown> | null;
+  created_at: string;
+}
+
 export interface IssueAttachment {
   id: string;
   issue_id: string;

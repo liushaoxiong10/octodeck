@@ -167,6 +167,16 @@ function validateDef(def: CustomBackendDef): string | null {
   ) {
     return `runtime 必须是 local-device / server-side`;
   }
+  if (def.runtime === 'local-device') {
+    if (!def.deviceLinkId) return 'LocalRuntime 必须选择设备';
+    if (!def.agentClientId) return 'LocalRuntime 必须选择 Agent client';
+  }
+  if (def.runtime === 'server-side' && !def.model) {
+    return 'Server Side 必须选择模型端点/模型名称';
+  }
+  if (def.runtime === 'server-side' && !def.providerId) {
+    return 'Server Side 必须选择模型端点';
+  }
   if (
     def.workdirMode &&
     def.workdirMode !== 'auto' &&
@@ -251,6 +261,7 @@ export function upsertCustomBackend(
     binary: def.binary,
     runtime: def.runtime ?? null,
     model: def.model ?? null,
+    providerId: def.providerId ?? null,
     workdirMode: def.workdirMode ?? null,
     workdir: def.workdir ?? null,
     deviceLinkId: def.deviceLinkId ?? null,

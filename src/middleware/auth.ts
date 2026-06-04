@@ -80,24 +80,43 @@ export const authMiddleware = async (c: any, next: any) => {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  const result = tryVerifyAny(allValues);
-  if (!result) {
+  let selected:
+    | {
+        token: string;
+        legacy: boolean;
+        session: NonNullable<ReturnType<typeof getCachedSessionWithUser>>;
+      }
+    | null = null;
+
+  for (const value of allValues) {
+    const verified = verifySessionToken(value);
+    if (!verified) continue;
+
+    const candidate = getCachedSessionWithUser(verified.token);
+    if (!candidate) {
+      invalidateSessionCache(verified.token);
+      continue;
+    }
+
+    if (isSessionExpired(candidate.expires_at)) {
+      deleteUserSession(verified.token);
+      invalidateSessionCache(verified.token);
+      continue;
+    }
+
+    selected = {
+      token: verified.token,
+      legacy: verified.legacy,
+      session: candidate,
+    };
+    break;
+  }
+
+  if (!selected) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 
-  const { token, legacy } = result;
-
-  const session = getCachedSessionWithUser(token);
-  if (!session) {
-    invalidateSessionCache(token);
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-
-  if (isSessionExpired(session.expires_at)) {
-    deleteUserSession(token);
-    invalidateSessionCache(token);
-    return c.json({ error: 'Session expired' }, 401);
-  }
+  const { token, legacy, session } = selected;
 
   if (session.status === 'disabled') {
     return c.json({ error: 'Account disabled' }, 403);

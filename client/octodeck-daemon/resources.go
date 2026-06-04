@@ -53,6 +53,7 @@ func collectResourceSnapshot() ResourceSnapshot {
 		s.DiskTotalBytes = disk.DiskTotalBytes
 		s.DiskUsedBytes = disk.DiskUsedBytes
 		s.DiskUsedPercent = disk.DiskUsedPercent
+		s.Disks = disk.Disks
 	}
 	return s
 }

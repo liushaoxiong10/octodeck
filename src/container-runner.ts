@@ -580,7 +580,7 @@ export function prepareHostPlugins(
 export function buildVolumeMounts(
   group: RegisteredGroup,
   isAdminHome: boolean,
-  mountUserSkills = true,
+  _legacyMountUserSkills = true,
   agentId?: string,
   ownerHomeFolder?: string,
   taskRunId?: string,
@@ -667,7 +667,6 @@ export function buildVolumeMounts(
     projectRoot,
     dataDir: DATA_DIR,
     groupSessionsDir,
-    mountUserSkills,
   });
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   const mcpServers = ownerId ? loadUserMcpServers(ownerId) : {};
@@ -703,27 +702,13 @@ export function buildVolumeMounts(
   // Skills：以只读卷挂载宿主机目录（由 entrypoint 创建符号链接）
   // 用户的所有 skills 在其所有工作区中全量生效
   const projectSkillsDir = claudeContextPlan.projectSkillsDir;
-  const userSkillsDir = claudeContextPlan.userSkillsDir ?? null;
-
-  // Ensure user skills directory exists so it can always be mounted.
-  // Skills may be installed after the group is created; without pre-creating,
-  // the existsSync check would skip mounting and the container would never see them.
-  if (userSkillsDir) {
-    fs.mkdirSync(userSkillsDir, { recursive: true });
-  }
-
-  // 全量挂载：用户的所有 skills 在所有工作区中生效
+  // Project/builtin skills are file-backed. Cloud skills are DB-backed and are
+  // exposed through cloud_skill_search/cloud_skill_get MCP tools, not mounted
+  // into Claude's skills directory.
   if (fs.existsSync(projectSkillsDir)) {
     mounts.push({
       hostPath: projectSkillsDir,
       containerPath: '/workspace/project-skills',
-      readonly: true,
-    });
-  }
-  if (userSkillsDir) {
-    mounts.push({
-      hostPath: userSkillsDir,
-      containerPath: '/workspace/user-skills',
       readonly: true,
     });
   }
@@ -1018,12 +1003,10 @@ export async function runContainerAgent(
   try {
     // Determine if this is an admin home container (full privileges)
     const isAdminHome = !!group.is_home && group.folder === 'main';
-    // Per-user skills: always mount if the group has an owner
-    const shouldMountUserSkills = !!group.created_by;
     const mounts = buildVolumeMounts(
       group,
       isAdminHome,
-      shouldMountUserSkills,
+      true,
       input.agentId,
       ownerHomeFolder,
       input.taskRunId,
@@ -1105,7 +1088,6 @@ export async function runContainerAgent(
                 '.claude',
               )
             : path.join(DATA_DIR, 'sessions', group.folder, '.claude'),
-          mountUserSkills: shouldMountUserSkills,
         }).audit,
       };
       container.stdin.write(JSON.stringify(dockerInput));

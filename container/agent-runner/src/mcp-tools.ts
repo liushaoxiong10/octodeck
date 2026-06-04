@@ -63,6 +63,23 @@ async function invokeCloudMemory(ctx: McpContext, payload: Record<string, unknow
   return data;
 }
 
+async function invokeCloudSkill(ctx: McpContext, payload: Record<string, unknown>): Promise<any> {
+  if (!ctx.ownerUserId) throw new Error('ownerUserId is required for cloud skill tools');
+  const baseUrl = ctx.serverBaseUrl || process.env.OCTODECK_SERVER_URL || 'http://127.0.0.1:3000';
+  const secret = ctx.agentRunnerSecret || process.env.OCTODECK_AGENT_RUNNER_SECRET || '';
+  const res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/cloud-skills/tool`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${secret}`,
+    },
+    body: JSON.stringify({ userId: ctx.ownerUserId, ...payload }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `cloud_skill_http_${res.status}`);
+  return data;
+}
+
 async function invokeAgentTeamTool(ctx: McpContext, payload: Record<string, unknown>): Promise<any> {
   if (!ctx.ownerUserId) throw new Error('ownerUserId is required for agent team tools');
   const baseUrl = ctx.serverBaseUrl || process.env.OCTODECK_SERVER_URL || 'http://127.0.0.1:3000';
@@ -1302,6 +1319,35 @@ Returns null if the current chat is a DM (DMs do not belong to a server). Only w
       },
     ),
   ];
+
+  if (ctx.ownerUserId) {
+    tools.push(
+      tool(
+        'cloud_skill_search',
+        '搜索当前用户安装在 OctoDeck 云端的 Cloud Skills。适合在 Claude Code 原生 Skill 列表未显示云端 skill 时，用来发现可用 skill。',
+        { query: z.string().optional().describe('可选搜索词，匹配 skill id/name/description/packageName') },
+        async (args) => {
+          try {
+            return toolJson(await invokeCloudSkill(ctx, { operation: 'search', query: args.query }));
+          } catch (err) {
+            return toolError(err);
+          }
+        },
+      ),
+      tool(
+        'cloud_skill_get',
+        '读取当前用户安装在 OctoDeck 云端的 Cloud Skill 的完整 SKILL.md 内容。读取后按其中的指令执行任务。',
+        { skill_id: z.string().describe('Cloud Skill ID / directory name') },
+        async (args) => {
+          try {
+            return toolJson(await invokeCloudSkill(ctx, { operation: 'get', skillId: args.skill_id }));
+          } catch (err) {
+            return toolError(err);
+          }
+        },
+      ),
+    );
+  }
 
   // Skill 安装/卸载仅限主容器（与 memory_* 工具一致）
   if (ctx.isHome) {

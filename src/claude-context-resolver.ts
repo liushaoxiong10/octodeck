@@ -12,7 +12,6 @@ export interface ClaudeContextPlanArgs {
   projectRoot: string;
   dataDir: string;
   groupSessionsDir?: string;
-  mountUserSkills?: boolean;
 }
 
 export interface ClaudeContextPlan {
@@ -24,7 +23,6 @@ export interface ClaudeContextPlan {
   externalSkillsDir?: string;
   builtinSkillsDir: string;
   projectSkillsDir: string;
-  userSkillsDir?: string;
   audit: ClaudeContextAudit;
 }
 
@@ -103,7 +101,6 @@ function linkEntries(
 export function buildClaudeContextPlan(
   args: ClaudeContextPlanArgs,
 ): ClaudeContextPlan {
-  const ownerId = args.group.created_by;
   const isAdminOwned =
     args.ownerHomeFolder === ADMIN_HOME_FOLDER ||
     (!!args.group.is_home && args.group.folder === ADMIN_HOME_FOLDER);
@@ -121,11 +118,6 @@ export function buildClaudeContextPlan(
       ? '/opt/builtin-skills'
       : path.join(args.dataDir, 'builtin-skills');
   const projectSkillsDir = path.join(args.projectRoot, 'container', 'skills');
-  const userSkillsDir =
-    args.mountUserSkills !== false && ownerId
-      ? path.join(args.dataDir, 'skills', ownerId)
-      : undefined;
-
   const hostClaudeRuntime = args.groupSessionsDir
     ? path.join(args.groupSessionsDir, 'CLAUDE.md')
     : undefined;
@@ -211,19 +203,6 @@ export function buildClaudeContextPlan(
               : hostSkillsRuntime,
           count: countChildDirs(projectSkillsDir),
         },
-        ...(userSkillsDir
-          ? [
-              {
-                name: 'user' as const,
-                sourcePath: userSkillsDir,
-                runtimePath:
-                  args.executionMode === 'container'
-                    ? '/workspace/user-skills'
-                    : hostSkillsRuntime,
-                count: countChildDirs(userSkillsDir),
-              },
-            ]
-          : []),
       ],
     },
     octodeckPrompt: { totalBytes: 0, files: [] },
@@ -239,7 +218,6 @@ export function buildClaudeContextPlan(
     externalSkillsDir,
     builtinSkillsDir,
     projectSkillsDir,
-    userSkillsDir,
     audit,
   };
 }
@@ -261,7 +239,6 @@ export function syncHostClaudeContext(
   linkEntries(plan.builtinSkillsDir, skillsDir, includeSkill);
   linkEntries(plan.externalSkillsDir, skillsDir, includeSkill);
   linkEntries(plan.projectSkillsDir, skillsDir, includeSkill);
-  linkEntries(plan.userSkillsDir, skillsDir, includeSkill);
 
   const rulesDir = path.join(groupSessionsDir, 'rules');
   fs.mkdirSync(rulesDir, { recursive: true });

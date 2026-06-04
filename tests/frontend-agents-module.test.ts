@@ -3,7 +3,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { baseNavItems } from '../web/src/components/layout/nav-items.js';
-import { getSkillPackageName, normalizeSkillDisplayText } from '../web/src/utils/skillsGrouping.js';
+import {
+  dedupeSkillsByIdentity,
+  getSkillIdentityKey,
+  getSkillPackageName,
+  normalizeSkillDisplayText,
+} from '../web/src/utils/skillsGrouping.js';
 
 const repoRoot = process.cwd();
 
@@ -96,6 +101,22 @@ describe('frontend agents module', () => {
     expect(form).not.toContain('上一步');
   });
 
+  test('custom backend form defaults to run-time workspace resolution', () => {
+    const form = readFileSync(
+      join(repoRoot, 'web/src/components/settings/CustomBackendFormDialog.tsx'),
+      'utf8',
+    );
+    const list = readFileSync(
+      join(repoRoot, 'web/src/components/settings/CustomBackendList.tsx'),
+      'utf8',
+    );
+
+    expect(form).toContain('默认运行位置');
+    expect(form).toContain('Agent 创建时默认不绑定 Workdir');
+    expect(form).toContain('form.workdirMode === \'custom\'');
+    expect(list).toContain('自动继承任务/Workspace');
+  });
+
   test('promotes model endpoints to a top-level page beside Agent', () => {
     const paths = baseNavItems.map((item) => item.path);
     const modelEndpoints = baseNavItems.find((item) => item.path === '/model-endpoints');
@@ -137,7 +158,9 @@ describe('frontend agents module', () => {
     const skillsPage = readFileSync(join(repoRoot, 'web/src/pages/SkillsPage.tsx'), 'utf8');
     const skillsStore = readFileSync(join(repoRoot, 'web/src/stores/skills.ts'), 'utf8');
 
-    expect(grouping).toContain("UNKNOWN_SKILL_PACKAGE = '本地/未知来源'");
+    expect(grouping).toContain("CLOUD_SKILL_PACKAGE = 'Cloud'");
+    expect(grouping).toContain("DEVICE_SKILL_PACKAGE = 'Device'");
+    expect(grouping).toContain("WORKSPACE_SKILL_PACKAGE = 'Workspace'");
     expect(grouping).toContain('groupSkillsByPackage');
     expect(agentsPage).toContain('groupSkillsByPackage(skills)');
     expect(agentsPage).toContain('MarkdownRenderer content={skill.content}');
@@ -149,9 +172,44 @@ describe('frontend agents module', () => {
     expect(skillsStore).toContain('workspacePath?: string');
   });
 
-  test('skills UI normalizes legacy host wording in package badges', () => {
-    expect(normalizeSkillDisplayText('宿主机')).toBe('本地/系统');
-    expect(getSkillPackageName({ packageName: '宿主机' })).toBe('本地/系统');
+  test('skills UI uses Cloud / Device / Workspace fallback package labels', () => {
+    expect(normalizeSkillDisplayText('宿主机')).toBe('Device');
+    expect(getSkillPackageName({ packageName: '宿主机' })).toBe('Device');
+    expect(getSkillPackageName({ source: 'cloud' })).toBe('Cloud');
+    expect(getSkillPackageName({ source: 'cli' })).toBe('Device');
+    expect(getSkillPackageName({ source: 'workspace' })).toBe('Workspace');
+  });
+
+  test('install skill dialog uses Claude SDK format for cloud installs without client picker', () => {
+    const dialog = readFileSync(
+      join(repoRoot, 'web/src/components/skills/InstallSkillDialog.tsx'),
+      'utf8',
+    );
+
+    expect(dialog).toContain('Claude SDK / Claude Code 可用的格式');
+    expect(dialog).toContain("if (target === 'cloud') return { target: 'cloud' }");
+    expect(dialog).not.toContain('Skill 格式');
+    expect(dialog).not.toContain('Skill 来源 Agent');
+    expect(dialog).not.toContain('setSourceProvider');
+  });
+
+  test('skills UI deduplicates identical device skills and keys selection by full identity', () => {
+    const codexSkill = {
+      id: 'planner',
+      source: 'cli',
+      deviceId: 'cl_1234567890abcdef',
+      sourceProvider: 'codex',
+      packageName: 'agent-tools',
+    };
+    const duplicateCodexSkill = { ...codexSkill };
+    const workspaceSkill = {
+      ...codexSkill,
+      source: 'workspace',
+      workspacePath: 'Agent A Workspace',
+    };
+
+    expect(dedupeSkillsByIdentity([codexSkill, duplicateCodexSkill, workspaceSkill])).toHaveLength(2);
+    expect(getSkillIdentityKey(codexSkill)).not.toBe(getSkillIdentityKey(workspaceSkill));
   });
 
   test('agents page exposes agent team generation and management tab', () => {

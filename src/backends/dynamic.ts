@@ -7,6 +7,7 @@
 import fs from 'fs';
 
 import type { ExecutionMode } from '../types.js';
+import { resolveProviderById } from '../runtime-config.js';
 import { runViaAgentLink } from './agent-link-driver.js';
 import { runHostCli } from './host-cli-driver.js';
 import type { HostCliDriverConfig } from './host-cli-driver.js';
@@ -37,12 +38,32 @@ export interface CustomBackendDef {
   resumeArgvTemplate?: string[];
   workdirMode?: 'auto' | 'custom';
   workdir?: string;
+  /** Server-side model endpoint selected for this Agent. */
+  providerId?: string | null;
   /** Optional device id. When set, this backend runs on the selected octodeck-daemon device. */
   deviceLinkId?: string | null;
   /** Agent client discovered by octodeck-daemon on the selected device. */
   agentClientId?: string | null;
   createdAt?: string;
   updatedAt?: string;
+}
+
+function providerEnv(providerId: string | null | undefined): Record<string, string> | undefined {
+  if (!providerId) return undefined;
+  const { config, customEnv } = resolveProviderById(providerId);
+  const env: Record<string, string> = { ...customEnv };
+  if (config.anthropicBaseUrl) env.ANTHROPIC_BASE_URL = config.anthropicBaseUrl;
+  if (config.anthropicApiKey) env.ANTHROPIC_API_KEY = config.anthropicApiKey;
+  if (config.claudeCodeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = config.claudeCodeOauthToken;
+  if (config.anthropicAuthToken) {
+    if (config.apiType && config.apiType !== 'claude') {
+      env.ANTHROPIC_API_KEY = config.anthropicAuthToken;
+      delete env.ANTHROPIC_AUTH_TOKEN;
+    } else {
+      env.ANTHROPIC_AUTH_TOKEN = config.anthropicAuthToken;
+    }
+  }
+  return env;
 }
 
 function makeResolveBinary(binary: string): () => string | null {
@@ -68,7 +89,7 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
   const argvTemplate = def.argvTemplate.slice();
   const sessionArgvTemplate = def.sessionArgvTemplate?.slice();
   const resumeArgvTemplate = def.resumeArgvTemplate?.slice();
-  const env = def.env ? { ...def.env } : undefined;
+  const env = { ...(providerEnv(def.providerId) ?? {}), ...(def.env ?? {}) };
 
   return {
     id: def.id,
@@ -113,7 +134,11 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
         outputProtocol: def.outputProtocol,
         timeoutMs: def.timeoutMs,
         maxOutputBytes: def.maxOutputBytes,
-        envOverrides: env,
+        envOverrides: Object.keys(env).length > 0 ? env : undefined,
+        runtime: def.runtime,
+        model: def.model,
+        workdirMode: def.workdirMode,
+        workdir: def.workdir,
       };
       const configuredDeviceLinkId = def.deviceLinkId?.trim();
       const groupDeviceLinkId =
@@ -124,24 +149,19 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
       const runtime =
         def.runtime ?? (deviceLinkId ? 'local-device' : 'server-side');
       const runArgs =
-        (def.workdirMode === 'custom' && def.workdir) ||
+        def.workdirMode === 'custom' && def.workdir
+          ? { ...args, group: { ...args.group, customCwd: def.workdir } }
+          : args;
+      if (runtime === 'local-device' && deviceLinkId)
+        return runViaAgentLink(runArgs, cfg, deviceLinkId);
+      const hostArgs =
         runtime === 'server-side'
           ? {
-              ...args,
-              group: {
-                ...args.group,
-                ...(def.workdirMode === 'custom' && def.workdir
-                  ? { customCwd: def.workdir }
-                  : {}),
-                ...(runtime === 'server-side'
-                  ? { executionNode: 'server-local' }
-                  : {}),
-              },
+              ...runArgs,
+              group: { ...runArgs.group, executionNode: 'server-local' },
             }
-          : args;
-      if (deviceLinkId && runtime === 'local-device')
-        return runViaAgentLink(runArgs, cfg, deviceLinkId);
-      return runHostCli(runArgs, cfg);
+          : runArgs;
+      return runHostCli(hostArgs, cfg);
     },
   };
 }

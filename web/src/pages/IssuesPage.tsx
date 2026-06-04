@@ -11,12 +11,14 @@ import {
   PlayCircle,
   Plus,
   RefreshCw,
+  Square,
   SlidersHorizontal,
   Upload,
   X,
 } from 'lucide-react';
 import { DndContext, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
+import { useSearchParams } from 'react-router-dom';
 
 import { PageHeader } from '../components/common/PageHeader';
 import { EmptyState } from '../components/common/EmptyState';
@@ -52,7 +54,7 @@ import {
   SelectValue,
 } from '../components/ui/select';
 import { Label } from '../components/ui/label';
-import { useIssuesStore, type CreateIssueInput, type IssueAttachment, type IssuePriority, type IssueStatus, type WorkspaceIssue } from '../stores/issues';
+import { useIssuesStore, type CreateIssueInput, type IssueAgentRun, type IssueAgentRunEvent, type IssueAttachment, type IssuePriority, type IssueStatus, type WorkspaceIssue } from '../stores/issues';
 import { useGroupsStore } from '../stores/groups';
 import { useAgentLinksStore, type AgentLink } from '../stores/agentLinks';
 import { useReposStore } from '../stores/repos';
@@ -118,6 +120,84 @@ function buildAgentOptions(devices: AgentLink[]) {
   ];
 }
 
+function formatOptionalDate(value?: string | null): string {
+  return value ? new Date(value).toLocaleString() : '—';
+}
+
+function formatRunDuration(run: IssueAgentRun): string {
+  const start = run.run_started_at || run.created_at;
+  const end = run.run_completed_at || new Date().toISOString();
+  const ms = Math.max(0, new Date(end).getTime() - new Date(start).getTime());
+  const minutes = Math.floor(ms / 60000);
+  const seconds = Math.floor((ms % 60000) / 1000);
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return `${hours}h ${rest}m`;
+  }
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function formatEventPayload(event: IssueAgentRunEvent): string | null {
+  if (!event.payload) return null;
+  try {
+    return JSON.stringify(event.payload, null, 2);
+  } catch {
+    return String(event.payload);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function formatAuditValue(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function nestedAuditValue(source: Record<string, unknown> | null | undefined, keys: string[]): unknown {
+  if (!source) return undefined;
+  for (const key of keys) {
+    const value = source[key];
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  const rawEvent = source.rawEvent;
+  if (isRecord(rawEvent)) {
+    for (const key of keys) {
+      const value = rawEvent[key];
+      if (value !== undefined && value !== null && value !== '') return value;
+    }
+  }
+  return undefined;
+}
+
+function toolAuditFromEvent(event: IssueAgentRunEvent): Record<string, unknown> | null {
+  const streamEvent = event.payload?.streamEvent;
+  if (!isRecord(streamEvent)) return null;
+  const type = String(streamEvent.eventType || event.event_type || '');
+  if (!type.startsWith('tool_') && type !== 'permission_denied') return null;
+  return {
+    toolName: streamEvent.toolName,
+    toolUseId: streamEvent.toolUseId,
+    parentToolUseId: streamEvent.parentToolUseId,
+    input: streamEvent.toolInput ?? nestedAuditValue(streamEvent, ['input', 'arguments', 'params']),
+    response: streamEvent.detail ?? nestedAuditValue(streamEvent, ['content', 'result', 'output', 'text', 'error']),
+    status: streamEvent.statusText,
+    rawEvent: streamEvent.rawEvent,
+  };
+}
+
+function isToolAuditEvent(event: IssueAgentRunEvent): boolean {
+  return !!toolAuditFromEvent(event) || event.event_type.includes('tool_') || event.event_type.includes('tool_call') || event.event_type.includes('tool_result');
+}
+
 function priorityClass(priority: IssuePriority) {
   if (priority === 'urgent') return 'border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300';
   if (priority === 'high') return 'border-orange-500/40 bg-orange-500/10 text-orange-700 dark:text-orange-300';
@@ -174,7 +254,10 @@ export function IssuesPage() {
   } = useIssuesStore();
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedIssue, setSelectedIssue] = useState<WorkspaceIssue | null>(null);
+  const [searchParams] = useSearchParams();
   const { repos, load: loadRepos } = useReposStore();
+  const targetIssueId = searchParams.get('issue');
+  const targetRunId = searchParams.get('run');
 
   useEffect(() => {
     loadIssues();
@@ -183,6 +266,12 @@ export function IssuesPage() {
   useEffect(() => {
     loadRepos();
   }, [loadRepos]);
+
+  useEffect(() => {
+    if (!targetIssueId || selectedIssue?.id === targetIssueId) return;
+    const target = issues.find((issue) => issue.id === targetIssueId);
+    if (target) setSelectedIssue(target);
+  }, [issues, selectedIssue?.id, targetIssueId]);
 
   const activeCount = issues.length;
 
@@ -239,7 +328,7 @@ export function IssuesPage() {
         )}
 
         <CreateIssueDialog open={createOpen} onOpenChange={setCreateOpen} />
-        <IssueDetailDialog issue={selectedIssue} onOpenChange={(open) => !open && setSelectedIssue(null)} />
+        <IssueDetailDialog issue={selectedIssue} initialRunId={targetRunId} onOpenChange={(open) => !open && setSelectedIssue(null)} />
       </div>
     </div>
   );
@@ -544,19 +633,40 @@ function CreateIssueDialog({ open, onOpenChange }: { open: boolean; onOpenChange
   );
 }
 
-function IssueDetailDialog({ issue, onOpenChange }: { issue: WorkspaceIssue | null; onOpenChange: (open: boolean) => void }) {
-  const { updateIssue, runIssueAgent, loadIssueRuns, runsByIssue, loadIssueAttachments, attachmentsByIssue, uploadIssueAttachment, deleteIssueAttachment } = useIssuesStore();
+function IssueDetailDialog({ issue, initialRunId, onOpenChange }: { issue: WorkspaceIssue | null; initialRunId?: string | null; onOpenChange: (open: boolean) => void }) {
+  const { updateIssue, runIssueAgent, cancelIssueRun, loadIssueRuns, loadIssueRunEvents, runsByIssue, runEventsByRun, loadIssueAttachments, attachmentsByIssue, uploadIssueAttachment, deleteIssueAttachment } = useIssuesStore();
   const [draft, setDraft] = useState<Partial<WorkspaceIssue>>({});
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const runs = issue ? runsByIssue[issue.id] ?? [] : [];
   const attachments = issue ? attachmentsByIssue[issue.id] ?? [] : [];
+  const hasActiveRun = runs.some((run) => run.status === 'queued' || run.status === 'running');
 
   useEffect(() => {
     if (!issue) return;
     setDraft(issue);
+    if (initialRunId) setExpandedRunId(initialRunId);
     loadIssueRuns(issue.id);
     loadIssueAttachments(issue.id);
-  }, [issue, loadIssueRuns, loadIssueAttachments]);
+  }, [issue, initialRunId, loadIssueRuns, loadIssueAttachments]);
+
+  useEffect(() => {
+    if (!issue || !expandedRunId) return;
+    loadIssueRunEvents(issue.id, expandedRunId);
+  }, [issue, expandedRunId, loadIssueRunEvents]);
+
+  useEffect(() => {
+    if (!issue || !hasActiveRun) return;
+    const timer = window.setInterval(() => {
+      loadIssueRuns(issue.id);
+      for (const run of runs) {
+        if (run.status === 'queued' || run.status === 'running' || run.id === expandedRunId) {
+          loadIssueRunEvents(issue.id, run.id);
+        }
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [issue, hasActiveRun, runs, expandedRunId, loadIssueRuns, loadIssueRunEvents]);
 
   if (!issue) return null;
   const save = async () => {
@@ -632,7 +742,10 @@ function IssueDetailDialog({ issue, onOpenChange }: { issue: WorkspaceIssue | nu
             <div className="h-px bg-border" />
             <div className="flex items-center justify-between">
               <h3 className="flex items-center gap-2 text-sm font-semibold"><History className="h-4 w-4" />Run history</h3>
-              <Button size="sm" variant="outline" onClick={() => runIssueAgent(issue.id)}><PlayCircle className="mr-2 h-4 w-4" />Run</Button>
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="ghost" onClick={() => loadIssueRuns(issue.id)}><RefreshCw className="mr-2 h-4 w-4" />Refresh</Button>
+                <Button size="sm" variant="outline" onClick={() => runIssueAgent(issue.id)}><PlayCircle className="mr-2 h-4 w-4" />Run</Button>
+              </div>
             </div>
             {runs.length === 0 ? (
               <p className="text-sm text-muted-foreground">No agent runs yet.</p>
@@ -641,11 +754,59 @@ function IssueDetailDialog({ issue, onOpenChange }: { issue: WorkspaceIssue | nu
                 {runs.map((run) => (
                   <div key={run.id} className="rounded-lg border bg-background p-2 text-xs">
                     <div className="flex items-center justify-between gap-2">
-                      <Badge variant="outline">{run.status}</Badge>
-                      <span className="text-muted-foreground">{new Date(run.created_at).toLocaleString()}</span>
+                      <button type="button" className="min-w-0 flex-1 text-left" onClick={() => setExpandedRunId(expandedRunId === run.id ? null : run.id)}>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge variant="outline">{run.status}</Badge>
+                          <span className="font-mono text-[10px] text-muted-foreground">{run.id}</span>
+                          {(run.status === 'queued' || run.status === 'running') && <span className="text-muted-foreground">Elapsed {formatRunDuration(run)}</span>}
+                        </div>
+                      </button>
+                      {(run.status === 'queued' || run.status === 'running') && (
+                        <Button size="sm" variant="destructive" className="h-7 px-2 text-xs" onClick={() => cancelIssueRun(issue.id, run.id)}><Square className="mr-1 h-3 w-3" />Stop</Button>
+                      )}
+                    </div>
+                    <div className="mt-2 grid gap-1 text-muted-foreground">
+                      <div>Created: {formatOptionalDate(run.created_at)}</div>
+                      <div>Started: {formatOptionalDate(run.run_started_at)}</div>
+                      <div>Completed: {formatOptionalDate(run.run_completed_at)}</div>
                     </div>
                     {run.error && <p className="mt-2 text-destructive">{run.error}</p>}
-                    {run.result && <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-muted-foreground">{run.result}</p>}
+                    {run.result && <p className={cn('mt-2 whitespace-pre-wrap text-muted-foreground', expandedRunId === run.id ? 'max-h-80 overflow-auto' : 'line-clamp-4')}>{run.result}</p>}
+                    {!run.result && !run.error && (run.status === 'queued' || run.status === 'running') && <p className="mt-2 text-muted-foreground">Agent is still running. This panel refreshes automatically while a run is active.</p>}
+                    {expandedRunId === run.id && (
+                      <div className="mt-3 space-y-2 border-t pt-2">
+                        <div className="flex items-center justify-between">
+                          <p className="font-semibold">Audit timeline</p>
+                          <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => loadIssueRunEvents(issue.id, run.id)}>Refresh events</Button>
+                        </div>
+                        {(runEventsByRun[run.id] ?? []).length === 0 ? (
+                          <p className="text-muted-foreground">No audit events yet.</p>
+                        ) : (
+                          <div className="max-h-80 space-y-2 overflow-auto pr-1">
+                            {(runEventsByRun[run.id] ?? []).map((event) => {
+                              const payload = formatEventPayload(event);
+                              const toolAudit = toolAuditFromEvent(event);
+                              return (
+                                <div key={event.id} className={cn('rounded border bg-muted/20 p-2', isToolAuditEvent(event) && 'border-blue-200 bg-blue-50/40 dark:border-blue-900/60 dark:bg-blue-950/20')}>
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <Badge variant="outline">{event.event_type}</Badge>
+                                      {isToolAuditEvent(event) && <Badge variant="outline" className="border-blue-300 text-blue-700">工具审计</Badge>}
+                                    </div>
+                                    <span className="text-[10px] text-muted-foreground">{formatOptionalDate(event.created_at)}</span>
+                                  </div>
+                                  {event.title && <p className="mt-1 font-medium">{event.title}</p>}
+                                  {event.summary && <p className="mt-1 text-muted-foreground">{event.summary}</p>}
+                                  {toolAudit && <IssueToolAuditPanel audit={toolAudit} />}
+                                  {event.detail && <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-background p-2 text-[10px] text-muted-foreground">{event.detail}</pre>}
+                                  {payload && <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-background p-2 text-[10px] text-muted-foreground">{payload}</pre>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -658,6 +819,24 @@ function IssueDetailDialog({ issue, onOpenChange }: { issue: WorkspaceIssue | nu
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function IssueToolAuditPanel({ audit }: { audit: Record<string, unknown> }) {
+  const input = formatAuditValue(audit.input);
+  const response = formatAuditValue(audit.response);
+  const rawEvent = formatAuditValue(audit.rawEvent);
+  return (
+    <div className="mt-2 space-y-2 rounded border border-blue-200 bg-background p-2 text-[10px] dark:border-blue-900/60">
+      <div className="grid gap-2 md:grid-cols-3">
+        <div><span className="text-muted-foreground">工具：</span><span className="font-medium">{String(audit.toolName || 'unknown')}</span></div>
+        <div><span className="text-muted-foreground">调用 ID：</span><span className="font-mono">{String(audit.toolUseId || '—')}</span></div>
+        <div><span className="text-muted-foreground">状态：</span><span>{String(audit.status || '—')}</span></div>
+      </div>
+      {input && <div><div className="mb-1 font-medium">工具输入</div><pre className="max-h-52 overflow-auto whitespace-pre-wrap rounded bg-muted/40 p-2 text-muted-foreground">{input}</pre></div>}
+      {response && <div><div className="mb-1 font-medium">工具响应</div><pre className="max-h-52 overflow-auto whitespace-pre-wrap rounded bg-muted/40 p-2 text-muted-foreground">{response}</pre></div>}
+      {!input && !response && rawEvent && <div><div className="mb-1 font-medium">原始工具事件</div><pre className="max-h-52 overflow-auto whitespace-pre-wrap rounded bg-muted/40 p-2 text-muted-foreground">{rawEvent}</pre></div>}
+    </div>
   );
 }
 

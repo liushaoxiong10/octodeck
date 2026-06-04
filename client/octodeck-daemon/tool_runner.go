@@ -195,6 +195,13 @@ func (r *toolRunner) normalizeCwd(req *ToolRequestFrame) error {
 			return err
 		}
 		req.Cwd = cwd
+	} else if strings.HasPrefix(req.Cwd, deviceTmpURIPrefix) {
+		folder := strings.TrimPrefix(req.Cwd, deviceTmpURIPrefix)
+		cwd, err := ensureNamedTmpDir(r.cfg, folder)
+		if err != nil {
+			return err
+		}
+		req.Cwd = cwd
 	}
 	return nil
 }

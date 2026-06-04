@@ -256,13 +256,18 @@ type ModelsResultFrame struct {
 }
 
 type SkillInfo struct {
-	ID          string `json:"id"`
-	Name        string `json:"name,omitempty"`
-	Description string `json:"description,omitempty"`
-	Source      string `json:"source"`
-	Enabled     bool   `json:"enabled"`
-	PackageName string `json:"packageName,omitempty"`
-	Content     string `json:"content,omitempty"`
+	ID             string `json:"id"`
+	Name           string `json:"name,omitempty"`
+	Description    string `json:"description,omitempty"`
+	Source         string `json:"source"`
+	SourceProvider string `json:"sourceProvider,omitempty"`
+	Level          string `json:"level,omitempty"`
+	LevelKey       string `json:"levelKey,omitempty"`
+	Enabled        bool   `json:"enabled"`
+	PackageName    string `json:"packageName,omitempty"`
+	PackageSource  string `json:"packageSource,omitempty"`
+	InstalledAt    string `json:"installedAt,omitempty"`
+	Content        string `json:"content,omitempty"`
 }
 
 type SkillsResultFrame struct {
@@ -348,6 +353,11 @@ type AgentRunWorkspace struct {
 	Kind        string             `json:"kind,omitempty"`
 	Cwd         string             `json:"cwd,omitempty"`
 	Folder      string             `json:"folder,omitempty"`
+	AgentID     string             `json:"agentId,omitempty"`
+	AgentRoot   string             `json:"agentRoot,omitempty"`
+	WorkdirMode string             `json:"workdirMode,omitempty"`
+	Scope       string             `json:"scope,omitempty"`
+	ScopeID     string             `json:"scopeId,omitempty"`
 	Repo        *WorkspaceRepoSpec `json:"repo,omitempty"`
 	SessionRoot string             `json:"sessionRoot,omitempty"`
 }
@@ -372,6 +382,11 @@ type WorkspaceRepoSpec struct {
 	GitURL      string `json:"gitUrl,omitempty"`
 	DevicePath  string `json:"devicePath,omitempty"`
 	GroupFolder string `json:"groupFolder"`
+	AgentID     string `json:"agentId,omitempty"`
+	AgentRoot   string `json:"agentRoot,omitempty"`
+	WorkdirMode string `json:"workdirMode,omitempty"`
+	Scope       string `json:"scope,omitempty"`
+	ScopeID     string `json:"scopeId,omitempty"`
 }
 
 type RunCancelFrame struct {

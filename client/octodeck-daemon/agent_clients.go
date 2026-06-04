@@ -51,7 +51,7 @@ var agentClientPermissionModes = map[string][]string{
 
 var agentClientCapabilities = map[string][]string{
 	"claude-code": {"print", "stream-json", "mcp", "permissions", "tools", "session", "skills"},
-	"codex":       {"exec", "plain-text", "sandbox", "approval-policy"},
+	"codex":       {"exec", "jsonl", "tools", "sandbox", "approval-policy"},
 	"traecli":     {"print", "plain-text", "permissions", "tools"},
 	"seed":        {"a2a", "jsonrpc", "events", "permissions", "tools", "session"},
 }

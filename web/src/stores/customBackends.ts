@@ -20,6 +20,7 @@ export interface CustomBackendDef {
   resumeArgvTemplate?: string[];
   workdirMode?: 'auto' | 'custom';
   workdir?: string;
+  providerId?: string | null;
   deviceLinkId?: string | null;
   agentClientId?: string | null;
   createdAt?: string;
@@ -28,6 +29,7 @@ export interface CustomBackendDef {
 
 export type CustomBackendCreateInput = Omit<
   CustomBackendDef,
+  | 'id'
   | 'createdAt'
   | 'updatedAt'
   | 'supportsContainer'

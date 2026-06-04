@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Bot,
   CheckCircle2,
@@ -20,6 +21,14 @@ import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { api } from '../api/client';
 import { useAuthStore } from '../stores/auth';
@@ -61,8 +70,13 @@ interface AgentSkillInfo {
   name?: string;
   description?: string;
   source: 'workspace' | 'cli';
+  sourceProvider?: string;
+  level?: 'package' | 'skill';
+  levelKey?: string;
   enabled?: boolean;
   packageName?: string;
+  packageSource?: string;
+  installedAt?: string;
   content?: string;
 }
 
@@ -74,6 +88,9 @@ interface AgentSkillsResponse {
 
 const AGENT_SECTIONS = ['Agent 管理', 'Agent.md', 'Agent Team'] as const;
 type AgentSectionName = (typeof AGENT_SECTIONS)[number];
+
+const AGENT_ADD_BUTTON_CLASS =
+  'gap-1.5 rounded-xl bg-primary text-primary-foreground shadow-sm shadow-primary/20 transition hover:bg-primary/90 hover:shadow-md hover:shadow-primary/25';
 
 const SECTION_ANCHORS: Record<AgentSectionName, string> = {
   'Agent 管理': 'agent',
@@ -370,6 +387,9 @@ const TEAM_SHAPES: Array<{
 ];
 
 export function AgentsPage() {
+  const [searchParams] = useSearchParams();
+  const queryTeamId = searchParams.get('team')?.trim() || undefined;
+  const queryRunId = searchParams.get('run')?.trim() || undefined;
   const { hasPermission } = useAuthStore();
   const canManage = hasPermission('manage_system_config');
   const [hashAnchor, setHashAnchor] = useState<AgentsAnchor>(() =>
@@ -387,7 +407,7 @@ export function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [activeSection, setActiveSection] = useState<AgentSectionName>(
-    hashAnchor.section ?? 'Agent 管理',
+    queryTeamId || queryRunId ? 'Agent Team' : (hashAnchor.section ?? 'Agent 管理'),
   );
   const [activeModule, setActiveModule] =
     useState<AgentModuleName>('Instructions');
@@ -435,6 +455,13 @@ export function AgentsPage() {
   useEffect(() => {
     void load();
   }, []);
+
+  useEffect(() => {
+    if (queryTeamId || queryRunId) {
+      setActiveSection('Agent Team');
+      scrollAgentsAnchorSection('Agent Team');
+    }
+  }, [queryTeamId, queryRunId]);
 
   useEffect(() => {
     const handleHashChange = () => {
@@ -582,8 +609,7 @@ export function AgentsPage() {
   const loadAgentSkills = async (agent = selectedAgent) => {
     if (
       !agent?.custom?.deviceLinkId ||
-      !agent.custom.agentClientId ||
-      agent.runtime !== 'local-device'
+      !agent.custom.agentClientId
     ) {
       setAgentSkills(null);
       setAgentSkillsError(null);
@@ -595,7 +621,7 @@ export function AgentsPage() {
       const cwd =
         agent.custom.workdirMode === 'custom'
           ? (agent.custom.workdir ?? '')
-          : '';
+          : `octodeck-workspace://${agent.id}`;
       const data = await api.get<AgentSkillsResponse>(
         `/api/agent-links/${encodeURIComponent(agent.custom.deviceLinkId)}/providers/${encodeURIComponent(agent.custom.agentClientId)}/skills?cwd=${encodeURIComponent(cwd)}`,
       );
@@ -723,12 +749,6 @@ export function AgentsPage() {
                 />
                 刷新
               </Button>
-              {canManage && activeSection === 'Agent 管理' ? (
-                <Button size="sm" onClick={handleCreate}>
-                  <Plus className="size-4" />
-                  新增 Agent
-                </Button>
-              ) : null}
             </div>
           </div>
         </div>
@@ -778,9 +798,19 @@ export function AgentsPage() {
                             个已允许
                           </p>
                         </div>
-                        {customLoading ? (
-                          <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                        ) : null}
+                        <div className="flex shrink-0 items-center gap-2">
+                          {customLoading ? (
+                            <Loader2 className="size-4 animate-spin text-muted-foreground" />
+                          ) : null}
+                          <Button
+                            size="sm"
+                            className={AGENT_ADD_BUTTON_CLASS}
+                            onClick={handleCreate}
+                          >
+                            <Plus className="size-4" />
+                            新增 Agent
+                          </Button>
+                        </div>
                       </div>
                     </div>
                     <div className="max-h-[calc(100vh-19rem)] divide-y divide-border/60 overflow-y-auto">
@@ -908,7 +938,8 @@ export function AgentsPage() {
           <AgentTeamWorkspace
             agents={agents}
             defaultGeneratorId={selectedAgent?.id ?? defaultBackend}
-            initialSelectedTeamId={hashAnchor.teamId}
+            initialSelectedTeamId={queryTeamId ?? hashAnchor.teamId}
+            initialSelectedRunId={queryRunId}
             onSelectedTeamIdChange={(teamId) =>
               setHashAnchor((prev) => ({ ...prev, teamId }))
             }
@@ -1521,11 +1552,13 @@ function AgentTeamWorkspace({
   agents,
   defaultGeneratorId,
   initialSelectedTeamId,
+  initialSelectedRunId,
   onSelectedTeamIdChange,
 }: {
   agents: AgentListItem[];
   defaultGeneratorId: string;
   initialSelectedTeamId?: string;
+  initialSelectedRunId?: string;
   onSelectedTeamIdChange: (teamId?: string) => void;
 }) {
   const {
@@ -1593,6 +1626,22 @@ function AgentTeamWorkspace({
       setSelectedTeamId(initialSelectedTeamId);
     }
   }, [initialSelectedTeamId, selectedTeamId, teams]);
+
+  useEffect(() => {
+    if (!initialSelectedRunId || activeRun?.id === initialSelectedRunId) return;
+    void loadRun(initialSelectedRunId)
+      .then(async (run) => {
+        if (run.teamId && run.teamId !== selectedTeamId) {
+          setSelectedTeamId(run.teamId);
+          onSelectedTeamIdChange(run.teamId);
+        }
+        await handleSelectRunHistory(run);
+      })
+      .catch(() => {
+        toast.error('无法打开 Agent Team Run 来源');
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSelectedRunId, activeRun?.id, loadRun]);
 
   useEffect(() => {
     if (selectedTeamId && teams.length === 0) return;
@@ -1835,6 +1884,7 @@ function AgentTeamWorkspace({
             </div>
             <Button
               size="sm"
+              className={AGENT_ADD_BUTTON_CLASS}
               onClick={openCreateDialog}
               disabled={!defaultGenerator}
             >
@@ -3075,6 +3125,7 @@ function AgentMdPanel({
   const {
     agentMdDefinitions,
     saving,
+    loadAgentMdDefinitions,
     createAgentMdDefinition,
     updateAgentMdDefinition,
     removeAgentMdDefinition,
@@ -3091,12 +3142,22 @@ function AgentMdPanel({
     summary: '',
     content: '',
   });
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createDraft, setCreateDraft] = useState({
+    name: '',
+    summary: '',
+    content: '',
+  });
   const generatorName = generatorAgent?.displayName ?? 'Agent';
   const generatorId = generatorAgent?.id ?? 'manual';
   const selectAgentMd = (agentMdId: string | null) => {
     setSelectedId(agentMdId);
     onSelectedAgentMdIdChange(agentMdId ?? undefined);
   };
+
+  useEffect(() => {
+    void loadAgentMdDefinitions();
+  }, [loadAgentMdDefinitions]);
 
   useEffect(() => {
     if (
@@ -3113,7 +3174,12 @@ function AgentMdPanel({
   useEffect(() => {
     if (selectedId && agentMdDefinitions.length === 0) return;
     if (!selected) {
-      selectAgentMd(null);
+      const firstDefinition = agentMdDefinitions[0];
+      if (firstDefinition) {
+        selectAgentMd(firstDefinition.id);
+        return;
+      }
+      if (selectedId) selectAgentMd(null);
       setDraft({
         name: '',
         summary: '',
@@ -3132,15 +3198,42 @@ function AgentMdPanel({
   }, [selected?.id, selected?.updatedAt, selectedId, generatorName]);
 
   const handleNew = () => {
-    selectAgentMd(null);
-    setDraft({
+    setCreateDraft({
       name: '',
       summary: '',
       content: defaultAgentMdContent(generatorName),
     });
+    setCreateOpen(true);
+  };
+
+  const handleCreate = async () => {
+    const name = createDraft.name.trim();
+    const summary = createDraft.summary.trim();
+    const content = createDraft.content.trim();
+    if (!name || !summary || !content) {
+      toast.error('请填写 agent.md 的名称、简介和内容');
+      return;
+    }
+    try {
+      const saved = await createAgentMdDefinition({
+        name,
+        summary,
+        content,
+        createdByAgentId: generatorId,
+      });
+      selectAgentMd(saved.id);
+      setCreateOpen(false);
+      toast.success('agent.md 已创建');
+    } catch (err) {
+      toast.error(getErrorMessage(err, '创建 agent.md 失败'));
+    }
   };
 
   const handleSave = async () => {
+    if (!selected) {
+      toast.error('请先选择一个 agent.md 定义');
+      return;
+    }
     const name = draft.name.trim();
     const summary = draft.summary.trim();
     const content = draft.content.trim();
@@ -3150,9 +3243,7 @@ function AgentMdPanel({
     }
     try {
       const payload = { name, summary, content, createdByAgentId: generatorId };
-      const saved = selected
-        ? await updateAgentMdDefinition(selected.id, payload)
-        : await createAgentMdDefinition(payload);
+      const saved = await updateAgentMdDefinition(selected.id, payload);
       selectAgentMd(saved.id);
       toast.success('agent.md 已保存');
     } catch (err) {
@@ -3175,115 +3266,213 @@ function AgentMdPanel({
   return (
     <div
       id="agent-md"
-      className="rounded-2xl border border-border bg-background/80 p-4"
+      className="grid gap-5 lg:grid-cols-[minmax(280px,1fr)_minmax(0,2fr)]"
     >
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div>
-          <h4 className="text-sm font-semibold text-foreground">
-            agent.md 管理
-          </h4>
-          <p className="mt-1 text-xs text-muted-foreground">
-            用户可以自行定义 agent.md。现有 agent.md 简介会在生成 Team
-            时提供给模型，用于辅助拆分角色；不合适时模型可返回新的 agent.md
-            定义。
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={handleNew}>
-          <Plus className="size-4" />
-          新建
-        </Button>
-      </div>
-
-      <div className="grid gap-4 xl:grid-cols-[minmax(220px,0.8fr)_minmax(0,1.2fr)]">
-        <div className="space-y-2">
-          <div className="text-xs font-semibold text-muted-foreground">
-            已有 agent.md
+      <aside className="rounded-2xl border border-border bg-background/80 p-4 shadow-sm">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h4 className="text-sm font-semibold text-foreground">
+              agent.md 定义
+            </h4>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {agentMdDefinitions.length} 个已保存定义
+            </p>
           </div>
-          {agentMdDefinitions.length === 0 ? (
-            <EmptyText>
-              还没有 agent.md。可以手动创建，或在生成 Team 时由 Agent 自动补充。
-            </EmptyText>
-          ) : (
-            agentMdDefinitions.map((definition) => (
+          <Button
+            size="sm"
+            className={AGENT_ADD_BUTTON_CLASS}
+            onClick={handleNew}
+          >
+            <Plus className="size-4" />
+            新增定义
+          </Button>
+        </div>
+        <p className="mb-3 rounded-xl border border-dashed border-border bg-muted/10 p-3 text-xs leading-5 text-muted-foreground">
+          现有 agent.md 简介会在生成 Team 时提供给模型，用于辅助拆分角色。
+        </p>
+        {agentMdDefinitions.length === 0 ? (
+          <EmptyText>
+            还没有 agent.md。点击「新增定义」开始创建。
+          </EmptyText>
+        ) : (
+          <div className="max-h-[calc(100vh-19rem)] space-y-2 overflow-y-auto pr-1">
+            {agentMdDefinitions.map((definition) => (
               <button
                 key={definition.id}
                 type="button"
                 onClick={() => selectAgentMd(definition.id)}
-                className={`w-full rounded-xl border p-3 text-left transition ${selected?.id === definition.id ? 'border-primary bg-primary/5' : 'border-border bg-background/80 hover:bg-muted/40'}`}
+                className={`w-full rounded-xl border p-3 text-left transition ${selected?.id === definition.id ? 'border-primary bg-primary/5 shadow-sm' : 'border-border bg-background/80 hover:bg-muted/40'}`}
               >
                 <div className="truncate text-sm font-medium text-foreground">
                   {definition.name}
                 </div>
-                <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
                   {definition.summary}
                 </div>
               </button>
-            ))
-          )}
-        </div>
-
-        <div className="space-y-3 rounded-2xl border border-border bg-muted/10 p-4">
-          <label className="grid gap-1.5">
-            <span className="text-xs font-medium text-muted-foreground">
-              名称
-            </span>
-            <input
-              value={draft.name}
-              onChange={(event) =>
-                setDraft((prev) => ({ ...prev, name: event.target.value }))
-              }
-              className="rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
-              placeholder="例如：Frontend Implementer"
-            />
-          </label>
-          <label className="grid gap-1.5">
-            <span className="text-xs font-medium text-muted-foreground">
-              简介（会提供给 Agent Team 生成模型）
-            </span>
-            <textarea
-              value={draft.summary}
-              onChange={(event) =>
-                setDraft((prev) => ({ ...prev, summary: event.target.value }))
-              }
-              className="min-h-20 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
-              placeholder="简要说明这个 agent.md 擅长什么、适合什么角色。"
-            />
-          </label>
-          <label className="grid gap-1.5">
-            <span className="text-xs font-medium text-muted-foreground">
-              agent.md 内容
-            </span>
-            <textarea
-              value={draft.content}
-              onChange={(event) =>
-                setDraft((prev) => ({ ...prev, content: event.target.value }))
-              }
-              className="min-h-64 rounded-xl border border-border bg-background px-3 py-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring"
-            />
-          </label>
-          <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={handleSave} disabled={saving}>
-              {saving ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Save className="size-4" />
-              )}
-              保存 agent.md
-            </Button>
-            {selected ? (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleDelete}
-                disabled={saving}
-              >
-                <Trash2 className="size-4" />
-                删除
-              </Button>
-            ) : null}
+            ))}
           </div>
-        </div>
-      </div>
+        )}
+      </aside>
+
+      <main className="min-w-0 rounded-2xl border border-border bg-background/80 p-4 shadow-sm">
+        {selected ? (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-3 border-b border-border/70 pb-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <h4 className="truncate text-sm font-semibold text-foreground">
+                  {selected.name}
+                </h4>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  最近更新：{formatDateTime(selected.updatedAt)}
+                </p>
+              </div>
+              <div className="flex shrink-0 flex-wrap gap-2">
+                <Button size="sm" onClick={handleSave} disabled={saving}>
+                  {saving ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Save className="size-4" />
+                  )}
+                  保存修改
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDelete}
+                  disabled={saving}
+                >
+                  <Trash2 className="size-4" />
+                  删除
+                </Button>
+              </div>
+            </div>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">
+                名称
+              </span>
+              <input
+                value={draft.name}
+                onChange={(event) =>
+                  setDraft((prev) => ({ ...prev, name: event.target.value }))
+                }
+                className="rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                placeholder="例如：Frontend Implementer"
+              />
+            </label>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">
+                简介（会提供给 Agent Team 生成模型）
+              </span>
+              <textarea
+                value={draft.summary}
+                onChange={(event) =>
+                  setDraft((prev) => ({ ...prev, summary: event.target.value }))
+                }
+                className="min-h-20 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                placeholder="简要说明这个 agent.md 擅长什么、适合什么角色。"
+              />
+            </label>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">
+                agent.md 内容
+              </span>
+              <textarea
+                value={draft.content}
+                onChange={(event) =>
+                  setDraft((prev) => ({ ...prev, content: event.target.value }))
+                }
+                className="min-h-[28rem] rounded-xl border border-border bg-background px-3 py-2 font-mono text-xs leading-5 outline-none focus:ring-2 focus:ring-ring"
+              />
+            </label>
+          </div>
+        ) : (
+          <div className="flex min-h-80 items-center justify-center">
+            <EmptyText>选择左侧 agent.md 查看详情，或点击「新增定义」创建。</EmptyText>
+          </div>
+        )}
+      </main>
+
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <form
+            className="grid gap-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleCreate();
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>新增 agent.md 定义</DialogTitle>
+              <DialogDescription>
+                填写名称、简介和 agent.md 内容。创建后会自动选中并在右侧继续编辑。
+              </DialogDescription>
+            </DialogHeader>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">
+                名称
+              </span>
+              <input
+                value={createDraft.name}
+                onChange={(event) =>
+                  setCreateDraft((prev) => ({ ...prev, name: event.target.value }))
+                }
+                className="rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                placeholder="例如：Frontend Implementer"
+                autoFocus
+              />
+            </label>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">
+                简介
+              </span>
+              <textarea
+                value={createDraft.summary}
+                onChange={(event) =>
+                  setCreateDraft((prev) => ({
+                    ...prev,
+                    summary: event.target.value,
+                  }))
+                }
+                className="min-h-20 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                placeholder="简要说明这个 agent.md 擅长什么、适合什么角色。"
+              />
+            </label>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">
+                agent.md 内容
+              </span>
+              <textarea
+                value={createDraft.content}
+                onChange={(event) =>
+                  setCreateDraft((prev) => ({
+                    ...prev,
+                    content: event.target.value,
+                  }))
+                }
+                className="min-h-64 rounded-xl border border-border bg-background px-3 py-2 font-mono text-xs leading-5 outline-none focus:ring-2 focus:ring-ring"
+              />
+            </label>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setCreateOpen(false)}
+              >
+                取消
+              </Button>
+              <Button type="submit" disabled={saving}>
+                {saving ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Plus className="size-4" />
+                )}
+                创建定义
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -3688,6 +3877,12 @@ function SkillGroup({
                             </div>
                             <div className="break-all font-mono text-[11px] text-muted-foreground">
                               {skill.id}
+                            </div>
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {skill.sourceProvider ? (
+                                <Pill tone="blue">{skill.sourceProvider}</Pill>
+                              ) : null}
+                              <Pill>{skill.levelKey || skill.level || 'skill'}</Pill>
                             </div>
                           </div>
                           <span className="shrink-0">

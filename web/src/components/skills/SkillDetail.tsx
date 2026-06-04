@@ -85,13 +85,24 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
               <h2 className="text-xl font-bold text-foreground">{detail.name}</h2>
               <span
                 className={`px-2 py-0.5 rounded text-xs font-medium ${
-                  detail.source === 'user'
+                  ['cloud', 'user'].includes(detail.source)
                     ? 'bg-brand-100 text-primary'
                     : 'bg-muted text-muted-foreground'
                 }`}
               >
-                {detail.source === 'user' ? '用户级' : detail.source === 'external' ? '本地/系统' : '项目级'}
+                {detail.source === 'cloud'
+                  ? 'Cloud'
+                  : detail.source === 'user'
+                    ? 'Cloud'
+                    : detail.source === 'external'
+                      ? 'Cloud'
+                      : 'Workspace'}
               </span>
+              {detail.sourceProvider && (
+                <span className="px-2 py-0.5 rounded text-xs font-medium bg-primary/10 text-primary">
+                  {detail.sourceProvider}
+                </span>
+              )}
               {detail.userInvocable && (
                 <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300">
                   可调用
@@ -181,6 +192,22 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
               </span>
             </div>
           )}
+          {detail.levelKey && (
+            <div>
+              <span className="text-muted-foreground">聚合级别：</span>
+              <span className="text-foreground ml-1 font-mono text-xs">
+                {detail.level ?? 'skill'} · {detail.levelKey}
+              </span>
+            </div>
+          )}
+          {detail.sourceProvider && (
+            <div>
+              <span className="text-muted-foreground">来源 Agent：</span>
+              <span className="text-foreground ml-1 font-mono text-xs">
+                {detail.sourceProvider}
+              </span>
+            </div>
+          )}
           {detail.allowedTools && detail.allowedTools.length > 0 && (
             <div>
               <span className="text-muted-foreground">允许工具：</span>
@@ -241,13 +268,13 @@ export function SkillDetail({ skillId, onDeleted }: SkillDetailProps) {
       {/* 底部操作区 */}
       <div className="p-6 bg-muted">
         <p className="text-sm text-muted-foreground">
-          {detail.source === 'user'
+          {['cloud', 'user'].includes(detail.source)
             ? packageName
               ? `通过 ${packageName} 安装，可重新安装以获取最新版本`
-              : '用户级技能可启用/禁用或删除，也可在对话中让 AI 安装或卸载技能'
+              : 'Cloud 技能可启用/禁用或删除，也可在对话中让 AI 安装或卸载技能'
             : detail.source === 'external'
-              ? '本地/系统技能为只读，来自 ~/.claude/skills/'
-              : '项目级技能为只读，不可修改或删除'}
+              ? 'Cloud 只读技能来自已同步的外部技能目录'
+              : 'Workspace 技能为只读，不可修改或删除'}
         </p>
       </div>
     </Card>

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useTasksStore } from '../stores/tasks';
 import { useAuthStore } from '../stores/auth';
 import { useGroupsStore } from '../stores/groups';
@@ -11,6 +12,9 @@ import { EmptyState } from '@/components/common/EmptyState';
 import { Button } from '@/components/ui/button';
 
 export function TasksPage() {
+  const [searchParams] = useSearchParams();
+  const targetTaskId = searchParams.get('task')?.trim() || null;
+  const targetWorkspace = searchParams.get('workspace')?.trim() || null;
   const { tasks, loading, error, loadTasks, createTask, updateTaskStatus, deleteTask, runTaskNow } = useTasksStore();
   const { user } = useAuthStore();
   const [showCreateForm, setShowCreateForm] = useState(false);
@@ -143,6 +147,7 @@ export function TasksPage() {
                       onResume={handleResume}
                       onDelete={handleDelete}
                       onRunNow={runTaskNow}
+                      initialExpanded={task.id === targetTaskId || (!!targetWorkspace && task.group_folder === targetWorkspace)}
                     />
                   ))}
                 </div>
@@ -161,6 +166,7 @@ export function TasksPage() {
                       onResume={handleResume}
                       onDelete={handleDelete}
                       onRunNow={runTaskNow}
+                      initialExpanded={task.id === targetTaskId || (!!targetWorkspace && task.group_folder === targetWorkspace)}
                     />
                   ))}
                 </div>
@@ -179,6 +185,7 @@ export function TasksPage() {
                       onResume={handleResume}
                       onDelete={handleDelete}
                       onRunNow={runTaskNow}
+                      initialExpanded={task.id === targetTaskId || (!!targetWorkspace && task.group_folder === targetWorkspace)}
                     />
                   ))}
                 </div>

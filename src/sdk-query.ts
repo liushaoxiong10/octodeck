@@ -9,10 +9,7 @@ import {
   query,
   tool,
 } from '@anthropic-ai/claude-agent-sdk';
-import fs from 'fs';
-import path from 'path';
 import { z } from 'zod';
-import { DATA_DIR } from './config.js';
 import {
   buildClaudeEnvLines,
   getClaudeProviderConfig,
@@ -24,6 +21,7 @@ import {
   putCloudMemory,
   searchCloudMemory,
 } from './memory-store.js';
+import { getCloudSkill, listCloudSkillsByUser } from './db.js';
 
 // Mutex: process.env mutation is not re-entrant. Serialize concurrent calls
 // to prevent overlapping env writes from corrupting each other.
@@ -50,10 +48,6 @@ export async function sdkQuery(
   await prevLock;
 
   const timeout = opts?.timeout ?? 60_000;
-  const cloudSkillConfigDir = opts?.userId
-    ? prepareCloudSkillConfigDir(opts.userId)
-    : null;
-
   // Inject provider credentials into process.env for the SDK
   const config = getClaudeProviderConfig();
   const envLines = buildClaudeEnvLines(config);
@@ -66,24 +60,22 @@ export async function sdkQuery(
     savedEnv[key] = process.env[key];
     process.env[key] = value;
   }
-  if (cloudSkillConfigDir) {
-    savedEnv.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR;
-    process.env.CLAUDE_CONFIG_DIR = cloudSkillConfigDir;
-  }
-
   const abortController = new AbortController();
   const timer = setTimeout(() => abortController.abort(), timeout);
 
   try {
     const model = opts?.model || config.anthropicModel || undefined;
-    const cloudMemoryMcp =
+    const cloudToolsMcp =
       opts?.userId &&
       typeof createSdkMcpServer === 'function' &&
       typeof tool === 'function'
         ? createSdkMcpServer({
-            name: 'octodeck-cloud-memory',
+            name: 'octodeck-cloud-tools',
             version: '1.0.0',
-            tools: createCloudMemoryTools(opts.userId),
+            tools: [
+              ...createCloudMemoryTools(opts.userId),
+              ...createCloudSkillTools(opts.userId),
+            ],
           })
         : null;
 
@@ -93,17 +85,11 @@ export async function sdkQuery(
       options: {
         ...(model && { model }),
         maxTurns: 1,
-        allowedTools: cloudSkillConfigDir ? ['Skill'] : [],
+        allowedTools: [],
         permissionMode: 'bypassPermissions' as const,
         allowDangerouslySkipPermissions: true,
-        ...(cloudSkillConfigDir
-          ? {
-              settingSources: ['project', 'user'] as const,
-              skills: 'all' as const,
-            }
-          : {}),
-        ...(cloudMemoryMcp
-          ? { mcpServers: { octodeck_cloud_memory: cloudMemoryMcp } }
+        ...(cloudToolsMcp
+          ? { mcpServers: { octodeck_cloud_tools: cloudToolsMcp } }
           : {}),
         abortController,
       },
@@ -134,6 +120,59 @@ export async function sdkQuery(
     }
     release!();
   }
+}
+
+function createCloudSkillTools(userId: string) {
+  return [
+    tool(
+      'cloud_skill_search',
+      '搜索云端数据库中的 Cloud Skills。',
+      { query: z.string().optional() },
+      async (args) => ({
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              listCloudSkillsByUser(userId)
+                .filter((skill) => skill.enabled)
+                .filter((skill) => {
+                  const query = args.query?.trim().toLowerCase();
+                  return (
+                    !query ||
+                    skill.skillId.toLowerCase().includes(query) ||
+                    skill.name.toLowerCase().includes(query) ||
+                    skill.description.toLowerCase().includes(query) ||
+                    (skill.packageName ?? '').toLowerCase().includes(query)
+                  );
+                })
+                .map((skill) => ({
+                  id: skill.skillId,
+                  name: skill.name,
+                  description: skill.description,
+                  packageName: skill.packageName,
+                  sourceProvider: skill.sourceProvider,
+                })),
+              null,
+              2,
+            ),
+          },
+        ],
+      }),
+    ),
+    tool(
+      'cloud_skill_get',
+      '读取云端数据库中指定 Cloud Skill 的 SKILL.md 内容。',
+      { skill_id: z.string() },
+      async (args) => ({
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(getCloudSkill(userId, args.skill_id) ?? null, null, 2),
+          },
+        ],
+      }),
+    ),
+  ];
 }
 
 function createCloudMemoryTools(userId: string) {
@@ -255,37 +294,4 @@ function createCloudMemoryTools(userId: string) {
       }),
     ),
   ];
-}
-
-function prepareCloudSkillConfigDir(userId: string): string | null {
-  if (!/^[\w-]+$/.test(userId)) return null;
-  const userSkillsDir = path.join(DATA_DIR, 'skills', userId);
-  if (!fs.existsSync(userSkillsDir)) return null;
-
-  const configDir = path.join(DATA_DIR, 'sdk-query', userId, '.claude');
-  const skillsDir = path.join(configDir, 'skills');
-  fs.mkdirSync(skillsDir, { recursive: true });
-
-  for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
-    if (entry.isDirectory() || entry.isSymbolicLink()) {
-      fs.rmSync(path.join(skillsDir, entry.name), {
-        recursive: true,
-        force: true,
-      });
-    }
-  }
-
-  for (const entry of fs.readdirSync(userSkillsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-    const source = path.join(userSkillsDir, entry.name);
-    const target = path.join(skillsDir, entry.name);
-    try {
-      fs.symlinkSync(source, target);
-    } catch {
-      // Fallback for filesystems that disallow symlinks.
-      fs.cpSync(source, target, { recursive: true });
-    }
-  }
-
-  return configDir;
 }

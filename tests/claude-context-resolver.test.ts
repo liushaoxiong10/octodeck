@@ -50,7 +50,6 @@ describe('ClaudeContextResolver', () => {
     makeSkill(path.join(external, 'skills'), 'external-skill');
     makeSkill(path.join(dataDir, 'builtin-skills'), 'builtin-skill');
     makeSkill(path.join(projectRoot, 'container', 'skills'), 'project-skill');
-    makeSkill(path.join(dataDir, 'skills', 'admin'), 'user-skill');
 
     const plan = buildClaudeContextPlan({
       executionMode: 'host',
@@ -69,7 +68,28 @@ describe('ClaudeContextResolver', () => {
     expect(fs.readlinkSync(path.join(sessionDir, 'skills', 'builtin-skill'))).toBe(path.join(dataDir, 'builtin-skills', 'builtin-skill'));
     expect(fs.readlinkSync(path.join(sessionDir, 'skills', 'external-skill'))).toBe(path.join(external, 'skills', 'external-skill'));
     expect(fs.readlinkSync(path.join(sessionDir, 'skills', 'project-skill'))).toBe(path.join(projectRoot, 'container', 'skills', 'project-skill'));
-    expect(fs.readlinkSync(path.join(sessionDir, 'skills', 'user-skill'))).toBe(path.join(dataDir, 'skills', 'admin', 'user-skill'));
+  });
+
+  test('host sync does not materialize cloud DB skills as files', () => {
+    const external = path.join(tmp, 'external-claude');
+    const dataDir = path.join(tmp, 'data');
+    const projectRoot = path.join(tmp, 'project');
+    const sessionDir = path.join(tmp, 'sessions', 'server-device', '.claude');
+    makeSkill(path.join(dataDir, 'skills', 'alice'), 'cloud-skill');
+
+    const plan = buildClaudeContextPlan({
+      executionMode: 'host',
+      group: fakeGroup('server-device', 'alice') as any,
+      ownerHomeFolder: 'alice-home',
+      externalClaudeDir: external,
+      projectRoot,
+      dataDir,
+      groupSessionsDir: sessionDir,
+    });
+    syncHostClaudeContext(plan, sessionDir);
+
+    const runtimeSkillDir = path.join(sessionDir, 'skills', 'cloud-skill');
+    expect(fs.existsSync(runtimeSkillDir)).toBe(false);
   });
 
   test('host sync preserves a real session CLAUDE.md and reports shadowed', () => {

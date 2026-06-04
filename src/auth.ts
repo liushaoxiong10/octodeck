@@ -77,7 +77,7 @@ export function setSessionCookie(c: any, token: string): string {
   const name = secure ? SESSION_COOKIE_NAME_SECURE : SESSION_COOKIE_NAME_PLAIN;
   const secureSuffix = secure ? '; Secure' : '';
   const signedToken = signSessionToken(token);
-  return `${name}=${signedToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 24 * 60 * 60}${secureSuffix}`;
+  return `${name}=${signedToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${30 * 24 * 60 * 60}${secureSuffix}`;
 }
 
 /** Build a Set-Cookie header value that clears the session cookie. */
@@ -94,7 +94,7 @@ export function clearSessionCookies(c: any): string[] {
   const secureSuffix = secure ? '; Secure' : '';
   return names.map(
     (name) =>
-      `${name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secureSuffix}`,
+      `${name}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secureSuffix}`,
   );
 }
 

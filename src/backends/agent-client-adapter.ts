@@ -42,6 +42,7 @@ export function buildAgentBackendFromClient(input: {
   maxOutputBytes?: number;
   runtime?: 'local-device' | 'server-side';
   model?: string;
+  providerId?: string | null;
   workdirMode?: 'auto' | 'custom';
   workdir?: string;
 }): CustomBackendDef {
@@ -62,6 +63,7 @@ export function buildAgentBackendFromClient(input: {
     maxOutputBytes: input.maxOutputBytes,
     runtime: input.runtime,
     model: input.model,
+    providerId: input.providerId,
     workdirMode: input.workdirMode,
     workdir: input.workdir,
     deviceLinkId: input.deviceLinkId,
@@ -120,16 +122,18 @@ function templateForAgentClient(
       return {
         argvTemplate: [
           'exec',
+          '--json',
           '--skip-git-repo-check',
           '-m',
           '{model}',
           '{prompt}',
         ],
-        outputProtocol: 'plain-text',
+        outputProtocol: 'jsonline-stream-json',
         supportsNativeSessions: true,
         resumeArgvTemplate: [
           'exec',
           'resume',
+          '--json',
           '--skip-git-repo-check',
           '-m',
           '{model}',

@@ -1,6 +1,7 @@
 import { getSession } from '../agent-link/registry.js';
 import { invokeRemoteTool } from '../agent-link/tool-rpc.js';
 import { LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS } from '../runtime-config.js';
+import { getCloudSkill, listCloudSkillsByUser } from '../db.js';
 import {
   appendCloudMemory,
   getCloudMemory,
@@ -30,6 +31,13 @@ interface MemoryHttpBody {
   content?: string;
   query?: string;
   expectedRevision?: number;
+}
+
+interface CloudSkillToolBody {
+  userId?: string;
+  operation?: string;
+  skillId?: string;
+  query?: string;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -202,4 +210,67 @@ export async function handleCloudMemoryToolHttpRequest(
       400,
     );
   }
+}
+
+export async function handleCloudSkillToolHttpRequest(
+  request: Request,
+): Promise<Response> {
+  const secret = process.env.OCTODECK_AGENT_RUNNER_SECRET;
+  const auth = request.headers.get('authorization') || '';
+  if (!secret || auth !== `Bearer ${secret}`)
+    return jsonResponse({ error: 'unauthorized' }, 401);
+  if (request.method !== 'POST')
+    return jsonResponse({ error: 'method_not_allowed' }, 405);
+
+  let body: CloudSkillToolBody;
+  try {
+    body = (await request.json()) as CloudSkillToolBody;
+  } catch {
+    return jsonResponse({ error: 'invalid_json' }, 400);
+  }
+  if (!body.userId || !body.operation)
+    return jsonResponse({ error: 'missing_required_fields' }, 400);
+
+  if (body.operation === 'list' || body.operation === 'search') {
+    const query = body.query?.trim().toLowerCase();
+    const skills = listCloudSkillsByUser(body.userId)
+      .filter((skill) => skill.enabled)
+      .filter(
+        (skill) =>
+          !query ||
+          skill.skillId.toLowerCase().includes(query) ||
+          skill.name.toLowerCase().includes(query) ||
+          skill.description.toLowerCase().includes(query) ||
+          (skill.packageName ?? '').toLowerCase().includes(query),
+      )
+      .map((skill) => ({
+        id: skill.skillId,
+        name: skill.name,
+        description: skill.description,
+        packageName: skill.packageName,
+        sourceProvider: skill.sourceProvider,
+        updatedAt: skill.updatedAt,
+      }));
+    return jsonResponse({ skills });
+  }
+
+  if (body.operation === 'get') {
+    if (!body.skillId) return jsonResponse({ error: 'skillId_required' }, 400);
+    const skill = getCloudSkill(body.userId, body.skillId);
+    if (!skill || !skill.enabled)
+      return jsonResponse({ error: 'skill_not_found' }, 404);
+    return jsonResponse({
+      skill: {
+        id: skill.skillId,
+        name: skill.name,
+        description: skill.description,
+        packageName: skill.packageName,
+        sourceProvider: skill.sourceProvider,
+        content: skill.content,
+        updatedAt: skill.updatedAt,
+      },
+    });
+  }
+
+  return jsonResponse({ error: 'unsupported_operation' }, 400);
 }

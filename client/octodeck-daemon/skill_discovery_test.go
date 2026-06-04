@@ -59,6 +59,7 @@ description: Installed in CLI home
 
 func TestDiscoverProviderSkillsScansDaemonAgentSkillRoots(t *testing.T) {
 	root := t.TempDir()
+	home := filepath.Join(root, "home")
 	workspaceDir := filepath.Join(root, "workspace-root", "workspace")
 	cfg := &Config{
 		WorkspaceDir: workspaceDir,
@@ -75,6 +76,7 @@ description: Installed for daemon managed seed agent
 ---
 # Daemon Seed Skill
 `)
+	t.Setenv("HOME", home)
 
 	result, err := discoverProviderSkills(context.Background(), cfg, "seed", filepath.Join(root, "worktree"))
 	if err != nil {

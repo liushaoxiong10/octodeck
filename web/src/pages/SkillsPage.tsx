@@ -14,10 +14,16 @@ import { SkillCard } from '../components/skills/SkillCard';
 import { SkillDetail } from '../components/skills/SkillDetail';
 import { InstallSkillDialog } from '../components/skills/InstallSkillDialog';
 import { api } from '../api/client';
-import { groupSkillsByPackage, getSkillPackageName, normalizeSkillDisplayText } from '../utils/skillsGrouping';
+import {
+  dedupeSkillsByIdentity,
+  getSkillIdentityKey,
+  groupSkillsByPackage,
+  getSkillPackageName,
+  normalizeSkillDisplayText,
+} from '../utils/skillsGrouping';
 import { MarkdownRenderer } from '../components/chat/MarkdownRenderer';
 
-type SkillSourceFilter = 'all' | 'local' | 'device' | 'workspace';
+type SkillSourceFilter = 'all' | 'cloud' | 'device' | 'workspace';
 
 interface AgentSkillsResponse {
   workspaceSkills: Array<Partial<Skill> & { id: string; source: 'workspace' }>;
@@ -57,7 +63,7 @@ export function SkillsPage() {
 
   useEffect(() => {
     const deviceBackends = backends.filter(
-      (backend) => backend.runtime === 'local-device' && backend.deviceLinkId && backend.agentClientId,
+      (backend) => backend.deviceLinkId && backend.agentClientId,
     );
     if (deviceBackends.length === 0) {
       setDeviceSkills([]);
@@ -71,11 +77,15 @@ export function SkillsPage() {
       try {
         const results = await Promise.allSettled(
           deviceBackends.map(async (backend) => {
-            const cwd = backend.workdirMode === 'custom' ? (backend.workdir ?? '') : '';
+            const cwd = backend.workdirMode === 'custom'
+              ? (backend.workdir ?? '')
+              : `octodeck-workspace://${backend.id}`;
             const data = await api.get<AgentSkillsResponse>(
               `/api/agent-links/${encodeURIComponent(backend.deviceLinkId!)}/providers/${encodeURIComponent(backend.agentClientId!)}/skills?cwd=${encodeURIComponent(cwd)}`,
             );
-            const workspacePath = cwd || '自动 Workspace';
+            const workspacePath = backend.workdirMode === 'custom'
+              ? (backend.workdir ?? '自定义 Workspace')
+              : `${backend.displayName} Workspace`;
             const normalize = (skill: Partial<Skill> & { id: string; source: 'cli' | 'workspace' }): Skill => ({
               id: skill.id,
               name: skill.name || skill.id,
@@ -83,6 +93,11 @@ export function SkillsPage() {
               source: skill.source,
               enabled: skill.enabled ?? true,
               packageName: skill.packageName,
+              packageSource: skill.packageSource,
+              sourceProvider: skill.sourceProvider,
+              level: skill.level,
+              levelKey: skill.levelKey,
+              installedAt: skill.installedAt,
               content: skill.content,
               deviceId: backend.deviceLinkId ?? undefined,
               workspacePath: skill.source === 'workspace' ? workspacePath : undefined,
@@ -111,7 +126,10 @@ export function SkillsPage() {
     };
   }, [backends, deviceSkillsRefreshKey]);
 
-  const allSkills = useMemo(() => [...skills, ...deviceSkills], [skills, deviceSkills]);
+  const allSkills = useMemo(
+    () => dedupeSkillsByIdentity([...skills, ...deviceSkills]),
+    [skills, deviceSkills],
+  );
   const selectedSkill = useMemo(
     () => allSkills.find((skill) => getSkillKey(skill) === selectedKey) ?? null,
     [allSkills, selectedKey],
@@ -136,9 +154,9 @@ export function SkillsPage() {
         normalizeSkillDisplayText(s.packageName).toLowerCase().includes(q);
       const matchesSource =
         sourceFilter === 'all' ||
-        (sourceFilter === 'local' && ['user', 'project', 'external'].includes(s.source)) ||
+        (sourceFilter === 'cloud' && ['cloud', 'user', 'external'].includes(s.source)) ||
         (sourceFilter === 'device' && s.source === 'cli') ||
-        (sourceFilter === 'workspace' && s.source === 'workspace');
+        (sourceFilter === 'workspace' && ['workspace', 'project'].includes(s.source));
       const matchesDevice = deviceFilter === 'all' || s.deviceId === deviceFilter;
       const matchesWorkspace = workspaceFilter === 'all' || s.workspacePath === workspaceFilter;
       return matchesSearch && matchesSource && matchesDevice && matchesWorkspace;
@@ -146,15 +164,17 @@ export function SkillsPage() {
   }, [allSkills, searchQuery, sourceFilter, deviceFilter, workspaceFilter]);
 
   const packageGroups = useMemo(() => groupSkillsByPackage(filtered), [filtered]);
-  const userSkills = allSkills.filter((s) => s.source === 'user');
-  const externalSkills = allSkills.filter((s) => s.source === 'external');
-  const projectSkills = allSkills.filter((s) => s.source === 'project');
+  const cloudSkills = allSkills.filter((s) => ['cloud', 'user', 'external'].includes(s.source));
+  const deviceCliSkills = allSkills.filter((s) => s.source === 'cli');
+  const workspaceSkills = allSkills.filter((s) => ['workspace', 'project'].includes(s.source));
 
   const enabledCount = skills.filter((s) => s.enabled).length;
 
   const handleInstall = async (pkg: string, options?: Parameters<typeof installSkill>[1]) => {
     await installSkill(pkg, options);
-    if (options?.target === 'device') setDeviceSkillsRefreshKey((value) => value + 1);
+    if (options?.target === 'device' || options?.target === 'device-agent-workspace') {
+      setDeviceSkillsRefreshKey((value) => value + 1);
+    }
   };
 
   const handleRefresh = () => {
@@ -177,7 +197,7 @@ export function SkillsPage() {
         <div className="bg-background border-b border-border px-6 py-4">
           <PageHeader
             title="技能(Skill)管理"
-            subtitle={`用户级 ${userSkills.length}${externalSkills.length > 0 ? ` · 本地/系统 ${externalSkills.length}` : ''} · 项目级 ${projectSkills.length} · 启用 ${enabledCount}`}
+            subtitle={`Cloud ${cloudSkills.length} · Device ${deviceCliSkills.length} · Workspace ${workspaceSkills.length} · 启用 ${enabledCount}`}
             actions={
               <div className="flex items-center gap-3">
                 <Button variant="outline" onClick={handleRefresh} disabled={loading || deviceSkillsLoading}>
@@ -206,7 +226,7 @@ export function SkillsPage() {
               <div className="grid gap-2 sm:grid-cols-3">
                 <select className="rounded-lg border border-border bg-background px-3 py-2 text-sm" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as SkillSourceFilter)}>
                   <option value="all">全部来源</option>
-                  <option value="local">Local/System</option>
+                  <option value="cloud">Cloud</option>
                   <option value="device">Device CLI</option>
                   <option value="workspace">Workspace</option>
                 </select>
@@ -242,24 +262,24 @@ export function SkillsPage() {
                 />
               ) : (
                 <>
-                  {userSkills.length > 0 && sourceFilter !== 'device' && sourceFilter !== 'workspace' && (
+                  {cloudSkills.length > 0 && sourceFilter !== 'device' && sourceFilter !== 'workspace' && (
                     <div className="flex justify-end">
                       <button
                         className="text-xs text-muted-foreground hover:text-error flex items-center gap-1 cursor-pointer"
                         disabled={deletingAll}
                         onClick={async () => {
-                          if (!confirm('确定删除所有用户级技能？本地/系统技能不受影响。')) return;
+                          if (!confirm('确定删除所有 Cloud 技能？Device / Workspace 技能不受影响。')) return;
                           setDeletingAll(true);
                           try {
                             const n = await deleteAllUserSkills();
                             setSelectedKey(null);
-                            toast.success(`已删除 ${n} 个用户级技能`);
+                            toast.success(`已删除 ${n} 个 Cloud 技能`);
                           } catch { /* handled by store */ }
                           setDeletingAll(false);
                         }}
                       >
                         <Trash2 size={12} />
-                        {deletingAll ? '删除中...' : '清空用户级技能'}
+                        {deletingAll ? '删除中...' : '清空 Cloud 技能'}
                       </button>
                     </div>
                   )}
@@ -316,13 +336,14 @@ export function SkillsPage() {
         onInstall={handleInstall}
         installing={installing}
         devices={devices}
+        agents={backends}
       />
     </div>
   );
 }
 
 function getSkillKey(skill: Skill): string {
-  return `${skill.source}:${skill.deviceId ?? 'local'}:${skill.workspacePath ?? ''}:${skill.id}`;
+  return getSkillIdentityKey(skill);
 }
 
 function DeviceSkillDetail({ skill }: { skill: Skill }) {
@@ -334,8 +355,13 @@ function DeviceSkillDetail({ skill }: { skill: Skill }) {
             <div className="flex items-center gap-2 mb-2">
               <h2 className="text-xl font-bold text-foreground">{skill.name}</h2>
               <span className="px-2 py-0.5 rounded text-xs font-medium bg-muted text-muted-foreground">
-                {skill.source === 'workspace' ? 'Workspace' : 'Device CLI'}
+                {skill.source === 'workspace' ? 'Workspace' : 'Device'}
               </span>
+              {skill.sourceProvider ? (
+                <span className="px-2 py-0.5 rounded text-xs font-medium bg-primary/10 text-primary">
+                  {skill.sourceProvider}
+                </span>
+              ) : null}
               {skill.enabled === false ? (
                 <span className="px-2 py-0.5 rounded text-xs font-medium bg-muted text-muted-foreground">disabled</span>
               ) : (
@@ -349,6 +375,8 @@ function DeviceSkillDetail({ skill }: { skill: Skill }) {
         <div className="space-y-2 text-sm">
           <MetaLine label="Skill ID" value={skill.id} mono />
           <MetaLine label="Package" value={getSkillPackageName(skill)} mono />
+          <MetaLine label="Level" value={skill.levelKey || skill.level || 'skill'} mono />
+          <MetaLine label="Provider" value={skill.sourceProvider || '—'} mono />
           <MetaLine label="Device" value={skill.deviceId || '—'} mono />
           {skill.workspacePath ? <MetaLine label="Workspace" value={skill.workspacePath} mono /> : null}
         </div>

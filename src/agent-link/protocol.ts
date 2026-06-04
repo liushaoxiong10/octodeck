@@ -105,6 +105,11 @@ export const RunRequestFrame = z.object({
       gitUrl: z.string().max(2000).optional(),
       devicePath: z.string().max(4096).optional(),
       groupFolder: z.string().max(256),
+      agentId: z.string().min(1).max(128).optional(),
+      agentRoot: z.string().max(4096).optional(),
+      workdirMode: z.enum(['auto', 'custom']).optional(),
+      scope: z.enum(['workspace', 'session', 'direct_session', 'task', 'skills']).optional(),
+      scopeId: z.string().max(256).optional(),
     })
     .optional(),
 });
@@ -144,12 +149,22 @@ export const AgentRunWorkspaceSchema = z.object({
   kind: z.enum(['git', 'device_path', 'workspace']).optional(),
   cwd: z.string().max(4096).optional(),
   folder: z.string().max(256).optional(),
+  agentId: z.string().min(1).max(128).optional(),
+  agentRoot: z.string().max(4096).optional(),
+  workdirMode: z.enum(['auto', 'custom']).optional(),
+  scope: z.enum(['workspace', 'session', 'direct_session', 'task', 'skills']).optional(),
+  scopeId: z.string().max(256).optional(),
   repo: z
     .object({
       kind: z.enum(['git', 'device_path', 'workspace']),
       gitUrl: z.string().max(2000).optional(),
       devicePath: z.string().max(4096).optional(),
       groupFolder: z.string().max(256),
+      agentId: z.string().min(1).max(128).optional(),
+      agentRoot: z.string().max(4096).optional(),
+      workdirMode: z.enum(['auto', 'custom']).optional(),
+      scope: z.enum(['workspace', 'session', 'direct_session', 'task', 'skills']).optional(),
+      scopeId: z.string().max(256).optional(),
     })
     .optional(),
   sessionRoot: z.string().max(4096).optional(),
@@ -509,8 +524,13 @@ export const SkillInfoSchema = z.object({
   name: z.string().min(1).max(256).optional(),
   description: z.string().max(2048).optional(),
   source: z.enum(['workspace', 'cli']),
+  sourceProvider: z.string().max(64).optional(),
+  level: z.enum(['package', 'skill']).optional(),
+  levelKey: z.string().max(512).optional(),
   enabled: z.boolean().optional(),
   packageName: z.string().max(512).optional(),
+  packageSource: z.string().max(128).optional(),
+  installedAt: z.string().max(64).optional(),
   content: z.string().max(200_000).optional(),
 });
 export type SkillInfo = z.infer<typeof SkillInfoSchema>;

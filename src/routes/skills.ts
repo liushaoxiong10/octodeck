@@ -10,9 +10,18 @@ import type { Variables } from '../web-context.js';
 import type { AuthUser } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { DATA_DIR } from '../config.js';
-import { getAgentLinkById } from '../db.js';
+import {
+  deleteCloudSkill,
+  deleteCloudSkillsByUser,
+  getAgentLinkById,
+  getCloudSkill,
+  listCloudSkillsByUser,
+  setCloudSkillEnabled,
+  upsertCloudSkill,
+} from '../db.js';
 import { getSession } from '../agent-link/registry.js';
 import { invokeRemoteTool } from '../agent-link/tool-rpc.js';
+import { getCustomBackend } from '../backends/custom-loader.js';
 import {
   parseFrontmatter,
   validateSkillId,
@@ -32,9 +41,13 @@ interface Skill {
   id: string;
   name: string;
   description: string;
-  source: 'user' | 'project' | 'external';
+  source: 'cloud' | 'user' | 'project' | 'external';
   enabled: boolean;
   packageName?: string;
+  packageSource?: string;
+  sourceProvider?: 'claude' | 'codex' | 'traecli' | string;
+  level?: 'package' | 'skill';
+  levelKey?: string;
   installedAt?: string;
   userInvocable: boolean;
   allowedTools: string[];
@@ -45,17 +58,6 @@ interface Skill {
 
 interface SkillDetail extends Skill {
   content: string;
-}
-
-interface SkillsManifest {
-  skills: Record<
-    string,
-    {
-      packageName: string;
-      installedAt: string;
-      source: string;
-    }
-  >;
 }
 
 interface SearchResult {
@@ -69,11 +71,14 @@ interface SearchResult {
 
 type SkillInstallTarget =
   | { kind: 'cloud' }
-  | { kind: 'device'; deviceLinkId: string };
+  | { kind: 'device'; deviceLinkId: string }
+  | { kind: 'device-agent-workspace'; agentId: string };
+
+type SkillSourceProvider = 'claude' | 'codex' | 'traecli';
 
 // --- Utility Functions ---
 
-function getUserSkillsDir(userId: string): string {
+function getLegacyCloudSkillDir(userId: string): string {
   return path.join(DATA_DIR, 'skills', userId);
 }
 
@@ -81,55 +86,35 @@ function getProjectSkillsDir(): string {
   return path.resolve(process.cwd(), 'container', 'skills');
 }
 
-function getSkillsManifestPath(userId: string): string {
-  return path.join(DATA_DIR, 'skills', userId, '.skills-manifest.json');
+function normalizeSourceProvider(value: unknown): SkillSourceProvider {
+  if (value === 'codex') return 'codex';
+  if (value === 'traecli' || value === 'trae') return 'traecli';
+  return 'claude';
 }
 
-function readSkillsManifest(userId: string): SkillsManifest {
-  try {
-    const data = fs.readFileSync(getSkillsManifestPath(userId), 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    return { skills: {} };
-  }
+function toCloudSkill(record: ReturnType<typeof listCloudSkillsByUser>[number]): Skill {
+  return {
+    id: record.skillId,
+    name: record.name,
+    description: record.description,
+    source: 'cloud',
+    enabled: record.enabled,
+    packageName: record.packageName,
+    packageSource: record.packageSource,
+    sourceProvider: record.sourceProvider,
+    level: record.packageName ? 'package' : 'skill',
+    levelKey: record.packageName ?? record.skillId,
+    installedAt: record.installedAt,
+    userInvocable: true,
+    allowedTools: [],
+    argumentHint: null,
+    updatedAt: record.updatedAt,
+    files: record.files,
+  };
 }
 
-function writeSkillsManifest(userId: string, manifest: SkillsManifest): void {
-  const manifestPath = getSkillsManifestPath(userId);
-  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-}
-
-/**
- * Update the skills manifest after installing skills.
- * Records packageName, installedAt, and source for each installed skill.
- */
-function updateSkillsManifest(
-  userId: string,
-  packageName: string,
-  installedSkillIds: string[],
-): void {
-  const manifest = readSkillsManifest(userId);
-  const now = new Date().toISOString();
-  for (const id of installedSkillIds) {
-    manifest.skills[id] = {
-      packageName,
-      installedAt: now,
-      source: 'skills.sh',
-    };
-  }
-  writeSkillsManifest(userId, manifest);
-}
-
-/**
- * Remove a skill from the manifest when it is deleted.
- */
-function removeFromSkillsManifest(userId: string, skillId: string): void {
-  const manifest = readSkillsManifest(userId);
-  if (skillId in manifest.skills) {
-    delete manifest.skills[skillId];
-    writeSkillsManifest(userId, manifest);
-  }
+function toCloudSkillDetail(record: NonNullable<ReturnType<typeof getCloudSkill>>): SkillDetail {
+  return { ...toCloudSkill(record), content: record.content };
 }
 
 // validateSkillId, validateSkillPath, parseFrontmatter, listFiles, scanSkillDirectory
@@ -140,25 +125,14 @@ function scanDirectory(rootDir: string, source: 'user' | 'project'): Skill[] {
 }
 
 function discoverSkills(userId: string, userRole?: string): Skill[] {
-  const userSkills = scanDirectory(getUserSkillsDir(userId), 'user');
+  const cloudSkills = listCloudSkillsByUser(userId).map(toCloudSkill);
   const projectSkills = scanDirectory(getProjectSkillsDir(), 'project');
-
-  // 读取 skills manifest 补充安装元数据
-  const skillsManifest = readSkillsManifest(userId);
-
-  for (const skill of userSkills) {
-    const meta = skillsManifest.skills[skill.id];
-    if (meta) {
-      skill.packageName = meta.packageName;
-      skill.installedAt = meta.installedAt;
-    }
-  }
 
   // 按优先级去重（user > project），同 ID 高优先级覆盖低优先级。
   // “本地/系统”分类展示云端/设备侧返回的 skill，不再扫描宿主机本地库。
   const seen = new Set<string>();
   const result: Skill[] = [];
-  for (const skill of [...userSkills, ...projectSkills]) {
+  for (const skill of [...cloudSkills, ...projectSkills]) {
     if (!seen.has(skill.id)) {
       seen.add(skill.id);
       result.push(skill);
@@ -174,15 +148,15 @@ function getSkillDetail(
 ): SkillDetail | null {
   if (!validateSkillId(skillId)) return null;
 
+  const cloudSkill = getCloudSkill(userId, skillId);
+  if (cloudSkill) return toCloudSkillDetail(cloudSkill);
+
   const searchDirs: Array<{
     rootDir: string;
     source: 'user' | 'project' | 'external';
   }> = [
-    { rootDir: getUserSkillsDir(userId), source: 'user' },
     { rootDir: getProjectSkillsDir(), source: 'project' },
   ];
-
-  const skillsManifest = readSkillsManifest(userId);
 
   for (const { rootDir, source } of searchDirs) {
     const skillDir = path.join(rootDir, skillId);
@@ -229,14 +203,6 @@ function getSkillDetail(
         files: listFiles(skillDir),
         content,
       };
-
-      if (source === 'user') {
-        const meta = skillsManifest.skills[skillId];
-        if (meta) {
-          detail.packageName = meta.packageName;
-          detail.installedAt = meta.installedAt;
-        }
-      }
 
       return detail;
     } catch {
@@ -285,66 +251,30 @@ function parseSearchOutput(output: string): SearchResult[] {
   return results;
 }
 
-/**
- * Find skill entries under a path that were modified after the given timestamp.
- * Handles both real directories and symlinks (skills CLI creates symlinks in
- * ~/.claude/skills/ pointing to ~/.agents/skills/).
- * Returns entry names.
- */
-function findModifiedEntries(dir: string, afterMs: number): string[] {
-  const result: string[] = [];
-  if (!fs.existsSync(dir)) return result;
-  try {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      try {
-        // Use lstat for symlinks, stat (follows symlink) for mtime of real target
-        const lstat = fs.lstatSync(fullPath);
-
-        if (lstat.isSymbolicLink()) {
-          // Symlink: check both the symlink creation time and target mtime
-          if (lstat.mtimeMs >= afterMs) {
-            result.push(entry.name);
-            continue;
-          }
-          // Also check the resolved target's mtime
-          const realStat = fs.statSync(fullPath);
-          if (realStat.mtimeMs >= afterMs) {
-            result.push(entry.name);
-          }
-        } else if (lstat.isDirectory()) {
-          if (lstat.mtimeMs >= afterMs) {
-            result.push(entry.name);
-          }
-        }
-      } catch {
-        // skip broken symlinks etc.
-      }
-    }
-  } catch {
-    // ignore
-  }
-  return result;
-}
-
-/**
- * Copy a skill entry (directory or symlink target) to dest.
- * Resolves symlinks and copies the real content so the copy is self-contained.
- */
-function copySkillToUser(src: string, dest: string): void {
-  // Resolve symlink to get the real directory
-  let realSrc = src;
-  try {
-    const lstat = fs.lstatSync(src);
-    if (lstat.isSymbolicLink()) {
-      realSrc = fs.realpathSync(src);
-    }
-  } catch {
-    // use src as-is
-  }
-
-  fs.cpSync(realSrc, dest, { recursive: true });
+function readInstalledSkillEntry(entryPath: string): {
+  name: string;
+  description: string;
+  content: string;
+  enabled: boolean;
+  files: Skill['files'];
+} | null {
+  const skillMdPath = path.join(entryPath, 'SKILL.md');
+  const disabledPath = path.join(entryPath, 'SKILL.md.disabled');
+  const skillFilePath = fs.existsSync(skillMdPath)
+    ? skillMdPath
+    : fs.existsSync(disabledPath)
+      ? disabledPath
+      : null;
+  if (!skillFilePath) return null;
+  const content = fs.readFileSync(skillFilePath, 'utf-8');
+  const frontmatter = parseFrontmatter(content);
+  return {
+    name: frontmatter.name || path.basename(entryPath),
+    description: frontmatter.description || '',
+    content,
+    enabled: skillFilePath === skillMdPath,
+    files: listFiles(entryPath),
+  };
 }
 
 // --- Search cache (LRU, 5min TTL, max 100 entries) ---
@@ -594,6 +524,21 @@ skillsRoutes.get('/:id', authMiddleware, (c) => {
   return c.json({ skill });
 });
 
+skillsRoutes.get('/:id/content', authMiddleware, (c) => {
+  const id = c.req.param('id');
+  const authUser = c.get('user') as AuthUser;
+  const skill = getSkillDetail(id, authUser.id, authUser.role);
+  if (!skill) return c.json({ error: 'Skill not found' }, 404);
+  return c.json({
+    id: skill.id,
+    name: skill.name,
+    source: skill.source,
+    packageName: skill.packageName,
+    sourceProvider: skill.sourceProvider,
+    content: skill.content,
+  });
+});
+
 // Toggle enable/disable for user-level skills via SKILL.md ↔ SKILL.md.disabled rename.
 // Project-level skills are read-only.
 skillsRoutes.patch('/:id', authMiddleware, async (c) => {
@@ -603,37 +548,11 @@ skillsRoutes.patch('/:id', authMiddleware, async (c) => {
 
   if (!validateSkillId(id)) return c.json({ error: 'Invalid skill ID' }, 400);
 
-  const userDir = getUserSkillsDir(authUser.id);
-  const skillDir = path.join(userDir, id);
-
-  if (!fs.existsSync(skillDir)) {
-    return c.json(
-      { error: 'Skill not found or is not a user-level skill' },
-      404,
-    );
+  if (getCloudSkill(authUser.id, id)) {
+    setCloudSkillEnabled(authUser.id, id, Boolean(enabled));
+    return c.json({ success: true });
   }
-  if (!validateSkillPath(userDir, skillDir)) {
-    return c.json({ error: 'Invalid skill path' }, 400);
-  }
-
-  const srcPath = path.join(
-    skillDir,
-    enabled ? 'SKILL.md.disabled' : 'SKILL.md',
-  );
-  const dstPath = path.join(
-    skillDir,
-    enabled ? 'SKILL.md' : 'SKILL.md.disabled',
-  );
-
-  if (!fs.existsSync(srcPath)) {
-    return c.json(
-      { error: 'Skill not found or already in desired state' },
-      404,
-    );
-  }
-
-  fs.renameSync(srcPath, dstPath);
-  return c.json({ success: true });
+  return c.json({ error: 'Skill not found or is not a cloud skill' }, 404);
 });
 
 /**
@@ -648,38 +567,19 @@ function deleteSkillForUser(
     return { success: false, error: 'Invalid skill ID' };
   }
 
-  const userDir = getUserSkillsDir(userId);
-  const skillDir = path.join(userDir, skillId);
-
-  if (!fs.existsSync(skillDir)) {
-    return {
-      success: false,
-      error: 'Skill not found or is a project-level skill',
-    };
-  }
-
-  if (!validateSkillPath(userDir, skillDir)) {
-    return { success: false, error: 'Invalid skill path' };
-  }
-
-  try {
-    fs.rmSync(skillDir, { recursive: true, force: true });
-    removeFromSkillsManifest(userId, skillId);
+  if (deleteCloudSkill(userId, skillId)) {
     return { success: true };
-  } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    };
   }
+  return { success: false, error: 'Skill not found or is a project-level skill' };
 }
 
 // 批量删除所有用户级技能（清理旧的同步副本）
 skillsRoutes.delete('/user-all', authMiddleware, (c) => {
   const authUser = c.get('user') as AuthUser;
-  const userDir = getUserSkillsDir(authUser.id);
-  let deleted = 0;
+  const userDir = getLegacyCloudSkillDir(authUser.id);
+  let deleted = deleteCloudSkillsByUser(authUser.id);
   try {
+    // Best-effort cleanup for legacy file-state cloud skills from older builds.
     if (fs.existsSync(userDir)) {
       for (const entry of fs.readdirSync(userDir, { withFileTypes: true })) {
         if (entry.name.startsWith('.')) continue;
@@ -726,6 +626,7 @@ skillsRoutes.delete('/:id', authMiddleware, async (c) => {
 async function installSkillForUser(
   userId: string,
   pkg: string,
+  options: { sourceProvider?: SkillSourceProvider; selectedSkillIds?: string[] } = {},
 ): Promise<{ success: boolean; installed?: string[]; error?: string }> {
   if (
     !/^[\w\-]+\/[\w\-.]+(?:[@#][\w\-.\/]+)?$/.test(pkg) &&
@@ -737,14 +638,21 @@ async function installSkillForUser(
   // Create an isolated temp directory to act as HOME so `--global` installs
   // into tempHome/.claude/skills/ instead of the real ~/.claude/skills/.
   // This avoids any race condition when multiple installs run concurrently.
+  const sourceProvider = normalizeSourceProvider(options.sourceProvider);
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-install-'));
-  const tempSkillsDir = path.join(tempHome, '.claude', 'skills');
+  const providerConfigDir =
+    sourceProvider === 'claude'
+      ? 'claude'
+      : sourceProvider === 'traecli'
+        ? 'trae'
+        : sourceProvider;
+  const tempSkillsDir = path.join(tempHome, `.${providerConfigDir}`, 'skills');
   fs.mkdirSync(tempSkillsDir, { recursive: true });
 
   try {
     await execFileAsync(
       'npx',
-      ['-y', 'skills', 'add', pkg, '--global', '--yes', '-a', 'claude-code'],
+      ['-y', 'skills', 'add', pkg, '--global', '--yes', '-a', sourceProvider === 'claude' ? 'claude-code' : sourceProvider],
       {
         timeout: 60_000,
         env: { ...process.env, HOME: tempHome },
@@ -770,23 +678,38 @@ async function installSkillForUser(
       };
     }
 
-    // Copy resolved skill content to per-user directory
-    const userDir = getUserSkillsDir(userId);
-    fs.mkdirSync(userDir, { recursive: true });
+    const selected = new Set(options.selectedSkillIds ?? []);
+    const entriesToInstall = selected.size > 0
+      ? installedEntries.filter((entry) => selected.has(entry))
+      : installedEntries;
 
-    for (const name of installedEntries) {
-      const src = path.join(tempSkillsDir, name);
-      const dest = path.join(userDir, name);
-      if (fs.existsSync(dest)) {
-        fs.rmSync(dest, { recursive: true, force: true });
-      }
-      copySkillToUser(src, dest);
+    if (entriesToInstall.length === 0) {
+      return {
+        success: false,
+        error: 'No selected skills were found in the installed package',
+      };
     }
 
-    // Write manifest metadata
-    updateSkillsManifest(userId, pkg, installedEntries);
+    for (const name of entriesToInstall) {
+      const src = path.join(tempSkillsDir, name);
+      const entry = readInstalledSkillEntry(src);
+      if (entry) {
+        upsertCloudSkill({
+          userId,
+          skillId: name,
+          name: entry.name,
+          description: entry.description,
+          content: entry.content,
+          enabled: entry.enabled,
+          packageName: pkg,
+          packageSource: 'skills.sh',
+          sourceProvider,
+          files: entry.files,
+        });
+      }
+    }
 
-    return { success: true, installed: installedEntries };
+    return { success: true, installed: entriesToInstall };
   } catch (error) {
     return {
       success: false,
@@ -832,7 +755,7 @@ async function installSkillOnDevice(
       input: {
         command: `npx -y skills add ${shellQuote(pkg)} --global --yes -a claude-code`,
       },
-      cwd: 'octodeck-workspace://skills-install',
+      cwd: 'octodeck-tmp://skills-install',
       timeoutMs: 120_000,
       maxOutputBytes: 1_048_576,
     });
@@ -840,6 +763,92 @@ async function installSkillOnDevice(
       return { success: false, error: result.error || 'device install failed' };
     }
     return { success: true, installed: [] };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+async function installSkillOnAgentWorkspace(
+  userId: string,
+  agentId: string,
+  pkg: string,
+): Promise<{ success: boolean; installed?: string[]; error?: string }> {
+  if (
+    !/^[\w\-]+\/[\w\-.]+(?:[@#][\w\-.\/]+)?$/.test(pkg) &&
+    !/^https?:\/\//.test(pkg)
+  ) {
+    return { success: false, error: 'Invalid package name format' };
+  }
+
+  const backend = getCustomBackend(agentId);
+  if (!backend) {
+    return { success: false, error: 'agent not found' };
+  }
+  if (!backend.deviceLinkId) {
+    return { success: false, error: 'agent has no bound device' };
+  }
+
+  const link = getAgentLinkById(backend.deviceLinkId);
+  if (!link || link.userId !== userId || link.revokedAt) {
+    return { success: false, error: 'device not found' };
+  }
+  const session = getSession(backend.deviceLinkId);
+  if (!session || session.state !== 'open') {
+    return { success: false, error: 'device offline' };
+  }
+
+  const cwd =
+    backend.workdirMode === 'custom' && backend.workdir
+      ? backend.workdir
+      : `octodeck-workspace://${backend.id}`;
+  const command = [
+    'set -eu',
+    'tmp_home="$(mktemp -d)"',
+    'cleanup() { rm -rf "$tmp_home"; }',
+    'trap cleanup EXIT',
+    'mkdir -p "$tmp_home/.claude/skills" ./skills',
+    `HOME="$tmp_home" npx -y skills add ${shellQuote(pkg)} --global --yes -a claude-code`,
+    'installed=""',
+    'count=0',
+    'for entry in "$tmp_home/.claude/skills"/*; do',
+    '  [ -e "$entry" ] || continue',
+    '  name="$(basename "$entry")"',
+    '  rm -rf "./skills/$name"',
+    '  cp -RL "$entry" "./skills/$name"',
+    '  installed="$installed $name"',
+    '  count=$((count + 1))',
+    'done',
+    'if [ "$count" -eq 0 ]; then echo "No skills were installed — package may be invalid" >&2; exit 1; fi',
+    'printf "%s\\n" "$installed"',
+  ].join('\n');
+
+  try {
+    const result = await invokeRemoteTool(session, {
+      linkId: backend.deviceLinkId,
+      toolName: 'Bash',
+      input: { command },
+      cwd,
+      timeoutMs: 120_000,
+      maxOutputBytes: 1_048_576,
+    });
+    if (!result.ok) {
+      return {
+        success: false,
+        error: result.error || 'device workspace install failed',
+      };
+    }
+    const stdout =
+      result.result &&
+      typeof result.result === 'object' &&
+      'stdout' in result.result &&
+      typeof (result.result as { stdout?: unknown }).stdout === 'string'
+        ? (result.result as { stdout: string }).stdout
+        : '';
+    const installed = stdout.trim().split(/\s+/).filter(Boolean);
+    return { success: true, installed };
   } catch (error) {
     return {
       success: false,
@@ -861,14 +870,28 @@ skillsRoutes.post('/install', authMiddleware, async (c) => {
   }
 
   const pkg = body.package.trim();
+  const sourceProvider = normalizeSourceProvider(body.sourceProvider);
+  const selectedSkillIds = Array.isArray(body.selectedSkillIds)
+    ? body.selectedSkillIds
+        .filter((id: unknown): id is string => typeof id === 'string')
+        .map((id: string) => id.trim())
+        .filter(validateSkillId)
+    : undefined;
   const target: SkillInstallTarget =
-    body.target === 'device' && typeof body.deviceLinkId === 'string'
+    body.target === 'device-agent-workspace' && typeof body.agentId === 'string'
+      ? { kind: 'device-agent-workspace', agentId: body.agentId.trim() }
+      : body.target === 'device' && typeof body.deviceLinkId === 'string'
       ? { kind: 'device', deviceLinkId: body.deviceLinkId.trim() }
       : { kind: 'cloud' };
   const result =
     target.kind === 'device'
       ? await installSkillOnDevice(authUser.id, target.deviceLinkId, pkg)
-      : await installSkillForUser(authUser.id, pkg);
+      : target.kind === 'device-agent-workspace'
+        ? await installSkillOnAgentWorkspace(authUser.id, target.agentId, pkg)
+      : await installSkillForUser(authUser.id, pkg, {
+          sourceProvider,
+          selectedSkillIds,
+        });
 
   if (!result.success) {
     return c.json(
@@ -880,7 +903,7 @@ skillsRoutes.post('/install', authMiddleware, async (c) => {
   return c.json({ success: true, installed: result.installed });
 });
 
-// Reinstall a skill by its ID — requires the skill to have a packageName in the manifest.
+// Reinstall a cloud skill by its ID — requires packageName in DB.
 skillsRoutes.post('/:id/reinstall', authMiddleware, async (c) => {
   const id = c.req.param('id');
   const authUser = c.get('user') as AuthUser;
@@ -889,9 +912,8 @@ skillsRoutes.post('/:id/reinstall', authMiddleware, async (c) => {
     return c.json({ error: 'Invalid skill ID' }, 400);
   }
 
-  const manifest = readSkillsManifest(authUser.id);
-  const meta = manifest.skills[id];
-  if (!meta?.packageName) {
+  const cloudSkill = getCloudSkill(authUser.id, id);
+  if (!cloudSkill?.packageName) {
     return c.json(
       { error: 'Skill has no package info — cannot reinstall' },
       400,
@@ -909,7 +931,7 @@ skillsRoutes.post('/:id/reinstall', authMiddleware, async (c) => {
 
   const installResult = await installSkillForUser(
     authUser.id,
-    meta.packageName,
+    cloudSkill.packageName,
   );
   if (!installResult.success) {
     return c.json(
@@ -921,5 +943,5 @@ skillsRoutes.post('/:id/reinstall', authMiddleware, async (c) => {
   return c.json({ success: true, installed: installResult.installed });
 });
 
-export { getUserSkillsDir, installSkillForUser, deleteSkillForUser };
+export { installSkillForUser, deleteSkillForUser };
 export default skillsRoutes;

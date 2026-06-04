@@ -45,6 +45,18 @@ export interface IssueAgentRun {
   run_completed_at?: string | null;
 }
 
+export interface IssueAgentRunEvent {
+  id: string;
+  issue_id: string;
+  run_id: string;
+  event_type: string;
+  title?: string | null;
+  summary?: string | null;
+  detail?: string | null;
+  payload?: Record<string, unknown> | null;
+  created_at: string;
+}
+
 export interface IssueAttachment {
   id: string;
   issue_id: string;
@@ -100,6 +112,7 @@ interface IssuesState {
   order: { field: IssueSortField; direction: 'asc' | 'desc' };
   display: IssueDisplayOptions;
   runsByIssue: Record<string, IssueAgentRun[]>;
+  runEventsByRun: Record<string, IssueAgentRunEvent[]>;
   attachmentsByIssue: Record<string, IssueAttachment[]>;
   setQuery: (query: string) => void;
   setView: (view: IssueViewMode) => void;
@@ -112,6 +125,8 @@ interface IssuesState {
   deleteIssue: (id: string) => Promise<void>;
   runIssueAgent: (id: string) => Promise<IssueAgentRun | null>;
   loadIssueRuns: (id: string) => Promise<IssueAgentRun[]>;
+  loadIssueRunEvents: (issueId: string, runId: string) => Promise<IssueAgentRunEvent[]>;
+  cancelIssueRun: (issueId: string, runId: string) => Promise<IssueAgentRun | null>;
   loadIssueAttachments: (id: string) => Promise<IssueAttachment[]>;
   uploadIssueAttachment: (id: string, input: Omit<IssueAttachment, 'id' | 'issue_id' | 'created_by' | 'created_at'>) => Promise<IssueAttachment | null>;
   deleteIssueAttachment: (issueId: string, attachmentId: string) => Promise<void>;
@@ -154,6 +169,7 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
   order: { field: 'updated', direction: 'desc' },
   display: loadDisplay(),
   runsByIssue: {},
+  runEventsByRun: {},
   attachmentsByIssue: {},
 
   setQuery: (query) => set({ query }),
@@ -240,6 +256,29 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
       return [];
+    }
+  },
+
+  loadIssueRunEvents: async (issueId, runId) => {
+    try {
+      const data = await api.get<{ events: IssueAgentRunEvent[] }>(`/api/issues/${encodeURIComponent(issueId)}/runs/${encodeURIComponent(runId)}/events`);
+      set((state) => ({ runEventsByRun: { ...state.runEventsByRun, [runId]: data.events } }));
+      return data.events;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return [];
+    }
+  },
+
+  cancelIssueRun: async (issueId, runId) => {
+    try {
+      const data = await api.post<{ run: IssueAgentRun }>(`/api/issues/${encodeURIComponent(issueId)}/runs/${encodeURIComponent(runId)}/cancel`, {});
+      await get().loadIssues();
+      await get().loadIssueRuns(issueId);
+      return data.run;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return null;
     }
   },
 

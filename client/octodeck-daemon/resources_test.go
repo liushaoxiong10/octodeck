@@ -23,6 +23,9 @@ func TestCollectResourceSnapshotIncludesCPUCount(t *testing.T) {
 	if snapshot.CollectedAt == "" {
 		t.Fatalf("expected collectedAt, got %#v", snapshot)
 	}
+	if snapshot.DiskTotalBytes > 0 && len(snapshot.Disks) == 0 {
+		t.Fatalf("expected disk list when disk summary is collected, got %#v", snapshot)
+	}
 }
 
 func TestCPUUsedPercentFromLoad(t *testing.T) {

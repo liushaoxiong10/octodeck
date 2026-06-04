@@ -19,6 +19,7 @@ import { Toaster } from '@/components/ui/sonner';
 const ChatPage = lazy(() => import('./pages/ChatPage').then(m => ({ default: m.ChatPage })));
 const TasksPage = lazy(() => import('./pages/TasksPage').then(m => ({ default: m.TasksPage })));
 const IssuesPage = lazy(() => import('./pages/IssuesPage').then(m => ({ default: m.IssuesPage })));
+const HistoryPage = lazy(() => import('./pages/HistoryPage').then(m => ({ default: m.HistoryPage })));
 const DevicesPage = lazy(() => import('./pages/DevicesPage').then(m => ({ default: m.DevicesPage })));
 const ReposPage = lazy(() => import('./pages/ReposPage').then(m => ({ default: m.ReposPage })));
 const AgentsPage = lazy(() => import('./pages/AgentsPage').then(m => ({ default: m.AgentsPage })));
@@ -66,6 +67,7 @@ export function App() {
           <Route path="/groups" element={<Navigate to="/settings?tab=groups" replace />} />
           <Route path="/tasks" element={<Suspense fallback={null}><TasksPage /></Suspense>} />
           <Route path="/issues/:groupFolder?" element={<Suspense fallback={null}><IssuesPage /></Suspense>} />
+          <Route path="/history" element={<Suspense fallback={null}><HistoryPage /></Suspense>} />
           <Route path="/repos" element={<Suspense fallback={null}><ReposPage /></Suspense>} />
           <Route path="/devices" element={<Suspense fallback={null}><DevicesPage /></Suspense>} />
           <Route path="/agents" element={<Suspense fallback={null}><AgentsPage /></Suspense>} />

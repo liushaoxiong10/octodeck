@@ -378,7 +378,6 @@ export const SystemSettingsSchema = z.object({
 
 // ─── Custom CLI backend ─────────────────────────────────────────
 const CUSTOM_BACKEND_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
-const RESERVED_CUSTOM_BACKEND_IDS = new Set(['claude-sdk']);
 
 const CustomBackendBaseShape = {
   id: z
@@ -403,6 +402,7 @@ const CustomBackendBaseShape = {
   resumeArgvTemplate: z.array(z.string().max(1000)).min(1).max(64).optional(),
   workdirMode: z.enum(['auto', 'custom']).optional(),
   workdir: z.string().min(1).max(1024).optional(),
+  providerId: z.string().min(1).max(64).nullable().optional(),
   deviceLinkId: z
     .string()
     .regex(/^cl_[0-9a-f]{16}$/)
@@ -412,15 +412,11 @@ const CustomBackendBaseShape = {
 };
 
 export const CustomBackendCreateSchema = z
-  .object(CustomBackendBaseShape)
+  .object({
+    ...CustomBackendBaseShape,
+    id: z.never('新增 Agent 时 ID 由系统自动生成').optional(),
+  })
   .superRefine((data, ctx) => {
-    if (RESERVED_CUSTOM_BACKEND_IDS.has(data.id)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['id'],
-        message: `id ${data.id} 与内置 backend 冲突`,
-      });
-    }
     if (data.supportsContainer === true) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -436,6 +432,27 @@ export const CustomBackendCreateSchema = z
         code: z.ZodIssueCode.custom,
         path: ['deviceLinkId'],
         message: 'LocalRuntime 必须选择设备',
+      });
+    }
+    if (data.runtime === 'local-device' && !data.agentClientId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['agentClientId'],
+        message: 'LocalRuntime 必须选择 Agent client',
+      });
+    }
+    if (data.runtime === 'server-side' && !data.model) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['model'],
+        message: 'Server Side 必须选择模型端点/模型名称',
+      });
+    }
+    if (data.runtime === 'server-side' && !data.providerId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['providerId'],
+        message: 'Server Side 必须选择模型端点',
       });
     }
     if (data.workdirMode === 'custom') {
@@ -511,6 +528,7 @@ export const CustomBackendPatchSchema = z
     resumeArgvTemplate: CustomBackendBaseShape.resumeArgvTemplate,
     workdirMode: CustomBackendBaseShape.workdirMode,
     workdir: CustomBackendBaseShape.workdir,
+    providerId: CustomBackendBaseShape.providerId,
     deviceLinkId: CustomBackendBaseShape.deviceLinkId,
     agentClientId: CustomBackendBaseShape.agentClientId,
   })
@@ -545,6 +563,27 @@ export const CustomBackendPatchSchema = z
         code: z.ZodIssueCode.custom,
         path: ['argvTemplate'],
         message: 'argvTemplate 必须包含 {prompt} 占位符',
+      });
+    }
+    if (data.runtime === 'local-device' && data.deviceLinkId === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['deviceLinkId'],
+        message: 'LocalRuntime 必须选择设备',
+      });
+    }
+    if (data.runtime === 'local-device' && data.agentClientId === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['agentClientId'],
+        message: 'LocalRuntime 必须选择 Agent client',
+      });
+    }
+    if (data.runtime === 'server-side' && data.providerId === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['providerId'],
+        message: 'Server Side 必须选择模型端点',
       });
     }
   });

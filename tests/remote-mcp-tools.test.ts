@@ -158,6 +158,55 @@ describe('remote MCP tools', () => {
     }
   });
 
+  test('built-in MCP exposes cloud skill tools for server-side sessions', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ skills: [{ id: 'cloud-skill', name: 'Cloud Skill' }] }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    try {
+      const tools = createMcpTools({
+        chatJid: 'web:workspace',
+        groupFolder: 'workspace',
+        isHome: false,
+        isAdminHome: false,
+        workspaceIpc: '/tmp/octodeck-ipc-test',
+        workspaceGroup: '/tmp/octodeck-group-test',
+        workspaceGlobal: '/tmp/octodeck-global-test',
+        workspaceMemory: '/tmp/octodeck-memory-test',
+        ownerUserId: 'alice',
+        serverBaseUrl: 'http://127.0.0.1:3000',
+        agentRunnerSecret: 'secret',
+      });
+
+      expect(tools.map((tool: any) => tool.name)).toEqual(expect.arrayContaining([
+        'cloud_skill_search',
+        'cloud_skill_get',
+      ]));
+
+      const searchTool = tools.find((tool: any) => tool.name === 'cloud_skill_search') as any;
+      const result = await searchTool.handler({ query: 'cloud' });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:3000/api/cloud-skills/tool',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({ authorization: 'Bearer secret' }),
+        }),
+      );
+      const posted = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+      expect(posted).toMatchObject({
+        userId: 'alice',
+        operation: 'search',
+        query: 'cloud',
+      });
+      expect(result.content[0].text).toContain('cloud-skill');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   test('built-in MCP hides agent team tools for nested team agents', () => {
     const tools = createMcpTools({
       chatJid: 'system:agent-team:team_123',

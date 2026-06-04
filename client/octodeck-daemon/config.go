@@ -32,6 +32,12 @@ type Config struct {
 	TaskDir string `json:"taskDir,omitempty"`
 	// ReposDir stores shared git checkouts used to create per-run worktrees.
 	ReposDir string `json:"reposDir,omitempty"`
+	// CacheDir stores safely removable daemon/runtime caches.
+	CacheDir string `json:"cacheDir,omitempty"`
+	// TmpDir stores short-lived daemon/runtime temporary files.
+	TmpDir string `json:"tmpDir,omitempty"`
+	// StateDir stores local daemon runtime state such as locks and pid files.
+	StateDir string `json:"stateDir,omitempty"`
 	// Optional: cap concurrent runs. <=0 or omitted means unlimited.
 	MaxConcurrentRuns int `json:"maxConcurrentRuns"`
 	// Optional: client display version reported in hello.
@@ -137,6 +143,30 @@ func defaultReposDir() (string, error) {
 	return filepath.Join(home, "repos"), nil
 }
 
+func defaultCacheDir() (string, error) {
+	home, err := octodeckHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "cache"), nil
+}
+
+func defaultTmpDir() (string, error) {
+	home, err := octodeckHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "tmp"), nil
+}
+
+func defaultStateDir() (string, error) {
+	home, err := octodeckHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "state"), nil
+}
+
 func defaultAllowedRoots() ([]string, error) {
 	home, err := octodeckHomeDir()
 	if err != nil {
@@ -192,6 +222,27 @@ func loadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 		cfg.ReposDir = repos
+	}
+	if cfg.CacheDir == "" {
+		cache, err := defaultCacheDir()
+		if err != nil {
+			return nil, err
+		}
+		cfg.CacheDir = cache
+	}
+	if cfg.TmpDir == "" {
+		tmp, err := defaultTmpDir()
+		if err != nil {
+			return nil, err
+		}
+		cfg.TmpDir = tmp
+	}
+	if cfg.StateDir == "" {
+		state, err := defaultStateDir()
+		if err != nil {
+			return nil, err
+		}
+		cfg.StateDir = state
 	}
 	if len(cfg.AllowedRoots) == 0 {
 		roots, err := defaultAllowedRoots()
@@ -273,6 +324,15 @@ func (c *Config) validate() error {
 	}
 	if c.ReposDir != "" && !filepath.IsAbs(c.ReposDir) {
 		return fmt.Errorf("reposDir must be absolute: %q", c.ReposDir)
+	}
+	if c.CacheDir != "" && !filepath.IsAbs(c.CacheDir) {
+		return fmt.Errorf("cacheDir must be absolute: %q", c.CacheDir)
+	}
+	if c.TmpDir != "" && !filepath.IsAbs(c.TmpDir) {
+		return fmt.Errorf("tmpDir must be absolute: %q", c.TmpDir)
+	}
+	if c.StateDir != "" && !filepath.IsAbs(c.StateDir) {
+		return fmt.Errorf("stateDir must be absolute: %q", c.StateDir)
 	}
 	return nil
 }

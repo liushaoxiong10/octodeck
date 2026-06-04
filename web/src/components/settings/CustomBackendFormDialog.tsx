@@ -74,16 +74,11 @@ function backendToForm(b: CustomBackendDef): FormState {
         : '',
     deviceLinkId: b.deviceLinkId ?? '',
     agentClientId: b.agentClientId ?? '',
-    serverProviderId: '',
+    serverProviderId: b.providerId ?? '',
     model: b.model ?? '',
     workdirMode: b.workdirMode ?? 'auto',
     workdir: b.workdir ?? '',
   };
-}
-
-function defaultId(runtime: RuntimeMode, providerId: string) {
-  const suffix = providerId.replace(/[^a-z0-9_-]/gi, '-').toLowerCase() || 'agent';
-  return runtime === 'server-side' ? `server-${suffix}` : `device-${suffix}`;
 }
 
 export default function CustomBackendFormDialog({
@@ -130,7 +125,15 @@ export default function CustomBackendFormDialog({
       setServerProviders(enabled);
       if (enabled.length > 0) {
         const models = Array.from(
-          new Map(enabled.map((p) => [p.anthropicModel, { id: p.anthropicModel, displayName: p.anthropicModel }])).values(),
+          new Map(
+            enabled.flatMap((p) => {
+              const configured = p.anthropicModel
+                ? [{ id: p.anthropicModel, displayName: p.anthropicModel }]
+                : [];
+              const fetched = (p.models ?? []).map((m) => ({ id: m.id, displayName: m.displayName || m.id }));
+              return [...configured, ...fetched].map((m) => [m.id, m] as const);
+            }),
+          ).values(),
         );
         setServerModels(models);
         setForm((prev) => ({
@@ -164,11 +167,25 @@ export default function CustomBackendFormDialog({
     }
   }
 
-  const handleSubmit = async () => {
-    if (!isEdit && !/^[a-z][a-z0-9_-]{0,63}$/.test(form.id)) {
-      toast.error('ID 必须以小写字母开头，仅包含 [a-z0-9_-]，最长 64 字符');
-      return;
+  async function loadServerProviderModels(providerId = form.serverProviderId) {
+    if (!providerId) return;
+    setModelsLoading(true);
+    try {
+      const data = await api.post<{ models: ModelInfo[]; provider?: { anthropicModel?: string } }>(
+        `/api/config/claude/providers/${encodeURIComponent(providerId)}/models/fetch`,
+        {},
+      );
+      const models = data.models ?? [];
+      setServerModels(models.map((m) => ({ id: m.id, displayName: m.displayName ?? m.id })));
+      setForm((prev) => ({ ...prev, model: prev.model || data.provider?.anthropicModel || models[0]?.id || '' }));
+    } catch (err) {
+      toast.error(getErrorMessage(err, '从服务端模型端点拉取模型失败'));
+    } finally {
+      setModelsLoading(false);
     }
+  }
+
+  const handleSubmit = async () => {
     if (!form.displayName.trim()) {
       toast.error('显示名称不能为空');
       return;
@@ -189,6 +206,10 @@ export default function CustomBackendFormDialog({
     }
     if (!form.model.trim()) {
       toast.error('请选择模型');
+      return;
+    }
+    if (form.runtime === 'server-side' && !form.serverProviderId) {
+      toast.error('请选择 Server Side Provider');
       return;
     }
     if (form.workdirMode === 'custom' && !form.workdir.startsWith('/')) {
@@ -214,38 +235,42 @@ export default function CustomBackendFormDialog({
 
     setSubmitting(true);
     try {
+      const workspaceOverride =
+        form.workdirMode === 'custom'
+          ? { workdirMode: 'custom' as const, workdir: form.workdir.trim() }
+          : isEdit
+            ? { workdirMode: 'auto' as const, workdir: undefined }
+            : {};
       const common = {
         displayName: form.displayName.trim(),
         timeoutMs,
         maxOutputBytes,
         runtime: form.runtime,
         model: form.model.trim(),
-        workdirMode: form.workdirMode,
-        workdir: form.workdirMode === 'custom' ? form.workdir.trim() : undefined,
-        deviceLinkId: form.runtime === 'local-device' ? form.deviceLinkId.trim() : undefined,
+        providerId: form.runtime === 'server-side' ? form.serverProviderId : undefined,
+        ...workspaceOverride,
+        deviceLinkId: form.deviceLinkId.trim() || undefined,
         supportsHost: true,
       } as const;
-      const providerId = form.runtime === 'server-side' ? form.serverProviderId : form.agentClientId;
       if (isEdit && backend) {
         await update(backend.id, {
           ...common,
           agentClientId: form.runtime === 'local-device' ? form.agentClientId : null,
-          deviceLinkId: form.runtime === 'local-device' ? form.deviceLinkId.trim() : null,
+          deviceLinkId: form.deviceLinkId.trim() || null,
           ...(form.runtime === 'server-side'
             ? { binary: 'claude', argvTemplate: ['-p', '{prompt}', '--model', form.model], outputProtocol: 'plain-text' as const }
             : {}),
         });
-        toast.success('已更新自定义 Agent');
+        toast.success('已更新 Agent');
       } else {
         await create({
-          id: form.id || defaultId(form.runtime, providerId),
           ...common,
           agentClientId: form.runtime === 'local-device' ? form.agentClientId : undefined,
           ...(form.runtime === 'server-side'
             ? { binary: 'claude', argvTemplate: ['-p', '{prompt}', '--model', form.model], outputProtocol: 'plain-text' as const, usesProviderPool: true }
             : {}),
         });
-        toast.success('已创建自定义 Agent');
+        toast.success('已创建 Agent');
       }
       onOpenChange(false);
     } catch (err) {
@@ -260,7 +285,6 @@ export default function CustomBackendFormDialog({
       ...prev,
       agentClientId: providerId,
       model: '',
-      id: prev.id || defaultId(prev.runtime, providerId),
       displayName: prev.displayName || `${selectedDevice?.displayName ?? 'Device'} ${providerId}`,
     }));
     void loadLocalModels(form.deviceLinkId, providerId);
@@ -270,7 +294,7 @@ export default function CustomBackendFormDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{isEdit ? `编辑自定义 Agent: ${backend?.id}` : '新增自定义 Agent'}</DialogTitle>
+          <DialogTitle>{isEdit ? `编辑 Agent: ${backend?.id}` : '新增 Agent'}</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-5 py-2">
@@ -286,14 +310,14 @@ export default function CustomBackendFormDialog({
                 <button
                   key={runtime}
                   type="button"
-                  onClick={() => setForm((prev) => ({ ...prev, runtime, deviceLinkId: runtime === 'server-side' ? '' : prev.deviceLinkId, agentClientId: '', model: '' }))}
+                  onClick={() => setForm((prev) => ({ ...prev, runtime, agentClientId: '', model: '' }))}
                   className={`rounded-2xl border p-4 text-left transition ${form.runtime === runtime ? 'border-primary bg-primary/10 shadow-sm' : 'border-border bg-background hover:bg-muted/30'}`}
                 >
                   <div className="text-sm font-semibold">{runtime === 'local-device' ? 'LocalRuntime' : 'Server Side'}</div>
                   <p className="mt-2 text-xs leading-5 text-muted-foreground">
                     {runtime === 'local-device'
                       ? 'Provider CLI 在选中 Device 上运行，模型列表实时从该设备/provider 查询。'
-                      : 'Loop 在服务端运行，使用服务端 Provider Pool，不需要选择 Device。'}
+                      : '模型在服务端运行；可选绑定 Device，将文件/命令/Repo/Skill 放到设备侧执行。'}
                   </p>
                 </button>
               ))}
@@ -301,10 +325,12 @@ export default function CustomBackendFormDialog({
           </section>
 
           <section className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-xs text-zinc-500 mb-1">ID</label>
-              <Input value={form.id} onChange={(e) => set('id', e.target.value)} disabled={isEdit} placeholder="如 codex-agent" />
-            </div>
+            {isEdit ? (
+              <div>
+                <label className="block text-xs text-zinc-500 mb-1">ID</label>
+                <Input value={form.id} disabled />
+              </div>
+            ) : null}
             <div>
               <label className="block text-xs text-zinc-500 mb-1">显示名称</label>
               <Input value={form.displayName} onChange={(e) => set('displayName', e.target.value)} placeholder="如 Mac Codex" />
@@ -343,17 +369,21 @@ export default function CustomBackendFormDialog({
                 </div>
               </div>
             ) : (
-              <div>
-                <label className="block text-xs text-zinc-500 mb-1">Server Side Provider</label>
-                <select
-                  value={form.serverProviderId}
-                  onChange={(e) => set('serverProviderId', e.target.value)}
-                  disabled={providersLoading || serverProviders.length === 0}
-                  className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
-                >
-                  <option value="">{providersLoading ? '加载中...' : '请选择 server-side provider'}</option>
-                  {serverProviders.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.anthropicModel})</option>)}
-                </select>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="block text-xs text-zinc-500 mb-1">Device（可选）</label>
+                  <select
+                    value={form.deviceLinkId}
+                    onChange={(e) => setForm((prev) => ({ ...prev, deviceLinkId: e.target.value }))}
+                    className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+                  >
+                    <option value="">不绑定 Device</option>
+                    {devices.map((d) => (
+                      <option key={d.id} value={d.id}>{d.displayName} ({d.id}){d.online ? ' · online' : ' · offline'}</option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-xs text-muted-foreground">绑定后文件/命令/Repo/Skill 在 Device 的 Agent Root 下执行。</p>
+                </div>
               </div>
             )}
           </section>
@@ -366,8 +396,35 @@ export default function CustomBackendFormDialog({
                   {modelsLoading ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
                   实时查询
                 </Button>
-              ) : null}
+              ) : (
+                <Button type="button" variant="outline" size="sm" onClick={() => loadServerProviderModels()} disabled={!form.serverProviderId || modelsLoading}>
+                  {modelsLoading ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+                  服务端拉取
+                </Button>
+              )}
             </div>
+            {form.runtime === 'server-side' ? (
+              <div>
+                <label className="block text-xs text-zinc-500 mb-1">Server Side Provider</label>
+                <select
+                  value={form.serverProviderId}
+                  onChange={(e) => {
+                    const providerId = e.target.value;
+                    const provider = serverProviders.find((p) => p.id === providerId);
+                    setForm((prev) => ({
+                      ...prev,
+                      serverProviderId: providerId,
+                      model: provider?.anthropicModel || prev.model,
+                    }));
+                  }}
+                  disabled={providersLoading || serverProviders.length === 0}
+                  className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+                >
+                  <option value="">{providersLoading ? '加载中...' : '请选择 server-side provider'}</option>
+                  {serverProviders.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.anthropicModel})</option>)}
+                </select>
+              </div>
+            ) : null}
             <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
               <select
                 value={modelOptions.some((m) => m.id === form.model) ? form.model : ''}
@@ -382,19 +439,32 @@ export default function CustomBackendFormDialog({
             </div>
           </section>
 
-          <section className="space-y-3">
-            <div className="text-xs font-medium text-muted-foreground">Workdir</div>
-            <div className="grid grid-cols-2 gap-3">
-              <button type="button" onClick={() => set('workdirMode', 'auto')} className={`rounded-xl border p-3 text-left ${form.workdirMode === 'auto' ? 'border-primary bg-primary/10' : 'border-border'}`}>
-                <div className="text-sm font-medium">自动生成 Workdir</div>
-                <p className="mt-1 text-xs text-muted-foreground">由 Agent 运行时按工作区生成路径。</p>
-              </button>
-              <button type="button" onClick={() => set('workdirMode', 'custom')} className={`rounded-xl border p-3 text-left ${form.workdirMode === 'custom' ? 'border-primary bg-primary/10' : 'border-border'}`}>
-                <div className="text-sm font-medium">指定绝对路径</div>
-                <p className="mt-1 text-xs text-muted-foreground">Workdir 绑定到 Agent 自身。</p>
-              </button>
+          <section className="space-y-3 rounded-2xl border border-border bg-muted/20 p-4">
+            <div>
+              <div className="text-xs font-medium text-muted-foreground">默认运行位置</div>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                Agent 创建时默认不绑定 Workdir；实际运行目录会在每次任务/会话启动时，按任务来源、Workspace、Repo 或设备侧 Agent Root 自动解析。
+              </p>
             </div>
-            {form.workdirMode === 'custom' ? <Input value={form.workdir} onChange={(e) => set('workdir', e.target.value)} placeholder="/Users/me/project" /> : null}
+            <div className="rounded-xl border border-primary/20 bg-primary/5 p-3 text-xs leading-5 text-muted-foreground">
+              当前策略：自动继承任务运行位置。运行 Agent 时系统会明确传入并记录 resolved workdir。
+            </div>
+            <details className="group">
+              <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">
+                高级：固定运行目录（仅用于兼容特殊 CLI）
+              </summary>
+              <div className="mt-3 grid grid-cols-2 gap-3">
+                <button type="button" onClick={() => set('workdirMode', 'auto')} className={`rounded-xl border p-3 text-left ${form.workdirMode === 'auto' ? 'border-primary bg-primary/10' : 'border-border'}`}>
+                  <div className="text-sm font-medium">不绑定目录</div>
+                  <p className="mt-1 text-xs text-muted-foreground">推荐：运行时从任务/Workspace 解析。</p>
+                </button>
+                <button type="button" onClick={() => set('workdirMode', 'custom')} className={`rounded-xl border p-3 text-left ${form.workdirMode === 'custom' ? 'border-primary bg-primary/10' : 'border-border'}`}>
+                  <div className="text-sm font-medium">固定绝对路径</div>
+                  <p className="mt-1 text-xs text-muted-foreground">仅当该 Agent 必须始终在同一目录运行时使用。</p>
+                </button>
+              </div>
+              {form.workdirMode === 'custom' ? <Input className="mt-3" value={form.workdir} onChange={(e) => set('workdir', e.target.value)} placeholder="/Users/me/project" /> : null}
+            </details>
           </section>
 
           <section className="grid gap-4 sm:grid-cols-2">
