@@ -78,6 +78,7 @@ OctoDeck 是一个基于 [Claude Agent SDK](https://github.com/anthropics/claude
 | **钉钉** | Stream 协议长连接 | Markdown 卡片 | AI Card 流式打字机、消息去重（LRU 1000/30min TTL）、图片下载（downloadCode/contentUrl）、群聊 @mention 过滤 |
 | **微信** | iLink Bot API (Long Polling) | 纯文本（2000 字符） | QR 码扫码配对、CDN 图片下载 + AES 解密、Typing 指示器、自动重连 |
 | **Web** | WebSocket 实时通信 | 流式 Markdown | 图片粘贴/拖拽上传、虚拟滚动、Mermaid 图表渲染、图片 Lightbox |
+| **本机 daemon** | Agent Link WebSocket | 双向 JSON 帧 | 远程设备执行、本机文件/目录选择、Agent Runtime 发现、自动更新 |
 
 每个用户可独立配置自己的 IM 通道（飞书应用凭据、Telegram Bot Token、QQ Bot 凭据、钉钉 Client ID/Secret、微信 iLink Token），互不干扰。消息统一路由：各渠道来源回各自渠道，Web 来源回 Web。
 
@@ -104,6 +105,18 @@ OctoDeck 是一个基于 [Claude Agent SDK](https://github.com/anthropics/claude
 - **脚本任务** — 定时任务支持 Agent 和 Script 两种执行类型，Script 模式直接执行 shell 命令
 - **自定义工作目录** — 每个会话可配置 `customCwd` 指向不同项目
 - **失败自动恢复** — 指数退避重试（5s → 80s，最多 5 次），上下文溢出自动压缩并归档历史
+
+
+### Agent Link 与本机 daemon
+
+通过 `octodeck-daemon` 可将任意本机或远程设备接入 OctoDeck，服务端与 daemon 之间使用长连接 Agent Link 协议通信：
+
+- **远程设备执行** — 工作区、任务和自定义 Agent 后端可选择在线设备作为执行节点，在设备本地运行 Claude/Coco/自定义 CLI
+- **Agent Runtime 发现** — daemon 启动时自动发现可用 Agent 客户端、模型、Skills 和运行时能力，并在设置页实时展示状态
+- **本机文件与目录工具** — Web 端可通过 daemon 安全浏览设备目录、读取/写入文件、执行受控命令，支持设备路径工作区
+- **多仓库/多会话工作区** — 支持从 git、设备路径或已有工作区初始化运行目录，任务/会话级目录可独立清理
+- **资源与运行状态上报** — daemon 心跳携带 CPU、内存、磁盘、运行中任务与可用槽位，便于 Web 端监控和调度
+- **自动更新** — 服务端暴露最新 daemon 版本与二进制下载；daemon 启动后会检查更新，服务端也会在发现旧版本连接时通过 WebSocket 主动下发 `daemon.update.request`，daemon 下载新二进制并重启服务
 
 
 ### 多对话与 Agent 定义
