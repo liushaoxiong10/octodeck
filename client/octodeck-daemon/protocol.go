@@ -31,6 +31,7 @@ const (
 	tAgentSessionsResult       frameType = "agent.sessions.result"
 	tAgentSessionDeleteRequest frameType = "agent.session.delete.request"
 	tAgentSessionDeleteResult  frameType = "agent.session.delete.result"
+	tWorkspaceCleanupRequest   frameType = "workspace.cleanup.request"
 	tAgentPermissionDecision   frameType = "agent.permission.decision"
 	tAgentRuntimeStatus        frameType = "agent.runtime.status"
 	tToolRequest               frameType = "tool.request"
@@ -41,6 +42,7 @@ const (
 	tModelsResult              frameType = "models.result"
 	tSkillsRequest             frameType = "skills.request"
 	tSkillsResult              frameType = "skills.result"
+	tDaemonUpdateRequest       frameType = "daemon.update.request"
 	tMemorySync                frameType = "memory.sync"
 )
 
@@ -350,16 +352,19 @@ type AgentRunRequestFrame struct {
 }
 
 type AgentRunWorkspace struct {
-	Kind        string             `json:"kind,omitempty"`
-	Cwd         string             `json:"cwd,omitempty"`
-	Folder      string             `json:"folder,omitempty"`
-	AgentID     string             `json:"agentId,omitempty"`
-	AgentRoot   string             `json:"agentRoot,omitempty"`
-	WorkdirMode string             `json:"workdirMode,omitempty"`
-	Scope       string             `json:"scope,omitempty"`
-	ScopeID     string             `json:"scopeId,omitempty"`
-	Repo        *WorkspaceRepoSpec `json:"repo,omitempty"`
-	SessionRoot string             `json:"sessionRoot,omitempty"`
+	Kind        string               `json:"kind,omitempty"`
+	Cwd         string               `json:"cwd,omitempty"`
+	Folder      string               `json:"folder,omitempty"`
+	AgentID     string               `json:"agentId,omitempty"`
+	AgentRoot   string               `json:"agentRoot,omitempty"`
+	WorkdirMode string               `json:"workdirMode,omitempty"`
+	Scope       string               `json:"scope,omitempty"`
+	ScopeID     string               `json:"scopeId,omitempty"`
+	TaskID      string               `json:"taskId,omitempty"`
+	TaskRunID   string               `json:"taskRunId,omitempty"`
+	Repo        *WorkspaceRepoSpec   `json:"repo,omitempty"`
+	Repos       []*WorkspaceRepoSpec `json:"repos,omitempty"`
+	SessionRoot string               `json:"sessionRoot,omitempty"`
 }
 
 type AgentRunInput struct {
@@ -379,7 +384,9 @@ type AgentRunPolicy struct {
 
 type WorkspaceRepoSpec struct {
 	Kind        string `json:"kind"`
+	Name        string `json:"name,omitempty"`
 	GitURL      string `json:"gitUrl,omitempty"`
+	MainBranch  string `json:"mainBranch,omitempty"`
 	DevicePath  string `json:"devicePath,omitempty"`
 	GroupFolder string `json:"groupFolder"`
 	AgentID     string `json:"agentId,omitempty"`
@@ -387,6 +394,8 @@ type WorkspaceRepoSpec struct {
 	WorkdirMode string `json:"workdirMode,omitempty"`
 	Scope       string `json:"scope,omitempty"`
 	ScopeID     string `json:"scopeId,omitempty"`
+	TaskID      string `json:"taskId,omitempty"`
+	TaskRunID   string `json:"taskRunId,omitempty"`
 }
 
 type RunCancelFrame struct {
@@ -422,6 +431,16 @@ type AgentSessionDeleteRequestFrame struct {
 	AgentID   string    `json:"agentId"`
 	Workspace string    `json:"workspace"`
 	SessionID string    `json:"sessionId"`
+}
+
+type WorkspaceCleanupRequestFrame struct {
+	Type      frameType `json:"type"`
+	ID        int64     `json:"id"`
+	Workspace string    `json:"workspace"`
+	Scope     string    `json:"scope,omitempty"`
+	SessionID string    `json:"sessionId,omitempty"`
+	TaskID    string    `json:"taskId,omitempty"`
+	TaskRunID string    `json:"taskRunId,omitempty"`
 }
 
 type AgentPermissionDecisionFrame struct {
@@ -462,6 +481,14 @@ type SkillsRequestFrame struct {
 	RequestID  string    `json:"requestId"`
 	ProviderID string    `json:"providerId"`
 	Cwd        string    `json:"cwd,omitempty"`
+}
+
+type DaemonUpdateRequestFrame struct {
+	Type           frameType `json:"type"`
+	ID             int64     `json:"id"`
+	LatestVersion  string    `json:"latestVersion"`
+	CurrentVersion string    `json:"currentVersion,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
 }
 
 // ─── Bidirectional ───────────────────────────────────────────
@@ -535,6 +562,12 @@ func parseInbound(raw []byte) (any, error) {
 			return nil, err
 		}
 		return &f, nil
+	case tWorkspaceCleanupRequest:
+		var f WorkspaceCleanupRequestFrame
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, err
+		}
+		return &f, nil
 	case tAgentPermissionDecision:
 		var f AgentPermissionDecisionFrame
 		if err := json.Unmarshal(raw, &f); err != nil {
@@ -561,6 +594,12 @@ func parseInbound(raw []byte) (any, error) {
 		return &f, nil
 	case tSkillsRequest:
 		var f SkillsRequestFrame
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, err
+		}
+		return &f, nil
+	case tDaemonUpdateRequest:
+		var f DaemonUpdateRequestFrame
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, err
 		}

@@ -1,7 +1,8 @@
 import { getSession } from '../agent-link/registry.js';
 import { invokeRemoteTool } from '../agent-link/tool-rpc.js';
+import { verifyAgentToolToken } from '../config.js';
 import { LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS } from '../runtime-config.js';
-import { getCloudSkill, listCloudSkillsByUser } from '../db.js';
+import { getAgentLinkById, getCloudSkill, listCloudSkillsByUser } from '../db.js';
 import {
   appendCloudMemory,
   getCloudMemory,
@@ -47,12 +48,17 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function getToolAuthUserId(request: Request): string | null {
+  const auth = request.headers.get('authorization') || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
+  return token ? verifyAgentToolToken(token)?.userId ?? null : null;
+}
+
 export async function handleAgentLinkToolHttpRequest(
   request: Request,
 ): Promise<Response> {
-  const secret = process.env.OCTODECK_AGENT_RUNNER_SECRET;
-  const auth = request.headers.get('authorization') || '';
-  if (!secret || auth !== `Bearer ${secret}`) {
+  const authUserId = getToolAuthUserId(request);
+  if (!authUserId) {
     return jsonResponse({ error: 'unauthorized' }, 401);
   }
   if (request.method !== 'POST') {
@@ -73,6 +79,10 @@ export async function handleAgentLinkToolHttpRequest(
   const session = getSession(body.linkId);
   if (!session || session.state !== 'open') {
     return jsonResponse({ error: 'link_offline' }, 409);
+  }
+  const link = getAgentLinkById(body.linkId);
+  if (!link || link.userId !== authUserId || link.revokedAt) {
+    return jsonResponse({ error: 'link_not_found' }, 404);
   }
 
   try {
@@ -102,9 +112,8 @@ export async function handleAgentLinkToolHttpRequest(
 export async function handleCloudMemoryToolHttpRequest(
   request: Request,
 ): Promise<Response> {
-  const secret = process.env.OCTODECK_AGENT_RUNNER_SECRET;
-  const auth = request.headers.get('authorization') || '';
-  if (!secret || auth !== `Bearer ${secret}`)
+  const authUserId = getToolAuthUserId(request);
+  if (!authUserId)
     return jsonResponse({ error: 'unauthorized' }, 401);
   if (request.method !== 'POST')
     return jsonResponse({ error: 'method_not_allowed' }, 405);
@@ -116,8 +125,9 @@ export async function handleCloudMemoryToolHttpRequest(
     return jsonResponse({ error: 'invalid_json' }, 400);
   }
 
-  if (!body.userId || !body.operation)
+  if (!body.operation)
     return jsonResponse({ error: 'missing_required_fields' }, 400);
+  body.userId = authUserId;
 
   try {
     switch (body.operation) {
@@ -190,6 +200,12 @@ export async function handleCloudMemoryToolHttpRequest(
             { error: 'deviceLinkId_agentId_path_content_required' },
             400,
           );
+        {
+          const link = getAgentLinkById(body.deviceLinkId);
+          if (!link || link.userId !== authUserId || link.revokedAt) {
+            return jsonResponse({ error: 'device_not_found' }, 404);
+          }
+        }
         return jsonResponse({
           memory: syncClientAgentMemory({
             userId: body.userId,
@@ -215,9 +231,8 @@ export async function handleCloudMemoryToolHttpRequest(
 export async function handleCloudSkillToolHttpRequest(
   request: Request,
 ): Promise<Response> {
-  const secret = process.env.OCTODECK_AGENT_RUNNER_SECRET;
-  const auth = request.headers.get('authorization') || '';
-  if (!secret || auth !== `Bearer ${secret}`)
+  const authUserId = getToolAuthUserId(request);
+  if (!authUserId)
     return jsonResponse({ error: 'unauthorized' }, 401);
   if (request.method !== 'POST')
     return jsonResponse({ error: 'method_not_allowed' }, 405);
@@ -228,8 +243,9 @@ export async function handleCloudSkillToolHttpRequest(
   } catch {
     return jsonResponse({ error: 'invalid_json' }, 400);
   }
-  if (!body.userId || !body.operation)
+  if (!body.operation)
     return jsonResponse({ error: 'missing_required_fields' }, 400);
+  body.userId = authUserId;
 
   if (body.operation === 'list' || body.operation === 'search') {
     const query = body.query?.trim().toLowerCase();

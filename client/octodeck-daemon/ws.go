@@ -224,6 +224,8 @@ func (c *wsClient) run(ctx context.Context) error {
 			c.agents.handleSessions(ctx, f)
 		case *AgentSessionDeleteRequestFrame:
 			c.agents.handleSessionDelete(ctx, f)
+		case *WorkspaceCleanupRequestFrame:
+			c.handleWorkspaceCleanup(f)
 		case *AgentPermissionDecisionFrame:
 			c.agents.handlePermissionDecision(ctx, f)
 		case *ToolRequestFrame:
@@ -234,6 +236,8 @@ func (c *wsClient) run(ctx context.Context) error {
 			c.models.handle(ctx, f)
 		case *SkillsRequestFrame:
 			c.skills.handle(ctx, f)
+		case *DaemonUpdateRequestFrame:
+			c.handleDaemonUpdate(ctx, f)
 		case *ErrorFrame:
 			if f.Fatal {
 				return fmt.Errorf("server fatal: %s: %s", f.Code, f.Message)
@@ -241,6 +245,53 @@ func (c *wsClient) run(ctx context.Context) error {
 		case *HelloAckFrame:
 			// duplicate hello_ack — ignore
 		}
+	}
+}
+
+func (c *wsClient) handleDaemonUpdate(ctx context.Context, req *DaemonUpdateRequestFrame) {
+	if req == nil {
+		return
+	}
+	go func() {
+		if !autoUpdateEnabled(c.cfg) {
+			logDaemonUpdateSkip(req, "auto update disabled")
+			return
+		}
+		latest := strings.TrimSpace(req.LatestVersion)
+		if !isNewerDaemonVersion(latest, c.cfg.Version) {
+			logDaemonUpdateSkip(req, fmt.Sprintf("current version %s is up to date", c.cfg.Version))
+			return
+		}
+		logDaemonUpdateSkip(req, fmt.Sprintf("server requested update current=%s latest=%s reason=%s", c.cfg.Version, latest, req.Reason))
+		if err := updateDaemonBinary(c.cfg, "", true); err != nil {
+			_ = c.send(&ErrorFrame{Type: tError, Code: "daemon_update_failed", Message: err.Error(), Fatal: false})
+		}
+	}()
+}
+
+func logDaemonUpdateSkip(req *DaemonUpdateRequestFrame, message string) {
+	if strings.Contains(message, "requested update") {
+		fmt.Printf("octodeck-daemon: %s\n", message)
+		return
+	}
+	fmt.Printf("octodeck-daemon: server update request ignored latest=%s: %s\n", req.LatestVersion, message)
+}
+
+func (c *wsClient) handleWorkspaceCleanup(req *WorkspaceCleanupRequestFrame) {
+	if req == nil {
+		return
+	}
+	scope := req.Scope
+	if scope == "" {
+		scope = "workspace"
+	}
+	dir, err := cleanupWorkspaceScopeDir(c.cfg, req.Workspace, scope, req.SessionID, req.TaskID, req.TaskRunID)
+	if err != nil {
+		_ = c.send(&ErrorFrame{Type: tError, Code: "workspace_cleanup_failed", Message: err.Error(), Fatal: false})
+		return
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		_ = c.send(&ErrorFrame{Type: tError, Code: "workspace_cleanup_failed", Message: err.Error(), Fatal: false})
 	}
 }
 

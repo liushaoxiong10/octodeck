@@ -15,6 +15,7 @@ export interface GroupInfo {
   runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent';
   device_link_id?: string;
   agent_client_id?: string;
+  agent_model?: string;
   execution_mode?: 'container' | 'host';
   custom_cwd?: string;
   repo_id?: string;

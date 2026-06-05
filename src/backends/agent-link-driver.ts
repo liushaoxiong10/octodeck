@@ -20,7 +20,7 @@ import path from 'path';
 import { EventEmitter } from 'events';
 import type { ChildProcess } from 'child_process';
 
-import { GROUPS_DIR } from '../config.js';
+import { createAgentToolToken, GROUPS_DIR } from '../config.js';
 import { logger } from '../logger.js';
 import {
   LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS,
@@ -42,6 +42,8 @@ import {
 import type { BackendRunArgs } from './types.js';
 import type { HostCliDriverConfig } from './host-cli-driver.js';
 import { loadUserMcpServers } from '../mcp-utils.js';
+import { listManagedReposByUser } from '../db.js';
+import type { ManagedRepo } from '../types.js';
 import {
   shouldDisableAgentTeamMcp,
   stripAgentTeamMcpConfigArgs,
@@ -87,11 +89,46 @@ function firstContentBlock(evt: CocoEvent, type: string): Record<string, unknown
   return content.find((block) => block?.type === type) ?? null;
 }
 
+function firstStringValue(
+  source: Record<string, unknown>,
+  keys: string[],
+): string | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'string' && value) return value;
+  }
+  return undefined;
+}
+
 function streamEventFromCocoEvent(evt: CocoEvent): StreamEvent | null {
   const sessionId = evt.session_id;
   const toolUseBlock = firstContentBlock(evt, 'tool_use');
   const toolResultBlock = firstContentBlock(evt, 'tool_result');
-  if (evt.type === 'tool_use' || evt.type === 'tool_call' || toolUseBlock) {
+  const thinkingBlock = firstContentBlock(evt, 'thinking') ?? firstContentBlock(evt, 'reasoning');
+  if (
+    evt.type === 'thinking' ||
+    evt.type === 'reasoning' ||
+    evt.type === 'reasoning_delta' ||
+    thinkingBlock
+  ) {
+    const source = thinkingBlock ?? (evt as unknown as Record<string, unknown>);
+    const text = firstStringValue(source, [
+      'thinking',
+      'reasoning',
+      'reason',
+      'text',
+      'content',
+    ]);
+    if (text) {
+      return {
+        eventType: 'thinking_delta',
+        sessionId,
+        text,
+        rawEvent: evt as unknown as Record<string, unknown>,
+      };
+    }
+  }
+  if (evt.type === 'tool_use' || evt.type === 'tool_call' || evt.type === 'tool_use_start' || toolUseBlock) {
     const source = toolUseBlock ?? (evt as unknown as Record<string, unknown>);
     const input = source.input;
     const toolInput = input && typeof input === 'object' && !Array.isArray(input)
@@ -108,7 +145,7 @@ function streamEventFromCocoEvent(evt: CocoEvent): StreamEvent | null {
       rawEvent: evt as unknown as Record<string, unknown>,
     };
   }
-  if (evt.type === 'tool_result' || toolResultBlock) {
+  if (evt.type === 'tool_result' || evt.type === 'tool_use_end' || toolResultBlock) {
     const source = toolResultBlock ?? (evt as unknown as Record<string, unknown>);
     const content = source.content ?? source.result ?? source.text;
     const isError = Boolean(source.is_error ?? evt.is_error);
@@ -145,13 +182,47 @@ function valueFromPayload(payload: Record<string, unknown> | undefined, keys: st
   return undefined;
 }
 
+function nestedObjectFromPayload(
+  payload: Record<string, unknown> | undefined,
+  keys: string[],
+): Record<string, unknown> | undefined {
+  const value = valueFromPayload(payload, keys);
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function normalizeUsagePayload(payload: Record<string, unknown> | undefined): StreamEvent['usage'] | undefined {
+  const usage = nestedObjectFromPayload(payload, ['usage']) ?? payload;
+  if (!usage) return undefined;
+  const num = (...keys: string[]) => {
+    for (const key of keys) {
+      const value = usage[key];
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value);
+    }
+    return 0;
+  };
+  const normalized = {
+    inputTokens: num('inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens'),
+    outputTokens: num('outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens'),
+    cacheReadInputTokens: num('cacheReadInputTokens', 'cache_read_input_tokens'),
+    cacheCreationInputTokens: num('cacheCreationInputTokens', 'cache_creation_input_tokens'),
+    costUSD: num('costUSD', 'cost_usd', 'cost'),
+    durationMs: num('durationMs', 'duration_ms'),
+    numTurns: num('numTurns', 'num_turns'),
+  };
+  if (!Object.values(normalized).some((value) => value > 0)) return undefined;
+  return normalized;
+}
+
 function streamEventFromAgentRunFrame(frame: {
   eventType: string;
   text?: string;
   sessionId?: string;
   payload?: Record<string, unknown>;
 }): StreamEvent | null {
-  if (frame.eventType === 'tool_call') {
+  if (frame.eventType === 'tool_call' || frame.eventType === 'tool_use_start') {
     const input = valueFromPayload(frame.payload, ['input', 'arguments', 'params']);
     const toolInput = input && typeof input === 'object' && !Array.isArray(input)
       ? (input as Record<string, unknown>)
@@ -167,7 +238,7 @@ function streamEventFromAgentRunFrame(frame: {
       rawEvent: frame.payload,
     };
   }
-  if (frame.eventType === 'tool_result') {
+  if (frame.eventType === 'tool_result' || frame.eventType === 'tool_use_end') {
     const content = valueFromPayload(frame.payload, ['content', 'result', 'text', 'output']);
     const isError = Boolean(valueFromPayload(frame.payload, ['is_error', 'isError', 'error']));
     return {
@@ -184,7 +255,7 @@ function streamEventFromAgentRunFrame(frame: {
     return { eventType: 'permission_denied', sessionId: frame.sessionId, detail: compactJson(frame.payload) ?? undefined, rawEvent: frame.payload };
   }
   if (frame.eventType === 'usage') {
-    return { eventType: 'usage', sessionId: frame.sessionId, detail: compactJson(frame.payload) ?? undefined, rawEvent: frame.payload };
+    return { eventType: 'usage', sessionId: frame.sessionId, usage: normalizeUsagePayload(frame.payload), detail: compactJson(frame.payload) ?? undefined, rawEvent: frame.payload };
   }
   if (frame.eventType === 'session') {
     return { eventType: 'status', sessionId: frame.sessionId, statusText: 'session', detail: compactJson(frame.payload) ?? undefined, rawEvent: frame.payload };
@@ -334,6 +405,8 @@ interface RemoteWorkspaceMeta {
   workdirMode: 'auto' | 'custom';
   scope: RemoteWorkspaceScope;
   scopeId?: string;
+  taskId?: string;
+  taskRunId?: string;
 }
 
 function newRunId(): string {
@@ -410,6 +483,7 @@ function buildRepoContext(
   return {
     id: group.repoId,
     gitUrl: group.repoGitUrl,
+    mainBranch: group.repoMainBranch,
     devicePath: group.repoDevicePath,
     kind: group.repoGitUrl
       ? 'git'
@@ -420,13 +494,17 @@ function buildRepoContext(
   };
 }
 
-function buildWorkspaceRepo(
+type WorkspaceRepo =
+  | ({ kind: 'git'; gitUrl: string; mainBranch?: string; groupFolder: string; name?: string } & Partial<RemoteWorkspaceMeta>)
+  | ({ kind: 'device_path'; devicePath: string; groupFolder: string; name?: string } & Partial<RemoteWorkspaceMeta>)
+  | ({ kind: 'workspace'; groupFolder: string; name?: string } & Partial<RemoteWorkspaceMeta>);
+
+function buildWorkspaceRepos(
   group: BackendRunArgs['group'],
+  linkId: string,
+  userId: string | undefined,
   meta?: RemoteWorkspaceMeta,
-):
-  | ({ kind: 'git'; gitUrl: string; groupFolder: string } & Partial<RemoteWorkspaceMeta>)
-  | ({ kind: 'device_path'; devicePath: string; groupFolder: string } & Partial<RemoteWorkspaceMeta>)
-  | undefined {
+): WorkspaceRepo[] {
   const workspaceFields = meta
     ? {
         agentId: meta.agentId,
@@ -434,30 +512,95 @@ function buildWorkspaceRepo(
         workdirMode: meta.workdirMode,
         scope: meta.scope,
         scopeId: meta.scopeId,
+        taskId: meta.taskId,
+        taskRunId: meta.taskRunId,
       }
     : {};
+  // 指定单一 repo
   if (group.repoGitUrl) {
-    return {
-      kind: 'git',
-      gitUrl: group.repoGitUrl,
-      groupFolder: group.folder,
-      ...workspaceFields,
-    };
+    return [
+      {
+        kind: 'git',
+        name: deriveRepoNameFromGitUrl(group.repoGitUrl),
+        gitUrl: group.repoGitUrl,
+        mainBranch: group.repoMainBranch,
+        groupFolder: group.folder,
+        ...workspaceFields,
+      },
+    ];
   }
   if (group.repoDevicePath) {
-    return {
-      kind: 'device_path',
-      devicePath: group.repoDevicePath,
-      groupFolder: group.folder,
-      ...workspaceFields,
-    };
+    return [
+      {
+        kind: 'device_path',
+        name: path.basename(path.normalize(group.repoDevicePath)) || undefined,
+        devicePath: group.repoDevicePath,
+        groupFolder: group.folder,
+        ...workspaceFields,
+      },
+    ];
   }
-  return undefined;
+  // 全部可见：枚举该用户所有 managed repo
+  if (!userId) return [];
+  const allRepos = listManagedReposByUser(userId);
+  const out: WorkspaceRepo[] = [];
+  const seen = new Set<string>();
+  for (const r of allRepos) {
+    if (r.kind === 'git' && r.gitUrl) {
+      const key = `git:${r.gitUrl}:${r.mainBranch ?? ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        kind: 'git',
+        name: r.name || deriveRepoNameFromGitUrl(r.gitUrl),
+        gitUrl: r.gitUrl,
+        mainBranch: r.mainBranch,
+        groupFolder: group.folder,
+        ...workspaceFields,
+      });
+    } else if (
+      r.kind === 'device_path' &&
+      r.devicePath &&
+      r.deviceLinkId === linkId
+    ) {
+      const key = `device_path:${r.devicePath}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        kind: 'device_path',
+        name: r.name || path.basename(path.normalize(r.devicePath)) || undefined,
+        devicePath: r.devicePath,
+        groupFolder: group.folder,
+        ...workspaceFields,
+      });
+    }
+  }
+  return out;
 }
 
-function buildRemoteWorkspaceMeta(args: BackendRunArgs, cfg: HostCliDriverConfig): RemoteWorkspaceMeta {
+function deriveRepoNameFromGitUrl(gitUrl: string): string {
+  try {
+    const u = new URL(gitUrl);
+    // path like "/org/repo.git"
+    let base = path.posix.basename(u.pathname);
+    if (base.endsWith('.git')) base = base.slice(0, -4);
+    if (base) return base;
+  } catch {
+    // fall through
+  }
+  // fallback: strip last path segment
+  const m = gitUrl.match(/([^/:]+?)(?:\.git)?\/?$/);
+  return m?.[1] || 'repo';
+}
+
+function buildRemoteWorkspaceMeta(
+  args: BackendRunArgs,
+  cfg: HostCliDriverConfig,
+  fallbackSessionId?: string,
+): RemoteWorkspaceMeta {
   const { input, group } = args;
-  const sessionScopeId = input.sessionId || input.agentId;
+  const agentId = input.agentId || cfg.backendId;
+  const sessionScopeId = input.sessionId || fallbackSessionId;
   const scope: RemoteWorkspaceScope = input.isScheduledTask
     ? 'task'
     : sessionScopeId
@@ -465,13 +608,19 @@ function buildRemoteWorkspaceMeta(args: BackendRunArgs, cfg: HostCliDriverConfig
         ? 'direct_session'
         : 'session'
       : 'workspace';
-  const scopeId = input.taskRunId || input.messageTaskId || sessionScopeId || group.folder;
+  const scopeId = input.isScheduledTask
+    ? input.taskRunId
+    : scope === 'session' || scope === 'direct_session'
+      ? sessionScopeId
+      : undefined;
   return {
-    agentId: input.agentId || cfg.backendId,
+    agentId,
     agentRoot: cfg.workdirMode === 'custom' ? cfg.workdir : undefined,
     workdirMode: cfg.workdirMode === 'custom' ? 'custom' : 'auto',
     scope,
     scopeId,
+    taskId: input.isScheduledTask ? input.messageTaskId : undefined,
+    taskRunId: input.isScheduledTask ? input.taskRunId : undefined,
   };
 }
 
@@ -488,6 +637,7 @@ function buildRemoteEnv(
 ): Record<string, string> | undefined {
   const env: Record<string, string> = { ...(baseEnv ?? {}) };
   if (userId) {
+    env.OCTODECK_AGENT_TOOL_TOKEN = createAgentToolToken(userId);
     const mcpServers = loadUserMcpServers(userId, { deviceLinkId });
     if (Object.keys(mcpServers).length > 0) {
       env.OCTODECK_USER_MCP_SERVERS_JSON = JSON.stringify(mcpServers);
@@ -505,7 +655,7 @@ async function runViaAgentRuntime(opts: {
   groupDir: string;
   logsDir: string;
   workspaceMeta: RemoteWorkspaceMeta;
-  workspaceRepo: ReturnType<typeof buildWorkspaceRepo>;
+  workspaceRepos: WorkspaceRepo[];
   runContext: Record<string, unknown>;
   timeoutMs: number;
   maxOutputBytes: number;
@@ -519,7 +669,7 @@ async function runViaAgentRuntime(opts: {
     groupDir,
     logsDir,
     workspaceMeta,
-    workspaceRepo,
+    workspaceRepos,
     runContext,
     timeoutMs,
     maxOutputBytes,
@@ -685,8 +835,12 @@ async function runViaAgentRuntime(opts: {
             streamEvent: structuredEvent,
           });
         }
-        if (frame.text) {
-          if (textAccum.length < maxOutputBytes) {
+        if (
+          frame.text &&
+          (frame.eventType === 'text_delta' ||
+            frame.eventType === 'thinking_delta')
+        ) {
+          if (frame.eventType !== 'thinking_delta' && textAccum.length < maxOutputBytes) {
             textAccum += frame.text.slice(0, maxOutputBytes - textAccum.length);
           }
           void emitWrapped({
@@ -727,18 +881,24 @@ async function runViaAgentRuntime(opts: {
 
     registerAgentRun(controller);
     const remoteEnv = buildRemoteEnv(cfg.envOverrides, group.created_by, linkId);
+    const primaryRepo = workspaceRepos[0];
+    const workspacePayload: Record<string, unknown> = {
+      kind: workspaceRepos.length > 1 ? 'workspace' : primaryRepo?.kind ?? 'workspace',
+      cwd: groupDir,
+      folder: group.folder,
+      ...workspaceMeta,
+    };
+    if (workspaceRepos.length === 1) {
+      workspacePayload.repo = primaryRepo;
+    } else if (workspaceRepos.length > 1) {
+      workspacePayload.repos = workspaceRepos;
+    }
     const ok = session.send({
       type: 'agent.run.request',
       id: 0,
       runId,
       agentId: agentClientId,
-      workspace: {
-        kind: workspaceRepo?.kind ?? 'workspace',
-        cwd: groupDir,
-        folder: group.folder,
-        ...workspaceMeta,
-        ...(workspaceRepo ? { repo: workspaceRepo } : {}),
-      },
+      workspace: workspacePayload,
       input: {
         prompt: input.prompt,
         sessionId: input.sessionId,
@@ -751,7 +911,7 @@ async function runViaAgentRuntime(opts: {
       policy: buildAgentRunPolicy(cfg, input),
       context: runContext,
       remoteCwdPlaceholder: REMOTE_CWD_PLACEHOLDER,
-      workspaceRepo,
+      workspaceRepo: primaryRepo,
     });
     if (!ok) {
       clearTimeout(timer);
@@ -786,13 +946,23 @@ export async function runViaAgentLink(
 
   // 1. Server-side cwd: keep run logs locally; remote daemon will resolve its
   //    own cwd from this path. Only enforce absolute + existence on server.
+  //    优先用 group.folder 派生独立 workspace URI，避免多个 workspace 共享
+  //    agent 默认目录（原先 fallback 到 agentId 会让所有无 repo workspace
+  //    落在同一个 .octodeck/workspace/<agentId>/）。
   const defaultGroupDir = path.join(GROUPS_DIR, group.folder);
   fs.mkdirSync(defaultGroupDir, { recursive: true });
-  const workspaceMeta = buildRemoteWorkspaceMeta(args, cfg);
+  const workspaceSessionId = input.sessionId || input.turnId || newRunId();
+  const workspaceMeta = buildRemoteWorkspaceMeta(args, cfg, workspaceSessionId);
+  const workspaceRepos = buildWorkspaceRepos(
+    group,
+    linkId,
+    group.created_by,
+    workspaceMeta,
+  );
   const groupDir =
     group.customCwd ||
     workspaceMeta.agentRoot ||
-    `${DEVICE_WORKSPACE_URI_PREFIX}${workspaceMeta.agentId}`;
+    `${DEVICE_WORKSPACE_URI_PREFIX}${group.folder}`;
   if (
     !path.isAbsolute(groupDir) &&
     !groupDir.startsWith(DEVICE_WORKSPACE_URI_PREFIX)
@@ -806,12 +976,23 @@ export async function runViaAgentLink(
   const logsDir = path.join(defaultGroupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
-  const workspaceRepo = buildWorkspaceRepo(group, workspaceMeta);
   const contextCwd =
-    workspaceRepo || groupDir.startsWith(DEVICE_WORKSPACE_URI_PREFIX)
+    workspaceRepos.length > 0 ||
+    groupDir.startsWith(DEVICE_WORKSPACE_URI_PREFIX)
       ? REMOTE_CWD_PLACEHOLDER
       : groupDir;
   const runContext = buildRunContext(args, cfg, contextCwd);
+  const workspaceOnlySpec: WorkspaceRepo = {
+    kind: 'workspace',
+    groupFolder: group.folder,
+    agentId: workspaceMeta.agentId,
+    agentRoot: workspaceMeta.agentRoot,
+    workdirMode: workspaceMeta.workdirMode,
+    scope: workspaceMeta.scope,
+    scopeId: workspaceMeta.scopeId,
+    taskId: workspaceMeta.taskId,
+    taskRunId: workspaceMeta.taskRunId,
+  };
 
   const settings = getSystemSettings();
   const configuredTimeoutMs =
@@ -839,7 +1020,7 @@ export async function runViaAgentLink(
       groupDir,
       logsDir,
       workspaceMeta,
-      workspaceRepo,
+      workspaceRepos,
       runContext,
       timeoutMs,
       maxOutputBytes,
@@ -1166,7 +1347,7 @@ export async function runViaAgentLink(
       context: runContext,
       stdinJson: JSON.stringify(input),
       remoteCwdPlaceholder: REMOTE_CWD_PLACEHOLDER,
-      workspaceRepo,
+      workspaceRepo: workspaceRepos[0] ?? (input.isScheduledTask ? workspaceOnlySpec : undefined),
     });
     if (!ok) {
       clearTimeout(timer);

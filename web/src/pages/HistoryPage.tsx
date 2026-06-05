@@ -80,6 +80,7 @@ function statusClass(status?: string | null): string {
   if (['success', 'done', 'review'].includes(status)) return 'border-emerald-300 text-emerald-700';
   if (['error', 'failed'].includes(status)) return 'border-destructive text-destructive';
   if (['running', 'queued', 'in_progress'].includes(status)) return 'border-blue-300 text-blue-700';
+  if (status === 'tool') return 'border-blue-300 text-blue-700';
   return '';
 }
 
@@ -125,7 +126,7 @@ function toolAuditFromStage(stage: HistoryStage): Record<string, unknown> | null
 }
 
 function isToolStage(stage: HistoryStage): boolean {
-  return !!toolAuditFromStage(stage) || stage.type.includes('tool_') || stage.type.includes('tool_call') || stage.type.includes('tool_result');
+  return stage.status === 'tool' || !!toolAuditFromStage(stage) || stage.type.includes('tool_') || stage.type.includes('tool_call') || stage.type.includes('tool_result');
 }
 
 export function HistoryPage() {
@@ -282,7 +283,7 @@ function StageCard({ stage, index }: { stage: HistoryStage; index: number }) {
         <button type="button" className="min-w-0 flex-1 text-left" onClick={() => setExpanded(!expanded)}>
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="outline">{stage.type}</Badge>
-            {isToolStage(stage) && <Badge variant="outline" className="border-blue-300 text-blue-700">工具审计</Badge>}
+            {isToolStage(stage) && <Badge variant="outline" className="border-blue-300 text-blue-700">role: tool</Badge>}
             {stage.status && <Badge variant="outline" className={statusClass(stage.status)}>{stage.status}</Badge>}
             <span className="text-xs text-muted-foreground">{formatDate(stage.at)}</span>
           </div>

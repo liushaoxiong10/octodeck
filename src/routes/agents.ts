@@ -447,15 +447,25 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
     // Resolve bound target name for display
     let boundTargetName: string | null = null;
     let boundWorkspaceName: string | null = null;
+    let visibleBoundAgentId = g.target_agent_id ?? null;
+    let visibleBoundMainJid = g.target_main_jid ?? null;
     if (g.target_agent_id) {
       const boundAgent = getAgent(g.target_agent_id);
       if (boundAgent) {
-        boundTargetName = boundAgent.name;
         const ownerGroup = getRegisteredGroup(boundAgent.chat_jid);
-        if (ownerGroup) boundWorkspaceName = ownerGroup.name;
+        if (
+          ownerGroup &&
+          canAccessGroup(user, { ...ownerGroup, jid: boundAgent.chat_jid })
+        ) {
+          boundTargetName = boundAgent.name;
+          boundWorkspaceName = ownerGroup.name;
+        } else {
+          visibleBoundAgentId = null;
+        }
       }
     } else if (g.target_main_jid) {
       let boundGroup = getRegisteredGroup(g.target_main_jid);
+      let boundJid = g.target_main_jid;
       // Legacy fallback: old bindings stored web:${folder} instead of actual JID
       if (!boundGroup && g.target_main_jid.startsWith('web:')) {
         const folder = g.target_main_jid.slice(4);
@@ -463,18 +473,23 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
         for (const fj of jids) {
           if (fj.startsWith('web:')) {
             boundGroup = getRegisteredGroup(fj);
+            boundJid = fj;
             if (boundGroup) break;
           }
         }
       }
-      if (boundGroup) boundTargetName = boundGroup.name;
+      if (boundGroup && canAccessGroup(user, { ...boundGroup, jid: boundJid })) {
+        boundTargetName = boundGroup.name;
+      } else {
+        visibleBoundMainJid = null;
+      }
     }
 
     candidates.push({
       jid: j,
       name: g.name,
-      bound_agent_id: g.target_agent_id ?? null,
-      bound_main_jid: g.target_main_jid ?? null,
+      bound_agent_id: visibleBoundAgentId,
+      bound_main_jid: visibleBoundMainJid,
       binding_mode: g.binding_mode ?? 'single_context',
       reply_policy: g.reply_policy === 'mirror' ? 'mirror' : 'source_only',
       bound_target_name: boundTargetName,

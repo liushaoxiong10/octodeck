@@ -43,6 +43,10 @@ export function TasksPage() {
     notifyChannels: string[] | null;
     chatJid?: string;
     contextMode?: 'group' | 'isolated';
+    runtimeProfile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent';
+    agentClientId?: string;
+    backend?: string;
+    agentModel?: string;
   }) => {
     await createTask(
       data.prompt,
@@ -55,6 +59,10 @@ export function TasksPage() {
       data.notifyChannels,
       data.chatJid,
       data.contextMode,
+      data.runtimeProfile,
+      data.agentClientId,
+      data.backend,
+      data.agentModel,
     );
     // Only close the form when the store reports no error — failures surface
     // as a toast inside CreateTaskForm and the form stays open for retry.

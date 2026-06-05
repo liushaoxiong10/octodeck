@@ -94,9 +94,9 @@ function stmts() {
       ),
       storeMessageInsert: db.prepare(
         `INSERT OR REPLACE INTO messages (
-          id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me,
+          id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me,
           attachments, token_usage, turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason, task_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ),
       insertUsageInsert: db.prepare(
         `INSERT INTO usage_records (id, user_id, group_folder, agent_id, message_id, model,
@@ -142,7 +142,7 @@ function stmts() {
          )`,
       ),
       getMessagesSince: db.prepare(
-        `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, task_id
+        `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, attachments, task_id
          FROM messages
          WHERE chat_jid = ? AND (timestamp > ? OR (timestamp = ? AND id > ?)) AND is_from_me = 0
          ORDER BY timestamp ASC, id ASC`,
@@ -160,7 +160,7 @@ function getNewMessagesStmt(jidCount: number): any {
   if (!s) {
     const placeholders = Array(jidCount).fill('?').join(',');
     s = db.prepare(
-      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, attachments, task_id
+      `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, attachments, task_id
        FROM messages
        WHERE (timestamp > ? OR (timestamp = ? AND id > ?))
          AND chat_jid IN (${placeholders})
@@ -177,6 +177,7 @@ interface StoredMessageMeta {
   turnId?: string | null;
   sessionId?: string | null;
   sdkMessageUuid?: string | null;
+  role?: 'user' | 'assistant' | 'tool' | null;
   sourceKind?: MessageSourceKind | null;
   finalizationReason?: MessageFinalizationReason | null;
   taskId?: string | null;
@@ -318,6 +319,7 @@ function initializeSqliteDatabase(
       source_jid TEXT,
       sender TEXT,
       sender_name TEXT,
+      role TEXT,
       content TEXT,
       timestamp TEXT,
       is_from_me INTEGER,
@@ -343,6 +345,10 @@ function initializeSqliteDatabase(
       schedule_value TEXT NOT NULL,
       context_mode TEXT DEFAULT 'isolated',
       execution_type TEXT DEFAULT 'agent',
+      runtime_profile TEXT,
+      agent_client_id TEXT,
+      backend TEXT,
+      agent_model TEXT,
       script_command TEXT,
       next_run TEXT,
       last_run TEXT,
@@ -977,6 +983,7 @@ function initializeSqliteDatabase(
       name TEXT NOT NULL,
       kind TEXT NOT NULL,
       git_url TEXT,
+      main_branch TEXT,
       device_path TEXT,
       device_link_id TEXT,
       created_by TEXT NOT NULL,
@@ -996,6 +1003,7 @@ function initializeSqliteDatabase(
   ensureColumn('invite_codes', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
+  ensureColumn('repos', 'main_branch', 'TEXT');
   ensureColumn('chats', 'archived_at', 'TEXT');
   ensureColumn('chats', 'archive_reason', 'TEXT');
   ensureColumn(
@@ -1006,6 +1014,7 @@ function initializeSqliteDatabase(
   ensureColumn('registered_groups', 'custom_cwd', 'TEXT');
   ensureColumn('registered_groups', 'repo_id', 'TEXT');
   ensureColumn('registered_groups', 'repo_git_url', 'TEXT');
+  ensureColumn('registered_groups', 'repo_main_branch', 'TEXT');
   ensureColumn('registered_groups', 'repo_device_path', 'TEXT');
   ensureColumn('registered_groups', 'init_source_path', 'TEXT');
   ensureColumn('registered_groups', 'init_git_url', 'TEXT');
@@ -1025,6 +1034,10 @@ function initializeSqliteDatabase(
   );
   ensureColumn('scheduled_tasks', 'created_by', 'TEXT');
   ensureColumn('scheduled_tasks', 'execution_type', "TEXT DEFAULT 'agent'");
+  ensureColumn('scheduled_tasks', 'runtime_profile', 'TEXT');
+  ensureColumn('scheduled_tasks', 'agent_client_id', 'TEXT');
+  ensureColumn('scheduled_tasks', 'backend', 'TEXT');
+  ensureColumn('scheduled_tasks', 'agent_model', 'TEXT');
   ensureColumn('scheduled_tasks', 'script_command', 'TEXT');
   ensureColumn('scheduled_tasks', 'notify_channels', 'TEXT');
   ensureColumn('scheduled_tasks', 'execution_mode', 'TEXT');
@@ -1095,11 +1108,13 @@ function initializeSqliteDatabase(
   ensureColumn('registered_groups', 'runtime_profile', 'TEXT');
   ensureColumn('registered_groups', 'device_link_id', 'TEXT');
   ensureColumn('registered_groups', 'agent_client_id', 'TEXT');
+  ensureColumn('registered_groups', 'agent_model', 'TEXT');
   // Phase 5.1: per-group execution node (server-local | <agent_link_id>)
   ensureColumn('registered_groups', 'execution_node', 'TEXT');
   ensureColumn('agent_links', 'agent_clients', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('agent_links', 'resources', "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn('messages', 'token_usage', 'TEXT');
+  ensureColumn('messages', 'role', 'TEXT');
   ensureColumn('messages', 'turn_id', 'TEXT');
   ensureColumn('messages', 'session_id', 'TEXT');
   ensureColumn('messages', 'sdk_message_uuid', 'TEXT');
@@ -1147,13 +1162,14 @@ function initializeSqliteDatabase(
           custom_cwd TEXT,
           repo_id TEXT,
           repo_git_url TEXT,
+          repo_main_branch TEXT,
           repo_device_path TEXT,
           init_source_path TEXT,
           init_git_url TEXT,
           created_by TEXT,
           is_home INTEGER DEFAULT 0
         );
-        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL, NULL, NULL, NULL, 0 FROM registered_groups;
+        INSERT INTO registered_groups_new SELECT jid, name, folder, added_at, container_config, execution_mode, custom_cwd, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0 FROM registered_groups;
         DROP TABLE registered_groups;
         ALTER TABLE registered_groups_new RENAME TO registered_groups;
       `);
@@ -1193,6 +1209,10 @@ function initializeSqliteDatabase(
     'created_at',
     'created_by',
     'execution_type',
+    'runtime_profile',
+    'agent_client_id',
+    'backend',
+    'agent_model',
     'script_command',
     'execution_mode',
     'execution_node',
@@ -1222,6 +1242,7 @@ function initializeSqliteDatabase(
       'custom_cwd',
       'repo_id',
       'repo_git_url',
+      'repo_main_branch',
       'repo_device_path',
       'init_source_path',
       'init_git_url',
@@ -2515,6 +2536,9 @@ function normalizeMessageRow(
   if (typeof is_from_me === 'number') {
     out.is_from_me = is_from_me === 1;
   }
+  if (!out.role) {
+    out.role = out.is_from_me ? 'assistant' : 'user';
+  }
   return out;
 }
 
@@ -2560,6 +2584,7 @@ export function storeMessageDirect(
     sourceJid ?? chatJid,
     sender,
     senderName,
+    meta?.role ?? (isFromMe ? 'assistant' : 'user'),
     toUtf8String(content, 'messages.content'),
     timestamp,
     isFromMe ? 1 : 0,
@@ -3098,8 +3123,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, script_command, execution_mode, execution_node, next_run, status, created_at, created_by, notify_channels)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, execution_type, runtime_profile, agent_client_id, backend, agent_model, script_command, execution_mode, execution_node, next_run, status, created_at, created_by, notify_channels)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -3110,6 +3135,10 @@ export function createTask(
     task.schedule_value,
     task.context_mode || 'group',
     task.execution_type || 'agent',
+    task.runtime_profile ?? null,
+    task.agent_client_id ?? null,
+    task.backend ?? null,
+    task.agent_model ?? null,
     task.script_command == null
       ? null
       : toUtf8String(task.script_command, 'scheduled_tasks.script_command'),
@@ -3136,6 +3165,10 @@ function mapTaskRow(row: unknown): ScheduledTask {
     r.notify_channels = null;
   }
   // Normalize new nullable fields
+  if (r.runtime_profile === undefined) r.runtime_profile = null;
+  if (r.agent_client_id === undefined) r.agent_client_id = null;
+  if (r.backend === undefined) r.backend = null;
+  if (r.agent_model === undefined) r.agent_model = null;
   if (r.execution_mode === undefined) r.execution_mode = null;
   if (r.execution_node === undefined) r.execution_node = null;
   if (r.workspace_jid === undefined) r.workspace_jid = null;
@@ -3182,6 +3215,10 @@ export function updateTask(
       | 'schedule_value'
       | 'context_mode'
       | 'execution_type'
+      | 'runtime_profile'
+      | 'agent_client_id'
+      | 'backend'
+      | 'agent_model'
       | 'execution_mode'
       | 'execution_node'
       | 'script_command'
@@ -3215,6 +3252,22 @@ export function updateTask(
   if (updates.execution_type !== undefined) {
     fields.push('execution_type = ?');
     values.push(updates.execution_type);
+  }
+  if (updates.runtime_profile !== undefined) {
+    fields.push('runtime_profile = ?');
+    values.push(updates.runtime_profile);
+  }
+  if (updates.agent_client_id !== undefined) {
+    fields.push('agent_client_id = ?');
+    values.push(updates.agent_client_id || null);
+  }
+  if (updates.backend !== undefined) {
+    fields.push('backend = ?');
+    values.push(updates.backend || null);
+  }
+  if (updates.agent_model !== undefined) {
+    fields.push('agent_model = ?');
+    values.push(updates.agent_model || null);
   }
   if (updates.execution_mode !== undefined) {
     fields.push('execution_mode = ?');
@@ -3589,6 +3642,7 @@ function mapIssueAttachmentRow(row: unknown): IssueAttachment {
 
 export interface IssueListFilters {
   workspaceJid?: string;
+  workspaceJids?: string[];
   query?: string;
   statuses?: IssueStatus[];
   priorities?: IssuePriority[];
@@ -3660,6 +3714,16 @@ export function listIssues(filters: IssueListFilters = {}): {
   if (filters.workspaceJid) {
     where.push('workspace_jid = ?');
     values.push(filters.workspaceJid);
+  } else if (filters.workspaceJids) {
+    const workspaceJids = Array.from(new Set(filters.workspaceJids)).filter(
+      Boolean,
+    );
+    if (workspaceJids.length === 0) {
+      where.push('1 = 0');
+    } else {
+      where.push(`workspace_jid IN (${workspaceJids.map(() => '?').join(',')})`);
+      values.push(...workspaceJids);
+    }
   }
   if (filters.query?.trim()) {
     where.push('(title LIKE ? OR description LIKE ?)');
@@ -4171,6 +4235,7 @@ type RegisteredGroupRow = {
   custom_cwd: string | null;
   repo_id: string | null;
   repo_git_url: string | null;
+  repo_main_branch: string | null;
   repo_device_path: string | null;
   init_source_path: string | null;
   init_git_url: string | null;
@@ -4194,6 +4259,7 @@ type RegisteredGroupRow = {
   runtime_profile: string | null;
   device_link_id: string | null;
   agent_client_id: string | null;
+  agent_model: string | null;
   backend: string | null;
   execution_node: string | null;
 };
@@ -4214,6 +4280,7 @@ function parseGroupRow(
     customCwd: row.custom_cwd ?? undefined,
     repoId: row.repo_id ?? undefined,
     repoGitUrl: row.repo_git_url ?? undefined,
+    repoMainBranch: row.repo_main_branch ?? undefined,
     repoDevicePath: row.repo_device_path ?? undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,
@@ -4242,6 +4309,7 @@ function parseGroupRow(
     runtimeProfile: parseRuntimeProfile(row.runtime_profile),
     deviceLinkId: row.device_link_id ?? undefined,
     agentClientId: row.agent_client_id ?? undefined,
+    agentModel: row.agent_model ?? undefined,
     backend: row.backend ?? undefined,
     executionNode: row.execution_node ?? undefined,
   };
@@ -4280,8 +4348,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, repo_id, repo_git_url, repo_device_path, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist, runtime_profile, device_link_id, agent_client_id, backend, execution_node)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, repo_id, repo_git_url, repo_main_branch, repo_device_path, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist, runtime_profile, device_link_id, agent_client_id, agent_model, backend, execution_node)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -4292,6 +4360,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.customCwd ?? null,
     group.repoId ?? null,
     group.repoGitUrl ?? null,
+    group.repoMainBranch ?? null,
     group.repoDevicePath ?? null,
     group.initSourcePath ?? null,
     group.initGitUrl ?? null,
@@ -4317,6 +4386,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.runtimeProfile ?? null,
     group.deviceLinkId ?? null,
     group.agentClientId ?? null,
+    group.agentModel ?? null,
     group.backend ?? null,
     group.executionNode ?? null,
   );
@@ -4331,6 +4401,7 @@ type ManagedRepoRow = {
   name: string;
   kind: string;
   git_url: string | null;
+  main_branch: string | null;
   device_path: string | null;
   device_link_id: string | null;
   created_by: string;
@@ -4344,6 +4415,7 @@ function parseManagedRepoRow(row: ManagedRepoRow): ManagedRepo {
     name: row.name,
     kind: row.kind === 'device_path' ? 'device_path' : 'git',
     gitUrl: row.git_url ?? undefined,
+    mainBranch: row.main_branch ?? undefined,
     devicePath: row.device_path ?? undefined,
     deviceLinkId: row.device_link_id ?? undefined,
     createdBy: row.created_by,
@@ -4356,6 +4428,7 @@ export function createManagedRepo(input: {
   name: string;
   kind: ManagedRepoKind;
   gitUrl?: string;
+  mainBranch?: string;
   devicePath?: string;
   deviceLinkId?: string;
   createdBy: string;
@@ -4366,6 +4439,7 @@ export function createManagedRepo(input: {
     name: input.name,
     kind: input.kind,
     gitUrl: input.gitUrl,
+    mainBranch: input.mainBranch,
     devicePath: input.devicePath,
     deviceLinkId: input.deviceLinkId,
     createdBy: input.createdBy,
@@ -4373,13 +4447,14 @@ export function createManagedRepo(input: {
     updatedAt: now,
   };
   db.prepare(
-    `INSERT INTO repos (id, name, kind, git_url, device_path, device_link_id, created_by, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO repos (id, name, kind, git_url, main_branch, device_path, device_link_id, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     repo.id,
     repo.name,
     repo.kind,
     repo.gitUrl ?? null,
+    repo.kind === 'git' ? (repo.mainBranch ?? null) : null,
     repo.devicePath ?? null,
     repo.deviceLinkId ?? null,
     repo.createdBy,
@@ -4844,7 +4919,7 @@ export function getMessagesPage(
   const sql = sessionFilter
     ? before
       ? `
-      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+      SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
       FROM messages
       WHERE chat_jid = ? AND timestamp < ? AND session_id = ?
@@ -4852,7 +4927,7 @@ export function getMessagesPage(
       LIMIT ?
     `
       : `
-      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+      SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
       FROM messages
       WHERE chat_jid = ? AND session_id = ?
@@ -4861,7 +4936,7 @@ export function getMessagesPage(
     `
     : before
       ? `
-      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+      SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
       FROM messages
       WHERE chat_jid = ? AND timestamp < ?
@@ -4869,7 +4944,7 @@ export function getMessagesPage(
       LIMIT ?
     `
       : `
-      SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+      SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
              turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
       FROM messages
       WHERE chat_jid = ?
@@ -4905,13 +4980,13 @@ export function getMessagesAfter(
   const rows = db
     .prepare(
       sessionFilter
-        ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+        ? `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid = ? AND timestamp > ? AND session_id = ?
        ORDER BY timestamp ASC
        LIMIT ?`
-        : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+        : `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid = ? AND timestamp > ?
@@ -4939,26 +5014,26 @@ export function getMessagesPageMulti(
   const sessionFilter = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
   const sql = sessionFilter
     ? before
-      ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+      ? `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp < ? AND session_id = ?
        ORDER BY timestamp DESC
        LIMIT ?`
-      : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+      : `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND session_id = ?
        ORDER BY timestamp DESC
        LIMIT ?`
     : before
-      ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+      ? `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp < ?
        ORDER BY timestamp DESC
        LIMIT ?`
-      : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+      : `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid IN (${placeholders})
@@ -4996,13 +5071,13 @@ export function getMessagesAfterMulti(
   const rows = db
     .prepare(
       sessionFilter
-        ? `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+        ? `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp > ? AND session_id = ?
        ORDER BY timestamp ASC
        LIMIT ?`
-        : `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments, token_usage,
+        : `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid IN (${placeholders}) AND timestamp > ?
@@ -5038,6 +5113,10 @@ export interface SystemHistoryFilters {
   query?: string;
   limit?: number;
   offset?: number;
+  userId?: string;
+  includeAllUsers?: boolean;
+  accessibleWorkspaceJids?: string[];
+  accessibleGroupFolders?: string[];
 }
 
 export interface SystemHistoryItem {
@@ -5177,7 +5256,7 @@ export function listSystemHistory(filters: SystemHistoryFilters = {}): SystemHis
   if (type === 'all' || type === 'message') {
     const rows = db
       .prepare(
-        `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
+        `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.role, m.content, m.timestamp,
                 m.is_from_me, m.session_id, m.turn_id, m.source_kind, c.name AS chat_name,
                 c.archived_at AS chat_archived_at, c.archive_reason AS chat_archive_reason, c.jid AS chat_exists
          FROM messages m
@@ -5191,7 +5270,7 @@ export function listSystemHistory(filters: SystemHistoryFilters = {}): SystemHis
         id: `message:${row.chat_jid}:${row.id}`,
         type: 'message',
         title: String(row.chat_name || row.chat_jid || 'Conversation message'),
-        status: row.is_from_me ? 'agent' : 'user',
+        status: String(row.role || (row.is_from_me ? 'agent' : 'user')),
         actor: String(row.sender_name || row.sender || ''),
         workspace: String(row.chat_jid || ''),
         summary: typeof row.content === 'string' ? row.content.slice(0, 240) : null,
@@ -5200,7 +5279,7 @@ export function listSystemHistory(filters: SystemHistoryFilters = {}): SystemHis
         completedAt: null,
         createdAt: String(row.timestamp || ''),
         targetUrl: '/chat',
-        payload: { chatJid: row.chat_jid, messageId: row.id, sessionId: row.session_id, turnId: row.turn_id, sourceKind: row.source_kind },
+        payload: { chatJid: row.chat_jid, messageId: row.id, sessionId: row.session_id, turnId: row.turn_id, sourceKind: row.source_kind, role: row.role },
       });
     }
   }
@@ -5353,18 +5432,49 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
   const type = filters.type ?? 'all';
   const query = filters.query?.trim().toLowerCase();
   const flows: SystemHistoryFlow[] = [];
+  const includeAllUsers = !!filters.includeAllUsers;
+  const scopedUserId = filters.userId;
+  const accessibleWorkspaceJids = Array.from(
+    new Set(filters.accessibleWorkspaceJids ?? []),
+  ).filter(Boolean);
+  const accessibleGroupFolders = Array.from(
+    new Set(filters.accessibleGroupFolders ?? []),
+  ).filter(Boolean);
+  const placeholders = (values: unknown[]) => values.map(() => '?').join(',');
 
   if (type === 'all' || type === 'task') {
+    const taskAccess: string[] = [];
+    const taskValues: unknown[] = [];
+    if (!includeAllUsers) {
+      if (scopedUserId) {
+        taskAccess.push('t.created_by = ?');
+        taskValues.push(scopedUserId);
+      }
+      if (accessibleWorkspaceJids.length > 0) {
+        taskAccess.push(`t.chat_jid IN (${placeholders(accessibleWorkspaceJids)})`);
+        taskValues.push(...accessibleWorkspaceJids);
+      }
+      if (accessibleGroupFolders.length > 0) {
+        taskAccess.push(`t.group_folder IN (${placeholders(accessibleGroupFolders)})`);
+        taskValues.push(...accessibleGroupFolders);
+      }
+    }
+    const taskWhere = includeAllUsers
+      ? ''
+      : taskAccess.length > 0
+        ? `WHERE (${taskAccess.join(' OR ')})`
+        : 'WHERE 1 = 0';
     const rows = db
       .prepare(
         `SELECT l.id, l.task_id, l.run_at, l.duration_ms, l.status, l.result, l.error,
                 t.prompt, t.group_folder, t.chat_jid, t.execution_type
          FROM task_run_logs l
          LEFT JOIN scheduled_tasks t ON t.id = l.task_id
+         ${taskWhere}
          ORDER BY l.run_at DESC
          LIMIT ?`,
       )
-      .all(limit * 2) as Array<Record<string, unknown>>;
+      .all(...taskValues, limit * 2) as Array<Record<string, unknown>>;
     for (const row of rows) {
       const title = String(row.prompt || row.task_id || 'Scheduled task');
       const at = String(row.run_at || '');
@@ -5397,15 +5507,37 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
   }
 
   if (type === 'all' || type === 'issue') {
+    const issueAccess: string[] = [];
+    const issueValues: unknown[] = [];
+    if (!includeAllUsers) {
+      if (scopedUserId) {
+        issueAccess.push('r.created_by = ?');
+        issueValues.push(scopedUserId);
+      }
+      if (accessibleWorkspaceJids.length > 0) {
+        issueAccess.push(`r.workspace_jid IN (${placeholders(accessibleWorkspaceJids)})`);
+        issueValues.push(...accessibleWorkspaceJids);
+      }
+      if (accessibleGroupFolders.length > 0) {
+        issueAccess.push(`r.workspace_folder IN (${placeholders(accessibleGroupFolders)})`);
+        issueValues.push(...accessibleGroupFolders);
+      }
+    }
+    const issueWhere = includeAllUsers
+      ? ''
+      : issueAccess.length > 0
+        ? `WHERE (${issueAccess.join(' OR ')})`
+        : 'WHERE 1 = 0';
     const rows = db
       .prepare(
         `SELECT r.*, i.title AS issue_title, i.priority AS issue_priority
          FROM issue_agent_runs r
          LEFT JOIN issues i ON i.id = r.issue_id
+         ${issueWhere}
          ORDER BY r.created_at DESC
          LIMIT ?`,
       )
-      .all(limit * 2) as Array<Record<string, unknown>>;
+      .all(...issueValues, limit * 2) as Array<Record<string, unknown>>;
     for (const row of rows) {
       const sessionLabel = shortHistorySession(row.session_id) || String(row.id || '').slice(0, 12);
       const eventRows = db
@@ -5477,7 +5609,9 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
   }
 
   if (type === 'all' || type === 'team') {
-    const rows = db.prepare('SELECT * FROM agent_team_runs ORDER BY created_at DESC LIMIT ?').all(limit * 2) as Array<Record<string, unknown>>;
+    const teamWhere = includeAllUsers ? '' : scopedUserId ? 'WHERE user_id = ?' : 'WHERE 1 = 0';
+    const teamValues = includeAllUsers || !scopedUserId ? [] : [scopedUserId];
+    const rows = db.prepare(`SELECT * FROM agent_team_runs ${teamWhere} ORDER BY created_at DESC LIMIT ?`).all(...teamValues, limit * 2) as Array<Record<string, unknown>>;
     for (const row of rows) {
       const eventRows = db
         .prepare('SELECT * FROM agent_team_events WHERE run_id = ? ORDER BY timestamp ASC LIMIT 80')
@@ -5518,23 +5652,31 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
   }
 
   if (type === 'all' || type === 'message') {
+    const baseChatJidExpr = `CASE
+           WHEN instr(m.chat_jid, '#agent:') > 0 THEN substr(m.chat_jid, 1, instr(m.chat_jid, '#agent:') - 1)
+           ELSE m.chat_jid
+         END`;
+    const messageWhere = includeAllUsers
+      ? ''
+      : accessibleWorkspaceJids.length > 0
+        ? `WHERE ${baseChatJidExpr} IN (${placeholders(accessibleWorkspaceJids)})`
+        : 'WHERE 1 = 0';
+    const messageValues = includeAllUsers ? [] : accessibleWorkspaceJids;
     const rows = db
       .prepare(
-        `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
+        `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.role, m.content, m.timestamp,
                 m.is_from_me, m.session_id, m.turn_id, m.source_kind,
                 c.name AS chat_name, c.archived_at AS chat_archived_at, c.archive_reason AS chat_archive_reason,
                 CASE WHEN c.jid IS NULL THEN 0 ELSE 1 END AS chat_exists,
                 g.name AS group_name, g.folder AS group_folder
          FROM messages m
          LEFT JOIN chats c ON c.jid = m.chat_jid
-         LEFT JOIN registered_groups g ON g.jid = CASE
-           WHEN instr(m.chat_jid, '#agent:') > 0 THEN substr(m.chat_jid, 1, instr(m.chat_jid, '#agent:') - 1)
-           ELSE m.chat_jid
-         END
+         LEFT JOIN registered_groups g ON g.jid = ${baseChatJidExpr}
+         ${messageWhere}
          ORDER BY m.timestamp DESC
          LIMIT ?`, 
       )
-      .all(limit * 8) as Array<Record<string, unknown>>;
+      .all(...messageValues, limit * 8) as Array<Record<string, unknown>>;
     const byChat = new Map<string, Array<Record<string, unknown>>>();
     for (const row of rows) {
       const key = String(row.chat_jid || 'unknown');
@@ -5577,8 +5719,9 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
       if (messages.length === 0) continue;
       const first = messages[0];
       const last = messages[messages.length - 1];
-      const userCount = messages.filter((message) => Number(message.is_from_me || 0) !== 1).length;
-      const agentCount = messages.length - userCount;
+      const userCount = messages.filter((message) => String(message.role || (Number(message.is_from_me || 0) === 1 ? 'assistant' : 'user')) === 'user').length;
+      const toolCount = messages.filter((message) => String(message.role || '') === 'tool').length;
+      const agentCount = messages.length - userCount - toolCount;
       const sessionLabel = shortHistorySession(sessionId) || 'local';
       const workspaceLabel = String(last.group_name || last.chat_name || last.group_folder || last.chat_jid || 'Workspace');
       const archivedAt = typeof last.chat_archived_at === 'string' && last.chat_archived_at
@@ -5588,7 +5731,7 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
         id: `conversation:${key}`,
         type: 'conversation',
         title: `${workspaceLabel} · ${sessionLabel}`,
-        status: `${userCount} user / ${agentCount} agent`,
+        status: `${userCount} user / ${agentCount} agent / ${toolCount} tool`,
         archivedAt,
         actor: String(last.sender_name || last.sender || ''),
         workspace: String(last.chat_jid || ''),
@@ -5597,16 +5740,19 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
         summary: typeof last.content === 'string' ? last.content.slice(0, 240) : null,
         targetUrl: chatHistoryTargetUrl(last.chat_jid, sessionId, last.group_folder),
         metrics: { stages: messages.length, messages: messages.length },
-        stages: messages.map((message) => ({
-          id: `message:${message.chat_jid}:${message.id}`,
-          type: message.is_from_me ? 'agent_message' : 'user_message',
-          title: message.is_from_me ? 'Agent output' : 'User input',
-          status: message.is_from_me ? 'agent' : 'user',
-          at: String(message.timestamp || ''),
-          summary: typeof message.content === 'string' ? message.content.slice(0, 240) : null,
-          detail: typeof message.content === 'string' ? message.content : null,
-          payload: { chatJid: message.chat_jid, messageId: message.id, sessionId: message.session_id, turnId: message.turn_id, sourceKind: message.source_kind, archivedAt, archiveReason: last.chat_archive_reason },
-        })),
+        stages: messages.map((message) => {
+          const role = String(message.role || (Number(message.is_from_me || 0) === 1 ? 'assistant' : 'user'));
+          return {
+            id: `message:${message.chat_jid}:${message.id}`,
+            type: role === 'tool' ? 'tool_message' : message.is_from_me ? 'agent_message' : 'user_message',
+            title: role === 'tool' ? 'Tool' : message.is_from_me ? 'Agent output' : 'User input',
+            status: role,
+            at: String(message.timestamp || ''),
+            summary: typeof message.content === 'string' ? message.content.slice(0, 240) : null,
+            detail: typeof message.content === 'string' ? message.content : null,
+            payload: { chatJid: message.chat_jid, messageId: message.id, sessionId: message.session_id, turnId: message.turn_id, sourceKind: message.source_kind, role, archivedAt, archiveReason: last.chat_archive_reason },
+          };
+        }),
       });
     }
   }
@@ -5638,7 +5784,7 @@ export function getMessagesByTimeRange(
   const endIso = new Date(endTs).toISOString();
   const rows = db
     .prepare(
-      `SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me, attachments,
+      `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
        WHERE chat_jid = ? AND timestamp >= ? AND timestamp < ?
@@ -5670,6 +5816,7 @@ export function getGroupsByOwner(
     custom_cwd: string | null;
     repo_id: string | null;
     repo_git_url: string | null;
+    repo_main_branch: string | null;
     repo_device_path: string | null;
     init_source_path: string | null;
     init_git_url: string | null;
@@ -5692,6 +5839,7 @@ export function getGroupsByOwner(
     customCwd: row.custom_cwd ?? undefined,
     repoId: row.repo_id ?? undefined,
     repoGitUrl: row.repo_git_url ?? undefined,
+    repoMainBranch: row.repo_main_branch ?? undefined,
     repoDevicePath: row.repo_device_path ?? undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,

@@ -41,6 +41,7 @@ import { useTasksStore, type ScheduledTask } from '../stores/tasks';
 import { useIssuesStore, type WorkspaceIssue } from '../stores/issues';
 import {
   useAgentTeamsStore,
+  type AgentMdStoreEntry,
   type AgentTeam,
   type AgentTeamApproval,
   type AgentTeamCheckpoint,
@@ -3127,6 +3128,8 @@ function AgentMdPanel({
     saving,
     loadAgentMdDefinitions,
     createAgentMdDefinition,
+    listAgentMdStoreEntries,
+    importAgentMdFromStore,
     updateAgentMdDefinition,
     removeAgentMdDefinition,
   } = useAgentTeamsStore();
@@ -3148,6 +3151,11 @@ function AgentMdPanel({
     summary: '',
     content: '',
   });
+  const [storeOpen, setStoreOpen] = useState(false);
+  const [storeQuery, setStoreQuery] = useState('');
+  const [storeEntries, setStoreEntries] = useState<AgentMdStoreEntry[]>([]);
+  const [storeLoading, setStoreLoading] = useState(false);
+  const [importingPath, setImportingPath] = useState<string | null>(null);
   const generatorName = generatorAgent?.displayName ?? 'Agent';
   const generatorId = generatorAgent?.id ?? 'manual';
   const selectAgentMd = (agentMdId: string | null) => {
@@ -3204,6 +3212,36 @@ function AgentMdPanel({
       content: defaultAgentMdContent(generatorName),
     });
     setCreateOpen(true);
+  };
+
+  const loadStoreEntries = async (query = storeQuery) => {
+    setStoreLoading(true);
+    try {
+      setStoreEntries(await listAgentMdStoreEntries(query));
+    } catch (err) {
+      toast.error(getErrorMessage(err, '加载 agent.md 商店失败'));
+    } finally {
+      setStoreLoading(false);
+    }
+  };
+
+  const handleOpenStore = () => {
+    setStoreOpen(true);
+    void loadStoreEntries('');
+  };
+
+  const handleImportFromStore = async (entry: AgentMdStoreEntry) => {
+    setImportingPath(entry.path);
+    try {
+      const saved = await importAgentMdFromStore(entry.path, generatorId);
+      selectAgentMd(saved.id);
+      setStoreOpen(false);
+      toast.success(`已从商店添加 agent.md「${saved.name}」`);
+    } catch (err) {
+      toast.error(getErrorMessage(err, '从商店添加 agent.md 失败'));
+    } finally {
+      setImportingPath(null);
+    }
   };
 
   const handleCreate = async () => {
@@ -3278,21 +3316,27 @@ function AgentMdPanel({
               {agentMdDefinitions.length} 个已保存定义
             </p>
           </div>
-          <Button
-            size="sm"
-            className={AGENT_ADD_BUTTON_CLASS}
-            onClick={handleNew}
-          >
-            <Plus className="size-4" />
-            新增定义
-          </Button>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={handleOpenStore}>
+              <Sparkles className="size-4" />
+              从商店添加
+            </Button>
+            <Button
+              size="sm"
+              className={AGENT_ADD_BUTTON_CLASS}
+              onClick={handleNew}
+            >
+              <Plus className="size-4" />
+              新增定义
+            </Button>
+          </div>
         </div>
         <p className="mb-3 rounded-xl border border-dashed border-border bg-muted/10 p-3 text-xs leading-5 text-muted-foreground">
           现有 agent.md 简介会在生成 Team 时提供给模型，用于辅助拆分角色。
         </p>
         {agentMdDefinitions.length === 0 ? (
           <EmptyText>
-            还没有 agent.md。点击「新增定义」开始创建。
+            还没有 agent.md。点击「从商店添加」导入，或点击「新增定义」开始创建。
           </EmptyText>
         ) : (
           <div className="max-h-[calc(100vh-19rem)] space-y-2 overflow-y-auto pr-1">
@@ -3471,6 +3515,79 @@ function AgentMdPanel({
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={storeOpen} onOpenChange={setStoreOpen}>
+        <DialogContent className="sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>从商店添加 agent.md</DialogTitle>
+            <DialogDescription>
+              从 https://github.com/msitarzewski/agency-agents 读取角色定义，导入后会保存为当前用户的 agent.md。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <form
+              className="flex gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void loadStoreEntries(storeQuery);
+              }}
+            >
+              <input
+                value={storeQuery}
+                onChange={(event) => setStoreQuery(event.target.value)}
+                className="min-w-0 flex-1 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                placeholder="搜索名称、分类或路径，例如 backend、marketing、security"
+              />
+              <Button type="submit" variant="outline" disabled={storeLoading}>
+                {storeLoading ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-4" />
+                )}
+                搜索
+              </Button>
+            </form>
+            <div className="max-h-[28rem] space-y-2 overflow-y-auto pr-1">
+              {storeLoading ? (
+                <div className="flex items-center justify-center gap-2 rounded-xl border border-border bg-muted/20 p-6 text-sm text-muted-foreground">
+                  <Loader2 className="size-4 animate-spin" />
+                  正在加载商店条目…
+                </div>
+              ) : storeEntries.length === 0 ? (
+                <EmptyText>没有找到匹配的商店条目。</EmptyText>
+              ) : (
+                storeEntries.map((entry) => (
+                  <div
+                    key={entry.path}
+                    className="flex flex-col gap-3 rounded-xl border border-border bg-background/80 p-3 sm:flex-row sm:items-start sm:justify-between"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium text-foreground">
+                        {entry.name}
+                      </div>
+                      <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                        {entry.path} · {entry.category} · {Math.ceil(entry.size / 1024)} KB
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      onClick={() => void handleImportFromStore(entry)}
+                      disabled={saving || importingPath === entry.path}
+                    >
+                      {importingPath === entry.path ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Plus className="size-4" />
+                      )}
+                      添加
+                    </Button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

@@ -3168,6 +3168,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           // 流式事件处理 - 广播 WebSocket + 持久化 SDK Task 生命周期到 DB
           if (result.status === 'stream' && result.streamEvent) {
             broadcastStreamEvent(chatJid, result.streamEvent);
+            persistToolMessage(chatJid, result.streamEvent);
 
             // ── 累积 text_delta / thinking_delta 文本（中断时用于保存已输出内容）──
             if (
@@ -4417,6 +4418,74 @@ export function buildOverflowPartialReply(partialText: string): string {
   return trimmed
     ? `${trimmed}\n\n---\n*⚠️ 上下文压缩中，稍后自动继续*`
     : '*⚠️ 上下文压缩中，稍后自动继续*';
+}
+
+function compactToolValue(value: unknown, max = 3000): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function toolMessageContent(event: StreamEvent): string {
+  const label = event.skillName || event.toolName || event.toolUseId || 'unknown';
+  const lines = [
+    event.eventType === 'tool_use_end' ? `工具响应: ${label}` : `工具调用: ${label}`,
+  ];
+  if (event.toolUseId) lines.push(`id: ${event.toolUseId}`);
+  if (event.parentToolUseId) lines.push(`parent: ${event.parentToolUseId}`);
+  if (event.toolInputSummary) lines.push(`summary: ${event.toolInputSummary}`);
+  const input = compactToolValue(event.toolInput ?? event.rawEvent);
+  if (event.eventType === 'tool_use_start' && input) lines.push(`input:\n${input}`);
+  const response = compactToolValue(event.detail ?? event.rawEvent);
+  if (event.eventType === 'tool_use_end' && response) lines.push(`response:\n${response}`);
+  return lines.join('\n');
+}
+
+function persistToolMessage(chatJid: string, event: StreamEvent, agentId?: string): void {
+  if (event.eventType !== 'tool_use_start' && event.eventType !== 'tool_use_end') return;
+  const msgId = `tool-${event.toolUseId || crypto.randomUUID()}-${event.eventType === 'tool_use_start' ? 'start' : 'end'}`;
+  const timestamp = new Date().toISOString();
+  const targetJid = agentId ? `${chatJid}#agent:${agentId}` : chatJid;
+  ensureChatExists(targetJid);
+  const content = toolMessageContent(event);
+  const sourceKind = event.eventType === 'tool_use_start' ? 'tool_call' : 'tool_result';
+  const persistedMsgId = storeMessageDirect(
+    msgId,
+    targetJid,
+    'octodeck-tool',
+    event.skillName || event.toolName || 'Tool',
+    content,
+    timestamp,
+    true,
+    {
+      meta: {
+        role: 'tool',
+        turnId: event.turnId ?? null,
+        sessionId: event.sessionId ?? null,
+        sdkMessageUuid: event.messageUuid ?? null,
+        sourceKind,
+      },
+    },
+  );
+  broadcastNewMessage(
+    targetJid,
+    {
+      id: persistedMsgId,
+      chat_jid: targetJid,
+      sender: 'octodeck-tool',
+      sender_name: event.skillName || event.toolName || 'Tool',
+      role: 'tool',
+      content,
+      timestamp,
+      is_from_me: true,
+      turn_id: event.turnId ?? null,
+      session_id: event.sessionId ?? null,
+      sdk_message_uuid: event.messageUuid ?? null,
+      source_kind: sourceKind,
+      finalization_reason: null,
+    },
+    agentId,
+  );
 }
 
 /**
@@ -6302,6 +6371,7 @@ async function processAgentConversation(
     // Stream events
     if (output.status === 'stream' && output.streamEvent) {
       broadcastStreamEvent(chatJid, output.streamEvent, agentId);
+      persistToolMessage(chatJid, output.streamEvent, agentId);
 
       // ── 累积 text_delta 文本（中断时用于保存已输出内容）──
       if (

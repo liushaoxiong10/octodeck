@@ -68,4 +68,34 @@ describe('agent-link registry replacement handling', () => {
     expect(failModelRequestsForLink).not.toHaveBeenCalled();
     expect(failSkillsRequestsForLink).not.toHaveBeenCalled();
   });
+
+  test('sends daemon update request after hello when client version is outdated', async () => {
+    vi.clearAllMocks();
+    const { handleHello } = await import('../src/agent-link/registry.js');
+
+    const session = fakeSession('cl_outdated');
+    session.send.mockReturnValue(true);
+
+    handleHello(
+      session,
+      {
+        type: 'hello',
+        id: 1,
+        version: 'octodeck-daemon/1.0.3',
+        capabilities: ['run.host-cli'],
+      },
+      'Outdated Daemon',
+    );
+
+    expect(session.send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'hello_ack' }),
+    );
+    expect(session.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'daemon.update.request',
+        latestVersion: 'octodeck-daemon/1.0.4',
+        currentVersion: 'octodeck-daemon/1.0.3',
+      }),
+    );
+  });
 });

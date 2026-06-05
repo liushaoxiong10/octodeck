@@ -49,6 +49,14 @@ const EMPTY_AGENTS: import('../../types').AgentInfo[] = [];
 
 type SidebarTab = 'files' | 'env' | 'skills' | 'mcp' | 'members';
 
+function sessionFileDefaultPath(sessionId: string | null | undefined): string | undefined {
+  const value = sessionId?.trim();
+  if (!value || value === '.' || value === '..' || value.includes('/') || value.includes('\\')) {
+    return undefined;
+  }
+  return `sessions/${value}`;
+}
+
 interface ChatViewProps {
   groupJid: string;
   onBack?: () => void;
@@ -96,6 +104,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const groupMessages = useChatStore(s => s.messages[groupJid]);
   const isWaiting = useChatStore(s => !!s.waiting[groupJid]);
   const mainInterrupted = useChatStore(s => !!s.streaming[groupJid]?.interrupted);
+  const mainStreamingSessionId = useChatStore(s => s.streaming[groupJid]?.sessionId ?? null);
   const hasMoreMessages = useChatStore(s => !!s.hasMore[groupJid]);
   const loading = useChatStore(s => s.loading);
   const loadMessages = useChatStore(s => s.loadMessages);
@@ -109,6 +118,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
 
   const agents = useChatStore(s => s.agents[groupJid] ?? EMPTY_AGENTS);
   const activeAgentTab = useChatStore(s => s.activeAgentTab[groupJid] ?? null);
+  const activeAgentStreamingSessionId = useChatStore(s => activeAgentTab ? s.agentStreaming[activeAgentTab]?.sessionId ?? null : null);
   const setActiveAgentTab = useChatStore(s => s.setActiveAgentTab);
 
   // URL `?agent=` is the source of truth for the active sub-conversation tab.
@@ -270,6 +280,19 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   // Derived: active agent info and kind
   const activeAgent = activeAgentTab ? agents.find(a => a.id === activeAgentTab) : null;
   const isConversationTab = activeAgent?.kind === 'conversation';
+  const latestVisibleSessionId = useMemo(() => {
+    const source = activeAgentTab ? (agentMessages[activeAgentTab] || []) : (groupMessages || []);
+    for (let i = source.length - 1; i >= 0; i -= 1) {
+      const sessionId = source[i]?.session_id?.trim();
+      if (sessionId) return sessionId;
+    }
+    return null;
+  }, [activeAgentTab, agentMessages, groupMessages]);
+  const filePanelDefaultPath = sessionFileDefaultPath(
+    urlSessionId ||
+    (activeAgentTab ? activeAgentStreamingSessionId : mainStreamingSessionId) ||
+    latestVisibleSessionId,
+  );
   const isTopicWorkspace =
     group?.conversation_nav_mode === 'vertical_threads' ||
     agents.some((a) => a.source_kind === 'feishu_thread');
@@ -858,7 +881,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           {/* Tab content */}
           <div className="flex-1 overflow-hidden min-h-0">
             {sidebarTab === 'files' ? (
-              <FilePanel groupJid={groupJid} />
+              <FilePanel groupJid={groupJid} defaultPath={filePanelDefaultPath} />
             ) : sidebarTab === 'env' ? (
               <ContainerEnvPanel groupJid={groupJid} />
             ) : sidebarTab === 'skills' ? (
@@ -914,6 +937,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           <div className="flex-1 overflow-hidden h-[calc(80dvh-56px)]">
             <FilePanel
               groupJid={groupJid}
+              defaultPath={filePanelDefaultPath}
               onClose={() => setMobilePanel(null)}
             />
           </div>

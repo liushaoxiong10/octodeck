@@ -27,6 +27,8 @@ import {
 import { useFileStore, FileEntry, toBase64Url } from '../../stores/files';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
+import { useAgentLinksStore, type AgentLink } from '../../stores/agentLinks';
+import { useCustomBackendsStore } from '../../stores/customBackends';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { api } from '../../api/client';
 import { withBasePath } from '../../utils/url';
@@ -50,7 +52,36 @@ import { MarkdownRenderer } from './MarkdownRenderer';
 
 interface FilePanelProps {
   groupJid: string;
+  defaultPath?: string;
   onClose?: () => void;
+}
+
+interface SystemSettingsForWorkspace {
+  defaultBackend?: string;
+}
+
+function isAgentLinkExecutionTarget(target: string | null | undefined): target is string {
+  return !!target && (/^cl_[0-9a-f]{16}$/.test(target) || /^runtime:cl_[0-9a-f]{16}:[^:]+$/.test(target) || /^cl_[0-9a-f]{16}:[^:]+$/.test(target) || /^provider:[^:]+$/.test(target));
+}
+
+function agentClientIdFromExecutionTarget(target: string): string | undefined {
+  return target.match(/^provider:([^:]+)$/)?.[1]
+    ?? target.match(/^runtime:cl_[0-9a-f]{16}:([^:]+)$/)?.[1]
+    ?? target.match(/^cl_[0-9a-f]{16}:([^:]+)$/)?.[1];
+}
+
+function uniqueProviderIds(devices: AgentLink[]): string[] {
+  return [...new Set(devices.flatMap((device) => [
+    ...(device.runtimes ?? []).map((runtime) => runtime.agentClientId),
+    ...device.agentClients.map((client) => client.id),
+  ]).filter(Boolean))].sort();
+}
+
+function targetSummary(target: string): string {
+  if (target.startsWith('provider:')) return `Provider Pool ${target.slice('provider:'.length)}`;
+  if (target.startsWith('runtime:')) return `Runtime ${target.slice('runtime:'.length)}`;
+  if (target.includes(':')) return `Runtime ${target}`;
+  return `Device ${target}`;
 }
 
 // ─── File type constants ─────────────────────────────────────────
@@ -790,7 +821,7 @@ function GenericTextPreview({
 
 // ─── Main FilePanel ─────────────────────────────────────────────
 
-export function FilePanel({ groupJid, onClose }: FilePanelProps) {
+export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
   const {
     files,
     currentPath,
@@ -818,19 +849,163 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
   // Preview / Editor state — only one overlay can be open at a time
   const [preview, setPreview] = useState<PreviewState>(null);
 
+  const group = useChatStore((s) => s.groups[groupJid]);
+  const updateGroupConfig = useChatStore((s) => s.updateGroupConfig);
   const isStreaming = useChatStore((s) => !!s.streaming[groupJid]);
   const canOpenLocalFolder = useAuthStore((s) => s.user?.role === 'admin');
+  const { links: agentLinks, load: loadAgentLinks } = useAgentLinksStore();
+  const { backends: customBackends, load: loadCustomBackends } = useCustomBackendsStore();
   const prevStreamingRef = useRef(false);
+
+  const [defaultBackend, setDefaultBackend] = useState('claude-sdk');
+  const [savingRuntime, setSavingRuntime] = useState(false);
+  const [modelDraft, setModelDraft] = useState('');
 
   const fileList = files[groupJid] || [];
   const currentDir = currentPath[groupJid] || '';
+  const canEditRuntime = group?.editable === true;
+  const isDeviceCliWorkspace = group?.runtime_profile === 'device-cli-agent';
+
+  useEffect(() => {
+    setModelDraft(group?.agent_model ?? '');
+  }, [group?.agent_model, groupJid]);
+
+  useEffect(() => {
+    if (!canEditRuntime) return;
+    loadAgentLinks();
+    loadCustomBackends();
+  }, [canEditRuntime, loadAgentLinks, loadCustomBackends]);
+
+  useEffect(() => {
+    if (!canEditRuntime) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const sys = await api.get<SystemSettingsForWorkspace>('/api/config/system');
+        if (cancelled) return;
+        setDefaultBackend(sys.defaultBackend ?? 'claude-sdk');
+      } catch {
+        // Runtime controls are best-effort; file browsing should still work.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [canEditRuntime]);
+
+  const customBackendById = useMemo(() => {
+    return new Map(customBackends.map((backend) => [backend.id, backend]));
+  }, [customBackends]);
+
+  const currentBackendId = group?.backend || defaultBackend;
+  const selectedCustomBackend = customBackendById.get(currentBackendId);
+
+  const selectableAgentBackends = useMemo(() => {
+    return customBackends
+      .filter((backend) => (backend.runtime === 'local-device' || backend.deviceLinkId) && backend.deviceLinkId && backend.agentClientId)
+      .sort((a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id));
+  }, [customBackends]);
+
+  const modelSuggestions = useMemo(() => {
+    return [...new Set([
+      group?.agent_model,
+      selectedCustomBackend?.model,
+      ...customBackends.map((backend) => backend.model),
+    ].filter((value): value is string => !!value))].sort();
+  }, [customBackends, group?.agent_model, selectedCustomBackend?.model]);
+
+  const executionTargetOptions = useMemo(() => [
+    ...uniqueProviderIds(agentLinks).map((providerId) => {
+      const onlineRuntimes = agentLinks.flatMap((device) => device.runtimes ?? [])
+        .filter((runtime) => runtime.agentClientId === providerId && runtime.status !== 'offline');
+      return {
+        value: `provider:${providerId}`,
+        label: `Provider Pool · ${providerId} · ${onlineRuntimes.length} online`,
+        disabled: onlineRuntimes.length === 0,
+      };
+    }),
+    ...agentLinks.flatMap((device) => {
+      const runtimes = device.runtimes && device.runtimes.length > 0
+        ? device.runtimes
+        : device.agentClients.map((client) => ({
+            runtimeId: `${device.id}:${client.id}`,
+            deviceLinkId: device.id,
+            agentClientId: client.id,
+            displayName: client.displayName || client.id,
+            status: device.online ? 'idle' : 'offline',
+            runningRuns: device.runningRuns ?? [],
+          }));
+      return [
+        {
+          value: device.id,
+          label: `Device · ${device.displayName} (${device.id})`,
+          disabled: !device.online,
+        },
+        ...runtimes.map((runtime) => ({
+          value: `runtime:${runtime.deviceLinkId}:${runtime.agentClientId}`,
+          label: `Runtime · ${device.displayName} · ${runtime.displayName ?? runtime.agentClientId} · ${runtime.status}`,
+          disabled: !device.online || runtime.status === 'offline' || runtime.status === 'draining',
+        })),
+      ];
+    }),
+  ], [agentLinks]);
+
+  const handleBackendChange = async (nextBackendId: string) => {
+    if (!group || nextBackendId === currentBackendId) return;
+    setSavingRuntime(true);
+    try {
+      const selected = customBackendById.get(nextBackendId);
+      const patch: Parameters<typeof updateGroupConfig>[1] = { backend: nextBackendId };
+      if (group.runtime_profile === 'device-cli-agent') {
+        if (!selected?.deviceLinkId || !selected.agentClientId) {
+          showToast('切换失败', '请选择绑定 Device CLI 的 Agent');
+          return;
+        }
+        patch.device_link_id = selected.deviceLinkId;
+        patch.execution_node = selected.deviceLinkId;
+        patch.agent_client_id = selected.agentClientId;
+      }
+      const ok = await updateGroupConfig(groupJid, patch);
+      if (ok) showToast('已更新', 'Agent 配置将在下一次执行生效');
+    } finally {
+      setSavingRuntime(false);
+    }
+  };
+
+  const handleExecutionTargetChange = async (next: string) => {
+    if (!group || next === (group.execution_node ?? '')) return;
+    setSavingRuntime(true);
+    try {
+      const agentClientId = agentClientIdFromExecutionTarget(next);
+      const ok = await updateGroupConfig(groupJid, {
+        execution_node: next,
+        device_link_id: next,
+        ...(agentClientId ? { agent_client_id: agentClientId } : {}),
+      });
+      if (ok) showToast('已更新', '执行 Runtime 将在下一次执行生效');
+    } finally {
+      setSavingRuntime(false);
+    }
+  };
+
+  const handleModelSave = async () => {
+    const next = modelDraft.trim();
+    if ((group?.agent_model ?? '') === next) return;
+    setSavingRuntime(true);
+    try {
+      const ok = await updateGroupConfig(groupJid, { agent_model: next });
+      if (ok) showToast('已更新', next ? `模型已切换为 ${next}` : '已恢复 Agent 默认模型');
+    } finally {
+      setSavingRuntime(false);
+    }
+  };
 
   useEffect(() => {
     if (groupJid) {
-      loadFiles(groupJid);
+      loadFiles(groupJid, defaultPath ?? '');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupJid]);
+  }, [groupJid, defaultPath]);
 
   // Agent 运行期间定时刷新文件列表；结束时做最终刷新
   useEffect(() => {
@@ -1053,6 +1228,95 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
       {openDirError && (
         <div className="px-4 py-2 border-b border-red-100 dark:border-red-800 bg-red-50 dark:bg-red-950/40 text-xs text-red-600 dark:text-red-400">
           {openDirError}
+        </div>
+      )}
+
+      {canEditRuntime && group && (
+        <div className="px-4 py-3 border-b border-border bg-card/50 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-medium text-foreground">Agent 配置</div>
+            <div className="text-[11px] text-muted-foreground truncate">
+              {group.runtime_profile === 'device-cli-agent'
+                ? 'Device CLI'
+                : group.runtime_profile === 'server-agent-device-tools'
+                  ? 'Server + Device Tools'
+                  : 'Server Agent'}
+            </div>
+          </div>
+
+          {isDeviceCliWorkspace && (
+            <div className="space-y-1">
+              <Label className="text-[11px] text-muted-foreground">CLI Agent</Label>
+              <select
+                value={group.backend || ''}
+                disabled={savingRuntime || selectableAgentBackends.length === 0}
+                onChange={(e) => handleBackendChange(e.target.value)}
+                className="h-8 px-2 text-xs border border-border rounded-md bg-background w-full"
+              >
+                {!group.backend && <option value="">请选择 Agent</option>}
+                {group.backend && !selectableAgentBackends.some((backend) => backend.id === group.backend) && (
+                  <option value={group.backend}>{group.backend} · 当前配置</option>
+                )}
+                {selectableAgentBackends.map((backend) => (
+                  <option key={backend.id} value={backend.id}>
+                    {backend.displayName || backend.id} · {backend.agentClientId} · {backend.deviceLinkId}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {group.runtime_profile === 'server-agent-device-tools' && (
+            <div className="space-y-1">
+              <Label className="text-[11px] text-muted-foreground">执行 Runtime / Provider</Label>
+              <select
+                value={isAgentLinkExecutionTarget(group.execution_node) ? group.execution_node : ''}
+                disabled={savingRuntime}
+                onChange={(e) => handleExecutionTargetChange(e.target.value)}
+                className="h-8 px-2 text-xs border border-border rounded-md bg-background w-full"
+              >
+                <option value="" disabled>未选择 Device</option>
+                {group.execution_node && !executionTargetOptions.some((target) => target.value === group.execution_node) && (
+                  <option value={group.execution_node}>{targetSummary(group.execution_node)} · 当前配置</option>
+                )}
+                {executionTargetOptions.map((target) => (
+                  <option key={target.value} value={target.value} disabled={target.disabled}>
+                    {target.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div className="space-y-1">
+            <Label className="text-[11px] text-muted-foreground">模型</Label>
+            <div className="flex gap-2">
+              <Input
+                value={modelDraft}
+                onChange={(e) => setModelDraft(e.target.value)}
+                list={`workspace-model-presets-${groupJid}`}
+                placeholder={selectedCustomBackend?.model || '输入模型 ID，留空使用默认'}
+                className="h-8 text-xs"
+                disabled={savingRuntime}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleModelSave}
+                disabled={savingRuntime || (group.agent_model ?? '') === modelDraft.trim()}
+                className="h-8 px-2"
+              >
+                {savingRuntime ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
+              </Button>
+            </div>
+            <datalist id={`workspace-model-presets-${groupJid}`}>
+              {modelSuggestions.map((model) => <option key={model} value={model} />)}
+            </datalist>
+            <div className="text-[11px] text-muted-foreground">
+              当前生效：{group.agent_model || selectedCustomBackend?.model || '系统/Agent 默认'}
+            </div>
+          </div>
         </div>
       )}
 

@@ -47,6 +47,44 @@ export interface AgentTeamRole {
   budget?: AgentTeamRoleBudget;
 }
 
+export type AgentTeamWorkflowStepType = 'role' | 'parallel' | 'route';
+
+export interface AgentTeamWorkflowAction {
+  roleId: string;
+  phase?: string;
+  instructions?: string;
+  outputKey?: string;
+}
+
+export interface AgentTeamWorkflowFailurePolicy {
+  action: 'continue' | 'abort' | 'run_role' | 'retry';
+  targetRoleId?: string;
+  phase?: string;
+  maxIterations?: number;
+  instructions?: string;
+}
+
+export interface AgentTeamWorkflowRoute {
+  judgeRoleId: string;
+  candidateRoleIds: string[];
+  fallbackRoleId?: string;
+  finalRoleId?: string;
+}
+
+export interface AgentTeamWorkflowStep {
+  id: string;
+  type: AgentTeamWorkflowStepType;
+  roleId?: string;
+  phase?: string;
+  instructions?: string;
+  inputKeys?: string[];
+  outputKey?: string;
+  dependsOn?: string[];
+  parallel?: AgentTeamWorkflowAction[][];
+  route?: AgentTeamWorkflowRoute;
+  onFailure?: AgentTeamWorkflowFailurePolicy;
+}
+
 export interface AgentTeam {
   id: string;
   name: string;
@@ -55,6 +93,7 @@ export interface AgentTeam {
   description: string;
   roles: AgentTeamRole[];
   workflow: string;
+  workflowSteps?: AgentTeamWorkflowStep[];
   successCriteria: string[];
   createdByAgentId: string;
   createdByUserId?: string;
@@ -77,6 +116,17 @@ export interface AgentMdSummary {
   id: string;
   name: string;
   summary: string;
+  content?: string;
+}
+
+export interface AgentMdStoreEntry {
+  id: string;
+  path: string;
+  name: string;
+  summary: string;
+  category: string;
+  size: number;
+  sourceUrl: string;
 }
 
 export type AgentTeamInput = Omit<AgentTeam, 'id' | 'createdAt' | 'updatedAt'>;
@@ -121,6 +171,36 @@ const AGENT_MD_FILE = path.join(
 );
 const AGENT_TEAMS_METADATA_KEY = 'agent_teams';
 const AGENT_MD_METADATA_KEY = 'agent_md_definitions';
+const AGENCY_AGENTS_REPO_OWNER = 'msitarzewski';
+const AGENCY_AGENTS_REPO_NAME = 'agency-agents';
+const AGENCY_AGENTS_BRANCH = 'main';
+const AGENCY_AGENTS_TREE_URL = `https://api.github.com/repos/${AGENCY_AGENTS_REPO_OWNER}/${AGENCY_AGENTS_REPO_NAME}/git/trees/${AGENCY_AGENTS_BRANCH}?recursive=1`;
+const AGENCY_AGENTS_RAW_BASE_URL = `https://raw.githubusercontent.com/${AGENCY_AGENTS_REPO_OWNER}/${AGENCY_AGENTS_REPO_NAME}/${AGENCY_AGENTS_BRANCH}`;
+const AGENCY_AGENTS_CATEGORIES = new Set([
+  'academic',
+  'design',
+  'engineering',
+  'finance',
+  'game-development',
+  'marketing',
+  'paid-media',
+  'product',
+  'project-management',
+  'sales',
+  'security',
+  'spatial-computing',
+  'specialized',
+  'support',
+  'testing',
+]);
+
+interface GitHubTreeResponse {
+  tree?: Array<{
+    path?: string;
+    type?: string;
+    size?: number;
+  }>;
+}
 
 function ensureDir(filePath = AGENT_TEAMS_FILE): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -205,6 +285,110 @@ function normalizeRole(role: AgentTeamRole, index: number): AgentTeamRole {
   };
 }
 
+function normalizeWorkflowAction(
+  action: AgentTeamWorkflowAction,
+): AgentTeamWorkflowAction | null {
+  const roleId = action.roleId?.trim();
+  if (!roleId) return null;
+  return {
+    roleId,
+    phase: action.phase?.trim() || undefined,
+    instructions: action.instructions?.trim() || undefined,
+    outputKey: action.outputKey?.trim() || undefined,
+  };
+}
+
+function normalizeWorkflowSteps(
+  steps: AgentTeamInput['workflowSteps'],
+): AgentTeamWorkflowStep[] | undefined {
+  if (!Array.isArray(steps)) return undefined;
+  const normalized = steps
+    .slice(0, 24)
+    .map((step, index): AgentTeamWorkflowStep | null => {
+      if (!step || typeof step !== 'object') return null;
+      const type = step.type;
+      if (!['role', 'parallel', 'route'].includes(String(type))) return null;
+      const id = step.id?.trim() || `step_${index + 1}`;
+      const onFailure = step.onFailure
+        ? {
+            action: ['continue', 'abort', 'run_role', 'retry'].includes(
+              String(step.onFailure.action),
+            )
+              ? step.onFailure.action
+              : 'abort',
+            targetRoleId: step.onFailure.targetRoleId?.trim() || undefined,
+            phase: step.onFailure.phase?.trim() || undefined,
+            maxIterations:
+              Number.isFinite(step.onFailure.maxIterations) &&
+              Number(step.onFailure.maxIterations) > 0
+                ? Math.min(5, Math.trunc(Number(step.onFailure.maxIterations)))
+                : undefined,
+            instructions: step.onFailure.instructions?.trim() || undefined,
+          }
+        : undefined;
+      if (type === 'role') {
+        const roleId = step.roleId?.trim();
+        if (!roleId) return null;
+        return {
+          id,
+          type,
+          roleId,
+          phase: step.phase?.trim() || undefined,
+          instructions: step.instructions?.trim() || undefined,
+          inputKeys: sanitizeLines(step.inputKeys),
+          outputKey: step.outputKey?.trim() || undefined,
+          dependsOn: sanitizeLines(step.dependsOn),
+          onFailure,
+        };
+      }
+      if (type === 'parallel') {
+        const parallel = Array.isArray(step.parallel)
+          ? step.parallel
+              .slice(0, 8)
+              .map((chain) =>
+                Array.isArray(chain)
+                  ? chain
+                      .slice(0, 8)
+                      .map(normalizeWorkflowAction)
+                      .filter(Boolean)
+                  : [],
+              )
+              .filter((chain) => chain.length > 0)
+          : [];
+        if (parallel.length === 0) return null;
+        return {
+          id,
+          type,
+          instructions: step.instructions?.trim() || undefined,
+          inputKeys: sanitizeLines(step.inputKeys),
+          dependsOn: sanitizeLines(step.dependsOn),
+          parallel: parallel as AgentTeamWorkflowAction[][],
+          onFailure,
+        };
+      }
+      const route = step.route;
+      if (!route?.judgeRoleId?.trim()) return null;
+      const candidateRoleIds = sanitizeLines(route.candidateRoleIds);
+      if (candidateRoleIds.length === 0) return null;
+      return {
+        id,
+        type,
+        instructions: step.instructions?.trim() || undefined,
+        inputKeys: sanitizeLines(step.inputKeys),
+        dependsOn: sanitizeLines(step.dependsOn),
+        route: {
+          judgeRoleId: route.judgeRoleId.trim(),
+          candidateRoleIds,
+          fallbackRoleId: route.fallbackRoleId?.trim() || undefined,
+          finalRoleId: route.finalRoleId?.trim() || undefined,
+        },
+        onFailure,
+      };
+    })
+    .filter(Boolean) as AgentTeamWorkflowStep[];
+  return normalized.length ? normalized : undefined;
+}
+
 function normalizeTeamInput(input: AgentTeamInput): AgentTeamInput {
   const roles = (Array.isArray(input.roles) ? input.roles : [])
     .slice(0, 12)
@@ -229,6 +413,7 @@ function normalizeTeamInput(input: AgentTeamInput): AgentTeamInput {
     roles,
     workflow:
       input.workflow?.trim() || '团队按角色职责协作，并在完成后汇总结果。',
+    workflowSteps: normalizeWorkflowSteps(input.workflowSteps),
     successCriteria: sanitizeLines(input.successCriteria).length
       ? sanitizeLines(input.successCriteria)
       : ['产出满足用户目标'],
@@ -249,6 +434,75 @@ function normalizeAgentMdInput(
     createdByAgentId: input.createdByAgentId?.trim() || 'unknown',
     createdByUserId: input.createdByUserId?.trim() || undefined,
   };
+}
+
+function requestTimeoutSignal(timeoutMs: number): AbortSignal {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), timeoutMs).unref?.();
+  return controller.signal;
+}
+
+async function fetchText(url: string, timeoutMs = 15_000): Promise<string> {
+  const response = await fetch(url, { signal: requestTimeoutSignal(timeoutMs) });
+  if (!response.ok) {
+    throw new Error(`failed to fetch ${url}: ${response.status}`);
+  }
+  return response.text();
+}
+
+async function fetchJson<T>(url: string, timeoutMs = 15_000): Promise<T> {
+  const response = await fetch(url, { signal: requestTimeoutSignal(timeoutMs) });
+  if (!response.ok) {
+    throw new Error(`failed to fetch ${url}: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+function isAgencyAgentMarkdownPath(filePath: string): boolean {
+  if (!filePath.endsWith('.md')) return false;
+  const segments = filePath.split('/');
+  const [category, fileName] = segments;
+  if (!category || !fileName) return false;
+  if (fileName.toLowerCase() === 'readme.md') return false;
+  if (AGENCY_AGENTS_CATEGORIES.has(category)) return true;
+  return filePath === 'integrations/mcp-memory/backend-architect-with-memory.md';
+}
+
+function agencyAgentRawUrl(filePath: string): string {
+  return `${AGENCY_AGENTS_RAW_BASE_URL}/${filePath
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/')}`;
+}
+
+function titleFromAgentPath(filePath: string): string {
+  const fileName = filePath.split('/').pop()?.replace(/\.md$/i, '') || 'agent';
+  return fileName
+    .split('-')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function parseFrontmatter(content: string): Record<string, string> {
+  const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
+  if (!match) return {};
+  const result: Record<string, string> = {};
+  for (const line of match[1].split('\n')) {
+    const item = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!item) continue;
+    result[item[1]] = item[2].trim().replace(/^['"]|['"]$/g, '');
+  }
+  return result;
+}
+
+function firstContentSentence(content: string): string {
+  return content
+    .replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '')
+    .split('\n')
+    .map((line) => line.replace(/^#+\s*/, '').trim())
+    .find(Boolean)
+    ?.slice(0, 300) || '来自 agency-agents 商店的 agent.md 定义。';
 }
 
 function readFile(): StoredAgentTeamsFile {
@@ -396,6 +650,7 @@ export function updateAgentTeam(
     description: patch.description ?? existing.description,
     roles: patch.roles ?? existing.roles,
     workflow: patch.workflow ?? existing.workflow,
+    workflowSteps: patch.workflowSteps ?? existing.workflowSteps,
     successCriteria: patch.successCriteria ?? existing.successCriteria,
     createdByAgentId: patch.createdByAgentId ?? existing.createdByAgentId,
     createdByUserId: existing.createdByUserId,
@@ -511,6 +766,61 @@ export function deleteAgentMdDefinition(
   return true;
 }
 
+export async function listAgentMdStoreEntries(
+  query = '',
+): Promise<AgentMdStoreEntry[]> {
+  const data = await fetchJson<GitHubTreeResponse>(AGENCY_AGENTS_TREE_URL);
+  const normalizedQuery = query.trim().toLowerCase();
+  return (data.tree ?? [])
+    .filter((item) => item.type === 'blob' && item.path)
+    .filter((item) => isAgencyAgentMarkdownPath(item.path || ''))
+    .map((item) => {
+      const filePath = item.path || '';
+      const category = filePath.split('/')[0] || 'agency-agents';
+      return {
+        id: filePath.replace(/\.md$/i, '').replace(/[^a-zA-Z0-9]+/g, '-'),
+        path: filePath,
+        name: titleFromAgentPath(filePath),
+        summary: `${category} / ${filePath.split('/').pop()}`,
+        category,
+        size: item.size ?? 0,
+        sourceUrl: `https://github.com/${AGENCY_AGENTS_REPO_OWNER}/${AGENCY_AGENTS_REPO_NAME}/blob/${AGENCY_AGENTS_BRANCH}/${filePath}`,
+      } satisfies AgentMdStoreEntry;
+    })
+    .filter((entry) => {
+      if (!normalizedQuery) return true;
+      return [entry.name, entry.path, entry.category]
+        .join(' ')
+        .toLowerCase()
+        .includes(normalizedQuery);
+    })
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
+export async function createAgentMdDefinitionFromStore(
+  filePath: string,
+  createdByAgentId: string,
+  ownerUserId?: string,
+): Promise<AgentMdDefinition> {
+  const pathToImport = filePath.trim();
+  if (!isAgencyAgentMarkdownPath(pathToImport)) {
+    throw new Error('unsupported agency-agents store path');
+  }
+  const content = await fetchText(agencyAgentRawUrl(pathToImport));
+  const frontmatter = parseFrontmatter(content);
+  const name = frontmatter.name || titleFromAgentPath(pathToImport);
+  const summary = frontmatter.description || firstContentSentence(content);
+  return createAgentMdDefinition(
+    {
+      name,
+      summary,
+      content: content.trim(),
+      createdByAgentId,
+    },
+    ownerUserId,
+  );
+}
+
 export function buildAgentTeamDraft(
   input: AgentTeamDraftInput,
 ): AgentTeamInput {
@@ -525,6 +835,7 @@ export function buildAgentTeamDraft(
     description: `面向“${goal}”的 ${shapeLabel} 抽象 Agent Team 定义。`,
     roles,
     workflow: workflowForShape(shape),
+    workflowSteps: workflowStepsForShape(shape, roles),
     successCriteria: [
       '团队产出直接回应用户目标',
       '每个角色都有清晰输入、输出和交接边界',
@@ -543,7 +854,7 @@ export function buildAgentTeamGenerationPrompt(
         .slice(0, 30)
         .map(
           (definition) =>
-            `- ${definition.name} (${definition.id}): ${definition.summary}`,
+            `- ${definition.name} (${definition.id}): ${definition.summary}${definition.content ? `\n  agent.md:\n${definition.content.slice(0, 4000).split('\n').map((line) => `  ${line}`).join('\n')}` : ''}`,
         )
         .join('\n')
     : '- 暂无现有 agent.md 定义。';
@@ -560,6 +871,8 @@ export function buildAgentTeamGenerationPrompt(
 - shape 必须是以下之一：auto、pipeline、parallel、leader-worker、judge-route。
 - 如果 Interaction shape 是 auto，team.shape 必须返回模型实际选择的具体形态：pipeline、parallel、leader-worker 或 judge-route；不要在生成结果的 team.shape 中继续返回 auto。
 - roles 每项必须包含 id、name、responsibility，可选 inputs、outputs、skills、guardrails。
+- 必须生成 workflowSteps；编排、测试、返工、路由、产物传递都由 workflowSteps 显式描述，不要依赖角色数量、角色名称或固定关键词。
+- workflowSteps 支持：role（单角色步骤）、parallel（多条并行链）、route（由 judgeRoleId 产出路由决策）。测试/验证失败后的返工请用 onFailure 指向目标 role，而不是要求 QA 输出固定中文短语。
 - roles 控制在 3-6 个；workflow 控制在 1200 字以内；successCriteria 控制在 3-6 条。
 - 优先复用现有 agent.md：如果某个现有 agent.md 的简介能覆盖必要角色，请优先把该角色设计为匹配这个 agent.md 的能力边界。
 - 复用现有 agent.md 时，在角色的 skills 或 guardrails 中写明建议使用的 agent.md 名称；不要把 agent.md id 当成具体执行绑定写入 Team role。
@@ -583,6 +896,11 @@ JSON 结构：
     "description": "...",
     "roles": [{"id":"...","name":"...","responsibility":"...","inputs":["..."],"outputs":["..."],"skills":["..."],"guardrails":["..."]}],
     "workflow": "...",
+    "workflowSteps": [
+      {"id":"plan","type":"role","roleId":"planner","phase":"plan","instructions":"产出计划","outputKey":"plan"},
+      {"id":"build","type":"role","roleId":"builder","phase":"work","inputKeys":["plan"],"outputKey":"build"},
+      {"id":"verify","type":"role","roleId":"reviewer","phase":"verify","inputKeys":["build"],"outputKey":"verification","onFailure":{"action":"run_role","targetRoleId":"builder","phase":"revise","maxIterations":1,"instructions":"根据验证反馈修正产物"}}
+    ],
     "successCriteria": ["..."],
     "createdByAgentId": "${fallback.createdByAgentId}"
   },
@@ -777,4 +1095,59 @@ function workflowForShape(shape: AgentTeamShape): string {
   if (shape === 'pipeline')
     return 'Pipeline：角色按顺序接力，每一步消费上一步输出并交付给下一步。';
   return 'Let AI decide：由生成器根据目标选择最合适的协作方式，并保持角色边界清晰。';
+}
+
+function workflowStepsForShape(
+  shape: AgentTeamShape,
+  roles: AgentTeamRole[],
+): AgentTeamWorkflowStep[] | undefined {
+  if (roles.length === 0) return undefined;
+  if (shape === 'parallel') {
+    return [
+      {
+        id: 'parallel_work',
+        type: 'parallel',
+        parallel: roles.map((candidate) => [
+          { roleId: candidate.id, phase: 'work', outputKey: candidate.id },
+        ]),
+      },
+    ];
+  }
+  if (shape === 'leader-worker') {
+    const [lead, ...workers] = roles;
+    return [
+      { id: 'lead_plan', type: 'role', roleId: lead.id, phase: 'plan', outputKey: 'plan' },
+      {
+        id: 'worker_parallel',
+        type: 'parallel',
+        inputKeys: ['plan'],
+        parallel: workers.map((worker) => [
+          { roleId: worker.id, phase: 'work', outputKey: worker.id },
+        ]),
+      },
+      { id: 'lead_finalize', type: 'role', roleId: lead.id, phase: 'finalize', outputKey: 'final' },
+    ];
+  }
+  if (shape === 'judge-route' && roles.length > 1) {
+    const [judge, ...candidates] = roles;
+    return [
+      {
+        id: 'judge_route',
+        type: 'route',
+        route: {
+          judgeRoleId: judge.id,
+          candidateRoleIds: candidates.map((candidate) => candidate.id),
+          fallbackRoleId: candidates[0]?.id,
+          finalRoleId: candidates[candidates.length - 1]?.id,
+        },
+      },
+    ];
+  }
+  return roles.map((candidate, index) => ({
+    id: `step_${index + 1}`,
+    type: 'role',
+    roleId: candidate.id,
+    phase: index === 0 ? 'plan' : index === roles.length - 1 ? 'finalize' : 'work',
+    outputKey: candidate.id,
+  }));
 }

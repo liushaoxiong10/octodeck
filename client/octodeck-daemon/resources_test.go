@@ -104,17 +104,31 @@ func TestParseDfOutputAllDisks(t *testing.T) {
 /dev/root      104857600 41943040  62914560  40% /
 /dev/data      209715200 52428800 157286400  25% /data
 tmpfs            1024000        0   1024000   0% /run
+devtmpfs         1024000        0   1024000   0% /dev
+proc                   0        0         0   0% /proc
+overlay         31457280 10485760  20971520  33% /var/lib/docker/overlay2/demo/merged
 `)
 	if !ok {
 		t.Fatal("expected df output to parse")
 	}
-	if len(disk.Disks) != 3 {
-		t.Fatalf("expected all disks, got %#v", disk.Disks)
+	if len(disk.Disks) != 2 {
+		t.Fatalf("expected virtual filesystems to be filtered, got %#v", disk.Disks)
 	}
 	if disk.DiskTotalBytes != 104857600*1024 || disk.DiskUsedBytes != 41943040*1024 {
 		t.Fatalf("expected root disk to remain primary: %#v", disk)
 	}
 	if disk.Disks[1].MountPoint != "/data" || disk.Disks[1].Filesystem != "/dev/data" {
 		t.Fatalf("unexpected second disk: %#v", disk.Disks[1])
+	}
+}
+
+func TestParseDfOutputOnlyVirtualDisks(t *testing.T) {
+	_, ok := parseDfOutput(`Filesystem     1K-blocks Used Available Use% Mounted on
+tmpfs            1024000    0   1024000   0% /run
+overlay         31457280 1024  31456256   1% /
+proc                   0    0         0   0% /proc
+`)
+	if ok {
+		t.Fatal("expected virtual-only df output to be ignored")
 	}
 }

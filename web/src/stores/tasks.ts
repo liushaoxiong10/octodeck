@@ -18,6 +18,10 @@ export interface ScheduledTask {
   status: 'active' | 'paused' | 'completed' | 'parsing';
   created_at: string;
   notify_channels?: string[] | null;
+  runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent' | null;
+  agent_client_id?: string | null;
+  backend?: string | null;
+  agent_model?: string | null;
   execution_mode?: 'host' | 'container' | null;
   execution_node?: string | null;
   workspace_jid?: string | null;
@@ -53,6 +57,10 @@ interface TasksState {
     notifyChannels?: string[] | null,
     chatJid?: string,
     contextMode?: 'group' | 'isolated',
+    runtimeProfile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent',
+    agentClientId?: string,
+    backend?: string,
+    agentModel?: string,
   ) => Promise<void>;
   updateTaskStatus: (id: string, status: 'active' | 'paused') => Promise<void>;
   updateTask: (id: string, fields: Record<string, unknown>) => Promise<void>;
@@ -105,6 +113,10 @@ export const useTasksStore = create<TasksState>((set, get) => ({
     notifyChannels?: string[] | null,
     chatJid?: string,
     contextMode?: 'group' | 'isolated',
+    runtimeProfile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent',
+    agentClientId?: string,
+    backend?: string,
+    agentModel?: string,
   ) => {
     try {
       const normalizedScheduleValue =
@@ -137,6 +149,18 @@ export const useTasksStore = create<TasksState>((set, get) => ({
       }
       if (contextMode) {
         body.context_mode = contextMode;
+      }
+      if (runtimeProfile) {
+        body.runtime_profile = runtimeProfile;
+      }
+      if (agentClientId) {
+        body.agent_client_id = agentClientId;
+      }
+      if (backend) {
+        body.backend = backend;
+      }
+      if (agentModel?.trim()) {
+        body.agent_model = agentModel.trim();
       }
       await api.post('/api/tasks', body);
       set({ error: null });

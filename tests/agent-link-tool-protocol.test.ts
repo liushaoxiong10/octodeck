@@ -86,6 +86,22 @@ describe('agent-link tool protocol', () => {
     });
   });
 
+  test('encodes daemon update requests sent to octodeck-daemon', () => {
+    const encoded = encodeFrame({
+      type: 'daemon.update.request',
+      id: 8,
+      latestVersion: 'octodeck-daemon/1.0.4',
+      currentVersion: 'octodeck-daemon/1.0.3',
+      reason: 'client_version_outdated',
+    });
+
+    expect(JSON.parse(encoded)).toMatchObject({
+      type: 'daemon.update.request',
+      latestVersion: 'octodeck-daemon/1.0.4',
+      currentVersion: 'octodeck-daemon/1.0.3',
+    });
+  });
+
   test('accepts hello and ping resource snapshots from octodeck-daemon', () => {
     const hello = parseInboundFrame(
       JSON.stringify({

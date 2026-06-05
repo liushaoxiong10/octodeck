@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -24,7 +26,9 @@ import (
 func goos() string   { return runtime.GOOS }
 func goarch() string { return runtime.GOARCH }
 
-const daemonVersion = "octodeck-daemon/1.0.2"
+const daemonVersion = "octodeck-daemon/1.0.4"
+
+var daemonUpdateMu sync.Mutex
 
 func hostname() string {
 	h, err := os.Hostname()
@@ -110,6 +114,14 @@ func runUpdateCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	return updateDaemonBinary(cfg, targetPath, restart)
+}
+
+func updateDaemonBinary(cfg *Config, targetPath string, restart bool) error {
+	daemonUpdateMu.Lock()
+	defer daemonUpdateMu.Unlock()
+
+	var err error
 	if targetPath == "" {
 		targetPath, err = os.Executable()
 		if err != nil {
@@ -147,6 +159,109 @@ func runUpdateCommand(args []string) error {
 		fmt.Println("octodeck-daemon: restart requested")
 	}
 	return nil
+}
+
+type daemonVersionResponse struct {
+	Version string `json:"version"`
+}
+
+func daemonVersionURL(server string) string {
+	return strings.TrimRight(server, "/") + "/api/daemon/version"
+}
+
+func autoUpdateEnabled(cfg *Config) bool {
+	return cfg == nil || cfg.AutoUpdate == nil || *cfg.AutoUpdate
+}
+
+func checkDaemonUpdate(ctx context.Context, cfg *Config) (string, bool, error) {
+	if cfg == nil {
+		return "", false, errors.New("nil config")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, daemonVersionURL(cfg.Server), nil)
+	if err != nil {
+		return "", false, err
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", false, fmt.Errorf("daemon version check http %s", resp.Status)
+	}
+	var body daemonVersionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", false, err
+	}
+	latest := strings.TrimSpace(body.Version)
+	return latest, isNewerDaemonVersion(latest, cfg.Version), nil
+}
+
+func runAutoUpdate(ctx context.Context, cfg *Config) error {
+	if !autoUpdateEnabled(cfg) {
+		return nil
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	latest, available, err := checkDaemonUpdate(checkCtx, cfg)
+	if err != nil {
+		return fmt.Errorf("check daemon update: %w", err)
+	}
+	if !available {
+		return nil
+	}
+	log.Printf("octodeck-daemon: auto update available current=%s latest=%s", cfg.Version, latest)
+	if err := updateDaemonBinary(cfg, "", true); err != nil {
+		return fmt.Errorf("auto update to %s: %w", latest, err)
+	}
+	return nil
+}
+
+func normalizeDaemonVersion(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "octodeck-daemon/")
+	s = strings.TrimPrefix(s, "v")
+	return s
+}
+
+func isNewerDaemonVersion(latest string, current string) bool {
+	latest = normalizeDaemonVersion(latest)
+	current = normalizeDaemonVersion(current)
+	if latest == "" || current == "" || latest == current {
+		return false
+	}
+	latestParts, latestOK := parseDaemonSemver(latest)
+	currentParts, currentOK := parseDaemonSemver(current)
+	if latestOK && currentOK {
+		for i := 0; i < len(latestParts); i++ {
+			if latestParts[i] != currentParts[i] {
+				return latestParts[i] > currentParts[i]
+			}
+		}
+		return false
+	}
+	return latest != current
+}
+
+func parseDaemonSemver(s string) ([3]int, bool) {
+	var out [3]int
+	base := strings.SplitN(s, "-", 2)[0]
+	parts := strings.Split(base, ".")
+	if len(parts) == 0 || len(parts) > 3 {
+		return out, false
+	}
+	for i, p := range parts {
+		if p == "" {
+			return out, false
+		}
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return out, false
+		}
+		out[i] = n
+	}
+	return out, true
 }
 
 func downloadFile(url string, target string, mode os.FileMode) error {
@@ -268,6 +383,7 @@ func runForever(ctx context.Context, cfg *Config) error {
 		30 * time.Second,
 	}
 	attempt := 0
+	autoUpdateAttempted := false
 
 	for {
 		if ctx.Err() != nil {
@@ -292,6 +408,14 @@ func runForever(ctx context.Context, cfg *Config) error {
 
 		attempt = 0 // reset backoff on a successful handshake
 		log.Printf("octodeck-daemon: connected (server=%s)", client.helloAck.ServerVersion)
+		if !autoUpdateAttempted {
+			autoUpdateAttempted = true
+			go func() {
+				if err := runAutoUpdate(ctx, cfg); err != nil {
+					log.Printf("octodeck-daemon: auto update skipped: %v", err)
+				}
+			}()
+		}
 
 		runErr := client.run(ctx)
 		client.close(fmt.Sprintf("loop_exit:%v", runErr))

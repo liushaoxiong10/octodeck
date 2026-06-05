@@ -1,5 +1,5 @@
 import { useState, memo, lazy, Suspense } from 'react';
-import { Copy, Check, ChevronDown, ChevronUp, Ellipsis, ImageDown } from 'lucide-react';
+import { Copy, Check, ChevronDown, ChevronUp, Ellipsis, ImageDown, Wrench } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Message } from '../../stores/chat';
@@ -20,7 +20,6 @@ interface MessageBubbleProps {
   thinkingContent?: string;
   thinkingDurationMs?: number;
   isShared?: boolean;
-  classic?: boolean;
 }
 
 interface MessageAttachment {
@@ -200,6 +199,30 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
     mediumTap();
     setContextMenu({ x: rect.left, y: rect.bottom + 4 });
   };
+
+  if (message.role === 'tool') {
+    const title = message.sender_name || 'Tool';
+    return (
+      <div className="group mb-3 flex justify-center">
+        <div className="w-full max-w-3xl rounded-xl border border-blue-200/70 bg-blue-50/50 px-3 py-2 text-sm dark:border-blue-900/60 dark:bg-blue-950/20">
+          <div className="mb-1 flex items-center gap-2 text-xs font-medium text-blue-700 dark:text-blue-300">
+            <Wrench className="h-3.5 w-3.5" />
+            <span>tool · {title}</span>
+            {showTime && <span className="ml-auto font-normal text-muted-foreground">{time}</span>}
+          </div>
+          <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-blue-950/80 dark:text-blue-100/80">{message.content}</pre>
+          <button
+            onClick={handleCopy}
+            className="mt-1 inline-flex h-6 items-center gap-1 rounded px-1.5 text-xs text-muted-foreground hover:bg-foreground/5 hover:text-foreground"
+            title="复制"
+          >
+            {copied ? <Check className="h-3 w-3 text-primary" /> : <Copy className="h-3 w-3" />}
+            复制
+          </button>
+        </div>
+      </div>
+    );
+  }
 
 
   // Context overflow system message
@@ -464,7 +487,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
     const showSenderLabel = isShared;
     return (
       <div className="group flex justify-end mb-4">
-        <div className="flex flex-col items-end min-w-0 w-full">
+        <div className="flex flex-col items-end min-w-0 max-w-[75%]">
           {showSenderLabel && (
             <span className="text-xs text-muted-foreground font-medium mb-1 mr-1">
               {message.sender_name || currentUser?.display_name || currentUser?.username || '我'}
@@ -486,7 +509,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
               </div>
             )}
             {!hasOnlyImages && (
-              <div className="bg-primary/10 text-foreground px-4 py-2.5 rounded-2xl rounded-tr-sm shadow-sm">
+              <div className="bg-muted text-foreground px-4 py-2.5 rounded-2xl rounded-tr-sm">
                 <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">{message.content}</p>
               </div>
             )}
@@ -553,37 +576,9 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
             {showTime && <span className="text-xs text-muted-foreground">{time}</span>}
           </div>
 
-          {/* Card */}
-          <div className="relative bg-surface rounded-xl border border-border/60 px-5 py-4 max-lg:bg-surface/90 max-lg:backdrop-blur-sm overflow-hidden font-serif shadow-card">
-            {/* Action buttons */}
-            <div className="absolute top-2 right-2 flex items-center gap-0.5 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
-              <button
-                onClick={() => setShowShareDialog(true)}
-                className="w-7 h-7 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-foreground/10 max-lg:hidden cursor-pointer"
-                title="分享图片"
-                aria-label="生成分享图片"
-              >
-                <ImageDown className="w-4 h-4" />
-              </button>
-              <button
-                onClick={handleCopy}
-                className="w-7 h-7 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-foreground/10 max-lg:hidden cursor-pointer"
-                title="复制"
-                aria-label="复制消息"
-              >
-                {copied ? <Check className="w-4 h-4 text-primary" /> : <Copy className="w-4 h-4" />}
-              </button>
-              <button
-                onClick={handleMenuButton}
-                className="w-7 h-7 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-foreground/10 cursor-pointer"
-                title="更多"
-                aria-label="消息菜单"
-              >
-                <Ellipsis className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Reasoning block */}
+          {/* Claude-style: no card container, direct content */}
+          <div className="overflow-hidden font-serif">
+            {/* Reasoning block — muted left border style */}
             {thinkingContent && <ReasoningBlock content={thinkingContent} durationMs={thinkingDurationMs} />}
 
             {/* Image attachments */}
@@ -612,6 +607,34 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
             {message.is_from_me && message.token_usage && (
               <TokenUsageDisplay tokenUsageJson={message.token_usage} />
             )}
+          </div>
+
+          {/* Action toolbar — below content, Claude-style */}
+          <div className="flex items-center gap-0.5 mt-1 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={handleCopy}
+              className="h-7 px-2 rounded-md flex items-center gap-1 text-muted-foreground hover:text-foreground hover:bg-foreground/5 text-xs cursor-pointer transition-colors"
+              title="复制"
+              aria-label="复制消息"
+            >
+              {copied ? <Check className="w-3.5 h-3.5 text-primary" /> : <Copy className="w-3.5 h-3.5" />}
+            </button>
+            <button
+              onClick={() => setShowShareDialog(true)}
+              className="h-7 px-2 rounded-md flex items-center gap-1 text-muted-foreground hover:text-foreground hover:bg-foreground/5 text-xs max-lg:hidden cursor-pointer transition-colors"
+              title="分享"
+              aria-label="生成分享图片"
+            >
+              <ImageDown className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={handleMenuButton}
+              className="h-7 px-2 rounded-md flex items-center gap-1 text-muted-foreground hover:text-foreground hover:bg-foreground/5 text-xs cursor-pointer transition-colors"
+              title="更多"
+              aria-label="消息菜单"
+            >
+              <Ellipsis className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
       </div>
@@ -646,6 +669,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showTime, th
 }, (prev, next) =>
   prev.message.id === next.message.id &&
   prev.message.content === next.message.content &&
+  prev.message.role === next.message.role &&
   prev.message.token_usage === next.message.token_usage &&
   prev.showTime === next.showTime &&
   prev.thinkingContent === next.thinkingContent &&

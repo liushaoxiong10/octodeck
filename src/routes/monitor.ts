@@ -11,6 +11,7 @@ import {
   isHostExecutionGroup,
   hasHostExecutionPermission,
   canAccessGroup,
+  canModifyGroup,
   getWebDeps,
 } from '../web-context.js';
 import {
@@ -340,6 +341,24 @@ monitorRoutes.post(
     if (!deps) return c.json({ error: 'Server not initialized' }, 500);
 
     const folder = c.req.param('folder');
+    const user = c.get('user') as AuthUser;
+    const groups = Object.entries(getAllRegisteredGroups()).filter(
+      ([, group]) => group.folder === folder,
+    );
+    const targetGroup =
+      groups.find(([jid]) => jid.startsWith('web:')) ?? groups[0];
+    if (!targetGroup) {
+      return c.json({ error: 'Group not found' }, 404);
+    }
+    const [targetJid, targetGroupInfo] = targetGroup;
+    if (
+      !canModifyGroup(
+        { id: user.id, role: user.role },
+        { ...targetGroupInfo, jid: targetJid },
+      )
+    ) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
     let body: { providerId?: unknown };
     try {
       body = await c.req.json();

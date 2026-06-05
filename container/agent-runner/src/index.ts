@@ -1822,6 +1822,7 @@ async function main(): Promise<void> {
     ownerUserId: containerInput.ownerUserId,
     serverBaseUrl: containerInput.remoteToolServerUrl || process.env.OCTODECK_SERVER_URL || 'http://127.0.0.1:3000',
     agentRunnerSecret: process.env.OCTODECK_AGENT_RUNNER_SECRET || '',
+    agentToolToken: containerInput.agentToolToken || process.env.OCTODECK_AGENT_TOOL_TOKEN || '',
     disableMemoryLayer,
   };
   const buildMcpServerConfig = () => createSdkMcpServer({
@@ -1837,7 +1838,11 @@ async function main(): Promise<void> {
               containerInput.remoteToolServerUrl ||
               process.env.OCTODECK_SERVER_URL ||
               'http://127.0.0.1:3000',
-            secret: process.env.OCTODECK_AGENT_RUNNER_SECRET || '',
+            secret:
+              containerInput.agentToolToken ||
+              process.env.OCTODECK_AGENT_TOOL_TOKEN ||
+              process.env.OCTODECK_AGENT_RUNNER_SECRET ||
+              '',
             timeoutMs: 7_200_000,
             maxOutputBytes: 1_048_576,
           })

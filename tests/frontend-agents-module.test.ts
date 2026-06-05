@@ -271,6 +271,11 @@ describe('frontend agents module', () => {
     expect(agentsPage).toContain('Judge route');
     expect(agentsPage).toContain('agent.md 管理');
     expect(agentsPage).toContain('AgentMdPanel');
+    expect(agentsPage).toContain('从商店添加');
+    expect(agentsPage).toContain('agency-agents');
+    expect(teamStore).toContain('AgentMdStoreEntry');
+    expect(teamStore).toContain('/api/agent-teams/agent-md-store');
+    expect(teamStore).toContain('/api/agent-teams/agent-md-store/import');
     expect(agentsPage).toContain('现有 agent.md 简介会在生成 Team 时提供给模型');
     expect(teamStore).toContain('/api/agent-teams/generate');
     expect(teamStore).toContain('/api/agent-teams/${encodeURIComponent(id)}/execute');

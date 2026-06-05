@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import type { Variables } from '../web-context.js';
 
-const DAEMON_VERSION = 'octodeck-daemon/1.0.0';
+const DAEMON_VERSION = 'octodeck-daemon/1.0.4';
 const DAEMON_UPDATE_COMMAND =
   '~/.octodeck/daemon/bin/octodeck-daemon update -config ~/.octodeck/daemon/config.json';
 const DAEMON_UNINSTALL_COMMAND =
@@ -42,6 +42,7 @@ export function buildDaemonInstallScript(
         '/opt/homebrew/bin/claude',
       ],
       version: DAEMON_VERSION,
+      autoUpdate: true,
     },
     null,
     2,

@@ -9,7 +9,7 @@ import {
 import type { AuthUser } from '../types.js';
 import type { RegisteredGroup } from '../types.js';
 import { getRegisteredGroup } from '../db.js';
-import { getSession } from '../agent-link/registry.js';
+import { getSession, listOnlineRuntimesByProvider } from '../agent-link/registry.js';
 import { invokeRemoteTool } from '../agent-link/tool-rpc.js';
 import { logger } from '../logger.js';
 import {
@@ -252,7 +252,26 @@ function isDeviceWorkspaceFilesGroup(group: RegisteredGroup): boolean {
 }
 
 function deviceWorkspaceCwd(group: RegisteredGroup): string {
+  if (group.customCwd) return group.customCwd;
+  if (group.repoDevicePath) return group.repoDevicePath;
   return `octodeck-workspace://${group.folder}`;
+}
+
+function resolveDeviceWorkspaceLinkId(group: RegisteredGroup): string | undefined {
+  const raw = group.deviceLinkId || group.executionNode;
+  if (typeof raw !== 'string') return undefined;
+  const direct = /^(cl_[0-9a-f]{16})$/.exec(raw);
+  if (direct) return direct[1];
+  const runtime = /^runtime:(cl_[0-9a-f]{16}):[^:]+$/.exec(raw);
+  if (runtime) return runtime[1];
+  const legacyRuntime = /^(cl_[0-9a-f]{16}):[^:]+$/.exec(raw);
+  if (legacyRuntime) return legacyRuntime[1];
+  const provider = /^provider:([^:]+)$/.exec(raw);
+  if (provider) {
+    return listOnlineRuntimesByProvider(provider[1], group.created_by)[0]
+      ?.deviceLinkId;
+  }
+  return undefined;
 }
 
 function normalizeRemoteRelativePath(relativePath: string): string {
@@ -296,7 +315,7 @@ async function invokeDeviceWorkspaceTool(
   input: Record<string, unknown>,
   opts?: { timeoutMs?: number; maxOutputBytes?: number },
 ) {
-  const linkId = group.deviceLinkId || group.executionNode;
+  const linkId = resolveDeviceWorkspaceLinkId(group);
   if (!linkId) throw new Error('Device link not configured');
   const session = getSession(linkId);
   if (!session || session.state !== 'open') throw new Error('Device offline');

@@ -97,7 +97,7 @@ import type {
   OAuthUsageBucket,
 } from '../runtime-config.js';
 import { parseOAuthUsageBucket } from '../runtime-config.js';
-import type { AuthUser, RegisteredGroup } from '../types.js';
+import type { AgentLink, AuthUser, RegisteredGroup } from '../types.js';
 import { hasPermission } from '../permissions.js';
 import { logger } from '../logger.js';
 import {
@@ -1423,6 +1423,21 @@ function generateCustomBackendId(): string {
   throw new Error('Failed to generate unique agent id');
 }
 
+function requireOwnedAgentLink(linkId: string | null | undefined, user: AuthUser): AgentLink {
+  if (!linkId) throw new Error('Device not found');
+  const link = getAgentLinkById(linkId);
+  if (!link || link.userId !== user.id || link.revokedAt) {
+    throw new Error('Device not found');
+  }
+  return link;
+}
+
+function optionalOwnedAgentLinkId(linkId: string | null | undefined, user: AuthUser): string | null {
+  if (!linkId) return null;
+  requireOwnedAgentLink(linkId, user);
+  return linkId;
+}
+
 configRoutes.get(
   '/custom-backends',
   authMiddleware,
@@ -1458,23 +1473,29 @@ configRoutes.post(
       const workdir =
         workdirMode === 'custom' ? validation.data.workdir : undefined;
       const payload = validation.data.agentClientId
-        ? buildAgentBackendFromClient({
-            id: backendId,
-            displayName: validation.data.displayName,
-            deviceLinkId: validation.data.deviceLinkId!,
-            agentClientId: validation.data.agentClientId,
-            discoveredClient: resolveDeviceAgentClient(
-              getAgentLinkById(validation.data.deviceLinkId!),
-              validation.data.agentClientId,
-            ),
-            timeoutMs: validation.data.timeoutMs,
-            maxOutputBytes: validation.data.maxOutputBytes,
-            runtime: validation.data.runtime,
-            model: validation.data.model,
-            providerId: validation.data.providerId ?? null,
-            workdirMode,
-            workdir,
-          })
+        ? (() => {
+            const link = requireOwnedAgentLink(
+              validation.data.deviceLinkId,
+              user,
+            );
+            return buildAgentBackendFromClient({
+              id: backendId,
+              displayName: validation.data.displayName,
+              deviceLinkId: validation.data.deviceLinkId!,
+              agentClientId: validation.data.agentClientId,
+              discoveredClient: resolveDeviceAgentClient(
+                link,
+                validation.data.agentClientId,
+              ),
+              timeoutMs: validation.data.timeoutMs,
+              maxOutputBytes: validation.data.maxOutputBytes,
+              runtime: validation.data.runtime,
+              model: validation.data.model,
+              providerId: validation.data.providerId ?? null,
+              workdirMode,
+              workdir,
+            });
+          })()
         : {
             id: backendId,
             displayName: validation.data.displayName,
@@ -1492,7 +1513,10 @@ configRoutes.post(
             providerId: validation.data.providerId ?? null,
             workdirMode,
             workdir,
-            deviceLinkId: validation.data.deviceLinkId ?? null,
+            deviceLinkId: optionalOwnedAgentLinkId(
+              validation.data.deviceLinkId,
+              user,
+            ),
             agentClientId: validation.data.agentClientId ?? null,
           };
       const def = upsertCustomBackend(payload, user.username);
@@ -1536,25 +1560,29 @@ configRoutes.patch(
         merged.workdirMode === 'custom' ? 'custom' : undefined;
       const workdir = workdirMode === 'custom' ? merged.workdir : undefined;
       const payload = merged.agentClientId
-        ? buildAgentBackendFromClient({
-            id,
-            displayName: merged.displayName,
-            deviceLinkId: merged.deviceLinkId!,
-            agentClientId: merged.agentClientId,
-            discoveredClient: resolveDeviceAgentClient(
-              getAgentLinkById(merged.deviceLinkId!),
-              merged.agentClientId,
-            ),
-            timeoutMs: merged.timeoutMs,
-            maxOutputBytes: merged.maxOutputBytes,
-            runtime: merged.runtime,
-            model: merged.model,
-            providerId: merged.providerId ?? null,
-            workdirMode,
-            workdir,
-          })
+        ? (() => {
+            const link = requireOwnedAgentLink(merged.deviceLinkId, user);
+            return buildAgentBackendFromClient({
+              id,
+              displayName: merged.displayName,
+              deviceLinkId: merged.deviceLinkId!,
+              agentClientId: merged.agentClientId,
+              discoveredClient: resolveDeviceAgentClient(
+                link,
+                merged.agentClientId,
+              ),
+              timeoutMs: merged.timeoutMs,
+              maxOutputBytes: merged.maxOutputBytes,
+              runtime: merged.runtime,
+              model: merged.model,
+              providerId: merged.providerId ?? null,
+              workdirMode,
+              workdir,
+            });
+          })()
         : {
             ...merged,
+            deviceLinkId: optionalOwnedAgentLinkId(merged.deviceLinkId, user),
             providerId: merged.providerId ?? null,
             workdirMode,
             workdir,

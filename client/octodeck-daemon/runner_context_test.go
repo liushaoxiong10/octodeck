@@ -86,6 +86,18 @@ func TestNormalizeAgentJSONLineCapturesToolEvents(t *testing.T) {
 	if payload == nil {
 		t.Fatal("expected raw payload for tool_result")
 	}
+
+	startLine := `{"type":"tool_use_start","session_id":"sess-1","id":"tool-2","name":"Read","input":{"file_path":"README.md"}}`
+	eventType, text, sessionID, payload = normalizeAgentJSONLine(startLine)
+	if eventType != "tool_call" || text != "" || sessionID != "sess-1" || payload == nil {
+		t.Fatalf("expected direct tool_use_start to normalize as tool_call, got type=%s text=%q session=%q payload=%v", eventType, text, sessionID, payload)
+	}
+
+	endLine := `{"type":"tool_use_end","session_id":"sess-1","tool_use_id":"tool-2","content":"ok"}`
+	eventType, text, sessionID, payload = normalizeAgentJSONLine(endLine)
+	if eventType != "tool_result" || text != "" || sessionID != "sess-1" || payload == nil {
+		t.Fatalf("expected direct tool_use_end to normalize as tool_result, got type=%s text=%q session=%q payload=%v", eventType, text, sessionID, payload)
+	}
 }
 
 func TestNormalizeAgentJSONLineCapturesReasoningEvents(t *testing.T) {
@@ -237,6 +249,9 @@ func TestResolveWorkspaceRepoUsesSharedReposAndFreshWorkspace(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("expected one shared repo under %s, entries=%v err=%v", reposRoot, entries, err)
 	}
+	if entries[0].Name() != "source" {
+		t.Fatalf("expected shared repo cache to use project name source, got %q", entries[0].Name())
+	}
 
 	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("v2"), 0o644); err != nil {
 		t.Fatal(err)
@@ -255,6 +270,39 @@ func TestResolveWorkspaceRepoUsesSharedReposAndFreshWorkspace(t *testing.T) {
 	}
 	if string(data) != "v2" {
 		t.Fatalf("expected synced main content v2, got %q", string(data))
+	}
+}
+
+func TestResolveWorkspaceRepoUsesConfiguredMainBranch(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	mustRun(t, root, "git", "init", source)
+	mustRun(t, source, "git", "branch", "-M", "main")
+	mustRun(t, source, "git", "config", "user.email", "test@example.com")
+	mustRun(t, source, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, source, "git", "add", "README.md")
+	mustRun(t, source, "git", "commit", "-m", "main")
+	mustRun(t, source, "git", "checkout", "-b", "develop")
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("develop"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, source, "git", "commit", "-am", "develop")
+	mustRun(t, source, "git", "checkout", "main")
+
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	cwd, err := resolveWorkspaceRepo(context.Background(), cfg, &WorkspaceRepoSpec{Kind: "git", GitURL: source, MainBranch: "develop", GroupFolder: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(cwd, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "develop" {
+		t.Fatalf("expected configured develop branch content, got %q", string(data))
 	}
 }
 
@@ -284,7 +332,7 @@ func TestResolveWorkspaceRepoCreatesStableGitWorktreeInsideAgentSession(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := filepath.Join(cfg.WorkspaceDir, "agent-abc", "sessions", "sess-123", "repo")
+	expected := filepath.Join(cfg.WorkspaceDir, "demo", "sessions", "sess-123", "source")
 	if first != expected {
 		t.Fatalf("expected session worktree %q, got %q", expected, first)
 	}
@@ -302,6 +350,93 @@ func TestResolveWorkspaceRepoCreatesStableGitWorktreeInsideAgentSession(t *testi
 	}
 	if second != first {
 		t.Fatalf("expected existing session worktree to be reused, first=%q second=%q", first, second)
+	}
+}
+
+func TestResolveWorkspaceRepoUsesProvidedRepoNameForSessionWorktree(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "origin-project")
+	mustRun(t, root, "git", "init", source)
+	mustRun(t, source, "git", "branch", "-M", "main")
+	mustRun(t, source, "git", "config", "user.email", "test@example.com")
+	mustRun(t, source, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("named"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, source, "git", "add", "README.md")
+	mustRun(t, source, "git", "commit", "-m", "init")
+
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	spec := &WorkspaceRepoSpec{
+		Kind:        "git",
+		Name:        "kunlun",
+		GitURL:      source,
+		GroupFolder: "demo",
+		AgentID:     "agent-abc",
+		Scope:       "session",
+		ScopeID:     "sess-123",
+	}
+	cwd, err := resolveWorkspaceRepo(context.Background(), cfg, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(cfg.WorkspaceDir, "demo", "sessions", "sess-123", "kunlun")
+	if cwd != expected {
+		t.Fatalf("expected named session worktree %q, got %q", expected, cwd)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "README.md")); err != nil {
+		t.Fatalf("expected named worktree to contain repository files: %v", err)
+	}
+}
+
+func TestAgentRuntimeResolveCwdKeepsSessionRootForSingleRepo(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "origin-project")
+	mustRun(t, root, "git", "init", source)
+	mustRun(t, source, "git", "branch", "-M", "main")
+	mustRun(t, source, "git", "config", "user.email", "test@example.com")
+	mustRun(t, source, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("runtime"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, source, "git", "add", "README.md")
+	mustRun(t, source, "git", "commit", "-m", "init")
+
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	rt := &agentRuntimeProcess{cfg: cfg}
+	req := &AgentRunRequestFrame{
+		AgentID: "agent-abc",
+		Workspace: &AgentRunWorkspace{
+			Folder:  "demo",
+			AgentID: "agent-abc",
+			Scope:   "session",
+			ScopeID: "sess-123",
+			Repos: []*WorkspaceRepoSpec{{
+				Kind:   "git",
+				Name:   "kunlun",
+				GitURL: source,
+			}},
+		},
+		Context: map[string]any{"group": map[string]any{"folder": "demo"}},
+	}
+
+	cwd, err := rt.resolveCwd(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedCwd := filepath.Join(cfg.WorkspaceDir, "demo", "sessions", "sess-123")
+	if cwd != expectedCwd {
+		t.Fatalf("expected session root cwd %q, got %q", expectedCwd, cwd)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "kunlun", "README.md")); err != nil {
+		t.Fatalf("expected repo mounted directly under session root: %v", err)
+	}
+	expectedShared := filepath.Join(cfg.WorkspaceDir, "demo", "shared")
+	if _, err := os.Stat(expectedShared); err != nil {
+		t.Fatalf("expected workspace shared dir: %v", err)
+	}
+	if shared := workspaceSharedDirFromRunContext(req.Context); shared != expectedShared {
+		t.Fatalf("expected shared dir in run context %q, got %q", expectedShared, shared)
 	}
 }
 
@@ -342,7 +477,7 @@ func TestResolveWorkspaceRepoSymlinksDeviceDirectoryInsideAgentSession(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := filepath.Join(cfg.WorkspaceDir, "agent-abc", "sessions", "sess-123")
+	expected := filepath.Join(cfg.WorkspaceDir, "demo", "sessions", "sess-123")
 	if cwd != expected {
 		t.Fatalf("expected agent session cwd %q, got %q", expected, cwd)
 	}
@@ -356,16 +491,32 @@ func TestResolveWorkspaceRepoSymlinksDeviceDirectoryInsideAgentSession(t *testin
 	}
 }
 
-func TestResolveAgentWorkspaceCwdUsesAgentTaskScope(t *testing.T) {
+func TestResolveAgentWorkspaceCwdUsesWorkspaceTaskScope(t *testing.T) {
 	root := t.TempDir()
 	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
-	cwd, err := resolveAgentWorkspaceCwd(cfg, &AgentRunWorkspace{AgentID: "agent-abc", Scope: "task", ScopeID: "task-001"})
+	cwd, err := resolveAgentWorkspaceCwd(cfg, &AgentRunWorkspace{Folder: "flow-demo", AgentID: "agent-abc", Scope: "task", TaskID: "task-001", TaskRunID: "run-001"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := filepath.Join(cfg.WorkspaceDir, "agent-abc", "tasks", "task-001")
+	expected := filepath.Join(cfg.WorkspaceDir, "flow-demo", "tasks", "task-001", "run-001")
 	if cwd != expected {
 		t.Fatalf("expected task cwd %q, got %q", expected, cwd)
+	}
+	if _, err := os.Stat(cwd); err != nil {
+		t.Fatalf("expected cwd created: %v", err)
+	}
+}
+
+func TestResolveAgentWorkspaceCwdUsesGlobalTaskScopeWithoutWorkspace(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	cwd, err := resolveAgentWorkspaceCwd(cfg, &AgentRunWorkspace{AgentID: "agent-abc", Scope: "task", TaskID: "task-001", TaskRunID: "run-001"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(root, "task", "task-001", "run-001")
+	if cwd != expected {
+		t.Fatalf("expected global task cwd %q, got %q", expected, cwd)
 	}
 	if _, err := os.Stat(cwd); err != nil {
 		t.Fatalf("expected cwd created: %v", err)
@@ -375,11 +526,11 @@ func TestResolveAgentWorkspaceCwdUsesAgentTaskScope(t *testing.T) {
 func TestResolveAgentWorkspaceCwdUsesDirectSessionRoot(t *testing.T) {
 	root := t.TempDir()
 	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
-	cwd, err := resolveAgentWorkspaceCwd(cfg, &AgentRunWorkspace{AgentID: "agent-abc", Scope: "direct_session", ScopeID: "sess-standalone"})
+	cwd, err := resolveAgentWorkspaceCwd(cfg, &AgentRunWorkspace{Folder: "flow-demo", AgentID: "agent-abc", Scope: "direct_session", ScopeID: "sess-standalone"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := filepath.Join(root, "session", "sess-standalone")
+	expected := filepath.Join(cfg.WorkspaceDir, "flow-demo", "sessions", "sess-standalone")
 	if cwd != expected {
 		t.Fatalf("expected direct session cwd %q, got %q", expected, cwd)
 	}
@@ -451,12 +602,31 @@ func TestValidateRunRequestAllowsDeviceTmpURI(t *testing.T) {
 	}
 }
 
-func TestResolveWorkspaceRepoRejectsDeviceDirectoryOutsideAllowedRoots(t *testing.T) {
+func TestResolveWorkspaceRepoAllowsDeviceDirectoryOutsideAllowedRoots(t *testing.T) {
 	allowed := t.TempDir()
 	outside := t.TempDir()
-	_, err := resolveWorkspaceRepo(context.Background(), &Config{AllowedRoots: []string{allowed}}, &WorkspaceRepoSpec{Kind: "device_path", DevicePath: outside, GroupFolder: "demo"})
-	if err == nil || !strings.Contains(err.Error(), "outside allowed roots") {
-		t.Fatalf("expected outside allowed roots error, got %v", err)
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	cwd, err := resolveWorkspaceRepo(context.Background(), &Config{AllowedRoots: []string{allowed}, WorkspaceDir: workspace}, &WorkspaceRepoSpec{Kind: "device_path", DevicePath: outside, GroupFolder: "demo"})
+	if err != nil {
+		t.Fatalf("expected device directory outside allowed roots to be accepted, got %v", err)
+	}
+	if cwd != filepath.Join(workspace, "demo") {
+		t.Fatalf("unexpected cwd: %s", cwd)
+	}
+}
+
+func TestRunCwdAllowedAllowsManagedSessionDirOutsideAllowedRoots(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{
+		AllowedRoots: []string{filepath.Join(root, "allowed")},
+		WorkspaceDir: filepath.Join(root, "workspace"),
+		SessionDir:   filepath.Join(root, "sessions"),
+		TaskDir:      filepath.Join(root, "tasks"),
+		TmpDir:       filepath.Join(root, "tmp"),
+	}
+	cwd := filepath.Join(cfg.SessionDir, "b1d40372-8ca1-4e68-82c2-b56ef1d45b09", "kunlun")
+	if !isRunCwdAllowed(cfg, cwd) {
+		t.Fatalf("expected managed session cwd outside allowed roots to be accepted: %s", cwd)
 	}
 }
 

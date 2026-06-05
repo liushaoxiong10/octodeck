@@ -261,6 +261,10 @@ func parseDfOutput(input string) (ResourceSnapshot, bool) {
 		if mountIndex >= len(fields) {
 			continue
 		}
+		mountPoint := strings.Join(fields[mountIndex:], " ")
+		if !isRealDiskFilesystem(filesystem, mountPoint) {
+			continue
+		}
 		totalBlocks, err1 := strconv.ParseUint(fields[totalIndex], 10, 64)
 		usedBlocks, err2 := strconv.ParseUint(fields[totalIndex+1], 10, 64)
 		percentText := strings.TrimSuffix(fields[percentIndex], "%")
@@ -276,7 +280,7 @@ func parseDfOutput(input string) (ResourceSnapshot, bool) {
 		}
 		disks = append(disks, DiskUsage{
 			Filesystem:      filesystem,
-			MountPoint:      strings.Join(fields[mountIndex:], " "),
+			MountPoint:      mountPoint,
 			DiskTotalBytes:  totalBlocks * blockSize,
 			DiskUsedBytes:   usedBlocks * blockSize,
 			DiskUsedPercent: clampPercentValue(usedPercent),
@@ -298,6 +302,53 @@ func parseDfOutput(input string) (ResourceSnapshot, bool) {
 		DiskUsedPercent: primary.DiskUsedPercent,
 		Disks:           disks,
 	}, true
+}
+
+func isRealDiskFilesystem(filesystem, mountPoint string) bool {
+	fs := strings.TrimSpace(filesystem)
+	if fs == "" {
+		// Keep compatibility with df output that omits the Filesystem column.
+		return true
+	}
+	lowerFS := strings.ToLower(fs)
+	virtualFilesystems := map[string]bool{
+		"autofs":      true,
+		"binfmt_misc": true,
+		"bpf":         true,
+		"cgroup":      true,
+		"cgroup2":     true,
+		"configfs":    true,
+		"debugfs":     true,
+		"devfs":       true,
+		"devtmpfs":    true,
+		"efivarfs":    true,
+		"fusectl":     true,
+		"hugetlbfs":   true,
+		"mqueue":      true,
+		"nsfs":        true,
+		"overlay":     true,
+		"proc":        true,
+		"pstore":      true,
+		"ramfs":       true,
+		"securityfs":  true,
+		"sysfs":       true,
+		"tmpfs":       true,
+		"tracefs":     true,
+	}
+	if virtualFilesystems[lowerFS] {
+		return false
+	}
+	if strings.HasPrefix(lowerFS, "/dev/") || strings.HasPrefix(lowerFS, "uuid=") || strings.HasPrefix(lowerFS, "label=") {
+		return true
+	}
+	if strings.HasPrefix(lowerFS, "zfs") || strings.HasPrefix(lowerFS, "zroot") || strings.HasPrefix(lowerFS, "rpool") {
+		return true
+	}
+	// macOS can report special non-disk maps in the Filesystem column.
+	if strings.HasPrefix(lowerFS, "map ") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(mountPoint)), "/dev") {
+		return false
+	}
+	return false
 }
 
 func percent(used uint64, total uint64) float64 {

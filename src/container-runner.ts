@@ -16,6 +16,7 @@ import path from 'path';
 import {
   AGENT_RUNNER_SECRET,
   CONTAINER_IMAGE,
+  createAgentToolToken,
   DATA_DIR,
   GROUPS_DIR,
   TIMEZONE,
@@ -86,6 +87,10 @@ import {
  */
 function getHostClaudeJsonPath(): string {
   return path.join(os.homedir(), '.claude.json');
+}
+
+function sanitizeEnvValue(value: string): string {
+  return value.replace(/[\r\n\0]/g, '');
 }
 
 /**
@@ -263,6 +268,8 @@ export interface ContainerInput {
   contextAudit?: ClaudeContextAudit;
   /** Owner user id used by cloud-memory tools in 云端模式. */
   ownerUserId?: string;
+  /** Signed per-user token used by in-process MCP tools to call server bridges. */
+  agentToolToken?: string;
   /**
    * Lightweight execution hint for one-shot structured output tasks.
    * Backends may use this to skip the full interactive agent runner, tools,
@@ -809,6 +816,9 @@ export function buildVolumeMounts(
     containerOverride,
     resolvedProvider?.customEnv,
   );
+  if (group.agentModel) {
+    envLines.push(`ANTHROPIC_MODEL=${sanitizeEnvValue(group.agentModel)}`);
+  }
   // SystemSettings.autoCompactWindow > 0 时注入到容器，让 agent-runner 通过 query() settings 传给 SDK
   const sysAutoCompact = getSystemSettings().autoCompactWindow;
   if (sysAutoCompact > 0) {
@@ -1068,6 +1078,9 @@ export async function runContainerAgent(
       const dockerInput: ContainerInput = {
         ...input,
         ownerUserId: group.created_by,
+        agentToolToken: group.created_by
+          ? createAgentToolToken(group.created_by)
+          : undefined,
         plugins: group.created_by
           ? loadUserPlugins(group.created_by, { runtime: 'docker' })
           : [],
@@ -1565,6 +1578,9 @@ export async function runHostAgent(
       containerOverride,
       hostPoolResult?.resolved.customEnv,
     );
+    if (group.agentModel) {
+      envLines.push(`ANTHROPIC_MODEL=${sanitizeEnvValue(group.agentModel)}`);
+    }
     for (const line of envLines) {
       const eqIdx = line.indexOf('=');
       if (eqIdx > 0) {
@@ -1658,6 +1674,11 @@ export async function runHostAgent(
     hostEnv['OCTODECK_WORKSPACE_GROUP'] = groupDir;
     hostEnv['OCTODECK_WORKSPACE_IPC'] = groupIpcDir;
     hostEnv['OCTODECK_AGENT_RUNNER_SECRET'] = AGENT_RUNNER_SECRET;
+    if (group.created_by) {
+      hostEnv['OCTODECK_AGENT_TOOL_TOKEN'] = createAgentToolToken(
+        group.created_by,
+      );
+    }
     hostEnv['OCTODECK_SERVER_URL'] =
       process.env.OCTODECK_SERVER_URL || `http://127.0.0.1:${WEB_PORT}`;
 
@@ -1857,6 +1878,9 @@ export async function runHostAgent(
       const hostInput: ContainerInput = {
         ...input,
         ownerUserId: group.created_by,
+        agentToolToken: group.created_by
+          ? createAgentToolToken(group.created_by)
+          : undefined,
         plugins: prepareHostPlugins(group.created_by),
         remoteExecutionLinkId:
           input.remoteExecutionLinkId ||

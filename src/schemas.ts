@@ -18,6 +18,10 @@ export const TaskPatchSchema = z.object({
   schedule_value: z.string().optional(),
   context_mode: z.enum(['group', 'isolated']).optional(),
   execution_type: z.enum(['agent', 'script']).optional(),
+  runtime_profile: AgentRuntimeProfileSchema.optional(),
+  agent_client_id: z.string().min(1).max(128).optional(),
+  backend: z.string().min(1).max(128).optional(),
+  agent_model: z.string().max(256).optional(),
   execution_mode: z.enum(['host', 'container']).optional(),
   execution_node: z.string().min(1).max(128).optional(),
   script_command: z.string().max(4096).nullable().optional(),
@@ -45,6 +49,10 @@ export const TaskCreateSchema = z
     schedule_value: z.string().min(1),
     context_mode: z.enum(['group', 'isolated']).optional(),
     execution_type: z.enum(['agent', 'script']).optional(),
+    runtime_profile: AgentRuntimeProfileSchema.optional(),
+    agent_client_id: z.string().min(1).max(128).optional(),
+    backend: z.string().min(1).max(128).optional(),
+    agent_model: z.string().max(256).optional(),
     execution_mode: z.enum(['host', 'container']).optional(),
     execution_node: z.string().min(1).max(128).optional(),
     script_command: z.string().max(4096).optional(),
@@ -193,6 +201,7 @@ export const GroupCreateSchema = z.object({
     .regex(/^cl_[0-9a-f]{16}$/)
     .optional(),
   agent_client_id: z.string().min(1).max(64).optional(),
+  agent_model: z.string().max(256).optional(),
   backend: z.string().min(1).max(64).optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
   // Device target for native execution: built-in server device or connected octodeck-daemon device.
@@ -232,6 +241,11 @@ export const RepoCreateSchema = z.object({
   kind: z.enum(['git', 'device_path']),
   git_url: z
     .string()
+    .optional()
+    .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  main_branch: z
+    .string()
+    .max(256)
     .optional()
     .transform((val) => (val && val.trim() ? val.trim() : undefined)),
   device_path: z
@@ -310,6 +324,7 @@ export const GroupPatchSchema = z.object({
     .regex(/^cl_[0-9a-f]{16}$/)
     .optional(),
   agent_client_id: z.string().min(1).max(64).optional(),
+  agent_model: z.string().max(256).optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
   backend: z.string().min(1).max(64).optional(),
   // 'server-local' | cl_xxx | runtime:cl_xxx:agentClient | provider:agentClient

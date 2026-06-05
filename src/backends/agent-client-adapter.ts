@@ -5,6 +5,7 @@ export interface DiscoveredAgentClient {
   displayName: string;
   binary: string;
   version?: string;
+  transport?: 'stdio' | 'acp' | 'a2a' | 'http' | string;
   permissionModes?: string[];
   capabilities?: string[];
 }
@@ -101,6 +102,7 @@ function templateForAgentClient(
   | 'resumeArgvTemplate'
 > {
   switch (id) {
+    case 'claude-acp':
     case 'claude-code':
       return {
         argvTemplate: [
@@ -118,6 +120,7 @@ function templateForAgentClient(
         supportsNativeSessions: true,
         sessionArgvTemplate: ['--resume={sessionId}'],
       };
+    case 'codex-acp':
     case 'codex':
       return {
         argvTemplate: [
@@ -141,6 +144,7 @@ function templateForAgentClient(
           '{prompt}',
         ],
       };
+    case 'traecli-acp':
     case 'traecli':
       return {
         argvTemplate: [

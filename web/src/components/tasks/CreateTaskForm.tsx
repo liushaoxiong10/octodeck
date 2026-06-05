@@ -19,6 +19,7 @@ import { useTasksStore } from '../../stores/tasks';
 import { useGroupsStore } from '../../stores/groups';
 import { useAgentLinksStore } from '../../stores/agentLinks';
 import type { AgentLink } from '../../stores/agentLinks';
+import { useCustomBackendsStore } from '../../stores/customBackends';
 import { formatGroupLabel } from '../settings/channel-meta';
 
 interface CreateTaskFormProps {
@@ -33,6 +34,10 @@ interface CreateTaskFormProps {
     notifyChannels: string[] | null;
     chatJid?: string;
     contextMode?: 'group' | 'isolated';
+    runtimeProfile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent';
+    agentClientId?: string;
+    backend?: string;
+    agentModel?: string;
   }) => Promise<void>;
   onClose: () => void;
   isAdmin?: boolean;
@@ -83,10 +88,15 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
   // --- Shared state ---
   const [notifyChannels, setNotifyChannels] = useState<string[] | null>(null);
   const [chatJid, setChatJid] = useState<string>('');
-  const [contextMode, setContextMode] = useState<'group' | 'isolated'>('group');
+  const [contextMode] = useState<'group' | 'isolated'>('isolated');
   const [executionModeExplicit, setExecutionModeExplicit] = useState<boolean>(false);
   const [executionNode, setExecutionNode] = useState('');
   const [executionNodeExplicit, setExecutionNodeExplicit] = useState(false);
+  const [agentConfigExplicit, setAgentConfigExplicit] = useState(false);
+  const [runtimeProfile, setRuntimeProfile] = useState<'server-agent' | 'server-agent-device-tools' | 'device-cli-agent' | ''>('');
+  const [agentBackendId, setAgentBackendId] = useState('');
+  const [agentClientId, setAgentClientId] = useState('');
+  const [agentModel, setAgentModel] = useState('');
   const connectedChannels = useConnectedChannels();
 
   const groupNames = useTasksStore((s) => s.groupNames);
@@ -94,6 +104,7 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
   const groups = useGroupsStore((s) => s.groups);
   const loadGroups = useGroupsStore((s) => s.loadGroups);
   const { links: devices, load: loadDevices } = useAgentLinksStore();
+  const { backends: customBackends, load: loadCustomBackends } = useCustomBackendsStore();
 
   useEffect(() => {
     if (Object.keys(groupNames).length === 0) {
@@ -104,6 +115,7 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
     }
     if (isAdmin) {
       loadDevices();
+      loadCustomBackends();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -125,6 +137,15 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
     const sourceNode = chatJid ? groups[chatJid]?.execution_node : undefined;
     setExecutionNode(isAgentLinkExecutionTarget(sourceNode) ? sourceNode : '');
   }, [chatJid, groups, executionNodeExplicit]);
+
+  useEffect(() => {
+    if (agentConfigExplicit) return;
+    const sourceGroup = chatJid ? groups[chatJid] : undefined;
+    setRuntimeProfile(sourceGroup?.runtime_profile ?? '');
+    setAgentBackendId(sourceGroup?.backend ?? '');
+    setAgentClientId(sourceGroup?.agent_client_id ?? '');
+    setAgentModel(sourceGroup?.agent_model ?? '');
+  }, [chatJid, groups, agentConfigExplicit]);
 
   const isScript = formData.executionType === 'script';
 
@@ -172,6 +193,81 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
     }),
   ];
 
+  const selectableAgentBackends = customBackends
+    .filter((backend) => (backend.runtime === 'local-device' || backend.deviceLinkId) && backend.deviceLinkId && backend.agentClientId)
+    .filter((backend) => !executionNode || backend.deviceLinkId === executionNode || executionNode.startsWith('provider:'));
+
+  const renderAgentConfig = () => {
+    if (!isAdmin || isScript) return null;
+    return (
+      <div className="rounded-lg border border-border p-3 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <label className="block text-sm font-medium text-foreground">Agent 配置</label>
+            <p className="mt-1 text-xs text-muted-foreground">
+              默认继承源工作区的 Agent / 模型；手动选择后会固定到这个定时任务
+            </p>
+          </div>
+          {agentConfigExplicit && (
+            <Button type="button" variant="outline" size="sm" onClick={() => setAgentConfigExplicit(false)}>
+              恢复继承
+            </Button>
+          )}
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-muted-foreground mb-1">Device CLI Agent</label>
+          <Select
+            value={agentBackendId || '__inherit__'}
+            onValueChange={(value) => {
+              setAgentConfigExplicit(true);
+              if (value === '__inherit__') {
+                setAgentBackendId('');
+                setAgentClientId('');
+                setRuntimeProfile('');
+                return;
+              }
+              const selected = customBackends.find((backend) => backend.id === value);
+              setAgentBackendId(value);
+              setAgentClientId(selected?.agentClientId ?? '');
+              setRuntimeProfile('device-cli-agent');
+              if (selected?.deviceLinkId && !executionNodeExplicit) {
+                setExecutionNode(selected.deviceLinkId);
+                setFormData((prev) => ({ ...prev, executionMode: 'host' }));
+              }
+              if (selected?.model && !agentModel) setAgentModel(selected.model);
+            }}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__inherit__">继承源工作区</SelectItem>
+              {agentBackendId && !selectableAgentBackends.some((backend) => backend.id === agentBackendId) && (
+                <SelectItem value={agentBackendId}>{agentBackendId} · 当前配置</SelectItem>
+              )}
+              {selectableAgentBackends.map((backend) => (
+                <SelectItem key={backend.id} value={backend.id}>
+                  {backend.displayName || backend.id} · {backend.agentClientId} · {backend.deviceLinkId}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-muted-foreground mb-1">模型覆盖</label>
+          <Input
+            value={agentModel}
+            onChange={(e) => {
+              setAgentConfigExplicit(true);
+              setAgentModel(e.target.value);
+            }}
+            placeholder="留空则继承工作区/Agent 默认模型"
+          />
+        </div>
+      </div>
+    );
+  };
+
   const renderTargetWorkspace = () => (
     <div>
       <label className="block text-sm font-medium text-foreground mb-2">消息目标</label>
@@ -199,20 +295,12 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
 
   const renderContextMode = () => (
     <div>
-      <label className="block text-sm font-medium text-foreground mb-2">上下文模式</label>
-      <Select value={contextMode} onValueChange={(value) => setContextMode(value as 'group' | 'isolated')}>
-        <SelectTrigger className="w-full">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="group">复用源工作区（group）</SelectItem>
-          <SelectItem value="isolated">独立临时工作区（isolated）</SelectItem>
-        </SelectContent>
-      </Select>
+      <label className="block text-sm font-medium text-foreground mb-2">运行模式</label>
+      <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm text-foreground">
+        后台任务模式
+      </div>
       <p className="mt-1 text-xs text-muted-foreground">
-        {contextMode === 'group'
-          ? '任务复用源工作区的会话、记忆和 skills，prompt 作为新消息注入'
-          : '每次执行创建新的 task-xxxx 工作区，fresh session，与源工作区隔离'}
+        定时任务不会创建新的可见工作区；会在后台独立执行，结果写回任务日志并通知目标工作区
       </p>
     </div>
   );
@@ -316,6 +404,10 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
         notifyChannels,
         chatJid: chatJid || undefined,
         contextMode: !isScript ? contextMode : undefined,
+        runtimeProfile: agentConfigExplicit && runtimeProfile ? runtimeProfile : undefined,
+        agentClientId: agentConfigExplicit && agentClientId ? agentClientId : undefined,
+        backend: agentConfigExplicit && agentBackendId ? agentBackendId : undefined,
+        agentModel: agentConfigExplicit && agentModel.trim() ? agentModel.trim() : undefined,
       });
       // The store swallows API errors into state.error; surface it as a toast
       // so the user sees why the submit failed. TasksPage keeps the form open
@@ -561,6 +653,7 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
 
             {renderTargetWorkspace()}
             {!isScript && renderContextMode()}
+            {renderAgentConfig()}
 
             {/* Script Command */}
             {isScript && (

@@ -8,6 +8,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { sdkQuery } from '../sdk-query.js';
 import { GROUPS_DIR } from '../config.js';
 import { removeFlowArtifacts } from '../file-manager.js';
+import { requestWorkspaceCleanup } from '../agent-link/registry.js';
 import type { Variables } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { TaskCreateSchema, TaskPatchSchema } from '../schemas.js';
@@ -25,7 +26,7 @@ import {
   getAgentLinkById,
   deleteGroupData,
 } from '../db.js';
-import type { AuthUser } from '../types.js';
+import type { AuthUser, RegisteredGroup, ScheduledTask } from '../types.js';
 import { TIMEZONE } from '../config.js';
 import {
   isHostExecutionGroup,
@@ -59,6 +60,28 @@ function deviceLinkIdFromExecutionTarget(
   const legacyRuntime = /^(cl_[0-9a-f]{16}):[^:]+$/.exec(value);
   if (legacyRuntime) return legacyRuntime[1];
   return undefined;
+}
+
+function buildTaskAgentConfig(
+  group: RegisteredGroup,
+  overrides: {
+    runtime_profile?: ScheduledTask['runtime_profile'];
+    agent_client_id?: string;
+    backend?: string;
+    agent_model?: string;
+    execution_node?: string | null;
+  } = {},
+): Pick<
+  ScheduledTask,
+  'runtime_profile' | 'agent_client_id' | 'backend' | 'agent_model'
+> {
+  return {
+    runtime_profile: overrides.runtime_profile ?? group.runtimeProfile ?? null,
+    agent_client_id: overrides.agent_client_id ?? group.agentClientId ?? null,
+    backend: overrides.backend ?? group.backend ?? null,
+    agent_model:
+      overrides.agent_model?.trim() || group.agentModel?.trim() || null,
+  };
 }
 
 // --- Routes ---
@@ -150,6 +173,10 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     schedule_type,
     schedule_value,
     execution_type,
+    runtime_profile,
+    agent_client_id,
+    backend,
+    agent_model,
     script_command,
     notify_channels,
     execution_node,
@@ -279,6 +306,12 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     schedule_value,
     context_mode: validation.data.context_mode || 'group',
     execution_type: execType,
+    ...buildTaskAgentConfig(group, {
+      runtime_profile,
+      agent_client_id,
+      backend,
+      agent_model,
+    }),
     execution_mode: taskExecutionMode,
     execution_node: taskExecutionNode,
     script_command: script_command ?? null,
@@ -468,6 +501,20 @@ tasksRoutes.delete('/:id', authMiddleware, (c) => {
     );
   }
 
+  const taskWorkspace = existing.workspace_folder || group?.folder || existing.group_folder;
+  const taskDeviceLinkId =
+    deviceLinkIdFromExecutionTarget(existing.execution_node) ||
+    group?.deviceLinkId ||
+    deviceLinkIdFromExecutionTarget(group?.executionNode);
+  if (taskDeviceLinkId && taskWorkspace) {
+    requestWorkspaceCleanup({
+      linkId: taskDeviceLinkId,
+      workspace: taskWorkspace,
+      scope: 'task',
+      taskId: existing.id,
+    });
+  }
+
   deleteTask(id);
   return c.json({ success: true });
 });
@@ -623,7 +670,7 @@ tasksRoutes.post('/ai', authMiddleware, async (c) => {
 
   let groupFolder: string;
   let chatJid: string;
-  let sourceIsHost: boolean;
+  let sourceGroup: RegisteredGroup;
 
   if (requestedChatJid) {
     // User-selected workspace: run the same validation chain as POST /api/tasks
@@ -641,14 +688,15 @@ tasksRoutes.post('/ai', authMiddleware, async (c) => {
     }
     groupFolder = group.folder;
     chatJid = requestedChatJid;
-    sourceIsHost = isHostExecutionGroup(group);
+    sourceGroup = group;
   } else {
     const homeGroup = getUserHomeGroup(authUser.id);
     if (!homeGroup) return c.json({ error: 'Home group not found' }, 400);
+    const registered = getRegisteredGroup(homeGroup.jid);
+    if (!registered) return c.json({ error: 'Home group not found' }, 400);
     groupFolder = homeGroup.folder;
     chatJid = homeGroup.jid;
-    const registered = getRegisteredGroup(homeGroup.jid);
-    sourceIsHost = registered ? isHostExecutionGroup(registered) : false;
+    sourceGroup = registered;
   }
 
   const taskId = crypto.randomUUID();
@@ -658,9 +706,14 @@ tasksRoutes.post('/ai', authMiddleware, async (c) => {
   // POST /api/tasks). Previously hard-coded to admin=host / member=container,
   // which would misattribute tasks whose target workspace is container-mode
   // even for admin, or vice-versa.
-  const taskExecutionMode: 'host' | 'container' = sourceIsHost
+  const taskExecutionMode: 'host' | 'container' = isHostExecutionGroup(sourceGroup)
     ? 'host'
     : 'container';
+  const inheritedExecutionNode = isAgentLinkExecutionTarget(
+    sourceGroup.executionNode,
+  )
+    ? sourceGroup.executionNode
+    : null;
 
   // Create task immediately with 'parsing' status and description as prompt
   createTask({
@@ -672,7 +725,9 @@ tasksRoutes.post('/ai', authMiddleware, async (c) => {
     schedule_value: '0 0 * * *', // placeholder, will be updated after parsing
     context_mode: requestedContextMode ?? 'group',
     execution_type: 'agent',
+    ...buildTaskAgentConfig(sourceGroup),
     execution_mode: taskExecutionMode,
+    execution_node: taskExecutionMode === 'host' ? inheritedExecutionNode : null,
     script_command: null,
     next_run: null,
     status: 'parsing',

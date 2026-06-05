@@ -17,6 +17,7 @@ type AgentClientInfo struct {
 	Version         string   `json:"version,omitempty"`
 	Provider        string   `json:"provider,omitempty"`
 	Transport       string   `json:"transport,omitempty"`
+	Args            []string `json:"-"`
 	PermissionModes []string `json:"permissionModes,omitempty"`
 	Capabilities    []string `json:"capabilities,omitempty"`
 }
@@ -25,34 +26,50 @@ type agentClientCandidate struct {
 	id          string
 	displayName string
 	command     string
+	provider    string
 	transport   string
+	args        []string
+	probeArgs   [][]string
+	markers     []string
 }
 
 var supportedAgentClients = []agentClientCandidate{
 	{id: "claude-code", displayName: "Claude Code", command: "claude"},
+	{id: "claude-acp", displayName: "Claude Code (ACP)", command: "claude", provider: "claude-code", transport: "acp", args: []string{"acp"}, probeArgs: [][]string{{"acp", "--help"}, {"--help"}}},
 	{id: "codex", displayName: "Codex CLI", command: "codex"},
+	{id: "codex-acp", displayName: "Codex CLI (ACP)", command: "codex", provider: "codex", transport: "acp", args: []string{"acp"}, probeArgs: [][]string{{"acp", "--help"}, {"--help"}}},
 	{id: "traecli", displayName: "TraeCLI", command: "traecli"},
+	{id: "traecli-acp", displayName: "TraeCLI (ACP)", command: "traecli", provider: "traecli", transport: "acp", args: []string{"acp"}, probeArgs: [][]string{{"acp", "--help"}, {"--help"}}},
 	{id: "seed", displayName: "Seed CLI", command: "seed", transport: "a2a"},
 }
 
 var agentClientVersionArgs = map[string][]string{
 	"claude-code": {"--version"},
+	"claude-acp":  {"--version"},
 	"codex":       {"--version"},
+	"codex-acp":   {"--version"},
 	"traecli":     {"--version"},
+	"traecli-acp": {"--version"},
 	"seed":        {"--version"},
 }
 
 var agentClientPermissionModes = map[string][]string{
 	"claude-code": {"default", "acceptEdits", "bypassPermissions", "plan"},
+	"claude-acp":  {"default", "acceptEdits", "bypassPermissions", "plan"},
 	"codex":       {"default", "read-only", "workspace-write", "full-access"},
+	"codex-acp":   {"default", "read-only", "workspace-write", "full-access"},
 	"traecli":     {"default", "acceptEdits", "bypassPermissions"},
+	"traecli-acp": {"default", "acceptEdits", "bypassPermissions"},
 	"seed":        {"default", "ask", "auto"},
 }
 
 var agentClientCapabilities = map[string][]string{
 	"claude-code": {"print", "stream-json", "mcp", "permissions", "tools", "session", "skills"},
+	"claude-acp":  {"acp", "jsonrpc", "mcp", "permissions", "tools", "session", "skills"},
 	"codex":       {"exec", "jsonl", "tools", "sandbox", "approval-policy"},
+	"codex-acp":   {"acp", "jsonrpc", "mcp", "tools", "sandbox", "approval-policy", "session"},
 	"traecli":     {"print", "plain-text", "permissions", "tools"},
+	"traecli-acp": {"acp", "jsonrpc", "mcp", "permissions", "tools", "session"},
 	"seed":        {"a2a", "jsonrpc", "events", "permissions", "tools", "session"},
 }
 
@@ -164,17 +181,25 @@ func discoverAgentClientsForConfig(cfg *Config) []AgentClientInfo {
 		if bin == "" {
 			continue
 		}
+		if !supportsAgentClientCandidate(c, bin) {
+			continue
+		}
 		transport := c.transport
 		if transport == "" {
 			transport = "stdio"
+		}
+		provider := c.provider
+		if provider == "" {
+			provider = c.id
 		}
 		clients = append(clients, AgentClientInfo{
 			ID:              c.id,
 			DisplayName:     c.displayName,
 			Binary:          bin,
 			Version:         detectAgentClientVersion(c.id, bin),
-			Provider:        c.id,
+			Provider:        provider,
 			Transport:       transport,
+			Args:            append([]string(nil), c.args...),
 			PermissionModes: agentClientPermissionModes[c.id],
 			Capabilities:    agentClientCapabilities[c.id],
 		})
@@ -197,7 +222,7 @@ func registryAgentClients(cfg *Config) []AgentClientInfo {
 			provider = entry.ID
 		}
 		version := ""
-		if entry.Binary != "" && transport == "stdio" {
+		if entry.Binary != "" && (transport == "stdio" || transport == "acp") {
 			args := entry.VersionCommand
 			if len(args) == 0 {
 				args = []string{"--version"}
@@ -211,11 +236,39 @@ func registryAgentClients(cfg *Config) []AgentClientInfo {
 			Version:         version,
 			Provider:        provider,
 			Transport:       transport,
+			Args:            append([]string(nil), entry.Args...),
 			PermissionModes: entry.PermissionModes,
 			Capabilities:    append([]string(nil), entry.Capabilities...),
 		})
 	}
 	return out
+}
+
+func supportsAgentClientCandidate(c agentClientCandidate, binary string) bool {
+	if c.transport != "acp" {
+		return true
+	}
+	probes := c.probeArgs
+	if len(probes) == 0 {
+		probes = [][]string{{"acp", "--help"}, {"--help"}}
+	}
+	markers := c.markers
+	if len(markers) == 0 {
+		markers = []string{"agent client protocol", "acp"}
+	}
+	for _, args := range probes {
+		out, ok := detectAgentClientOutputWithArgs(binary, args)
+		if !ok {
+			continue
+		}
+		lower := strings.ToLower(out)
+		for _, marker := range markers {
+			if marker != "" && strings.Contains(lower, strings.ToLower(marker)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func mergeAgentClients(auto []AgentClientInfo, registry []AgentClientInfo) []AgentClientInfo {
@@ -248,15 +301,23 @@ func detectAgentClientVersion(id string, binary string) string {
 }
 
 func detectAgentClientVersionWithArgs(binary string, args []string) string {
+	out, ok := detectAgentClientOutputWithArgs(binary, args)
+	if !ok {
+		return ""
+	}
+	return normalizeVersionOutput(out)
+}
+
+func detectAgentClientOutputWithArgs(binary string, args []string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil || ctx.Err() != nil {
-		return ""
+		return "", false
 	}
-	return normalizeVersionOutput(string(out))
+	return string(out), true
 }
 
 func normalizeVersionOutput(s string) string {

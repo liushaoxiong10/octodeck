@@ -122,6 +122,59 @@ describe('agent team definitions', () => {
     expect(prompt).toContain('不要在生成结果的 team.shape 中继续返回 auto');
   });
 
+  test('lists and imports reusable agent.md definitions from agency-agents store', async () => {
+    const originalFetch = global.fetch;
+    const storeContent = `---
+name: Backend Architect
+description: Senior backend architect specializing in scalable system design.
+---
+
+# Backend Architect
+
+Designs robust backend systems.`;
+    global.fetch = vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      if (requestUrl.includes('/git/trees/main?recursive=1')) {
+        return new Response(
+          JSON.stringify({
+            tree: [
+              {
+                path: 'engineering/engineering-backend-architect.md',
+                type: 'blob',
+                size: 1234,
+              },
+              { path: 'README.md', type: 'blob', size: 999 },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (requestUrl.includes('/engineering/engineering-backend-architect.md')) {
+        return new Response(storeContent, { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const entries = await agentTeams.listAgentMdStoreEntries('backend');
+      expect(entries).toHaveLength(1);
+      expect(entries[0].path).toBe('engineering/engineering-backend-architect.md');
+      expect(entries[0].sourceUrl).toContain('msitarzewski/agency-agents');
+
+      const imported = await agentTeams.createAgentMdDefinitionFromStore(
+        'engineering/engineering-backend-architect.md',
+        'claude-sdk',
+        'user_store',
+      );
+      expect(imported.name).toBe('Backend Architect');
+      expect(imported.summary).toContain('Senior backend architect');
+      expect(imported.content).toContain('# Backend Architect');
+      expect(agentTeams.listAgentMdDefinitions('user_store')).toEqual([imported]);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
   test('rejects generated team content that semantically binds concrete cli or device', () => {
     const draft = agentTeams.buildAgentTeamDraft({
       generatorAgentId: 'planner-agent',

@@ -260,23 +260,7 @@ func (r *toolRunner) validate(req *ToolRequestFrame) error {
 }
 
 func (r *toolRunner) listDirectories(requestedPath string) (map[string]any, error) {
-	roots := r.cfg.AllowedRoots
-	hasAllowlist := len(roots) > 0
-
 	if requestedPath == "" {
-		if hasAllowlist {
-			dirs := make([]map[string]any, 0, len(roots))
-			for _, root := range roots {
-				cleanRoot, err := cleanExistingDirectory(root)
-				if err != nil {
-					continue
-				}
-				dirs = append(dirs, directoryPayload(filepath.Base(cleanRoot), cleanRoot, hasVisibleSubdirectory(cleanRoot)))
-			}
-			sortDirectoryPayloads(dirs)
-			return map[string]any{"currentPath": nil, "parentPath": nil, "directories": dirs, "hasAllowlist": true}, nil
-		}
-
 		home, err := os.UserHomeDir()
 		if err != nil || home == "" {
 			home = string(filepath.Separator)
@@ -300,15 +284,12 @@ func (r *toolRunner) listDirectories(requestedPath string) (map[string]any, erro
 	if err != nil {
 		return nil, err
 	}
-	if hasAllowlist && !r.isAllowedPathForCwd(cleanPath, cleanPath) {
-		return nil, fmt.Errorf("path outside allowed roots: %s", cleanPath)
-	}
 
 	return map[string]any{
 		"currentPath":  cleanPath,
-		"parentPath":   parentPathFor(cleanPath, hasAllowlist, r),
+		"parentPath":   parentPathFor(cleanPath, false, nil),
 		"directories":  r.listVisibleSubdirectories(cleanPath),
-		"hasAllowlist": hasAllowlist,
+		"hasAllowlist": false,
 	}, nil
 }
 
@@ -355,9 +336,6 @@ func (r *toolRunner) listVisibleSubdirectories(dirPath string) []map[string]any 
 		fullPath := filepath.Join(dirPath, entry.Name())
 		cleanPath, err := cleanExistingDirectory(fullPath)
 		if err != nil {
-			continue
-		}
-		if !r.isAllowedPathForCwd(cleanPath, cleanPath) {
 			continue
 		}
 		dirs = append(dirs, directoryPayload(entry.Name(), cleanPath, hasVisibleSubdirectory(cleanPath)))
@@ -411,6 +389,39 @@ func (r *toolRunner) resolvePath(cwd, p string) (string, error) {
 
 func (r *toolRunner) isAllowedPathForCwd(p, cwd string) bool {
 	return isPathAllowedByRoots(p, r.cfg.AllowedRoots, cwd)
+}
+
+func isRunCwdAllowed(cfg *Config, cwd string) bool {
+	if isPathAllowedByRoots(cwd, cfg.AllowedRoots, cwd) {
+		return true
+	}
+	managedRoots := []string{
+		workspaceDir(cfg),
+		sessionDir(cfg),
+		taskDir(cfg),
+		tmpDir(cfg),
+	}
+	return isPathAllowedByCleanRoots(cwd, managedRoots)
+}
+
+func isPathAllowedByCleanRoots(p string, roots []string) bool {
+	clean, err := filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return false
+	}
+	for _, root := range roots {
+		r, err := filepath.Abs(filepath.Clean(root))
+		if err != nil {
+			continue
+		}
+		if clean == r {
+			return true
+		}
+		if rel, err := filepath.Rel(r, clean); err == nil && rel != "." && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel) {
+			return true
+		}
+	}
+	return false
 }
 
 func isPathAllowedByRoots(p string, roots []string, cwd string) bool {

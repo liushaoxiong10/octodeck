@@ -60,7 +60,7 @@ export const RuntimeCapabilitySchema = z.object({
   runtimeId: z.string().min(1).max(256),
   agentId: z.string().min(1).max(128),
   provider: z.string().max(128).optional(),
-  transport: z.enum(['stdio', 'a2a', 'http']).optional(),
+  transport: z.enum(['stdio', 'acp', 'a2a', 'http']).optional(),
   features: z.array(z.string().max(64)).max(64).optional(),
   permissionModes: z.array(z.string().max(64)).max(32).optional(),
   allowedWorkspaces: z.array(z.string().max(4096)).max(128).optional(),
@@ -84,6 +84,26 @@ export const HelloAckFrame = z.object({
 });
 export type HelloAckFrame = z.infer<typeof HelloAckFrame>;
 
+export const WorkspaceRepoSpecSchema = z.object({
+  kind: z.enum(['git', 'device_path', 'workspace']),
+  /** Display name used as the subdirectory name under resolved workspace/session/task root. 可选，缺失时 daemon 从 gitUrl/devicePath 推断。 */
+  name: z.string().max(256).optional(),
+  gitUrl: z.string().max(2000).optional(),
+  mainBranch: z.string().max(256).optional(),
+  devicePath: z.string().max(4096).optional(),
+  groupFolder: z.string().max(256),
+  agentId: z.string().min(1).max(128).optional(),
+  agentRoot: z.string().max(4096).optional(),
+  workdirMode: z.enum(['auto', 'custom']).optional(),
+  scope: z
+    .enum(['workspace', 'session', 'direct_session', 'task', 'skills'])
+    .optional(),
+  scopeId: z.string().max(256).optional(),
+  taskId: z.string().max(256).optional(),
+  taskRunId: z.string().max(256).optional(),
+});
+export type WorkspaceRepoSpec = z.infer<typeof WorkspaceRepoSpecSchema>;
+
 export const RunRequestFrame = z.object({
   type: z.literal('run.request'),
   id: z.number().int().nonnegative(),
@@ -99,19 +119,7 @@ export const RunRequestFrame = z.object({
   context: z.unknown().optional(),
   stdinJson: z.string().optional(),
   remoteCwdPlaceholder: z.string().max(128).optional(),
-  workspaceRepo: z
-    .object({
-      kind: z.enum(['git', 'device_path', 'workspace']),
-      gitUrl: z.string().max(2000).optional(),
-      devicePath: z.string().max(4096).optional(),
-      groupFolder: z.string().max(256),
-      agentId: z.string().min(1).max(128).optional(),
-      agentRoot: z.string().max(4096).optional(),
-      workdirMode: z.enum(['auto', 'custom']).optional(),
-      scope: z.enum(['workspace', 'session', 'direct_session', 'task', 'skills']).optional(),
-      scopeId: z.string().max(256).optional(),
-    })
-    .optional(),
+  workspaceRepo: WorkspaceRepoSpecSchema.optional(),
 });
 export type RunRequestFrame = z.infer<typeof RunRequestFrame>;
 
@@ -154,19 +162,12 @@ export const AgentRunWorkspaceSchema = z.object({
   workdirMode: z.enum(['auto', 'custom']).optional(),
   scope: z.enum(['workspace', 'session', 'direct_session', 'task', 'skills']).optional(),
   scopeId: z.string().max(256).optional(),
-  repo: z
-    .object({
-      kind: z.enum(['git', 'device_path', 'workspace']),
-      gitUrl: z.string().max(2000).optional(),
-      devicePath: z.string().max(4096).optional(),
-      groupFolder: z.string().max(256),
-      agentId: z.string().min(1).max(128).optional(),
-      agentRoot: z.string().max(4096).optional(),
-      workdirMode: z.enum(['auto', 'custom']).optional(),
-      scope: z.enum(['workspace', 'session', 'direct_session', 'task', 'skills']).optional(),
-      scopeId: z.string().max(256).optional(),
-    })
-    .optional(),
+  taskId: z.string().max(256).optional(),
+  taskRunId: z.string().max(256).optional(),
+  /** Single repo (legacy). 优先读 repos，repos 为空时退回 repo。 */
+  repo: WorkspaceRepoSpecSchema.optional(),
+  /** Multiple repos mounted under <resolved-root>/<name>/. */
+  repos: z.array(WorkspaceRepoSpecSchema).max(100).optional(),
   sessionRoot: z.string().max(4096).optional(),
 });
 export type AgentRunWorkspace = z.infer<typeof AgentRunWorkspaceSchema>;
@@ -185,14 +186,7 @@ export const AgentRunRequestFrame = z.object({
   policy: AgentRunPolicySchema.optional(),
   context: z.unknown().optional(),
   remoteCwdPlaceholder: z.string().max(128).optional(),
-  workspaceRepo: z
-    .object({
-      kind: z.enum(['git', 'device_path', 'workspace']),
-      gitUrl: z.string().max(2000).optional(),
-      devicePath: z.string().max(4096).optional(),
-      groupFolder: z.string().max(256),
-    })
-    .optional(),
+  workspaceRepo: WorkspaceRepoSpecSchema.optional(),
 });
 export type AgentRunRequestFrame = z.infer<typeof AgentRunRequestFrame>;
 
@@ -239,6 +233,19 @@ export const AgentSessionDeleteRequestFrame = z.object({
 });
 export type AgentSessionDeleteRequestFrame = z.infer<
   typeof AgentSessionDeleteRequestFrame
+>;
+
+export const WorkspaceCleanupRequestFrame = z.object({
+  type: z.literal('workspace.cleanup.request'),
+  id: z.number().int().nonnegative(),
+  workspace: z.string().max(256),
+  scope: z.enum(['workspace', 'session', 'direct_session', 'task']).optional(),
+  sessionId: z.string().max(512).optional(),
+  taskId: z.string().max(256).optional(),
+  taskRunId: z.string().max(256).optional(),
+});
+export type WorkspaceCleanupRequestFrame = z.infer<
+  typeof WorkspaceCleanupRequestFrame
 >;
 
 export const AgentPermissionDecisionFrame = z.object({
@@ -288,6 +295,17 @@ export const SkillsRequestFrame = z.object({
 });
 export type SkillsRequestFrame = z.infer<typeof SkillsRequestFrame>;
 
+export const DaemonUpdateRequestFrame = z.object({
+  type: z.literal('daemon.update.request'),
+  id: z.number().int().nonnegative(),
+  latestVersion: z.string().max(64),
+  currentVersion: z.string().max(64).optional(),
+  reason: z.string().max(128).optional(),
+});
+export type DaemonUpdateRequestFrame = z.infer<
+  typeof DaemonUpdateRequestFrame
+>;
+
 // ─── Incoming (C→S) ──────────────────────────────────────────
 
 export const HelloFrame = z.object({
@@ -311,7 +329,7 @@ export const HelloFrame = z.object({
         permissionModes: z.array(z.string().max(64)).max(16).optional(),
         capabilities: z.array(z.string().max(64)).max(32).optional(),
         provider: z.string().max(128).optional(),
-        transport: z.enum(['stdio', 'a2a', 'http']).optional(),
+        transport: z.enum(['stdio', 'acp', 'a2a', 'http']).optional(),
       }),
     )
     .max(16)
@@ -383,6 +401,8 @@ export const AgentRunEventFrame = z.object({
     'thinking_delta',
     'tool_call',
     'tool_result',
+    'tool_use_start',
+    'tool_use_end',
     'permission_request',
     'session',
     'usage',
@@ -423,7 +443,7 @@ export const AgentInfoSchema = z.object({
   binary: z.string().max(512),
   version: z.string().max(128).optional(),
   provider: z.string().max(128).optional(),
-  transport: z.enum(['stdio', 'a2a', 'http']).optional(),
+  transport: z.enum(['stdio', 'acp', 'a2a', 'http']).optional(),
   permissionModes: z.array(z.string().max(64)).max(16).optional(),
   capabilities: z.array(z.string().max(64)).max(32).optional(),
 });
@@ -604,11 +624,13 @@ export const OutboundFrame = z.discriminatedUnion('type', [
   AgentDiscoverRequestFrame,
   AgentSessionsRequestFrame,
   AgentSessionDeleteRequestFrame,
+  WorkspaceCleanupRequestFrame,
   AgentPermissionDecisionFrame,
   ToolRequestFrame,
   ToolCancelFrame,
   ModelsRequestFrame,
   SkillsRequestFrame,
+  DaemonUpdateRequestFrame,
   ErrorFrame,
 ]);
 export type OutboundFrame = z.infer<typeof OutboundFrame>;

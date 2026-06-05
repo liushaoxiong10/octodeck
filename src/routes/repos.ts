@@ -22,12 +22,31 @@ function toPayload(repo: ManagedRepo) {
     name: repo.name,
     kind: repo.kind,
     git_url: repo.gitUrl,
+    main_branch: repo.mainBranch,
     device_path: repo.devicePath,
     device_link_id: repo.deviceLinkId,
     created_by: repo.createdBy,
     created_at: repo.createdAt,
     updated_at: repo.updatedAt,
   };
+}
+
+function isValidMainBranchName(value: string | undefined): boolean {
+  if (!value) return true;
+  if (/\s/.test(value)) return false;
+  if (value.startsWith('-') || value.startsWith('/') || value.endsWith('/')) {
+    return false;
+  }
+  if (
+    value.includes('..') ||
+    value.includes('//') ||
+    value.includes('@{') ||
+    value.endsWith('.') ||
+    value.endsWith('.lock')
+  ) {
+    return false;
+  }
+  return /^[A-Za-z0-9._/-]+$/.test(value);
 }
 
 interface DeviceDirectoryPayload {
@@ -204,7 +223,7 @@ repoRoutes.post('/', authMiddleware, async (c) => {
   if (!validation.success)
     return c.json({ error: 'Invalid request body' }, 400);
 
-  const { name, kind, git_url, device_link_id } = validation.data;
+  const { name, kind, git_url, main_branch, device_link_id } = validation.data;
   let { device_path } = validation.data;
   if (kind === 'git') {
     if (!git_url) return c.json({ error: 'git_url is required' }, 400);
@@ -216,6 +235,9 @@ repoRoutes.post('/', authMiddleware, async (c) => {
     }
     if (url.protocol !== 'https:')
       return c.json({ error: 'git_url must use https protocol' }, 400);
+    if (!isValidMainBranchName(main_branch)) {
+      return c.json({ error: 'main_branch is not a valid branch name' }, 400);
+    }
   }
 
   if (kind === 'device_path') {
@@ -228,17 +250,14 @@ repoRoutes.post('/', authMiddleware, async (c) => {
     if (!link || link.userId !== user.id || link.revokedAt) {
       return c.json({ error: 'device_link_id not found' }, 400);
     }
-    const result = await listDeviceDirectories(device_link_id, device_path);
-    if (!result.ok) return c.json({ error: result.error }, result.status);
-    if (!result.payload.currentPath)
-      return c.json({ error: 'device_path is not a directory' }, 400);
-    device_path = result.payload.currentPath;
+    device_path = path.normalize(device_path);
   }
 
   const repo = createManagedRepo({
     name,
     kind,
     gitUrl: kind === 'git' ? git_url : undefined,
+    mainBranch: kind === 'git' ? main_branch : undefined,
     devicePath: kind === 'device_path' ? device_path : undefined,
     deviceLinkId: kind === 'device_path' ? device_link_id : undefined,
     createdBy: user.id,

@@ -14,14 +14,12 @@ import { getSystemSettings } from './runtime-config.js';
 import { ContainerOutput, writeTasksSnapshot } from './container-runner.js';
 import { resolveBackend } from './backends/registry.js';
 import {
-  addGroupMember,
   advanceSkippedTask,
   claimTaskRun,
   getAllTasks,
   cleanupOldTaskRunLogs,
   cleanupStaleRunningLogs,
   deleteGroupData,
-  ensureChatExists,
   getDueTasks,
   getTaskById,
   getUserById,
@@ -30,11 +28,8 @@ import {
   logTaskRunStart,
   releaseTaskRunClaim,
   updateTaskRunLog,
-  setRegisteredGroup,
-  updateChatName,
   updateTaskAfterRun,
   updateTaskAfterRunClaimed,
-  updateTaskWorkspace,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
@@ -98,80 +93,45 @@ function resolveTaskExecutionNode(
   return group?.executionNode;
 }
 
-function ensureTaskWorkspace(
+function resolveTaskSourceGroup(
   task: ScheduledTask,
-  deps: SchedulerDependencies,
-): { jid: string; folder: string } {
-  // If workspace already exists and is registered, reuse it
-  if (task.workspace_jid && task.workspace_folder) {
-    const groups = deps.registeredGroups();
-    if (groups[task.workspace_jid]) {
-      return { jid: task.workspace_jid, folder: task.workspace_folder };
-    }
-    // Workspace was deleted externally — clean up orphaned filesystem directory before recreating
-    const oldDir = path.join(GROUPS_DIR, task.workspace_folder);
-    try {
-      fs.rmSync(oldDir, { recursive: true, force: true });
-    } catch {
-      /* ignore if already gone */
-    }
-  }
-
-  const jid = `web:${crypto.randomUUID()}`;
-  // Strip existing 'task-' prefix from IPC-originated IDs to avoid 'task-task-...'
-  const idBase = task.id.startsWith('task-') ? task.id.slice(5) : task.id;
-  const folder = `task-${idBase.slice(0, 12)}`;
-  // 从 prompt 提取简短名称（取第一行前 12 个字符）
-  const firstLine = task.prompt.split('\n')[0].trim();
-  const shortName = firstLine.slice(0, 12).trim() || task.id.slice(0, 6);
-  const name = shortName;
-
-  const executionMode = resolveTaskExecutionMode(task, deps);
-
-  const sourceGroup = Object.values(deps.registeredGroups()).find(
+  groups: Record<string, RegisteredGroup>,
+): RegisteredGroup | undefined {
+  return groups[task.chat_jid] || Object.values(groups).find(
     (g) => g.folder === task.group_folder,
   );
-  const ownerId = resolveTaskOwner(task, sourceGroup);
+}
 
-  const group: RegisteredGroup = {
-    name,
-    folder,
-    added_at: new Date().toISOString(),
+function applyTaskWorkspaceConfig(
+  group: RegisteredGroup,
+  task: ScheduledTask,
+  sourceGroup: RegisteredGroup | undefined,
+  deps: SchedulerDependencies,
+): RegisteredGroup {
+  const executionMode = resolveTaskExecutionMode(task, deps);
+  const runtimeProfile =
+    task.runtime_profile ?? sourceGroup?.runtimeProfile ?? group.runtimeProfile;
+  const executionNode =
+    executionMode === 'host'
+      ? (resolveTaskExecutionNode(task, deps) ?? group.executionNode)
+      : undefined;
+
+  return {
+    ...group,
     executionMode,
-    executionNode:
-      executionMode === 'host'
-        ? resolveTaskExecutionNode(task, deps)
-        : undefined,
-    created_by: ownerId,
+    executionNode,
+    runtimeProfile: runtimeProfile ?? undefined,
+    agentClientId:
+      task.agent_client_id ?? sourceGroup?.agentClientId ?? group.agentClientId,
+    backend: task.backend ?? sourceGroup?.backend ?? group.backend,
+    agentModel: task.agent_model ?? sourceGroup?.agentModel ?? group.agentModel,
+    customCwd: sourceGroup?.customCwd ?? group.customCwd,
+    repoId: sourceGroup?.repoId ?? group.repoId,
+    repoGitUrl: sourceGroup?.repoGitUrl ?? group.repoGitUrl,
+    repoMainBranch: sourceGroup?.repoMainBranch ?? group.repoMainBranch,
+    repoDevicePath: sourceGroup?.repoDevicePath ?? group.repoDevicePath,
+    deviceLinkId: sourceGroup?.deviceLinkId ?? group.deviceLinkId,
   };
-
-  setRegisteredGroup(jid, group);
-  ensureChatExists(jid);
-  updateChatName(jid, name);
-  if (ownerId) {
-    addGroupMember(folder, ownerId, 'owner', ownerId);
-  }
-  deps.registeredGroups()[jid] = group;
-
-  // Create filesystem directory
-  const groupDir = path.join(GROUPS_DIR, folder);
-  fs.mkdirSync(groupDir, { recursive: true });
-
-  // Persist workspace info back to the task record
-  updateTaskWorkspace(task.id, jid, folder);
-  // Also update the in-memory task object
-  task.workspace_jid = jid;
-  task.workspace_folder = folder;
-
-  logger.info(
-    { taskId: task.id, folder, jid, executionMode, ownerId },
-    'Created task workspace',
-  );
-
-  // Notify frontend via WebSocket so sidebar refreshes (scoped to task owner)
-  deps.onWorkspaceCreated?.(jid, folder, name, ownerId);
-
-  return { jid, folder };
 }
 
 export interface SchedulerDependencies {
@@ -343,56 +303,72 @@ async function runTask(
   runningTaskIds.add(task.id);
   const startTime = Date.now();
   const runLogId = logTaskRunStart(task.id);
+  const taskRunId = options?.taskRunId || crypto.randomUUID();
 
-  // Ensure task has a dedicated workspace (Agent tasks only)
-  const workspace = ensureTaskWorkspace(task, deps);
-  const workspaceGroups = deps.registeredGroups();
-  const workspaceGroup = workspaceGroups[workspace.jid];
+  // Background task mode: execute against the source workspace configuration
+  // without registering/creating a new visible workspace. The daemon still gets
+  // taskId/taskRunId metadata so device-local runs use
+  // ~/.octodeck/workspace/tasks/<taskId>/<taskRunId>.
+  const groups = deps.registeredGroups();
+  const sourceJid = resolveTargetGroupJid(task, groups) || task.chat_jid;
+  const sourceGroup = groups[sourceJid] || resolveTaskSourceGroup(task, groups);
 
-  if (!workspaceGroup) {
+  if (!sourceGroup) {
     logger.error(
-      { taskId: task.id, workspaceJid: workspace.jid },
-      'Workspace group not found after creation',
+      { taskId: task.id, chatJid: task.chat_jid, groupFolder: task.group_folder },
+      'Source workspace group not found for background task',
     );
     updateTaskRunLog(runLogId, {
       duration_ms: Date.now() - startTime,
       status: 'error',
       result: null,
-      error: `Workspace group not found: ${workspace.jid}`,
+      error: `Source workspace group not found: ${task.chat_jid}`,
     });
     const nextRun = options?.manualRun ? task.next_run : computeNextRun(task);
     completeTaskRunWithFence(
       task.id,
       options?.claimToken,
       nextRun,
-      `Error: Workspace group not found: ${workspace.jid}`,
+      `Error: Source workspace group not found: ${task.chat_jid}`,
     );
     runningTaskIds.delete(task.id);
     return;
   }
 
-  const effectiveJid = options?.taskRunId
-    ? `${workspace.jid}#task:${options.taskRunId}`
-    : workspace.jid;
+  const taskGroup = applyTaskWorkspaceConfig(
+    {
+      ...sourceGroup,
+      folder: sourceGroup.folder,
+      created_by: resolveTaskOwner(task, sourceGroup),
+      // Background task runs must not be treated as the user's interactive home
+      // conversation even if the source workspace is the home workspace.
+      is_home: false,
+    },
+    task,
+    sourceGroup,
+    deps,
+  );
 
-  const groupDir = path.join(GROUPS_DIR, workspace.folder);
+  const effectiveJid = `${sourceJid}#task:${taskRunId}`;
+
+  const groupDir = path.join(GROUPS_DIR, taskGroup.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
   logger.info(
-    { taskId: task.id, group: workspace.folder },
-    'Running scheduled task',
+    { taskId: task.id, group: taskGroup.folder, sourceJid, taskRunId },
+    'Running scheduled task in background mode',
   );
 
   // Owner gate before running task: a disabled/deleted owner's scheduled
   // tasks must stop firing (billing only checks balance, not status, and is
   // skipped for admins — so it can't cover this). See `src/owner-gate.ts`.
-  if (workspaceGroup.created_by) {
-    const ownerGate = checkOwnerActive(getUserById(workspaceGroup.created_by));
+  if (taskGroup.created_by) {
+    const ownerGate = checkOwnerActive(getUserById(taskGroup.created_by));
     if (!ownerGate.allowed) {
       logger.info(
         {
           taskId: task.id,
-          userId: workspaceGroup.created_by,
+          userId: taskGroup.created_by,
           ownerStatus: ownerGate.status,
         },
         'Owner not active, blocking scheduled task',
@@ -416,11 +392,11 @@ async function runTask(
   }
 
   // Billing quota check before running task
-  if (isBillingEnabled() && workspaceGroup.created_by) {
-    const owner = getUserById(workspaceGroup.created_by);
+  if (isBillingEnabled() && taskGroup.created_by) {
+    const owner = getUserById(taskGroup.created_by);
     if (owner && owner.role !== 'admin') {
       const accessResult = checkBillingAccessFresh(
-        workspaceGroup.created_by,
+        taskGroup.created_by,
         owner.role,
       );
       if (!accessResult.allowed) {
@@ -428,7 +404,7 @@ async function runTask(
         logger.info(
           {
             taskId: task.id,
-            userId: workspaceGroup.created_by,
+            userId: taskGroup.created_by,
             reason,
             blockType: accessResult.blockType,
           },
@@ -461,7 +437,7 @@ async function runTask(
   const isAdminHome = false;
   const tasks = getAllTasks();
   writeTasksSnapshot(
-    workspace.folder,
+    taskGroup.folder,
     isAdminHome,
     tasks.map((t) => ({
       id: t.id,
@@ -473,21 +449,6 @@ async function runTask(
       next_run: t.next_run,
     })),
   );
-
-  // Store task prompt as a user message in workspace chat so it's visible in conversation
-  if (deps.storePromptMessage) {
-    const owner = workspaceGroup.created_by
-      ? getUserById(workspaceGroup.created_by)
-      : null;
-    const senderName = owner?.display_name || owner?.username || '定时任务';
-    deps.storePromptMessage(
-      workspace.jid,
-      owner?.id || 'system',
-      senderName,
-      task.prompt,
-      task.id,
-    );
-  }
 
   let result: string | null = null;
   let error: string | null = null;
@@ -514,9 +475,10 @@ async function runTask(
     deps.queue.closeStdin(effectiveJid);
   };
 
-  // Use persistent session for task workspace
-  const sessions = deps.getSessions();
-  const sessionId = sessions[workspace.folder];
+  // Background task runs are intentionally detached from the interactive
+  // workspace session. The backend gets taskRunId/messageTaskId to isolate IPC
+  // and remote daemon cwd without creating a visible chat workspace.
+  const sessionId = undefined;
 
   // Idle timer: writes _close sentinel after idleTimeout of no output,
   // so the container exits instead of hanging at waitForIpcMessage forever.
@@ -535,12 +497,12 @@ async function runTask(
 
   try {
     const executionMode = resolveTaskExecutionMode(task, deps);
-    const backend = resolveBackend(workspaceGroup);
+    const backend = resolveBackend(taskGroup);
 
     // Resolve owner's home folder for correct volume mounts (skills, memory, CLAUDE.md)
-    const ownerHomeFolder = workspaceGroup.created_by
-      ? getUserHomeGroup(workspaceGroup.created_by)?.folder || workspace.folder
-      : workspace.folder;
+    const ownerHomeFolder = taskGroup.created_by
+      ? getUserHomeGroup(taskGroup.created_by)?.folder || taskGroup.folder
+      : taskGroup.folder;
 
     let output: ContainerOutput;
     if (!backend.supportsExecutionMode(executionMode)) {
@@ -551,37 +513,39 @@ async function runTask(
       };
     } else {
       output = await backend.run({
-        group: workspaceGroup,
+        group: taskGroup,
         executionMode,
         input: {
           prompt: task.prompt,
           sessionId,
-          groupFolder: workspace.folder,
-          chatJid: workspace.jid,
+          groupFolder: taskGroup.folder,
+          chatJid: sourceJid,
           isMain: isAdminHome,
           isHome,
           isAdminHome,
           isScheduledTask: true,
-          taskRunId: options?.taskRunId,
+          taskRunId,
+          messageTaskId: task.id,
         },
         onProcess: (proc, identifier, selectedProviderId) =>
           deps.onProcess(
             effectiveJid,
             proc,
             executionMode === 'container' ? identifier : null,
-            workspace.folder,
+            taskGroup.folder,
             identifier,
-            options?.taskRunId,
+            taskRunId,
             selectedProviderId,
           ),
         onOutput: async (streamedOutput: ContainerOutput) => {
-          // Broadcast stream events to WebSocket clients viewing the task workspace
+          // Background tasks do not create a task workspace; stream to the
+          // source workspace channel for any active viewers.
           if (
             streamedOutput.status === 'stream' &&
             streamedOutput.streamEvent
           ) {
             deps.broadcastStreamEvent?.(
-              workspace.jid,
+              sourceJid,
               streamedOutput.streamEvent,
             );
           }
@@ -629,13 +593,13 @@ async function runTask(
     logger.error({ taskId: task.id, error }, 'Task failed');
   } finally {
     // Clean up isolated task IPC directory
-    if (options?.taskRunId) {
+    if (taskRunId) {
       const taskRunDir = path.join(
         DATA_DIR,
         'ipc',
-        workspace.folder,
+        taskGroup.folder,
         'tasks-run',
-        options.taskRunId,
+        taskRunId,
       );
       try {
         fs.rmSync(taskRunDir, { recursive: true, force: true });
@@ -673,13 +637,10 @@ async function runTask(
 
     if (text) {
       try {
-        await deps.storeResultAndNotify(workspace.jid, text, {
-          ownerId: workspaceGroup.created_by || undefined,
+        await deps.storeResultAndNotify(sourceJid, text, {
+          ownerId: taskGroup.created_by || undefined,
           notifyChannels: task.notify_channels,
           sourceKind: 'sdk_final',
-          // Use source workspace folder for IM routing — isolated tasks run in
-          // ephemeral workspaces (task-xxxxxx) that have no IM group bindings.
-          // task.group_folder is the workspace where the task was created.
           workspaceFolder: task.group_folder || undefined,
         });
       } catch (err) {
@@ -938,80 +899,6 @@ async function runScriptTask(
   }
 }
 
-/**
- * Group context mode: inject task prompt as a regular message into the source workspace.
- * The message is processed by the existing message pipeline (IPC if running, new container if idle).
- */
-async function runGroupModeTask(
-  task: ScheduledTask,
-  deps: SchedulerDependencies,
-  targetGroupJid: string,
-  manualRun = false,
-  claimToken?: string,
-): Promise<void> {
-  const startTime = Date.now();
-  runningTaskIds.add(task.id);
-  let resultSummary = '已注入到源工作区';
-
-  try {
-    // Resolve task owner for sender attribution
-    const owner = task.created_by ? getUserById(task.created_by) : null;
-    const senderName = owner?.display_name || owner?.username || '定时任务';
-
-    if (!deps.storePromptMessage) {
-      throw new Error('storePromptMessage dependency not available');
-    }
-
-    // Store prompt as a user message in the source workspace chat
-    deps.storePromptMessage(
-      targetGroupJid,
-      owner?.id || 'system',
-      senderName,
-      task.prompt,
-      task.id,
-    );
-
-    // Trigger normal message processing for the source workspace
-    deps.queue.enqueueMessageCheck(targetGroupJid);
-
-    logger.info(
-      { taskId: task.id, targetGroupJid, contextMode: 'group' },
-      'Group-mode task injected into source workspace',
-    );
-
-    logTaskRun({
-      task_id: task.id,
-      run_at: new Date().toISOString(),
-      duration_ms: Date.now() - startTime,
-      status: 'success',
-      result: '已注入到源工作区',
-      error: null,
-    });
-  } catch (err) {
-    resultSummary = `Error: ${err instanceof Error ? err.message : String(err)}`;
-    logger.error(
-      { taskId: task.id, error: resultSummary },
-      'Group-mode task injection failed',
-    );
-
-    logTaskRun({
-      task_id: task.id,
-      run_at: new Date().toISOString(),
-      duration_ms: Date.now() - startTime,
-      status: 'error',
-      result: null,
-      error: resultSummary,
-    });
-  } finally {
-    try {
-      const nextRun = manualRun ? task.next_run : computeNextRun(task);
-      completeTaskRunWithFence(task.id, claimToken, nextRun, resultSummary);
-    } finally {
-      runningTaskIds.delete(task.id);
-    }
-  }
-}
-
 let schedulerRunning = false;
 const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 let lastCleanupTime = 0;
@@ -1171,50 +1058,24 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
               'Unhandled error in runScriptTask',
             );
           });
-        } else if (currentTask.context_mode === 'group') {
-          const claim = claimTaskRun(currentTask.id, {
-            expectedNextRun: currentTask.next_run,
-            claimedBy: 'scheduler:group',
-          });
-          if (!claim) {
-            logger.debug(
-              { taskId: currentTask.id },
-              'Group-mode task claim lost, skipping',
-            );
-            continue;
-          }
-          // Group mode: inject prompt into source workspace as a regular message
-          runGroupModeTask(
-            currentTask,
-            deps,
-            targetGroupJid,
-            false,
-            claim.token,
-          ).catch((err) => {
-            logger.error(
-              { taskId: currentTask.id, err },
-              'Unhandled error in runGroupModeTask',
-            );
-          });
         } else {
           const claim = claimTaskRun(currentTask.id, {
             expectedNextRun: currentTask.next_run,
-            claimedBy: 'scheduler:isolated',
+            claimedBy: 'scheduler:background',
           });
           if (!claim) {
             logger.debug(
               { taskId: currentTask.id },
-              'Isolated task claim lost, skipping',
+              'Background task claim lost, skipping',
             );
             continue;
           }
-          // Isolated mode (default): each agent task has a dedicated workspace
-          const taskQueueJid = currentTask.workspace_jid
-            ? `${currentTask.workspace_jid}#task:${currentTask.id}`
-            : `${targetGroupJid}#task:${currentTask.id}`;
+          // Agent tasks run in background mode. Do not create or use a visible
+          // task workspace; isolate only the process/IPC namespace.
+          const taskQueueJid = `${targetGroupJid}#task:${currentTask.id}`;
           deps.queue.enqueueTask(taskQueueJid, currentTask.id, () =>
             runTask(currentTask, deps, {
-              taskRunId: currentTask.id,
+              taskRunId: crypto.randomUUID(),
               claimToken: claim.token,
             }),
           );
@@ -1268,19 +1129,13 @@ export function triggerTaskNow(
     runScriptTask(task, deps, targetGroupJid, true, claim.token).catch((err) =>
       logger.error({ taskId, err }, 'Manual script task failed'),
     );
-  } else if (task.context_mode === 'group') {
-    runGroupModeTask(task, deps, targetGroupJid, true, claim.token).catch(
-      (err) => logger.error({ taskId, err }, 'Manual group-mode task failed'),
-    );
   } else {
     const opts: RunTaskOptions = {
       manualRun: true,
-      taskRunId: task.id,
+      taskRunId: crypto.randomUUID(),
       claimToken: claim.token,
     };
-    const taskQueueJid = task.workspace_jid
-      ? `${task.workspace_jid}#task:${task.id}`
-      : `${targetGroupJid}#task:${task.id}`;
+    const taskQueueJid = `${targetGroupJid}#task:${task.id}`;
     deps.queue.enqueueTask(taskQueueJid, task.id, () =>
       runTask(task, deps, opts),
     );

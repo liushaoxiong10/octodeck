@@ -104,6 +104,7 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
     },
 
     run: (args) => {
+      const model = args.group.agentModel || def.model;
       const cfg: HostCliDriverConfig = {
         backendId: def.id,
         resolveBinary,
@@ -114,11 +115,11 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
             ctx.sessionId &&
             resumeArgvTemplate?.length
           ) {
-            return renderArgv(resumeArgvTemplate, { ...ctx, model: def.model });
+            return renderArgv(resumeArgvTemplate, { ...ctx, model });
           }
           const rendered = renderArgv(argvTemplate, {
             ...ctx,
-            model: def.model,
+            model,
           });
           if (
             def.supportsNativeSessions === true &&
@@ -126,7 +127,7 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
             sessionArgvTemplate?.length
           ) {
             rendered.push(
-              ...renderArgv(sessionArgvTemplate, { ...ctx, model: def.model }),
+              ...renderArgv(sessionArgvTemplate, { ...ctx, model }),
             );
           }
           return rendered;
@@ -136,7 +137,7 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
         maxOutputBytes: def.maxOutputBytes,
         envOverrides: Object.keys(env).length > 0 ? env : undefined,
         runtime: def.runtime,
-        model: def.model,
+        model,
         workdirMode: def.workdirMode,
         workdir: def.workdir,
       };

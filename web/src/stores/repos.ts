@@ -6,6 +6,7 @@ export interface ManagedRepoInfo {
   name: string;
   kind: 'git' | 'device_path';
   git_url?: string;
+  main_branch?: string;
   device_path?: string;
   device_link_id?: string;
   created_by: string;
@@ -22,6 +23,7 @@ interface ReposState {
     name: string;
     kind: 'git' | 'device_path';
     git_url?: string;
+    main_branch?: string;
     device_path?: string;
     device_link_id?: string;
   }) => Promise<ManagedRepoInfo | null>;

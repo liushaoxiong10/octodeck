@@ -54,6 +54,7 @@ function buildIssueGroup(baseGroup: RegisteredGroup, issue: WorkspaceIssue, run:
     backend: run.backend ?? issue.backend ?? baseGroup.backend,
     repoId: issue.project_repo_id ?? baseGroup.repoId,
     repoGitUrl: issue.project_git_url ?? baseGroup.repoGitUrl,
+    repoMainBranch: issue.project_git_url ? undefined : baseGroup.repoMainBranch,
     repoDevicePath: issue.project_device_path ?? baseGroup.repoDevicePath,
     deviceLinkId: run.agent_link_id ?? issue.agent_link_id ?? baseGroup.deviceLinkId,
     agentClientId: run.agent_client_id ?? issue.agent_client_id ?? baseGroup.agentClientId,

@@ -34,6 +34,11 @@ import { logger } from '../logger.js';
 import { authMiddleware } from '../middleware/auth.js';
 import type { Variables } from '../web-context.js';
 import {
+  canAccessGroup,
+  hasHostExecutionPermission,
+  isHostExecutionGroup,
+} from '../web-context.js';
+import {
   disconnectLink,
   getSession,
   getOnlineMeta,
@@ -55,7 +60,7 @@ import type { AuthUser } from '../types.js';
 import { listCustomBackends } from '../backends/custom-loader.js';
 import { handleAgentTeamLinkToolRequest } from './agent-teams.js';
 
-const LATEST_DAEMON_VERSION = 'octodeck-daemon/1.0.0';
+const LATEST_DAEMON_VERSION = 'octodeck-daemon/1.0.4';
 const DAEMON_UPDATE_COMMAND =
   '~/.octodeck/daemon/bin/octodeck-daemon update -config ~/.octodeck/daemon/config.json';
 const DAEMON_UNINSTALL_COMMAND =
@@ -177,16 +182,31 @@ agentLinkRoutes.delete('/:id', authMiddleware, (c) => {
   const agents = listCustomBackends()
     .filter((backend) => backend.deviceLinkId === id)
     .map((backend) => ({ id: backend.id, displayName: backend.displayName }));
-  const workspaces = Object.entries(getAllRegisteredGroups())
+  const allGroups = getAllRegisteredGroups();
+  const workspaces = Object.entries(allGroups)
     .filter(
-      ([, group]) => group.deviceLinkId === id || group.executionNode === id,
+      ([jid, group]) =>
+        (group.deviceLinkId === id || group.executionNode === id) &&
+        canAccessGroup({ id: user.id, role: user.role }, { ...group, jid }) &&
+        (!isHostExecutionGroup(group) || hasHostExecutionPermission(user)),
     )
     .map(([jid, group]) => ({ jid, name: group.name, folder: group.folder }));
   const repos = listManagedReposByUser(user.id)
     .filter((repo) => repo.deviceLinkId === id)
     .map((repo) => ({ id: repo.id, name: repo.name, kind: repo.kind }));
   const tasks = getAllTasks()
-    .filter((task) => task.execution_node === id)
+    .filter((task) => {
+      if (task.execution_node !== id) return false;
+      const group = allGroups[task.chat_jid];
+      if (!group) return user.role === 'admin';
+      return (
+        canAccessGroup(
+          { id: user.id, role: user.role },
+          { ...group, jid: task.chat_jid },
+        ) &&
+        (!isHostExecutionGroup(group) || hasHostExecutionPermission(user))
+      );
+    })
     .map((task) => ({ id: task.id, prompt: task.prompt, status: task.status }));
 
   if (

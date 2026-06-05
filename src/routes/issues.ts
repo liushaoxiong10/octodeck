@@ -21,6 +21,7 @@ import {
   getAgentLinkById,
   getIssueAttachmentById,
   getIssueById,
+  getAllRegisteredGroups,
   getManagedRepoById,
   getRegisteredGroup,
   getUserHomeGroup,
@@ -163,8 +164,42 @@ issueRoutes.get('/', authMiddleware, async (c) => {
   const statuses = parseCsv<IssueStatus>(c.req.query('status'));
   const priorities = parseCsv<IssuePriority>(c.req.query('priority'));
   const showDone = c.req.query('show_done') === 'true' || c.req.query('showDone') === 'true';
+  const requestedWorkspaceJid = c.req.query('workspace_jid') || undefined;
+  let accessibleWorkspaceJids: string[] | undefined;
+  if (requestedWorkspaceJid) {
+    const group = getRegisteredGroup(requestedWorkspaceJid);
+    if (!group) {
+      if (authUser.role !== 'admin') return c.json({ issues: [], total: 0 });
+    } else if (
+      !canAccessGroup(
+        { id: authUser.id, role: authUser.role },
+        { ...group, jid: requestedWorkspaceJid },
+      ) ||
+      (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser))
+    ) {
+      return c.json({ issues: [], total: 0 });
+    }
+  } else if (authUser.role !== 'admin') {
+    accessibleWorkspaceJids = Object.entries(getAllRegisteredGroups())
+      .filter(([jid, group]) => {
+        if (
+          !canAccessGroup(
+            { id: authUser.id, role: authUser.role },
+            { ...group, jid },
+          )
+        ) {
+          return false;
+        }
+        if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+          return false;
+        }
+        return true;
+      })
+      .map(([jid]) => jid);
+  }
   const { issues, total } = listIssues({
-    workspaceJid: c.req.query('workspace_jid') || undefined,
+    workspaceJid: requestedWorkspaceJid,
+    workspaceJids: accessibleWorkspaceJids,
     query: c.req.query('q') || undefined,
     statuses,
     priorities,

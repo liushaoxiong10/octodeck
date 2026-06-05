@@ -5,12 +5,14 @@ import crypto from 'crypto';
 
 import type { Variables } from '../web-context.js';
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
+import { AGENT_RUNNER_SECRET, verifyAgentToolToken } from '../config.js';
 import { getBackend } from '../backends/registry.js';
 import { getSystemSettings } from '../runtime-config.js';
 import type { AuthUser } from '../types.js';
 import {
   buildAgentTeamGenerationPrompt,
   buildAgentTeamDraft,
+  createAgentMdDefinitionFromStore,
   createAgentMdDefinition,
   createAgentTeam,
   deleteAgentMdDefinition,
@@ -19,6 +21,7 @@ import {
   getAgentTeam,
   isAbstractAgentTeamDefinition,
   listAgentMdDefinitions,
+  listAgentMdStoreEntries,
   listAgentMdSummaries,
   listAgentTeams,
   updateAgentMdDefinition,
@@ -80,6 +83,8 @@ const RoleSchema = z.object({
   outputs: z.array(z.string().max(500)).max(12).optional(),
   skills: z.array(z.string().max(500)).max(12).optional(),
   guardrails: z.array(z.string().max(500)).max(12).optional(),
+  requiredSkills: z.array(z.string().max(500)).max(12).optional(),
+  preferredAgentMd: z.array(z.string().max(500)).max(12).optional(),
   policy: z
     .object({
       permissionLevel: PermissionLevelSchema.optional(),
@@ -96,6 +101,42 @@ const RoleSchema = z.object({
     .optional(),
 });
 
+const WorkflowActionSchema = z.object({
+  roleId: z.string().min(1).max(64),
+  phase: z.string().min(1).max(64).optional(),
+  instructions: z.string().max(2000).optional(),
+  outputKey: z.string().min(1).max(128).optional(),
+});
+
+const WorkflowFailurePolicySchema = z.object({
+  action: z.enum(['continue', 'abort', 'run_role', 'retry']),
+  targetRoleId: z.string().min(1).max(64).optional(),
+  phase: z.string().min(1).max(64).optional(),
+  maxIterations: z.number().int().min(1).max(5).optional(),
+  instructions: z.string().max(2000).optional(),
+});
+
+const WorkflowStepSchema = z.object({
+  id: z.string().min(1).max(128),
+  type: z.enum(['role', 'parallel', 'route']),
+  roleId: z.string().min(1).max(64).optional(),
+  phase: z.string().min(1).max(64).optional(),
+  instructions: z.string().max(2000).optional(),
+  inputKeys: z.array(z.string().max(128)).max(12).optional(),
+  outputKey: z.string().min(1).max(128).optional(),
+  dependsOn: z.array(z.string().max(128)).max(12).optional(),
+  parallel: z.array(z.array(WorkflowActionSchema).min(1).max(8)).max(8).optional(),
+  route: z
+    .object({
+      judgeRoleId: z.string().min(1).max(64),
+      candidateRoleIds: z.array(z.string().min(1).max(64)).min(1).max(12),
+      fallbackRoleId: z.string().min(1).max(64).optional(),
+      finalRoleId: z.string().min(1).max(64).optional(),
+    })
+    .optional(),
+  onFailure: WorkflowFailurePolicySchema.optional(),
+});
+
 const TeamInputSchema = z.object({
   name: z.string().min(1).max(160),
   goal: z.string().min(1).max(6000),
@@ -103,6 +144,7 @@ const TeamInputSchema = z.object({
   description: z.string().min(1).max(4000),
   roles: z.array(RoleSchema).min(1).max(12),
   workflow: z.string().min(1).max(6000),
+  workflowSteps: z.array(WorkflowStepSchema).min(1).max(24).optional(),
   successCriteria: z.array(z.string().min(1).max(1000)).min(1).max(12),
   createdByAgentId: z.string().min(1).max(128),
 });
@@ -117,6 +159,10 @@ const AgentMdInputSchema = z.object({
 });
 
 const AgentMdPatchSchema = AgentMdInputSchema.partial();
+const AgentMdStoreImportSchema = z.object({
+  path: z.string().min(1).max(500),
+  createdByAgentId: z.string().min(1).max(128),
+});
 const GeneratedAgentMdInputSchema = AgentMdInputSchema.omit({
   createdByAgentId: true,
 });
@@ -139,6 +185,14 @@ const GenerateSchema = z.object({
 
 const ExecuteSchema = z.object({
   prompt: z.string().min(1).max(10000),
+  runtimeContext: z
+    .object({
+      groupFolder: z.string().min(1).max(256).optional(),
+      chatJid: z.string().min(1).max(512).optional(),
+      workspacePath: z.string().min(1).max(2000).optional(),
+      remoteToolCwd: z.string().min(1).max(2000).optional(),
+    })
+    .optional(),
   runnerAgentId: z.string().min(1).max(128).optional(),
   roleAssignments: z
     .record(
@@ -174,6 +228,7 @@ const AgentTeamToolSchema = z.object({
   prompt: z.string().min(1).max(10000).optional(),
   runnerAgentId: z.string().min(1).max(128).optional(),
   roleAssignments: ExecuteSchema.shape.roleAssignments,
+  runtimeContext: ExecuteSchema.shape.runtimeContext,
   maxFeedbackIterations: z.number().int().min(0).max(5).optional(),
   decision: z.enum(['approved', 'rejected']).optional(),
 });
@@ -287,6 +342,45 @@ router.get('/agent-md-summaries', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   return c.json({ summaries: listAgentMdSummaries(user.id) });
 });
+
+router.get('/agent-md-store', authMiddleware, async (c) => {
+  const query = c.req.query('query')?.trim() || '';
+  try {
+    return c.json({ entries: await listAgentMdStoreEntries(query) });
+  } catch {
+    return c.json({ error: 'failed to load agent.md store' }, 502);
+  }
+});
+
+router.post(
+  '/agent-md-store/import',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = AgentMdStoreImportSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        {
+          error:
+            parsed.error.issues[0]?.message || 'invalid agent.md store import',
+        },
+        400,
+      );
+    }
+    try {
+      const definition = await createAgentMdDefinitionFromStore(
+        parsed.data.path,
+        parsed.data.createdByAgentId,
+        user.id,
+      );
+      return c.json({ definition }, 201);
+    } catch {
+      return c.json({ error: 'failed to import agent.md from store' }, 502);
+    }
+  },
+);
 
 router.get('/agent-md/:id', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
@@ -582,6 +676,7 @@ async function executeTeamRequest(
       runnerAgentId,
       roleAssignments: parsed.data.roleAssignments ?? {},
       maxFeedbackIterations: parsed.data.maxFeedbackIterations,
+      runtimeContext: parsed.data.runtimeContext,
     });
     const approval = createApprovalRequest({
       runId,
@@ -612,17 +707,27 @@ async function executeTeamRequest(
     runnerAgentId,
     roleAssignments: parsed.data.roleAssignments ?? {},
     maxFeedbackIterations: parsed.data.maxFeedbackIterations,
+    runtimeContext: parsed.data.runtimeContext,
     defaultBackend: backend,
   });
 }
 
 export async function handleAgentTeamToolRequest(c: any): Promise<Response> {
-  const secret = process.env.OCTODECK_AGENT_RUNNER_SECRET;
   const auth = c.req.header('authorization') || '';
-  if (!secret || auth !== `Bearer ${secret}`)
-    return c.json({ error: 'unauthorized' }, 401);
+  const token = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
   const body = await c.req.json().catch(() => ({}));
-  return handleAgentTeamToolBody(c, body);
+  const tokenUser = token
+    ? verifyAgentToolToken(token)?.userId ||
+      (token === AGENT_RUNNER_SECRET && isRecord(body)
+        ? String(body.userId || '')
+        : null)
+    : null;
+  if (!tokenUser)
+    return c.json({ error: 'unauthorized' }, 401);
+  return handleAgentTeamToolBody(c, {
+    ...(isRecord(body) ? body : {}),
+    userId: tokenUser,
+  });
 }
 
 export async function handleAgentTeamLinkToolRequest(
@@ -793,6 +898,7 @@ function createInternalToolContext(
         runnerAgentId: data.runnerAgentId,
         roleAssignments: data.roleAssignments,
         maxFeedbackIterations: data.maxFeedbackIterations,
+        runtimeContext: data.runtimeContext,
       }),
     },
   };
@@ -865,6 +971,7 @@ async function executeExistingRun(
     runnerAgentId,
     roleAssignments: roleAssignments ?? {},
     maxFeedbackIterations,
+    runtimeContext: state.runtimeContext as ExecuteRequest['runtimeContext'],
     defaultBackend: backend,
   });
 }
@@ -880,6 +987,7 @@ async function executePreparedRun(
     runnerAgentId: string;
     roleAssignments: ExecuteRequest['roleAssignments'];
     maxFeedbackIterations?: number;
+    runtimeContext?: ExecuteRequest['runtimeContext'];
     defaultBackend: NonNullable<ReturnType<typeof getBackend>>;
   },
 ): Promise<
@@ -895,6 +1003,7 @@ async function executePreparedRun(
     runnerAgentId,
     roleAssignments,
     maxFeedbackIterations,
+    runtimeContext,
     defaultBackend,
   } = config;
   const settings = getSystemSettings();
@@ -917,7 +1026,16 @@ async function executePreparedRun(
       traceId,
       sessionId: `system:agent-team:${team.id}`,
     },
-    async ({ role, prompt, phase, previousResults, feedback }) => {
+    async ({
+      role,
+      prompt,
+      phase,
+      previousResults,
+      feedback,
+      instructions,
+      busMessages,
+      artifacts,
+    }) => {
       const assignment = roleAssignments?.[role.id];
       const roleRunnerAgentId = assignment?.runnerAgentId ?? runnerAgentId;
       if (!settings.allowedBackends.includes(roleRunnerAgentId)) {
@@ -950,6 +1068,13 @@ async function executePreparedRun(
         phase,
         previousResults,
         feedback,
+        {
+          instructions,
+          busMessages,
+          artifacts,
+          agentMdDefinitions: resolveRoleAgentMdDefinitions(role, user.id),
+          runtimeContext,
+        },
       );
       const taskId = `${runId}:${role.id}:${phase}`;
       recordAgentTeamTask({
@@ -974,11 +1099,12 @@ async function executePreparedRun(
         executionMode: 'host',
         input: {
           prompt: rolePrompt,
-          groupFolder: `agent-team-${team.id}-${role.id}`,
-          chatJid: `system:agent-team:${team.id}`,
+          groupFolder: runtimeContext?.groupFolder ?? `agent-team-${team.id}-${role.id}`,
+          chatJid: runtimeContext?.chatJid ?? `system:agent-team:${team.id}`,
           isMain: false,
           isHome: false,
           isAdminHome: false,
+          remoteToolCwd: runtimeContext?.remoteToolCwd,
           executionProfile: 'single-turn-json',
         },
         onProcess: () => undefined,
@@ -1059,6 +1185,7 @@ function createApprovalCheckpoint(input: {
   runnerAgentId: string;
   roleAssignments: ExecuteRequest['roleAssignments'];
   maxFeedbackIterations?: number;
+  runtimeContext?: ExecuteRequest['runtimeContext'];
 }) {
   const checkpoint = {
     id: `${input.runId}:approval:${input.role.id}`,
@@ -1070,6 +1197,7 @@ function createApprovalCheckpoint(input: {
       runnerAgentId: input.runnerAgentId,
       roleAssignments: input.roleAssignments ?? {},
       maxFeedbackIterations: input.maxFeedbackIterations,
+      runtimeContext: input.runtimeContext,
       pendingRoleId: input.role.id,
     },
   };
@@ -1179,7 +1307,12 @@ async function generateDraftWithAgent(
 
   const prompt = buildAgentTeamGenerationPrompt(
     fallback,
-    listAgentMdSummaries(ownerUserId),
+    listAgentMdDefinitions(ownerUserId).map((definition) => ({
+      id: definition.id,
+      name: definition.name,
+      summary: definition.summary,
+      content: definition.content,
+    })),
   );
   let agentTeamGeneratorProc: ChildProcess | null = null;
   let streamText = '';
@@ -1284,7 +1417,23 @@ function buildAgentTeamRolePrompt(
   phase: AgentTeamExecutionPhase,
   previousResults: AgentTeamRoleResult[],
   feedback?: string,
+  options: {
+    instructions?: string;
+    busMessages?: unknown[];
+    artifacts?: Record<string, string>;
+    agentMdDefinitions?: Array<{ id: string; name: string; summary: string; content: string }>;
+    runtimeContext?: ExecuteRequest['runtimeContext'];
+  } = {},
 ): string {
+  const agentMdBlock = options.agentMdDefinitions?.length
+    ? options.agentMdDefinitions
+        .map(
+          (definition) =>
+            `## ${definition.name} (${definition.id})\nSummary: ${definition.summary}\n${definition.content}`,
+        )
+        .join('\n\n')
+    : '';
+  const artifactEntries = Object.entries(options.artifacts ?? {}).slice(-20);
   return [
     '你正在作为 Agent Team 中的一个抽象角色执行任务。',
     '请只完成当前角色职责范围内的工作，并输出清晰、可交接的结果。',
@@ -1293,6 +1442,9 @@ function buildAgentTeamRolePrompt(
     `Goal: ${team.goal}`,
     `Shape: ${team.shape}`,
     `Workflow: ${team.workflow}`,
+    team.workflowSteps?.length
+      ? `Workflow steps JSON: ${JSON.stringify(team.workflowSteps, null, 2)}`
+      : '',
     '',
     `Current role: ${role.name} (${role.id})`,
     `Responsibility: ${role.responsibility}`,
@@ -1302,9 +1454,26 @@ function buildAgentTeamRolePrompt(
       ? `Suggested skills/agent.md: ${role.skills.join('; ')}`
       : '',
     role.guardrails?.length ? `Guardrails: ${role.guardrails.join('; ')}` : '',
+    role.requiredSkills?.length
+      ? `Required skills: ${role.requiredSkills.join('; ')}`
+      : '',
+    role.preferredAgentMd?.length
+      ? `Preferred agent.md: ${role.preferredAgentMd.join('; ')}`
+      : '',
+    agentMdBlock ? `\n当前角色可用 agent.md：\n${agentMdBlock}` : '',
     '',
     `Execution phase: ${phase}`,
+    options.instructions ? `Step instructions: ${options.instructions}` : '',
+    options.runtimeContext
+      ? `Runtime context: ${JSON.stringify(options.runtimeContext, null, 2)}`
+      : '',
     feedback ? `Feedback or upstream signal: ${feedback}` : '',
+    artifactEntries.length ? 'Message bus artifacts:' : '',
+    ...artifactEntries.map(([key, value]) => `- ${key}: ${value}`),
+    options.busMessages?.length ? 'Recent bus messages:' : '',
+    ...(options.busMessages ?? [])
+      .slice(-12)
+      .map((message) => `- ${JSON.stringify(message)}`),
     previousResults.length ? 'Previous role results:' : '',
     ...previousResults.map(
       (result) =>
@@ -1313,14 +1482,42 @@ function buildAgentTeamRolePrompt(
     '',
     `User request: ${userPrompt}`,
     '',
-    '输出要求：',
+    'Agent Team 通信协议（octodeck.agent-team.bus.v1）：',
+    '- 你收到的是 orchestrator 从消息总线汇总的 control/context/artifact/status 消息。',
+    '- 你的输出会作为 artifact 写回消息总线，供后续角色消费。',
+    '- 如果当前 step 需要路由，请输出 JSON：{"action":"run_role|finish|abort","target":"role_id","reason":"...","confidence":0.0-1.0}。',
+    '- 如果当前 step 发现失败或需要返工，请输出 JSON：{"status":"needs_revision|failed","summary":"...","issues":["..."],"suggestedFix":"..."}；编排器会根据 workflowSteps.onFailure 决定后续动作。',
+    '- 如果当前 step 成功，请输出清晰正文；也可以附加 JSON：{"status":"passed","summary":"..."}。',
+    '',
+    '通用输出要求：',
     '- 用中文输出。',
-    '- 如果当前角色是测试/QA，请明确写出“测试通过”或“测试不通过”，并说明原因。',
-    '- 如果当前角色是 Judge，请用 “route: <role_id>” 指明下一步选择的角色。',
-    '- 不要调用工具，不要声明自己无法执行；按角色给出可交付结果。',
+    '- 不要依赖固定中文短语表达测试结论；需要控制流程时使用上面的 JSON 协议。',
+    '- 按角色 agent.md、workflowSteps 和消息总线中的产物完成交付。',
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+function resolveRoleAgentMdDefinitions(
+  role: AgentTeamInput['roles'][number],
+  ownerUserId: string,
+): Array<{ id: string; name: string; summary: string; content: string }> {
+  const definitions = listAgentMdDefinitions(ownerUserId);
+  const wanted = new Set(
+    [...(role.preferredAgentMd ?? []), ...(role.skills ?? [])]
+      .map((item) => item.toLowerCase().trim())
+      .filter(Boolean),
+  );
+  if (wanted.size === 0) return [];
+  return definitions
+    .filter((definition) =>
+      [definition.id, definition.name, definition.summary].some((value) =>
+        wanted.has(value.toLowerCase()) ||
+        Array.from(wanted).some((needle) => value.toLowerCase().includes(needle)),
+      ),
+    )
+    .slice(0, 3)
+    .map(({ id, name, summary, content }) => ({ id, name, summary, content }));
 }
 
 function toTraceEventRecord(event: AgentTeamTraceEvent) {

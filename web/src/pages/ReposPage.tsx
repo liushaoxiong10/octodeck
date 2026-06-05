@@ -29,6 +29,11 @@ function RepoCard({ repo, onDelete }: { repo: ManagedRepoInfo; onDelete: (id: st
             <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
               {isGit ? repo.git_url : repo.device_path}
             </p>
+            {isGit && repo.main_branch && (
+              <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
+                <GitBranch className="size-3" /> 主分支：{repo.main_branch}
+              </p>
+            )}
             {repo.device_link_id && (
               <p className="mt-1 text-xs text-muted-foreground">绑定 Device：{repo.device_link_id}</p>
             )}
@@ -49,6 +54,7 @@ export function ReposPage() {
   const [name, setName] = useState('');
   const [kind, setKind] = useState<'git' | 'device_path'>('git');
   const [gitUrl, setGitUrl] = useState('');
+  const [mainBranch, setMainBranch] = useState('');
   const [devicePath, setDevicePath] = useState('');
   const [deviceLinkId, setDeviceLinkId] = useState('');
 
@@ -68,6 +74,7 @@ export function ReposPage() {
       name: name.trim(),
       kind,
       git_url: kind === 'git' ? gitUrl.trim() : undefined,
+      main_branch: kind === 'git' ? mainBranch.trim() || undefined : undefined,
       device_path: kind === 'device_path' ? devicePath.trim() : undefined,
       device_link_id: kind === 'device_path' ? deviceLinkId : undefined,
     });
@@ -76,6 +83,7 @@ export function ReposPage() {
     setOpen(false);
     setName('');
     setGitUrl('');
+    setMainBranch('');
     setDevicePath('');
     setDeviceLinkId('');
   }
@@ -133,10 +141,17 @@ export function ReposPage() {
               <button type="button" onClick={() => setKind('device_path')} className={`rounded-xl border p-3 text-left text-sm ${kind === 'device_path' ? 'border-primary bg-primary/10' : 'hover:bg-accent'}`}>Device 目录</button>
             </div>
             {kind === 'git' ? (
-              <div>
-                <label className="mb-2 block text-sm font-medium">Git URL</label>
-                <Input value={gitUrl} onChange={(e) => setGitUrl(e.target.value)} placeholder="https://github.com/user/repo.git" />
-              </div>
+              <>
+                <div>
+                  <label className="mb-2 block text-sm font-medium">Git URL</label>
+                  <Input value={gitUrl} onChange={(e) => setGitUrl(e.target.value)} placeholder="https://github.com/user/repo.git" />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium">主分支（可选）</label>
+                  <Input value={mainBranch} onChange={(e) => setMainBranch(e.target.value)} placeholder="main / master / develop" />
+                  <p className="mt-1 text-xs text-muted-foreground">留空时使用远端默认分支。</p>
+                </div>
+              </>
             ) : (
               <>
                 <div>

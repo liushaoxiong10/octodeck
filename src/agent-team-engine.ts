@@ -3,16 +3,24 @@ import type {
   AgentTeam,
   AgentTeamRole,
   AgentTeamShape,
+  AgentTeamWorkflowAction,
+  AgentTeamWorkflowFailurePolicy,
+  AgentTeamWorkflowStep,
 } from './agent-teams.js';
 
-export type AgentTeamExecutionPhase =
-  | 'plan'
-  | 'work'
-  | 'test'
-  | 'feedback'
-  | 'finalize'
-  | 'judge'
-  | 'route';
+export type AgentTeamExecutionPhase = string;
+
+export interface AgentTeamBusMessage {
+  id: string;
+  runId: string;
+  stepId?: string;
+  from: string;
+  to?: string;
+  kind: 'control' | 'artifact' | 'context' | 'status';
+  type: string;
+  payload: unknown;
+  timestamp: string;
+}
 
 export interface AgentTeamRoleRunContext {
   team: AgentTeam;
@@ -21,6 +29,9 @@ export interface AgentTeamRoleRunContext {
   phase: AgentTeamExecutionPhase;
   previousResults: AgentTeamRoleResult[];
   feedback?: string;
+  instructions?: string;
+  busMessages?: AgentTeamBusMessage[];
+  artifacts?: Record<string, string>;
 }
 
 export interface AgentTeamRoleResult {
@@ -71,6 +82,7 @@ export interface AgentTeamExecutionResult {
   runId?: string;
   traceId?: string;
   traceEvents?: AgentTeamTraceEvent[];
+  busMessages?: AgentTeamBusMessage[];
   error?: string;
 }
 
@@ -83,7 +95,10 @@ interface ExecutionState {
   traceId: string;
   sessionId?: string;
   traceEvents: AgentTeamTraceEvent[];
+  busMessages: AgentTeamBusMessage[];
+  artifacts: Record<string, string>;
   spanSeq: number;
+  messageSeq: number;
 }
 
 interface RouteDecision {
@@ -98,12 +113,266 @@ export async function executeAgentTeam(
   input: AgentTeamExecutionInput,
   runner: AgentTeamRoleRunner,
 ): Promise<AgentTeamExecutionResult> {
+  if (team.workflowSteps?.length) {
+    return executeWorkflowSteps(team, input, runner);
+  }
   const shape = team.shape === 'auto' ? inferConcreteShape(team) : team.shape;
   if (shape === 'parallel') return executeParallel(team, input, runner);
   if (shape === 'leader-worker')
     return executeLeaderWorker(team, input, runner);
   if (shape === 'judge-route') return executeJudgeRoute(team, input, runner);
   return executePipeline(team, input, runner);
+}
+
+async function executeWorkflowSteps(
+  team: AgentTeam,
+  input: AgentTeamExecutionInput,
+  runner: AgentTeamRoleRunner,
+): Promise<AgentTeamExecutionResult> {
+  const state = createExecutionState(input);
+  const roleResults: AgentTeamRoleResult[] = [];
+  const events: AgentTeamExecutionEvent[] = [];
+  emitBus(state, {
+    from: 'orchestrator',
+    kind: 'control',
+    type: 'workflow.started',
+    payload: {
+      teamId: team.id,
+      shape: team.shape,
+      protocol: 'octodeck.agent-team.bus.v1',
+    },
+  });
+
+  for (const step of team.workflowSteps ?? []) {
+    const outcome = await executeWorkflowStep(
+      team,
+      input,
+      runner,
+      step,
+      roleResults,
+      events,
+      state,
+    );
+    if (outcome.status === 'error') {
+      return summarize(team, 'error', roleResults, events, state, outcome.error);
+    }
+  }
+  return summarize(team, 'success', roleResults, events, state);
+}
+
+async function executeWorkflowStep(
+  team: AgentTeam,
+  input: AgentTeamExecutionInput,
+  runner: AgentTeamRoleRunner,
+  step: AgentTeamWorkflowStep,
+  roleResults: AgentTeamRoleResult[],
+  events: AgentTeamExecutionEvent[],
+  state: ExecutionState,
+): Promise<{ status: 'success' | 'error'; error?: string }> {
+  emitBus(state, {
+    stepId: step.id,
+    from: 'orchestrator',
+    kind: 'control',
+    type: 'step.started',
+    payload: step,
+  });
+  if (step.type === 'role') {
+    if (!step.roleId) return { status: 'error', error: `step ${step.id} missing roleId` };
+    const role = team.roles.find((candidate) => candidate.id === step.roleId);
+    if (!role) return { status: 'error', error: `role ${step.roleId} not found` };
+    const result = await runWorkflowAction(
+      team,
+      input,
+      runner,
+      role,
+      {
+        roleId: role.id,
+        phase: step.phase ?? 'work',
+        instructions: step.instructions,
+        outputKey: step.outputKey,
+      },
+      step,
+      roleResults,
+      state,
+    );
+    roleResults.push(result);
+    events.push({ kind: 'role', roleId: role.id, phase: result.phase });
+    return handleWorkflowFailure(team, input, runner, step, result, roleResults, events, state);
+  }
+  if (step.type === 'parallel') {
+    const chains = step.parallel ?? [];
+    const chainResults = await Promise.all(
+      chains.map((chain) => executeWorkflowActionChain(team, input, runner, step, chain, roleResults, state)),
+    );
+    for (const results of chainResults) roleResults.push(...results);
+    for (const chain of chains) {
+      events.push({ kind: 'edge', toRoleId: chain[0]?.roleId, label: `workflow-step:${step.id}` });
+    }
+    const failed = chainResults.flat().find((result) => result.status === 'error');
+    if (!failed) return { status: 'success' };
+    return handleWorkflowFailure(team, input, runner, step, failed, roleResults, events, state);
+  }
+  const route = step.route;
+  if (!route) return { status: 'error', error: `step ${step.id} missing route` };
+  const judge = team.roles.find((role) => role.id === route.judgeRoleId);
+  if (!judge) return { status: 'error', error: `judge role ${route.judgeRoleId} not found` };
+  const judgeResult = await runWorkflowAction(
+    team,
+    input,
+    runner,
+    judge,
+    { roleId: judge.id, phase: 'judge', instructions: step.instructions, outputKey: `${step.id}.judge` },
+    step,
+    roleResults,
+    state,
+  );
+  roleResults.push(judgeResult);
+  events.push({ kind: 'role', roleId: judge.id, phase: judgeResult.phase });
+  if (judgeResult.status === 'error') {
+    return handleWorkflowFailure(team, input, runner, step, judgeResult, roleResults, events, state);
+  }
+  const candidates = team.roles.filter((role) => route.candidateRoleIds.includes(role.id));
+  const decision = parseRouteDecision(judgeResult.result, candidates);
+  const selected =
+    (decision?.action === 'run_role' ? candidates.find((role) => role.id === decision.target) : null) ??
+    candidates.find((role) => role.id === route.fallbackRoleId) ??
+    candidates[0];
+  if (selected && decision?.action !== 'finish') {
+    emitBus(state, {
+      stepId: step.id,
+      from: judge.id,
+      to: selected.id,
+      kind: 'control',
+      type: 'route.decided',
+      payload: decision ?? { action: 'run_role', target: selected.id, reason: 'fallback route', confidence: 0.5 },
+    });
+    events.push({ kind: 'route', fromRoleId: judge.id, toRoleId: selected.id, label: decision?.reason ?? 'workflow route' });
+    const routed = await runWorkflowAction(
+      team,
+      input,
+      runner,
+      selected,
+      { roleId: selected.id, phase: 'route', instructions: judgeResult.result, outputKey: `${step.id}.${selected.id}` },
+      step,
+      roleResults,
+      state,
+    );
+    roleResults.push(routed);
+    events.push({ kind: 'role', roleId: selected.id, phase: routed.phase });
+    const failure = await handleWorkflowFailure(team, input, runner, step, routed, roleResults, events, state);
+    if (failure.status === 'error') return failure;
+  }
+  const finalRole = route.finalRoleId ? team.roles.find((role) => role.id === route.finalRoleId) : undefined;
+  if (finalRole && finalRole.id !== selected?.id) {
+    const final = await runWorkflowAction(
+      team,
+      input,
+      runner,
+      finalRole,
+      { roleId: finalRole.id, phase: 'finalize', outputKey: `${step.id}.final` },
+      step,
+      roleResults,
+      state,
+    );
+    roleResults.push(final);
+    events.push({ kind: 'role', roleId: finalRole.id, phase: final.phase });
+    return handleWorkflowFailure(team, input, runner, step, final, roleResults, events, state);
+  }
+  return { status: 'success' };
+}
+
+async function executeWorkflowActionChain(
+  team: AgentTeam,
+  input: AgentTeamExecutionInput,
+  runner: AgentTeamRoleRunner,
+  step: AgentTeamWorkflowStep,
+  chain: AgentTeamWorkflowAction[],
+  baseResults: AgentTeamRoleResult[],
+  state: ExecutionState,
+): Promise<AgentTeamRoleResult[]> {
+  const results: AgentTeamRoleResult[] = [];
+  for (const action of chain) {
+    const role = team.roles.find((candidate) => candidate.id === action.roleId);
+    if (!role) {
+      results.push({ roleId: action.roleId, roleName: action.roleId, phase: action.phase ?? 'work', status: 'error', result: '', error: `role ${action.roleId} not found` });
+      break;
+    }
+    const result = await runWorkflowAction(team, input, runner, role, action, step, [...baseResults, ...results], state);
+    results.push(result);
+    if (result.status === 'error') break;
+  }
+  return results;
+}
+
+function runWorkflowAction(
+  team: AgentTeam,
+  input: AgentTeamExecutionInput,
+  runner: AgentTeamRoleRunner,
+  role: AgentTeamRole,
+  action: AgentTeamWorkflowAction,
+  step: AgentTeamWorkflowStep,
+  previousResults: AgentTeamRoleResult[],
+  state: ExecutionState,
+): Promise<AgentTeamRoleResult> {
+  return runRole(
+    team,
+    role,
+    input.prompt,
+    action.phase ?? step.phase ?? 'work',
+    previousResults,
+    runner,
+    undefined,
+    state,
+    { stepId: step.id, instructions: action.instructions ?? step.instructions, outputKey: action.outputKey ?? step.outputKey },
+  );
+}
+
+async function handleWorkflowFailure(
+  team: AgentTeam,
+  input: AgentTeamExecutionInput,
+  runner: AgentTeamRoleRunner,
+  step: AgentTeamWorkflowStep,
+  result: AgentTeamRoleResult,
+  roleResults: AgentTeamRoleResult[],
+  events: AgentTeamExecutionEvent[],
+  state: ExecutionState,
+): Promise<{ status: 'success' | 'error'; error?: string }> {
+  const failed = result.status === 'error' || isStructuredFailure(result.result);
+  if (!failed) return { status: 'success' };
+  const policy = step.onFailure;
+  if (!policy || policy.action === 'abort') return { status: 'error', error: result.error || result.result };
+  if (policy.action === 'continue') return { status: 'success' };
+  const iterations = Math.max(1, Math.min(policy.maxIterations ?? input.maxFeedbackIterations ?? 1, 5));
+  for (let index = 0; index < iterations; index += 1) {
+    const targetRoleId = policy.action === 'retry' ? result.roleId : policy.targetRoleId;
+    if (!targetRoleId) return { status: 'error', error: `step ${step.id} failure policy missing targetRoleId` };
+    const target = team.roles.find((role) => role.id === targetRoleId);
+    if (!target) return { status: 'error', error: `failure target role ${targetRoleId} not found` };
+    emitBus(state, {
+      stepId: step.id,
+      from: 'orchestrator',
+      to: target.id,
+      kind: 'control',
+      type: 'failure.recover',
+      payload: { sourceRoleId: result.roleId, policy, iteration: index + 1, failure: result.result },
+    });
+    events.push({ kind: 'feedback', fromRoleId: result.roleId, toRoleId: target.id, label: policy.instructions ?? 'workflow onFailure' });
+    const recovery = await runRole(
+      team,
+      target,
+      input.prompt,
+      policy.phase ?? 'revise',
+      roleResults,
+      runner,
+      result.result,
+      state,
+      { stepId: step.id, instructions: policy.instructions, outputKey: `${step.id}.${target.id}.recovery.${index + 1}` },
+    );
+    roleResults.push(recovery);
+    events.push({ kind: 'role', roleId: target.id, phase: recovery.phase });
+    if (recovery.status === 'success' && !isStructuredFailure(recovery.result)) return { status: 'success' };
+  }
+  return { status: 'error', error: result.error || result.result };
 }
 
 async function executePipeline(
@@ -162,11 +431,7 @@ async function executePipeline(
       index += groupedRoles.length - 1;
       continue;
     }
-    const phase = roleLooksLikeTest(role)
-      ? 'test'
-      : index === team.roles.length - 1
-        ? 'finalize'
-        : 'work';
+    const phase = index === team.roles.length - 1 ? 'finalize' : 'work';
     const result = await runRole(
       team,
       role,
@@ -188,64 +453,8 @@ async function executePipeline(
         state,
         result.error || result.result,
       );
-
-    if (
-      roleLooksLikeTest(role) &&
-      isFailedTestResult(result.result) &&
-      feedbackUsed < maxFeedbackIterations
-    ) {
-      const targetIndex = findFeedbackTargetIndex(team.roles, index);
-      const target = team.roles[targetIndex];
-      feedbackUsed += 1;
-      events.push({
-        kind: 'feedback',
-        fromRoleId: role.id,
-        toRoleId: target.id,
-        label: '测试不通过 → 返工',
-      });
-      const feedbackResult = await runRole(
-        team,
-        target,
-        input.prompt,
-        'feedback',
-        roleResults,
-        runner,
-        result.result,
-        state,
-      );
-      roleResults.push(feedbackResult);
-      events.push({ kind: 'role', roleId: target.id, phase: 'feedback' });
-      if (feedbackResult.status === 'error')
-        return summarize(
-          team,
-          'error',
-          roleResults,
-          events,
-          state,
-          feedbackResult.error || feedbackResult.result,
-        );
-      const retest = await runRole(
-        team,
-        role,
-        input.prompt,
-        'feedback',
-        roleResults,
-        runner,
-        feedbackResult.result,
-        state,
-      );
-      roleResults.push(retest);
-      events.push({ kind: 'role', roleId: role.id, phase: 'feedback' });
-      if (retest.status === 'error' || isFailedTestResult(retest.result)) {
-        return summarize(
-          team,
-          retest.status === 'error' ? 'error' : 'success',
-          roleResults,
-          events,
-          state,
-          retest.error,
-        );
-      }
+    if (isStructuredFailure(result.result) && feedbackUsed < maxFeedbackIterations) {
+      return summarize(team, 'error', roleResults, events, state, result.result);
     }
   }
 
@@ -350,7 +559,7 @@ async function executeRoleChain(
       team,
       role,
       prompt,
-      roleLooksLikeTest(role) ? 'test' : 'work',
+      'work',
       previousResults,
       runner,
       undefined,
@@ -612,9 +821,18 @@ async function runRole(
   runner: AgentTeamRoleRunner,
   feedback?: string,
   state?: ExecutionState,
+  options: { stepId?: string; instructions?: string; outputKey?: string } = {},
 ): Promise<AgentTeamRoleResult> {
   const taskId = state ? `${state.runId}:${role.id}:${phase}` : undefined;
   if (state) {
+    emitBus(state, {
+      stepId: options.stepId,
+      from: 'orchestrator',
+      to: role.id,
+      kind: 'control',
+      type: 'role.start',
+      payload: { roleId: role.id, roleName: role.name, phase, instructions: options.instructions },
+    });
     emitTrace(state, {
       actor: role.id,
       type: 'agent.started',
@@ -629,6 +847,9 @@ async function runRole(
     phase,
     previousResults,
     feedback,
+    instructions: options.instructions,
+    busMessages: state?.busMessages,
+    artifacts: state?.artifacts,
   });
   if (state) {
     emitTrace(state, {
@@ -642,6 +863,17 @@ async function runRole(
         status: output.status,
         error: output.error,
       },
+    });
+  }
+  if (state) {
+    const outputKey = options.outputKey || `${role.id}.${phase}.output`;
+    state.artifacts[outputKey] = output.result ?? '';
+    emitBus(state, {
+      stepId: options.stepId,
+      from: role.id,
+      kind: 'artifact',
+      type: 'role.output',
+      payload: { roleId: role.id, phase, outputKey, status: output.status, result: output.result ?? '', error: output.error },
     });
   }
   return {
@@ -682,6 +914,7 @@ function summarize(
     runId: state.runId,
     traceId: state.traceId,
     traceEvents: state.traceEvents,
+    busMessages: state.busMessages,
     error,
   };
 }
@@ -695,8 +928,31 @@ function createExecutionState(input: AgentTeamExecutionInput): ExecutionState {
     traceId,
     sessionId: input.sessionId,
     traceEvents: [],
+    busMessages: [],
+    artifacts: {},
     spanSeq: 0,
+    messageSeq: 0,
   };
+}
+
+function emitBus(
+  state: ExecutionState,
+  message: Omit<AgentTeamBusMessage, 'id' | 'runId' | 'timestamp'>,
+): void {
+  state.messageSeq += 1;
+  const busMessage: AgentTeamBusMessage = {
+    id: `${state.runId}:msg_${state.messageSeq}`,
+    runId: state.runId,
+    timestamp: new Date().toISOString(),
+    ...message,
+  };
+  state.busMessages.push(busMessage);
+  emitTrace(state, {
+    actor: message.from,
+    type: `bus.${message.type}`,
+    taskId: message.stepId,
+    payload: busMessage,
+  });
 }
 
 function emitTrace(
@@ -719,32 +975,8 @@ function emitTrace(
 }
 
 function inferConcreteShape(team: AgentTeam): Exclude<AgentTeamShape, 'auto'> {
-  if (team.roles.length <= 2) return 'leader-worker';
+  if (team.roles.some((role) => role.parallelGroup)) return 'parallel';
   return 'pipeline';
-}
-
-function roleLooksLikeTest(role: AgentTeamRole): boolean {
-  return /测试|test|qa|quality/i.test(`${role.name} ${role.responsibility}`);
-}
-
-function roleLooksLikeDevelopment(role: AgentTeamRole): boolean {
-  return /开发|implement|dev|engineer|编码/i.test(
-    `${role.name} ${role.responsibility}`,
-  );
-}
-
-function isFailedTestResult(result: string): boolean {
-  return /测试不通过|不通过|失败|fail|failed|返工/i.test(result);
-}
-
-function findFeedbackTargetIndex(
-  roles: AgentTeamRole[],
-  testIndex: number,
-): number {
-  for (let index = testIndex - 1; index >= 0; index -= 1) {
-    if (roleLooksLikeDevelopment(roles[index])) return index;
-  }
-  return Math.max(0, testIndex - 1);
 }
 
 function parseRouteTarget(
@@ -759,6 +991,20 @@ function parseRouteTarget(
         normalized.includes(role.name.toLowerCase()),
     ) ?? null
   );
+}
+
+function isStructuredFailure(result: string): boolean {
+  const jsonText = extractJsonObject(result);
+  if (!jsonText) return false;
+  try {
+    const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+    const status = String(parsed.status ?? parsed.resultStatus ?? '').toLowerCase();
+    if (['failed', 'rejected', 'needs_revision', 'blocked'].includes(status)) return true;
+    if (parsed.success === false || parsed.ok === false) return true;
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function parseRouteDecision(

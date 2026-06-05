@@ -30,14 +30,18 @@ describe('managed repos db', () => {
       name: 'HappyClaw',
       kind: 'git',
       gitUrl: 'https://github.com/liushaoxiong10/happyclaw.git',
+      mainBranch: 'develop',
       createdBy: 'user-a',
     });
 
     expect(repo.id).toMatch(/^repo_/);
     expect(repo.kind).toBe('git');
     expect(repo.gitUrl).toBe('https://github.com/liushaoxiong10/happyclaw.git');
+    expect(repo.mainBranch).toBe('develop');
 
-    expect(db.listManagedReposByUser('user-a')).toHaveLength(1);
+    const repos = db.listManagedReposByUser('user-a');
+    expect(repos).toHaveLength(1);
+    expect(repos[0].mainBranch).toBe('develop');
     expect(db.listManagedReposByUser('user-b')).toHaveLength(0);
   });
 

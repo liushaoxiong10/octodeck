@@ -78,6 +78,54 @@ export const AGENT_RUNNER_SECRET =
   process.env.OCTODECK_AGENT_RUNNER_SECRET || WEB_SESSION_SECRET;
 process.env.OCTODECK_AGENT_RUNNER_SECRET = AGENT_RUNNER_SECRET;
 
+const AGENT_TOOL_TOKEN_PREFIX = 'tool_v1';
+
+function base64Url(input: string | Buffer): string {
+  return Buffer.from(input)
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+}
+
+function signAgentToolPayload(payload: string): string {
+  return base64Url(
+    crypto.createHmac('sha256', AGENT_RUNNER_SECRET).update(payload).digest(),
+  );
+}
+
+export function createAgentToolToken(userId: string): string {
+  const payload = base64Url(
+    JSON.stringify({ sub: userId, iat: Math.floor(Date.now() / 1000) }),
+  );
+  return `${AGENT_TOOL_TOKEN_PREFIX}.${payload}.${signAgentToolPayload(payload)}`;
+}
+
+export function verifyAgentToolToken(token: string): { userId: string } | null {
+  const [prefix, payload, signature] = token.split('.');
+  if (prefix !== AGENT_TOOL_TOKEN_PREFIX || !payload || !signature) return null;
+  const expected = signAgentToolPayload(payload);
+  const actualBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (
+    actualBuffer.length !== expectedBuffer.length ||
+    !crypto.timingSafeEqual(actualBuffer, expectedBuffer)
+  ) {
+    return null;
+  }
+  try {
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const decoded = JSON.parse(Buffer.from(normalized, 'base64').toString('utf-8')) as {
+      sub?: unknown;
+    };
+    return typeof decoded.sub === 'string' && decoded.sub
+      ? { userId: decoded.sub }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 // Ensure WeChat iLink API domains bypass HTTP proxy.
 // These Chinese domestic services are unreachable through most overseas proxies.
 const WECHAT_NO_PROXY_DOMAINS = [

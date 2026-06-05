@@ -5,6 +5,7 @@ const getOnlineMetaMock = vi.hoisted(() => vi.fn());
 const listOnlineRuntimesByProviderMock = vi.hoisted(() => vi.fn(() => []));
 const registerRunMock = vi.hoisted(() => vi.fn());
 const unregisterRunMock = vi.hoisted(() => vi.fn());
+const listManagedReposByUserMock = vi.hoisted(() => vi.fn(() => []));
 const getSystemSettingsMock = vi.hoisted(() =>
   vi.fn(() => ({ containerTimeout: 1000, containerMaxOutputSize: 4096 })),
 );
@@ -26,6 +27,10 @@ vi.mock('../src/runtime-config.js', () => ({
 }));
 vi.mock('../src/config.js', () => ({
   GROUPS_DIR: '/tmp/octodeck-test/groups',
+  createAgentToolToken: vi.fn(() => 'test-agent-tool-token'),
+}));
+vi.mock('../src/db.js', () => ({
+  listManagedReposByUser: listManagedReposByUserMock,
 }));
 
 describe('agent-link run context forwarding', () => {
@@ -34,6 +39,8 @@ describe('agent-link run context forwarding', () => {
     getOnlineMetaMock.mockReset();
     listOnlineRuntimesByProviderMock.mockReset();
     listOnlineRuntimesByProviderMock.mockReturnValue([]);
+    listManagedReposByUserMock.mockReset();
+    listManagedReposByUserMock.mockReturnValue([]);
     registerRunMock.mockClear();
     unregisterRunMock.mockClear();
   });
@@ -79,6 +86,9 @@ describe('agent-link run context forwarding', () => {
         kind: 'git',
         gitUrl: 'https://github.com/acme/project.git',
         groupFolder: 'repo-demo',
+        agentId: 'coco',
+        scope: 'session',
+        scopeId: expect.any(String),
       },
       remoteCwdPlaceholder: '__OCTODECK_REMOTE_CWD__',
       context: {
@@ -92,6 +102,7 @@ describe('agent-link run context forwarding', () => {
       },
     });
     expect(sent[0].argv).toContain('--cwd=__OCTODECK_REMOTE_CWD__');
+    expect(sent[0].workspaceRepo.scopeId).not.toBe('coco');
 
     registerRunMock.mock.calls
       .at(-1)?.[0]
@@ -217,8 +228,9 @@ describe('agent-link run context forwarding', () => {
       groupFolder: 'repo-conv',
       agentId: 'conversation-1',
       scope: 'session',
-      scopeId: 'conversation-1',
+      scopeId: expect.any(String),
     });
+    expect(sent[0].workspaceRepo.scopeId).not.toBe('conversation-1');
 
     registerRunMock.mock.calls
       .at(-1)?.[0]
@@ -454,6 +466,226 @@ describe('agent-link run context forwarding', () => {
       .at(-1)?.[0]
       .finish({ ok: true, result: 'ok', error: null, timedOut: false, durationMs: 1 });
     await promise;
+  });
+
+  test('runViaAgentLink forwards device agent.run thinking and tool events separately', async () => {
+    const sent: any[] = [];
+    const outputs: any[] = [];
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef'
+        ? { capabilities: ['agent.run'] }
+        : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Device Tool Events',
+          folder: 'device-tool-events',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:claude-code',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: 'hello',
+          chatJid: 'web:device-tool-events',
+          isHome: false,
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+        onOutput: vi.fn(async (output) => {
+          outputs.push(output);
+        }),
+      },
+      {
+        backendId: 'mac-claude-code',
+        resolveBinary: () => '/usr/local/bin/claude',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:claude-code',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'agent.run.request' });
+    const controller = registerRunMock.mock.calls.at(-1)?.[0] as any;
+    expect(controller).toBeTruthy();
+
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'thinking_delta',
+      text: '需要先检查文件',
+      sessionId: 'sess-1',
+    });
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'tool_call',
+      sessionId: 'sess-1',
+      payload: {
+        type: 'assistant',
+        session_id: 'sess-1',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'tool-1',
+              name: 'Bash',
+              input: { command: 'pwd' },
+            },
+          ],
+        },
+      },
+    });
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'tool_result',
+      sessionId: 'sess-1',
+      payload: {
+        type: 'user',
+        session_id: 'sess-1',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'tool-1',
+              content: '/repo',
+            },
+          ],
+        },
+      },
+    });
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'text_delta',
+      text: '最终回答',
+      sessionId: 'sess-1',
+    });
+    controller.finish({
+      type: 'agent.run.result',
+      runId: controller.runId,
+      ok: true,
+      error: null,
+      sessionId: 'sess-1',
+      timedOut: false,
+      durationMs: 1,
+    });
+
+    const result = await promise;
+    expect(result.result).toBe('最终回答');
+    const streamEvents = outputs
+      .map((output) => output.streamEvent)
+      .filter(Boolean);
+    expect(streamEvents.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining([
+        'thinking_delta',
+        'tool_use_start',
+        'tool_use_end',
+        'text_delta',
+      ]),
+    );
+    expect(streamEvents.find((event) => event.eventType === 'tool_use_start'))
+      .toMatchObject({ toolName: 'Bash', toolUseId: 'tool-1' });
+    expect(streamEvents.find((event) => event.eventType === 'tool_use_end'))
+      .toMatchObject({ toolUseId: 'tool-1', detail: '/repo' });
+  });
+
+  test('runViaAgentLink parses legacy device stream-json thinking and tool events', async () => {
+    const sent: any[] = [];
+    const outputs: any[] = [];
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Legacy Device Events',
+          folder: 'legacy-device-events',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:claude-code',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: { prompt: 'hello', chatJid: 'web:legacy-device-events' } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+        onOutput: vi.fn(async (output) => outputs.push(output)),
+      },
+      {
+        backendId: 'mac-claude-code',
+        resolveBinary: () => '/usr/local/bin/claude',
+        buildArgv: ({ prompt }) => [
+          '-p',
+          prompt,
+          '--output-format',
+          'stream-json',
+        ],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:claude-code',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'run.request' });
+    const controller = registerRunMock.mock.calls.at(-1)?.[0] as any;
+    controller.onChunk(
+      'stdout',
+      [
+        JSON.stringify({ type: 'reasoning', session_id: 'sess-1', reasoning: '先想一下' }),
+        JSON.stringify({
+          type: 'assistant',
+          session_id: 'sess-1',
+          message: {
+            content: [
+              { type: 'tool_use', id: 'tool-legacy', name: 'Bash', input: { command: 'pwd' } },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: 'user',
+          session_id: 'sess-1',
+          message: {
+            content: [
+              { type: 'tool_result', tool_use_id: 'tool-legacy', content: '/repo' },
+            ],
+          },
+        }),
+        JSON.stringify({ type: 'assistant', session_id: 'sess-1', message: { content: [{ type: 'text', text: '最终回答' }] } }),
+        '',
+      ].join('\n'),
+    );
+    controller.finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+
+    const result = await promise;
+    expect(result.result).toBe('最终回答');
+    const streamEvents = outputs.map((output) => output.streamEvent).filter(Boolean);
+    expect(streamEvents.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining(['thinking_delta', 'tool_use_start', 'tool_use_end', 'text_delta']),
+    );
+    expect(streamEvents.find((event) => event.eventType === 'thinking_delta'))
+      .toMatchObject({ text: '先想一下' });
+    expect(streamEvents.find((event) => event.eventType === 'tool_use_start'))
+      .toMatchObject({ toolName: 'Bash', toolUseId: 'tool-legacy' });
   });
 
   test('runViaAgentLink appends OctoDeck system prompt to legacy device Claude CLI argv', async () => {

@@ -423,7 +423,7 @@ function ProvidersPanel({ link }: { link: AgentLink }) {
       <div className="grid gap-2 sm:grid-cols-3">
         <StatTile label="Providers" value={link.agentClients.length} />
         <StatTile label="Online runtimes" value={onlineRuntimes.length} />
-        <StatTile label="Running" value={runningCount} />
+        <StatTile label="运行中" value={runningCount} />
       </div>
 
       {link.agentClients.length > 0 ? (
@@ -432,7 +432,7 @@ function ProvidersPanel({ link }: { link: AgentLink }) {
             <div className="grid grid-cols-[minmax(180px,1.3fr)_minmax(280px,2fr)_96px_96px_minmax(220px,1.2fr)] gap-3 border-b border-border bg-muted/30 px-4 py-2 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
               <div>Provider</div>
               <div>Runtime</div>
-              <div>Running</div>
+              <div>运行中</div>
               <div>Caps</div>
               <div>Binary</div>
             </div>
@@ -601,7 +601,7 @@ function DeviceDetails({
           <div className="grid grid-cols-2 gap-2 sm:min-w-64">
             <StatTile label="在线时长" value={uptime} />
             <StatTile label="Agents" value={servingAgents.length} />
-            <StatTile label="Running" value={link.runningRuns?.length ?? 0} />
+            <StatTile label="运行中" value={link.runningRuns?.length ?? 0} />
             <StatTile label="Runtimes" value={link.runtimes?.length ?? 0} />
           </div>
         </div>
@@ -700,7 +700,7 @@ function DeviceDetails({
             <div className="grid gap-4 lg:grid-cols-2">
               <div>
                 <div className="mb-2 text-xs font-medium text-muted-foreground">
-                  Running runs
+                  正在执行的 Run
                 </div>
                 <RunningRuns link={link} />
               </div>

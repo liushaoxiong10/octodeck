@@ -575,6 +575,15 @@ func (rt *agentRuntimeProcess) deleteSession(ctx context.Context, out io.Writer,
 		err = fmt.Errorf("agent adapter not found: %s", req.AgentID)
 	} else {
 		deleted, err = adapter.DeleteSession(ctx, rt.cfg, req.Workspace, req.SessionID)
+		if err == nil && req.Workspace != "" && req.SessionID != "" {
+			if localDir, dirErr := cleanupWorkspaceScopeDir(rt.cfg, req.Workspace, "session", req.SessionID, "", ""); dirErr != nil {
+				err = dirErr
+			} else if removeErr := os.RemoveAll(localDir); removeErr != nil {
+				err = removeErr
+			} else {
+				deleted = true
+			}
+		}
 	}
 	var errPtr *string
 	if err != nil {
@@ -716,7 +725,7 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 	go func() {
 		defer close(pumpStdoutDone)
 		pumpAgentStdout(ctx, stdout, req, outputJSON, &sent, func(frame AgentRunEventFrame) {
-			if frame.Text != "" {
+			if frame.EventType == "text_delta" && frame.Text != "" {
 				textMu.Lock()
 				finalText += frame.Text
 				textMu.Unlock()
@@ -764,18 +773,34 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 }
 
 func (rt *agentRuntimeProcess) resolveCwd(ctx context.Context, req *AgentRunRequestFrame) (string, error) {
-	if req.Workspace != nil && req.Workspace.Repo != nil {
-		cwd, err := resolveWorkspaceRepo(ctx, rt.cfg, req.Workspace.Repo)
-		if err != nil {
-			return "", err
-		}
-		req.Cwd = cwd
+	// Normalize to a unified list of repos: prefer Workspace.Repos, fall back to
+	// Workspace.Repo (single), then to the legacy WorkspaceRepo.
+	var repos []*WorkspaceRepoSpec
+	if req.Workspace != nil && len(req.Workspace.Repos) > 0 {
+		repos = req.Workspace.Repos
+	} else if req.Workspace != nil && req.Workspace.Repo != nil {
+		repos = []*WorkspaceRepoSpec{req.Workspace.Repo}
 	} else if req.WorkspaceRepo != nil {
-		cwd, err := resolveWorkspaceRepo(ctx, rt.cfg, req.WorkspaceRepo)
+		repos = []*WorkspaceRepoSpec{req.WorkspaceRepo}
+	}
+
+	if len(repos) > 0 {
+		// First, resolve the workspace/session/task root (this handles
+		// octodeck-workspace:// URI or custom CWD folder fallback, or the
+		// scope-aware workspace directory).
+		wsRoot, err := rt.resolveWorkspaceRoot(req)
 		if err != nil {
 			return "", err
 		}
-		req.Cwd = cwd
+		// Repos are materialized as direct children of the workspace/session/task
+		// root. Keep cwd fixed at the root for both single-repo and multi-repo
+		// runs so paths remain stable when a workspace gains more repos later.
+		for _, spec := range repos {
+			if _, err := mountWorkspaceRepoAt(ctx, rt.cfg, wsRoot, spec); err != nil {
+				return "", err
+			}
+		}
+		req.Cwd = wsRoot
 	} else {
 		requested := req.Cwd
 		if req.Workspace != nil && (req.Workspace.AgentID != "" || req.Workspace.AgentRoot != "" || req.Workspace.Scope != "" || req.Workspace.ScopeID != "") {
@@ -800,7 +825,8 @@ func (rt *agentRuntimeProcess) resolveCwd(ctx context.Context, req *AgentRunRequ
 	if req.RemoteCwdPlaceholder != "" {
 		req.Context = replaceContextPlaceholder(req.Context, req.RemoteCwdPlaceholder, req.Cwd)
 	}
-	if !isPathAllowedByRoots(req.Cwd, rt.cfg.AllowedRoots, req.Cwd) {
+	req.Context = enrichRunContextWorkspacePaths(rt.cfg, req.Context, req.Workspace, req.Cwd)
+	if !isRunCwdAllowed(rt.cfg, req.Cwd) {
 		return "", fmt.Errorf("cwd outside allowed roots: %s", req.Cwd)
 	}
 	if !isWorkspaceAllowedByRuntimePolicy(rt.cfg, req.AgentID, req.Cwd) {
@@ -875,6 +901,10 @@ func buildAgentEnv(cfg *Config, agentID string, overrides map[string]string, run
 func buildAgentAdapters(cfg *Config) map[string]agentAdapter {
 	out := make(map[string]agentAdapter)
 	for _, client := range cfg.AgentClients {
+		if client.Transport == "acp" {
+			out[client.ID] = &acpAdapter{baseAgentAdapter: baseAgentAdapter{client: client}, entry: findAgentRegistryEntry(cfg, client.ID)}
+			continue
+		}
 		if client.Transport == "a2a" {
 			out[client.ID] = &customA2AAdapter{baseAgentAdapter: baseAgentAdapter{client: client}, entry: findAgentRegistryEntry(cfg, client.ID)}
 			continue
@@ -886,6 +916,8 @@ func buildAgentAdapters(cfg *Config) map[string]agentAdapter {
 			}
 			if transport == "a2a" {
 				out[client.ID] = &customA2AAdapter{baseAgentAdapter: baseAgentAdapter{client: client}, entry: entry}
+			} else if transport == "acp" {
+				out[client.ID] = &acpAdapter{baseAgentAdapter: baseAgentAdapter{client: client}, entry: entry}
 			} else if transport == "http" {
 				out[client.ID] = &customHTTPAdapter{baseAgentAdapter: baseAgentAdapter{client: client}, entry: *entry}
 			} else {
@@ -917,10 +949,16 @@ func (a *baseAgentAdapter) providerDirName() string {
 	switch a.client.ID {
 	case "claude-code":
 		return "claude"
+	case "claude-acp":
+		return "claude-acp"
 	case "codex":
 		return "codex"
+	case "codex-acp":
+		return "codex-acp"
 	case "traecli":
 		return "traecli"
+	case "traecli-acp":
+		return "traecli-acp"
 	default:
 		return safePathSegment(a.client.ID)
 	}
@@ -942,6 +980,10 @@ type claudeCodeAdapter struct{ baseAgentAdapter }
 type codexAdapter struct{ baseAgentAdapter }
 type traecliAdapter struct{ baseAgentAdapter }
 type plainCLIAdapter struct{ baseAgentAdapter }
+type acpAdapter struct {
+	baseAgentAdapter
+	entry *AgentRegistryEntry
+}
 type customStdioAdapter struct {
 	baseAgentAdapter
 	entry AgentRegistryEntry
@@ -997,6 +1039,14 @@ func (a *codexAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]
 
 func (a *traecliAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
 	return []string{"-p", req.Input.Prompt}, false, nil
+}
+
+func (a *acpAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
+	return nil, false, fmt.Errorf("acp agent adapter %s runs via protocol transport", a.client.ID)
+}
+
+func (a *acpAdapter) RunDirect(ctx context.Context, cfg *Config, req *AgentRunRequestFrame, emit func(AgentRunEventFrame)) (AgentRunResultFrame, error) {
+	return a.runACPAgent(ctx, cfg, req, emit)
 }
 
 func prepareAgentRuntimeMCPConfig(cfg *Config, req *AgentRunRequestFrame, cwd string) error {
@@ -1287,6 +1337,495 @@ func (a *customHTTPAdapter) RunDirect(ctx context.Context, _ *Config, req *Agent
 	return AgentRunResultFrame{OK: parsed.OK, Result: parsed.Result, Error: parsed.Error, ErrorInfo: parsed.ErrorInfo, SessionID: parsed.SessionID, Usage: parsed.Usage, TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), DurationMs: time.Since(started).Milliseconds()}, nil
 }
 
+type acpClient struct {
+	enc     *json.Encoder
+	mu      sync.Mutex
+	nextID  int64
+	pending map[int64]chan runtimeRPCMessage
+	closed  chan struct{}
+	onEvent func(runtimeRPCMessage)
+}
+
+func (a *acpAdapter) runACPAgent(ctx context.Context, cfg *Config, req *AgentRunRequestFrame, emit func(AgentRunEventFrame)) (AgentRunResultFrame, error) {
+	started := time.Now()
+	args := append([]string(nil), a.client.Args...)
+	env := req.Env
+	if a.entry != nil {
+		if len(a.entry.Args) > 0 {
+			args = append([]string(nil), a.entry.Args...)
+		}
+		env = mergeStringMaps(a.entry.Env, req.Env)
+	}
+	cmd := exec.CommandContext(ctx, a.client.Binary, args...)
+	cmd.Dir = req.Cwd
+	cmd.Env = buildAgentEnv(cfg, req.AgentID, env, req.Context)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return AgentRunResultFrame{}, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return AgentRunResultFrame{}, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return AgentRunResultFrame{}, err
+	}
+	client := &acpClient{enc: json.NewEncoder(stdin), pending: map[int64]chan runtimeRPCMessage{}, closed: make(chan struct{})}
+	var sent atomic.Int64
+	var finalMu sync.Mutex
+	var finalText string
+	var sessionID string
+	var finalUsage map[string]any
+	client.onEvent = func(msg runtimeRPCMessage) {
+		frame := acpNotificationToFrame(req, msg)
+		if frame == nil {
+			return
+		}
+		if frame.Text != "" && !allowAgentBytes(&sent, int64(len(frame.Text)), req.MaxOutputBytes) {
+			return
+		}
+		if frame.EventType == "text_delta" && frame.Text != "" {
+			finalMu.Lock()
+			finalText += frame.Text
+			finalMu.Unlock()
+		}
+		if frame.SessionID != "" {
+			sessionID = frame.SessionID
+		}
+		if frame.EventType == "usage" {
+			if usage := acpUsageFromPayload(frame.Payload); usage != nil {
+				finalMu.Lock()
+				finalUsage = usage
+				finalMu.Unlock()
+			}
+		}
+		emit(*frame)
+	}
+	if err := cmd.Start(); err != nil {
+		return AgentRunResultFrame{}, err
+	}
+	readDone := make(chan struct{})
+	logDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		client.readLoop(stdout)
+	}()
+	go func() {
+		defer close(logDone)
+		pumpAgentLog(stderr, req, &sent, emit)
+	}()
+
+	if _, err := client.call(ctx, "initialize", map[string]any{"protocolVersion": 1, "clientInfo": map[string]any{"name": "octodeck-daemon", "version": daemonVersion}}); err != nil {
+		_ = stdin.Close()
+		_ = cmd.Wait()
+		<-readDone
+		<-logDone
+		return AgentRunResultFrame{}, err
+	}
+	created, err := client.call(ctx, "session/new", map[string]any{"cwd": req.Cwd, "mcpServers": acpMCPServers(cfg), "_meta": map[string]any{"octodeckSessionId": req.Input.SessionID, "runId": req.RunID}})
+	if err != nil {
+		_ = stdin.Close()
+		_ = cmd.Wait()
+		<-readDone
+		<-logDone
+		return AgentRunResultFrame{}, err
+	}
+	sessionID = acpSessionIDFromResult(created, req.Input.SessionID)
+	if sessionID == "" {
+		sessionID = req.RunID
+	}
+	promptResult, promptErr := client.call(ctx, "session/prompt", map[string]any{"sessionId": sessionID, "prompt": req.Input.Prompt, "content": []map[string]any{{"type": "text", "text": req.Input.Prompt}}, "_meta": map[string]any{"policy": req.Policy, "context": req.Context}})
+	if promptErr == nil {
+		if text := acpTextFromResult(promptResult); text != "" {
+			finalMu.Lock()
+			if finalText == "" {
+				finalText = text
+			}
+			finalMu.Unlock()
+		}
+		if usage := acpUsageFromResult(promptResult); usage != nil {
+			finalMu.Lock()
+			finalUsage = usage
+			finalMu.Unlock()
+		}
+	}
+	_ = stdin.Close()
+	waitErr := cmd.Wait()
+	<-readDone
+	<-logDone
+	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+	var errPtr *string
+	if promptErr != nil {
+		msg := promptErr.Error()
+		errPtr = &msg
+	} else if waitErr != nil {
+		msg := waitErr.Error()
+		errPtr = &msg
+	}
+	return AgentRunResultFrame{OK: errPtr == nil, Result: finalText, Error: errPtr, SessionID: sessionID, Usage: finalUsage, TimedOut: timedOut, DurationMs: time.Since(started).Milliseconds()}, nil
+}
+
+func (c *acpClient) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	c.mu.Lock()
+	c.nextID++
+	id := c.nextID
+	ch := make(chan runtimeRPCMessage, 1)
+	c.pending[id] = ch
+	paramsJSON, _ := json.Marshal(params)
+	err := c.enc.Encode(runtimeRPCMessage{JSONRPC: "2.0", ID: &id, Method: method, Params: paramsJSON})
+	if err != nil {
+		delete(c.pending, id)
+	}
+	c.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case msg := <-ch:
+		if msg.Error != nil {
+			return msg.Result, errors.New(msg.Error.Message)
+		}
+		return msg.Result, nil
+	case <-c.closed:
+		c.forget(id)
+		return nil, io.ErrUnexpectedEOF
+	case <-ctx.Done():
+		c.forget(id)
+		return nil, ctx.Err()
+	case <-time.After(30 * time.Second):
+		c.forget(id)
+		return nil, fmt.Errorf("acp method %s timeout", method)
+	}
+}
+
+func (c *acpClient) forget(id int64) {
+	c.mu.Lock()
+	delete(c.pending, id)
+	c.mu.Unlock()
+}
+
+func (c *acpClient) readLoop(r io.Reader) {
+	defer close(c.closed)
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var msg runtimeRPCMessage
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			continue
+		}
+		if msg.ID != nil {
+			c.mu.Lock()
+			ch := c.pending[*msg.ID]
+			delete(c.pending, *msg.ID)
+			c.mu.Unlock()
+			if ch != nil {
+				ch <- msg
+				close(ch)
+			}
+			continue
+		}
+		if c.onEvent != nil {
+			c.onEvent(msg)
+		}
+	}
+}
+
+func acpNotificationToFrame(req *AgentRunRequestFrame, msg runtimeRPCMessage) *AgentRunEventFrame {
+	if msg.Method == "" {
+		return nil
+	}
+	payload := acpPayloadMap(msg)
+	enrichACPToolPayload(payload)
+	eventType := acpEventType(msg.Method, payload)
+	text := ""
+	if eventType == "thinking_delta" {
+		text = firstStringDeep(payload, "thinking", "reasoning", "reason", "thought", "thoughts", "text", "content", "delta")
+	} else if eventType == "text_delta" {
+		text = acpAssistantText(payload)
+	}
+	sessionID := firstStringDeep(payload, "sessionId", "session_id", "sessionID")
+	return &AgentRunEventFrame{Type: tAgentRunEvent, RunID: req.RunID, AgentID: req.AgentID, EventType: eventType, Text: text, SessionID: sessionID, Payload: payload, At: formatTime(time.Now())}
+}
+
+func acpPayloadMap(msg runtimeRPCMessage) map[string]any {
+	payload := map[string]any{"method": msg.Method, "acpMethod": msg.Method}
+	if len(msg.Params) == 0 {
+		return payload
+	}
+	var params any
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		payload["paramsRaw"] = string(msg.Params)
+		return payload
+	}
+	if m, ok := params.(map[string]any); ok {
+		for k, v := range m {
+			payload[k] = v
+		}
+		payload["params"] = m
+		return payload
+	}
+	payload["params"] = params
+	return payload
+}
+
+func acpEventType(method string, payload map[string]any) string {
+	method = strings.ToLower(method)
+	rawType := strings.ToLower(firstStringDeep(payload, "type", "event", "eventType", "kind", "phase", "status"))
+	if rawType == "usage" || strings.Contains(method, "usage") || acpUsageFromPayload(payload) != nil {
+		return "usage"
+	}
+	if rawType == "permission_request" || rawType == "approval_request" || strings.Contains(method, "permission") || strings.Contains(method, "approval") {
+		return "permission_request"
+	}
+	if rawType == "tool_result" || rawType == "tool_use_end" || rawType == "tool_call_result" || strings.Contains(method, "toolresult") || (strings.Contains(method, "tool") && (strings.Contains(method, "result") || strings.Contains(method, "end") || strings.Contains(method, "response"))) {
+		return "tool_use_end"
+	}
+	if rawType == "tool_use" || rawType == "tool_call" || rawType == "tool_use_start" || rawType == "tool_call_start" || hasACPToolStart(payload) || (strings.Contains(method, "tool") && (strings.Contains(method, "call") || strings.Contains(method, "use") || strings.Contains(method, "start"))) {
+		return "tool_use_start"
+	}
+	if rawType == "thinking" || rawType == "reasoning" || rawType == "reasoning_delta" || rawType == "thinking_delta" || strings.Contains(method, "thought") || strings.Contains(method, "reason") || strings.Contains(method, "thinking") || firstStringDeep(payload, "thinking", "reasoning", "reason", "thought", "thoughts") != "" {
+		return "thinking_delta"
+	}
+	if acpAssistantText(payload) != "" {
+		return "text_delta"
+	}
+	if rawType == "session" || rawType == "session_created" || rawType == "session_resumed" || (strings.Contains(method, "session") && firstStringDeep(payload, "sessionId", "session_id", "id") != "") {
+		return "session"
+	}
+	return "log"
+}
+
+func acpSessionIDFromResult(raw json.RawMessage, fallback string) string {
+	var m map[string]any
+	if len(raw) > 0 && json.Unmarshal(raw, &m) == nil {
+		if id := firstString(m, "sessionId", "session_id", "id"); id != "" {
+			return id
+		}
+	}
+	return fallback
+}
+
+func acpTextFromResult(raw json.RawMessage) string {
+	var m map[string]any
+	if len(raw) > 0 && json.Unmarshal(raw, &m) == nil {
+		if text := acpAssistantText(m); text != "" {
+			return text
+		}
+		return firstStringDeep(m, "text", "content", "result", "output")
+	}
+	return ""
+}
+
+func acpUsageFromResult(raw json.RawMessage) map[string]any {
+	var m map[string]any
+	if len(raw) > 0 && json.Unmarshal(raw, &m) == nil {
+		return acpUsageFromPayload(m)
+	}
+	return nil
+}
+
+func acpUsageFromPayload(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	if usage, ok := payload["usage"].(map[string]any); ok {
+		return usage
+	}
+	if usage := findMapDeep(payload, func(m map[string]any) bool {
+		_, ok := m["usage"]
+		return ok
+	}); usage != nil {
+		if nested, ok := usage["usage"].(map[string]any); ok {
+			return nested
+		}
+	}
+	if hasAnyKey(payload, "inputTokens", "outputTokens", "input_tokens", "output_tokens", "totalTokens", "total_tokens", "cacheReadInputTokens", "cache_read_input_tokens", "costUSD", "cost_usd") {
+		return payload
+	}
+	return nil
+}
+
+func acpAssistantText(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	if delta, ok := payload["delta"].(map[string]any); ok {
+		if text := firstStringDeep(delta, "text", "content", "message", "output"); text != "" {
+			return text
+		}
+	}
+	if msg, ok := payload["message"].(map[string]any); ok {
+		if text := acpContentText(msg["content"], false); text != "" {
+			return text
+		}
+	}
+	if text := acpContentText(payload["content"], false); text != "" {
+		return text
+	}
+	return firstString(payload, "text", "delta", "result", "output")
+}
+
+func acpContentText(value any, includeThinking bool) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case []any:
+		var b strings.Builder
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			typ := strings.ToLower(firstString(m, "type", "kind"))
+			if typ == "text" || typ == "output_text" || typ == "assistant" || (includeThinking && (typ == "thinking" || typ == "reasoning")) {
+				if text := firstStringDeep(m, "text", "content", "thinking", "reasoning", "reason"); text != "" {
+					b.WriteString(text)
+				}
+			}
+		}
+		return b.String()
+	}
+	return ""
+}
+
+func enrichACPToolPayload(payload map[string]any) {
+	if payload == nil {
+		return
+	}
+	tool := findMapDeep(payload, func(m map[string]any) bool {
+		typ := strings.ToLower(firstString(m, "type", "kind"))
+		if strings.Contains(typ, "tool") {
+			return true
+		}
+		return (firstString(m, "name", "toolName") != "" && (m["input"] != nil || m["arguments"] != nil || m["args"] != nil)) || firstString(m, "toolUseId", "tool_use_id") != ""
+	})
+	if tool == nil {
+		return
+	}
+	for _, key := range []string{"id", "toolUseId", "tool_use_id", "name", "toolName", "input", "arguments", "args", "content", "result", "output", "text", "is_error", "isError", "error"} {
+		if payload[key] == nil && tool[key] != nil {
+			payload[key] = tool[key]
+		}
+	}
+	if payload["toolName"] == nil {
+		if name := firstString(tool, "name", "toolName"); name != "" {
+			payload["toolName"] = name
+		}
+	}
+	if payload["toolUseId"] == nil {
+		if id := firstString(tool, "id", "toolUseId", "tool_use_id"); id != "" {
+			payload["toolUseId"] = id
+		}
+	}
+}
+
+func hasACPToolStart(payload map[string]any) bool {
+	if payload == nil {
+		return false
+	}
+	if payload["toolCall"] != nil || payload["tool_call"] != nil || payload["toolUse"] != nil || payload["tool_use"] != nil {
+		return true
+	}
+	return findMapDeep(payload, func(m map[string]any) bool {
+		typ := strings.ToLower(firstString(m, "type", "kind"))
+		return typ == "tool_use" || typ == "tool_call" || typ == "tool_use_start" || (firstString(m, "name", "toolName") != "" && (m["input"] != nil || m["arguments"] != nil || m["args"] != nil))
+	}) != nil
+}
+
+func firstStringDeep(value any, keys ...string) string {
+	return firstStringDeepWithDepth(value, 0, keys...)
+}
+
+func firstStringDeepWithDepth(value any, depth int, keys ...string) string {
+	if depth > 8 || value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case map[string]any:
+		for _, key := range keys {
+			if s, ok := v[key].(string); ok && s != "" {
+				return s
+			}
+		}
+		for _, child := range v {
+			if text := firstStringDeepWithDepth(child, depth+1, keys...); text != "" {
+				return text
+			}
+		}
+	case []any:
+		for _, child := range v {
+			if text := firstStringDeepWithDepth(child, depth+1, keys...); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func findMapDeep(value any, pred func(map[string]any) bool) map[string]any {
+	return findMapDeepWithDepth(value, pred, 0)
+}
+
+func findMapDeepWithDepth(value any, pred func(map[string]any) bool, depth int) map[string]any {
+	if depth > 8 || value == nil {
+		return nil
+	}
+	switch v := value.(type) {
+	case map[string]any:
+		if pred(v) {
+			return v
+		}
+		for _, child := range v {
+			if found := findMapDeepWithDepth(child, pred, depth+1); found != nil {
+				return found
+			}
+		}
+	case []any:
+		for _, child := range v {
+			if found := findMapDeepWithDepth(child, pred, depth+1); found != nil {
+				return found
+			}
+		}
+	}
+	return nil
+}
+
+func hasAnyKey(m map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := m[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func acpMCPServers(cfg *Config) map[string]any {
+	server, err := buildAgentTeamMCPServerConfig(cfg)
+	if err != nil {
+		return nil
+	}
+	return map[string]any{"octodeck_agent_team": server}
+}
+
+func mergeStringMaps(a, b map[string]string) map[string]string {
+	if len(a) == 0 {
+		return b
+	}
+	out := make(map[string]string, len(a)+len(b))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		out[k] = v
+	}
+	return out
+}
+
 func listProviderSessions(ctx context.Context, cfg *Config, agentID, providerDir, workspace string) ([]AgentSessionInfo, error) {
 	root := sessionDir(cfg)
 	workspaces := []string{workspace}
@@ -1545,10 +2084,10 @@ func normalizeAgentJSONLine(line string) (string, string, string, map[string]any
 			return "thinking_delta", text, sessionID, evt
 		}
 	}
-	if rawType == "tool_use" || rawType == "tool_call" {
+	if rawType == "tool_use" || rawType == "tool_call" || rawType == "tool_use_start" {
 		return "tool_call", "", sessionID, evt
 	}
-	if rawType == "tool_result" {
+	if rawType == "tool_result" || rawType == "tool_use_end" {
 		return "tool_result", "", sessionID, evt
 	}
 	if rawType == "usage" {

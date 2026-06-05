@@ -10,29 +10,16 @@
  */
 
 export type StreamEventType =
-  | 'text_delta'
-  | 'thinking_delta'
-  | 'tool_use_start'
-  | 'tool_use_end'
-  | 'tool_progress'
-  | 'hook_started'
-  | 'hook_progress'
-  | 'hook_response'
-  | 'task_start'
-  | 'task_progress'
-  | 'task_updated'
-  | 'task_notification'
-  | 'permission_denied'
-  | 'memory_recall'
-  | 'compact_boundary'
-  | 'notification'
-  | 'prompt_suggestion'
-  | 'raw_sdk_event'
+  | 'text_delta' | 'thinking_delta'
+  | 'tool_use_start' | 'tool_use_end' | 'tool_progress'
+  | 'hook_started' | 'hook_progress' | 'hook_response'
+  | 'task_start' | 'task_progress' | 'task_updated' | 'task_notification'
+  | 'permission_denied' | 'memory_recall' | 'compact_boundary'
+  | 'notification' | 'prompt_suggestion' | 'raw_sdk_event'
   | 'context_audit'
   | 'todo_update'
   | 'usage'
-  | 'status'
-  | 'init';
+  | 'status' | 'init';
 
 export type StreamAgentScope = 'main' | 'task' | 'subagent' | 'system';
 export type StreamDisplayLevel = 'primary' | 'detail' | 'debug';
@@ -40,13 +27,7 @@ export type StreamDisplayLevel = 'primary' | 'detail' | 'debug';
 export interface ClaudeContextFileAudit {
   sourcePath?: string;
   runtimePath?: string;
-  status:
-    | 'linked'
-    | 'mounted'
-    | 'missing'
-    | 'shadowed'
-    | 'unavailable'
-    | 'unknown';
+  status: 'linked' | 'mounted' | 'missing' | 'shadowed' | 'unavailable' | 'unknown';
   tokens?: number;
   loaded?: boolean;
 }
@@ -155,11 +136,7 @@ export interface StreamEvent {
   toolInput?: Record<string, unknown>;
   rawEvent?: Record<string, unknown>;
   contextAudit?: ClaudeContextAudit;
-  todos?: Array<{
-    id: string;
-    content: string;
-    status: 'pending' | 'in_progress' | 'completed';
-  }>;
+  todos?: Array<{ id: string; content: string; status: 'pending' | 'in_progress' | 'completed' }>;
   /** Token usage data emitted at query completion */
   usage?: {
     inputTokens: number;
@@ -169,15 +146,12 @@ export interface StreamEvent {
     costUSD: number;
     durationMs: number;
     numTurns: number;
-    modelUsage?: Record<
-      string,
-      {
-        inputTokens: number;
-        outputTokens: number;
-        cacheReadInputTokens: number;
-        cacheCreationInputTokens: number;
-        costUSD: number;
-      }
-    >;
+    modelUsage?: Record<string, {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadInputTokens: number;
+      cacheCreationInputTokens: number;
+      costUSD: number;
+    }>;
   };
 }

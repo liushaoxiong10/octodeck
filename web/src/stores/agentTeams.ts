@@ -32,6 +32,38 @@ export interface AgentTeamRoleAssignment {
   agentClientId?: string;
 }
 
+export interface AgentTeamWorkflowAction {
+  roleId: string;
+  phase?: string;
+  instructions?: string;
+  outputKey?: string;
+}
+
+export interface AgentTeamWorkflowStep {
+  id: string;
+  type: 'role' | 'parallel' | 'route';
+  roleId?: string;
+  phase?: string;
+  instructions?: string;
+  inputKeys?: string[];
+  outputKey?: string;
+  dependsOn?: string[];
+  parallel?: AgentTeamWorkflowAction[][];
+  route?: {
+    judgeRoleId: string;
+    candidateRoleIds: string[];
+    fallbackRoleId?: string;
+    finalRoleId?: string;
+  };
+  onFailure?: {
+    action: 'continue' | 'abort' | 'run_role' | 'retry';
+    targetRoleId?: string;
+    phase?: string;
+    maxIterations?: number;
+    instructions?: string;
+  };
+}
+
 export interface AgentTeam {
   id: string;
   name: string;
@@ -40,6 +72,7 @@ export interface AgentTeam {
   description: string;
   roles: AgentTeamRole[];
   workflow: string;
+  workflowSteps?: AgentTeamWorkflowStep[];
   successCriteria: string[];
   createdByAgentId: string;
   createdAt: string;
@@ -54,6 +87,16 @@ export interface AgentMdDefinition {
   createdByAgentId: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AgentMdStoreEntry {
+  id: string;
+  path: string;
+  name: string;
+  summary: string;
+  category: string;
+  size: number;
+  sourceUrl: string;
 }
 
 export interface AgentTeamExecutionResult {
@@ -89,6 +132,17 @@ export interface AgentTeamExecutionResult {
     payload: unknown;
     timestamp: string;
     schemaVersion: 1;
+  }>;
+  busMessages?: Array<{
+    id: string;
+    runId: string;
+    stepId?: string;
+    from: string;
+    to?: string;
+    kind: 'control' | 'artifact' | 'context' | 'status';
+    type: string;
+    payload: unknown;
+    timestamp: string;
   }>;
   error?: string;
 }
@@ -199,6 +253,8 @@ interface AgentTeamsState {
   remove: (id: string) => Promise<void>;
   loadAgentMdDefinitions: () => Promise<void>;
   createAgentMdDefinition: (input: AgentMdDefinitionInput) => Promise<AgentMdDefinition>;
+  listAgentMdStoreEntries: (query?: string) => Promise<AgentMdStoreEntry[]>;
+  importAgentMdFromStore: (path: string, createdByAgentId: string) => Promise<AgentMdDefinition>;
   updateAgentMdDefinition: (id: string, patch: AgentMdDefinitionPatch) => Promise<AgentMdDefinition>;
   removeAgentMdDefinition: (id: string) => Promise<void>;
 }
@@ -365,6 +421,28 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const data = await api.post<{ definition: AgentMdDefinition }>('/api/agent-teams/agent-md', input);
+      await get().loadAgentMdDefinitions();
+      return data.definition;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    } finally {
+      set({ saving: false });
+    }
+  },
+
+  listAgentMdStoreEntries: async (query = '') => {
+    const params = new URLSearchParams();
+    if (query.trim()) params.set('query', query.trim());
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    const data = await api.get<{ entries: AgentMdStoreEntry[] }>(`/api/agent-teams/agent-md-store${suffix}`);
+    return data.entries ?? [];
+  },
+
+  importAgentMdFromStore: async (path, createdByAgentId) => {
+    set({ saving: true, error: null });
+    try {
+      const data = await api.post<{ definition: AgentMdDefinition }>('/api/agent-teams/agent-md-store/import', { path, createdByAgentId }, 30_000);
       await get().loadAgentMdDefinitions();
       return data.definition;
     } catch (err) {

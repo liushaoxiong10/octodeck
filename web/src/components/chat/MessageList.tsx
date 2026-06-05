@@ -26,8 +26,6 @@ interface MessageListProps {
   agentId?: string;
   /** Callback to send a message (used for quick prompts in empty state) */
   onSend?: (content: string) => void;
-  /** Restores the legacy centered chat layout used by direct conversation links */
-  classic?: boolean;
 }
 
 type FlatItem =
@@ -52,7 +50,7 @@ const quickPrompts = [
   { icon: Wrench, title: '调试问题', desc: '帮我定位和修复一个 Bug' },
 ];
 
-export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrigger, groupJid, isWaiting, onInterrupt, agentId, onSend, classic = false }: MessageListProps) {
+export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrigger, groupJid, isWaiting, onInterrupt, agentId, onSend }: MessageListProps) {
   const { mode: displayMode } = useDisplayMode();
   const thinkingCache = useChatStore(s => s.thinkingCache ?? {});
   const thinkingDurationCache = useChatStore(s => s.thinkingDurationCache ?? {});
@@ -374,7 +372,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
         ref={parentRef}
         className="h-full overflow-y-auto overflow-x-hidden py-6"
       >
-        <div className={displayMode === 'compact' ? 'mx-auto px-4 min-w-0' : `${classic ? 'max-w-[760px]' : 'max-w-4xl'} mx-auto px-4 min-w-0`}>
+        <div className={displayMode === 'compact' ? 'mx-auto px-4 min-w-0' : 'max-w-4xl mx-auto px-4 min-w-0'}>
         {loading && hasMore && (
           <div className="flex justify-center py-4">
             <Loader2 className="animate-spin text-primary" size={24} />
@@ -407,7 +405,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
                   }}
                 >
                   <div className="flex justify-center my-6">
-                    <span className={`${classic ? 'bg-background px-4 py-1 rounded-full text-xs text-slate-400 border border-slate-200 shadow-sm' : 'bg-surface px-4 py-1 rounded-full text-xs text-muted-foreground border border-border'}`}>
+                    <span className="bg-surface px-4 py-1 rounded-full text-xs text-muted-foreground border border-border">
                       {item.content}
                     </span>
                   </div>
@@ -509,7 +507,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
                 data-index={virtualItem.index}
               >
                 <ErrorBoundary>
-                  <MessageBubble message={message} showTime={showTime} thinkingContent={thinkingCache[message.id]} thinkingDurationMs={thinkingDurationCache[message.id]} isShared={isShared} classic={classic} />
+                  <MessageBubble message={message} showTime={showTime} thinkingContent={thinkingCache[message.id]} thinkingDurationMs={thinkingDurationCache[message.id]} isShared={isShared} />
                 </ErrorBoundary>
               </div>
             );

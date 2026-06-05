@@ -45,6 +45,8 @@ export interface ContainerInput {
   remoteToolCwd?: string;
   /** OctoDeck user ID that owns this run, used by cloud memory MCP tools. */
   ownerUserId?: string;
+  /** Signed per-user token used by MCP tools to call OctoDeck tool bridges. */
+  agentToolToken?: string;
   /** Native local tool policy for the SDK runner. */
   localToolPolicy?: 'none' | 'server' | 'device-remote' | 'container';
   /** Server base URL used by remote MCP tools to call /api/agent-link/tool. */

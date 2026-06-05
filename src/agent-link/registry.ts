@@ -46,6 +46,8 @@ import {
 } from './agent-runtime-rpc.js';
 import { AgentLinkSession } from './session.js';
 
+const LATEST_DAEMON_VERSION = 'octodeck-daemon/1.0.4';
+
 export interface OnlineLinkInfo {
   linkId: string;
   userId: string;
@@ -67,6 +69,60 @@ export interface OnlineLinkInfo {
 
 const sessions = new Map<string, AgentLinkSession>();
 const sessionMeta = new Map<string, OnlineLinkInfo>();
+
+function normalizeDaemonVersion(version: string | null | undefined): string {
+  return (version ?? '')
+    .trim()
+    .replace(/^octodeck-daemon\//, '')
+    .replace(/^v/, '');
+}
+
+function parseDaemonVersion(version: string): number[] | null {
+  const base = version.split('-', 1)[0] ?? '';
+  if (!base) return null;
+  const parts = base.split('.');
+  if (parts.length < 1 || parts.length > 3) return null;
+  const nums = parts.map((part) => Number.parseInt(part, 10));
+  if (nums.some((n, index) => !Number.isFinite(n) || String(n) !== parts[index])) {
+    return null;
+  }
+  while (nums.length < 3) nums.push(0);
+  return nums;
+}
+
+function isDaemonVersionNewer(latest: string, current: string | null | undefined): boolean {
+  const latestNorm = normalizeDaemonVersion(latest);
+  const currentNorm = normalizeDaemonVersion(current);
+  if (!latestNorm || !currentNorm || latestNorm === currentNorm) return false;
+  const latestParts = parseDaemonVersion(latestNorm);
+  const currentParts = parseDaemonVersion(currentNorm);
+  if (latestParts && currentParts) {
+    for (let i = 0; i < latestParts.length; i++) {
+      if (latestParts[i] !== currentParts[i]) {
+        return latestParts[i] > currentParts[i];
+      }
+    }
+    return false;
+  }
+  return latestNorm !== currentNorm;
+}
+
+function notifyDaemonUpdateIfNeeded(session: AgentLinkSession, currentVersion: string): void {
+  if (!isDaemonVersionNewer(LATEST_DAEMON_VERSION, currentVersion)) return;
+  const sent = session.send({
+    type: 'daemon.update.request',
+    id: Date.now(),
+    latestVersion: LATEST_DAEMON_VERSION,
+    currentVersion,
+    reason: 'client_version_outdated',
+  });
+  if (sent) {
+    logger.info(
+      { linkId: session.linkId, currentVersion, latestVersion: LATEST_DAEMON_VERSION },
+      'agent-link daemon update request sent',
+    );
+  }
+}
 
 let serverVersion = '0.0.0';
 export function setServerVersion(v: string): void {
@@ -146,6 +202,7 @@ export function handleHello(
     serverVersion,
     heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
   });
+  notifyDaemonUpdateIfNeeded(session, frame.version);
 }
 
 /** session 收到非 hello 帧时由 routes 调用。Phase 5.2 会在这里路由 run.* 帧。 */
@@ -165,7 +222,22 @@ export function handleFrame(
         meta.runningRuns = frame.runningRuns ?? meta.runningRuns ?? [];
         meta.maxConcurrentRuns = frame.maxConcurrentRuns;
         meta.availableSlots = frame.availableSlots;
-        meta.runtimes = frame.runtimes ?? meta.runtimes;
+        if (frame.runtimes) {
+          meta.runtimes = frame.runtimes;
+        } else if (frame.runningRuns && meta.runtimes) {
+          // Daemon 未上报按 runtime 拆分的状态，则按 backendId 重新派生，
+          // 避免单一 run 把所有 runtime 都标成 busy。
+          meta.runtimes = meta.runtimes.map((rt) => {
+            const rtRuns = meta.runningRuns!.filter(
+              (run) => (run.backendId ?? '') === rt.agentClientId,
+            );
+            return {
+              ...rt,
+              status: rt.status === 'offline' ? 'offline' : rtRuns.length > 0 ? 'busy' : 'idle',
+              runningRuns: rtRuns,
+            };
+          });
+        }
         sessionMeta.set(session.linkId, meta);
       }
       if (frame.resources) {
@@ -317,20 +389,27 @@ function buildRuntimeStatuses(
   maxConcurrentRuns?: number,
   availableSlots?: number,
 ): NonNullable<import('./protocol.js').PingFrame['runtimes']> {
-  return agentClients.map((client) => ({
-    runtimeId: `${linkId}:${client.id}`,
-    deviceLinkId: linkId,
-    agentClientId: client.id,
-    displayName: client.displayName,
-    status: runningRuns.length > 0 ? 'busy' : 'idle',
-    runningRuns,
-    maxConcurrentRuns:
-      runtimeCapabilities.find((cap) => cap.agentId === client.id)
-        ?.maxConcurrentRuns ?? maxConcurrentRuns,
-    availableSlots:
-      runtimeCapabilities.find((cap) => cap.agentId === client.id)
-        ?.availableSlots ?? availableSlots,
-  }));
+  const runsByClient = new Map<string, typeof runningRuns>();
+  for (const run of runningRuns) {
+    const key = run.backendId ?? '';
+    const list = runsByClient.get(key);
+    if (list) list.push(run);
+    else runsByClient.set(key, [run]);
+  }
+  return agentClients.map((client) => {
+    const clientRuns = runsByClient.get(client.id) ?? [];
+    const cap = runtimeCapabilities.find((c) => c.agentId === client.id);
+    return {
+      runtimeId: `${linkId}:${client.id}`,
+      deviceLinkId: linkId,
+      agentClientId: client.id,
+      displayName: client.displayName,
+      status: clientRuns.length > 0 ? 'busy' : 'idle',
+      runningRuns: clientRuns,
+      maxConcurrentRuns: cap?.maxConcurrentRuns ?? maxConcurrentRuns,
+      availableSlots: cap?.availableSlots ?? availableSlots,
+    };
+  });
 }
 
 const lastSeenWrite = new Map<string, number>();
@@ -369,6 +448,27 @@ export function isOnline(linkId: string): boolean {
 
 export function getSession(linkId: string): AgentLinkSession | undefined {
   return sessions.get(linkId);
+}
+
+export function requestWorkspaceCleanup(opts: {
+  linkId: string;
+  workspace: string;
+  scope?: 'workspace' | 'session' | 'direct_session' | 'task';
+  sessionId?: string;
+  taskId?: string;
+  taskRunId?: string;
+}): boolean {
+  const session = sessions.get(opts.linkId);
+  if (!session || session.state !== 'open') return false;
+  return session.send({
+    type: 'workspace.cleanup.request',
+    id: 0,
+    workspace: opts.workspace,
+    scope: opts.scope,
+    sessionId: opts.sessionId,
+    taskId: opts.taskId,
+    taskRunId: opts.taskRunId,
+  });
 }
 
 export function getOnlineMeta(linkId: string): OnlineLinkInfo | undefined {

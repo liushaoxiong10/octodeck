@@ -245,6 +245,7 @@ function buildRepoContext(
   return {
     id: group.repoId,
     gitUrl: group.repoGitUrl,
+    mainBranch: group.repoMainBranch,
     devicePath: group.repoDevicePath,
     kind: group.repoGitUrl
       ? 'git'

@@ -183,6 +183,7 @@ interface GroupPayloadItem {
     | 'device-cli-agent';
   device_link_id?: string;
   agent_client_id?: string;
+  agent_model?: string;
   execution_mode: 'container' | 'host';
   custom_cwd?: string;
   repo_id?: string;
@@ -306,6 +307,7 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       runtime_profile: group.runtimeProfile,
       device_link_id: isAdmin ? group.deviceLinkId : undefined,
       agent_client_id: isAdmin ? group.agentClientId : undefined,
+      agent_model: isAdmin ? group.agentModel : undefined,
       execution_mode: group.executionMode || 'container',
       custom_cwd: isAdmin ? group.customCwd : undefined,
       repo_id: isAdmin ? group.repoId : undefined,
@@ -331,6 +333,7 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
 }
 
 import { removeFlowArtifacts } from '../file-manager.js';
+import { requestWorkspaceCleanup } from '../agent-link/registry.js';
 import { clearSessionFiles } from '../session-files.js';
 export { removeFlowArtifacts };
 
@@ -407,6 +410,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
   const deviceLinkId =
     validation.data.device_link_id ?? validation.data.execution_node;
   const agentClientId = validation.data.agent_client_id;
+  const agentModel = validation.data.agent_model?.trim() || undefined;
   const backend = validation.data.backend;
   const executionMode = runtimeProfile === 'server-agent' ? 'host' : 'host';
   const executionNode = deviceLinkId;
@@ -423,6 +427,8 @@ groupRoutes.post('/', authMiddleware, async (c) => {
   }
   const effectiveRepoGitUrl =
     selectedRepo?.kind === 'git' ? selectedRepo.gitUrl : repoGitUrl;
+  const effectiveRepoMainBranch =
+    selectedRepo?.kind === 'git' ? selectedRepo.mainBranch : undefined;
   const effectiveRepoDevicePath =
     selectedRepo?.kind === 'device_path'
       ? selectedRepo.devicePath
@@ -718,6 +724,8 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     repoId: runtimeProfile !== 'server-agent' ? repoId : undefined,
     repoGitUrl:
       runtimeProfile !== 'server-agent' ? effectiveRepoGitUrl : undefined,
+    repoMainBranch:
+      runtimeProfile !== 'server-agent' ? effectiveRepoMainBranch : undefined,
     repoDevicePath:
       runtimeProfile !== 'server-agent' ? effectiveRepoDevicePath : undefined,
     initSourcePath: executionMode !== 'host' ? initSourcePath : undefined,
@@ -727,6 +735,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       runtimeProfile !== 'server-agent' ? effectiveExecutionNode : undefined,
     agentClientId:
       runtimeProfile === 'device-cli-agent' ? agentClientId : undefined,
+    agentModel,
     backend: runtimeProfile === 'device-cli-agent' ? backend : undefined,
     executionNode:
       runtimeProfile !== 'server-agent' ? effectiveExecutionNode : undefined,
@@ -841,6 +850,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     runtime_profile,
     device_link_id,
     agent_client_id,
+    agent_model,
     execution_mode,
     backend,
     execution_node,
@@ -855,6 +865,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     runtime_profile === undefined &&
     device_link_id === undefined &&
     agent_client_id === undefined &&
+    agent_model === undefined &&
     execution_mode === undefined &&
     backend === undefined &&
     execution_node === undefined
@@ -931,6 +942,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     runtime_profile === undefined &&
     device_link_id === undefined &&
     agent_client_id === undefined &&
+    agent_model === undefined &&
     execution_mode === undefined &&
     backend === undefined &&
     execution_node === undefined;
@@ -982,6 +994,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     runtime_profile !== undefined ||
     device_link_id !== undefined ||
     agent_client_id !== undefined ||
+    agent_model !== undefined ||
     execution_mode !== undefined ||
     backend !== undefined ||
     execution_node !== undefined
@@ -1002,6 +1015,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
       customCwd: existing.customCwd,
       repoId: existing.repoId,
       repoGitUrl: existing.repoGitUrl,
+      repoMainBranch: existing.repoMainBranch,
       repoDevicePath: existing.repoDevicePath,
       initSourcePath: existing.initSourcePath,
       initGitUrl: existing.initGitUrl,
@@ -1023,6 +1037,10 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         agent_client_id !== undefined
           ? agent_client_id
           : existing.agentClientId,
+      agentModel:
+        agent_model !== undefined
+          ? agent_model.trim() || undefined
+          : existing.agentModel,
       backend: backend !== undefined ? backend : existing.backend,
       executionNode:
         nextDeviceLinkId !== undefined
@@ -1139,6 +1157,16 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
   }
   deleteGroupData(jid, existing.folder);
   removeFlowArtifacts(existing.folder);
+
+  const cleanupDeviceLinkId =
+    existing.deviceLinkId || deviceLinkIdFromExecutionTarget(existing.executionNode);
+  if (cleanupDeviceLinkId) {
+    requestWorkspaceCleanup({
+      linkId: cleanupDeviceLinkId,
+      workspace: existing.folder,
+      scope: 'workspace',
+    });
+  }
 
   delete deps.getRegisteredGroups()[jid];
   delete deps.getSessions()[existing.folder];

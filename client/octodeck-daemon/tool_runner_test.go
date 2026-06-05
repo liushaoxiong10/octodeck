@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,6 +155,39 @@ func TestToolRunnerListDirectoriesForDevicePathPicker(t *testing.T) {
 	}
 }
 
+func TestToolRunnerListDirectoriesAllowsDevicePathOutsideAllowedRoots(t *testing.T) {
+	allowed := t.TempDir()
+	outside := t.TempDir()
+	project := filepath.Join(outside, "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realProject, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr := newToolRunner(&Config{AllowedRoots: []string{allowed}}, nil)
+	res := tr.execute(context.Background(), &ToolRequestFrame{
+		RequestID:      "tool-list-outside",
+		ToolName:       "ListDirectories",
+		Cwd:            "/",
+		Input:          map[string]any{"path": project},
+		TimeoutMs:      1000,
+		MaxOutputBytes: 4096,
+	})
+	if !res.OK {
+		t.Fatalf("expected device directory outside allowed roots to be listed: %s", valueOrEmpty(res.Error))
+	}
+	payload := res.Result.(map[string]any)
+	if payload["currentPath"].(string) != realProject {
+		t.Fatalf("expected currentPath %q, got %#v", realProject, payload["currentPath"])
+	}
+	if payload["hasAllowlist"].(bool) {
+		t.Fatalf("expected device directory picker to ignore allowed roots")
+	}
+}
+
 func valueOrEmpty(p *string) string {
 	if p == nil {
 		return ""
@@ -165,4 +201,52 @@ func writeTestConfig(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestDaemonVersionComparison(t *testing.T) {
+	if !isNewerDaemonVersion("octodeck-daemon/1.0.2", "octodeck-daemon/1.0.1") {
+		t.Fatal("expected 1.0.2 to be newer than 1.0.1")
+	}
+	if isNewerDaemonVersion("octodeck-daemon/1.0.1", "octodeck-daemon/1.0.2") {
+		t.Fatal("expected downgrade to not be considered newer")
+	}
+	if !isNewerDaemonVersion("v1.1.0", "octodeck-daemon/1.0.9") {
+		t.Fatal("expected v1.1.0 to be newer than 1.0.9")
+	}
+	if isNewerDaemonVersion("octodeck-daemon/1.0.2", "octodeck-daemon/1.0.2") {
+		t.Fatal("expected equal versions to not require update")
+	}
+}
+
+func TestCheckDaemonUpdateUsesServerVersionEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/daemon/version" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"version":"octodeck-daemon/1.0.4"}`)
+	}))
+	defer server.Close()
+
+	latest, available, err := checkDaemonUpdate(context.Background(), &Config{
+		Server:  server.URL,
+		Version: "octodeck-daemon/1.0.2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest != "octodeck-daemon/1.0.4" || !available {
+		t.Fatalf("unexpected update check result latest=%q available=%v", latest, available)
+	}
+}
+
+func TestAutoUpdateDefaultsEnabledAndCanBeDisabled(t *testing.T) {
+	if !autoUpdateEnabled(&Config{}) {
+		t.Fatal("expected auto update enabled by default")
+	}
+	disabled := false
+	if autoUpdateEnabled(&Config{AutoUpdate: &disabled}) {
+		t.Fatal("expected explicit autoUpdate=false to disable auto updates")
+	}
 }

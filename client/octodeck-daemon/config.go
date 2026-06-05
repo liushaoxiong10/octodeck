@@ -42,6 +42,9 @@ type Config struct {
 	MaxConcurrentRuns int `json:"maxConcurrentRuns"`
 	// Optional: client display version reported in hello.
 	Version string `json:"version,omitempty"`
+	// Optional: automatically download and restart into newer daemon versions.
+	// Nil defaults to enabled.
+	AutoUpdate *bool `json:"autoUpdate,omitempty"`
 	// AgentRegistry defines local agent adapters the server may reference by ID.
 	AgentRegistry []AgentRegistryEntry `json:"agentRegistry,omitempty"`
 	// RuntimePolicy constrains agent-runtime behavior and remote policy requests.
@@ -276,7 +279,7 @@ func (c *Config) validate() error {
 		if strings.TrimSpace(a.ID) == "" {
 			return errors.New("agentRegistry entry id is required")
 		}
-		if a.Transport == "" || a.Transport == "stdio" || a.Transport == "a2a" {
+		if a.Transport == "" || a.Transport == "stdio" || a.Transport == "a2a" || a.Transport == "acp" {
 			if a.Binary == "" {
 				return fmt.Errorf("agentRegistry[%s].binary is required for %s transport", a.ID, ifEmpty(a.Transport, "stdio"))
 			}
@@ -288,7 +291,7 @@ func (c *Config) validate() error {
 				return fmt.Errorf("agentRegistry[%s].url is required for http transport", a.ID)
 			}
 		} else {
-			return fmt.Errorf("agentRegistry[%s].transport must be stdio, a2a or http", a.ID)
+			return fmt.Errorf("agentRegistry[%s].transport must be stdio, acp, a2a or http", a.ID)
 		}
 		for k := range a.Env {
 			if isDangerousEnvKey(k) {

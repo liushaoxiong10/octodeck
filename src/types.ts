@@ -62,6 +62,7 @@ export interface RegisteredGroup {
   customCwd?: string; // 宿主机模式的自定义工作目录（绝对路径）
   repoId?: string; // 引用统一管理的 Repo（优先于 repoGitUrl/repoDevicePath 展示与选择）
   repoGitUrl?: string; // Device 原生执行：远端 Git 仓库地址，在 device workspace/repo 下缓存并基于 worktree 执行
+  repoMainBranch?: string; // Device 原生执行：Git Repo 指定主分支；缺失时使用远端默认分支
   repoDevicePath?: string; // Device 原生执行：指定当前 device 上的项目目录；若支持 git 则基于 worktree，否则直接操作目录
   initSourcePath?: string; // 容器模式下复制来源的宿主机绝对路径
   initGitUrl?: string; // 容器模式下 clone 来源的 Git URL
@@ -91,6 +92,8 @@ export interface RegisteredGroup {
   deviceLinkId?: string;
   /** Agent client to launch on device-cli-agent, e.g. claude-code/codex/traecli. */
   agentClientId?: string;
+  /** Per-workspace model override passed to the selected Agent backend. */
+  agentModel?: string;
   /**
    * 命令执行节点。
    *   - undefined / 'server-local' → server 进程内 spawn（沿用旧逻辑）
@@ -109,6 +112,7 @@ export interface ManagedRepo {
   name: string;
   kind: ManagedRepoKind;
   gitUrl?: string;
+  mainBranch?: string;
   devicePath?: string;
   deviceLinkId?: string;
   createdBy: string;
@@ -180,6 +184,7 @@ export interface NewMessage {
   source_jid?: string;
   sender: string;
   sender_name: string;
+  role?: 'user' | 'assistant' | 'tool';
   content: string;
   timestamp: string;
   attachments?: string;
@@ -199,6 +204,9 @@ export type MessageSourceKind =
   | 'compact_partial'
   | 'user_command'
   | 'scheduled_task_prompt'
+  | 'tool_call'
+  | 'tool_result'
+  | 'tool_progress'
   | 'legacy'
   | 'auto_continue';
 
@@ -230,6 +238,10 @@ export interface ScheduledTask {
   context_mode: 'group' | 'isolated';
   execution_type: 'agent' | 'script';
   script_command: string | null;
+  runtime_profile?: AgentRuntimeProfile | null;
+  agent_client_id?: string | null;
+  backend?: string | null;
+  agent_model?: string | null;
   execution_mode?: 'host' | 'container' | null;
   execution_node?: string | null;
   workspace_jid?: string | null;

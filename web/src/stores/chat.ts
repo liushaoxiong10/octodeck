@@ -21,6 +21,7 @@ export interface Message {
   source_jid?: string;
   sender: string;
   sender_name: string;
+  role?: 'user' | 'assistant' | 'tool';
   content: string;
   timestamp: string;
   is_from_me: boolean;
@@ -29,7 +30,7 @@ export interface Message {
   turn_id?: string | null;
   session_id?: string | null;
   sdk_message_uuid?: string | null;
-  source_kind?: 'sdk_final' | 'sdk_send_message' | 'interrupt_partial' | 'legacy' | null;
+  source_kind?: 'sdk_final' | 'sdk_send_message' | 'interrupt_partial' | 'tool_call' | 'tool_result' | 'tool_progress' | 'legacy' | null;
   finalization_reason?: 'completed' | 'interrupted' | 'error' | null;
 }
 
@@ -142,6 +143,7 @@ function mergeMessagesChronologically(
       old.content !== m.content ||
       old.timestamp !== m.timestamp ||
       old.token_usage !== m.token_usage ||
+      old.role !== m.role ||
       old.turn_id !== m.turn_id ||
       old.session_id !== m.session_id ||
       old.sdk_message_uuid !== m.sdk_message_uuid ||
@@ -257,6 +259,7 @@ interface ChatState {
   clearHistory: (jid: string) => Promise<boolean>;
   deleteMessage: (jid: string, messageId: string) => Promise<boolean>;
   createFlow: (name: string, options?: { runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent'; device_link_id?: string; agent_client_id?: string; backend?: string; execution_mode?: 'container' | 'host'; execution_node?: string; custom_cwd?: string; repo_id?: string; repo_git_url?: string; repo_device_path?: string; init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
+  updateGroupConfig: (jid: string, patch: Partial<Pick<GroupInfo, 'runtime_profile' | 'device_link_id' | 'agent_client_id' | 'agent_model' | 'execution_mode' | 'backend' | 'execution_node'>>) => Promise<boolean>;
   renameFlow: (jid: string, name: string) => Promise<void>;
   togglePin: (jid: string) => Promise<void>;
   deleteFlow: (jid: string) => Promise<void>;
@@ -1594,6 +1597,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  updateGroupConfig: async (jid, patch) => {
+    try {
+      await api.patch<{ success: boolean }>(
+        `/api/groups/${encodeURIComponent(jid)}`,
+        patch,
+      );
+      set((s) => {
+        const group = s.groups[jid];
+        if (!group) return { error: null } as Partial<ChatState>;
+        return {
+          groups: {
+            ...s.groups,
+            [jid]: {
+              ...group,
+              ...patch,
+            },
+          },
+          error: null,
+        };
+      });
+      return true;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  },
+
   renameFlow: async (jid: string, name: string) => {
     try {
       await api.patch<{ success: boolean }>(`/api/groups/${encodeURIComponent(jid)}`, { name });
@@ -2091,6 +2121,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       chat_jid: wsMsg.chat_jid || chatJid,
       sender: wsMsg.sender || '',
       sender_name: wsMsg.sender_name || '',
+      role: wsMsg.role || (wsMsg.is_from_me ? 'assistant' : 'user'),
       content: wsMsg.content || '',
       timestamp: wsMsg.timestamp || new Date().toISOString(),
       is_from_me: wsMsg.is_from_me ?? false,
@@ -2114,6 +2145,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         snapshotHasMore = !!s.agentHasMore[agentId];
         const isAgentReply =
           msg.is_from_me &&
+          msg.role !== 'tool' &&
           msg.sender !== '__system__' &&
           msg.source_kind !== 'sdk_send_message';
 
@@ -2164,6 +2196,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       const isAgentReply =
         msg.is_from_me &&
+        msg.role !== 'tool' &&
         msg.sender !== '__system__' &&
         source !== 'scheduled_task' &&
         msg.source_kind !== 'sdk_send_message';
