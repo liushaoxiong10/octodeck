@@ -49,6 +49,7 @@ import { Badge } from '@/components/ui/badge';
 import { Label } from '@/components/ui/label';
 import { FileUploadZone } from './FileUploadZone';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import type { ProvidersListResponse } from '../settings/types';
 
 interface FilePanelProps {
   groupJid: string;
@@ -60,6 +61,11 @@ interface SystemSettingsForWorkspace {
   defaultBackend?: string;
 }
 
+interface ModelInfo {
+  id: string;
+  displayName?: string;
+}
+
 function isAgentLinkExecutionTarget(target: string | null | undefined): target is string {
   return !!target && (/^cl_[0-9a-f]{16}$/.test(target) || /^runtime:cl_[0-9a-f]{16}:[^:]+$/.test(target) || /^cl_[0-9a-f]{16}:[^:]+$/.test(target) || /^provider:[^:]+$/.test(target));
 }
@@ -68,6 +74,14 @@ function agentClientIdFromExecutionTarget(target: string): string | undefined {
   return target.match(/^provider:([^:]+)$/)?.[1]
     ?? target.match(/^runtime:cl_[0-9a-f]{16}:([^:]+)$/)?.[1]
     ?? target.match(/^cl_[0-9a-f]{16}:([^:]+)$/)?.[1];
+}
+
+function deviceIdFromExecutionTarget(target: string | null | undefined): string | null {
+  if (!target) return null;
+  if (/^cl_[0-9a-f]{16}$/.test(target)) return target;
+  return target.match(/^runtime:(cl_[0-9a-f]{16}):[^:]+$/)?.[1]
+    ?? target.match(/^(cl_[0-9a-f]{16}):[^:]+$/)?.[1]
+    ?? null;
 }
 
 function uniqueProviderIds(devices: AgentLink[]): string[] {
@@ -860,6 +874,9 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
   const [defaultBackend, setDefaultBackend] = useState('claude-sdk');
   const [savingRuntime, setSavingRuntime] = useState(false);
   const [modelDraft, setModelDraft] = useState('');
+  const [serverModelOptions, setServerModelOptions] = useState<ModelInfo[]>([]);
+  const [cliModelOptions, setCliModelOptions] = useState<ModelInfo[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
 
   const fileList = files[groupJid] || [];
   const currentDir = currentPath[groupJid] || '';
@@ -899,6 +916,12 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
 
   const currentBackendId = group?.backend || defaultBackend;
   const selectedCustomBackend = customBackendById.get(currentBackendId);
+  const workspaceDeviceId = deviceIdFromExecutionTarget(group?.device_link_id ?? group?.execution_node);
+  const activeAgentClientId = group?.agent_client_id
+    ?? selectedCustomBackend?.agentClientId
+    ?? (group?.execution_node ? agentClientIdFromExecutionTarget(group.execution_node) : undefined);
+  const canOperateWorkspaceDirectory = !!workspaceDeviceId;
+  const workspaceDirectoryDisabledReason = '工作区未绑定 Device，不能操作工作区目录。请先在 Agent 配置中选择 Device/Agent。';
 
   const selectableAgentBackends = useMemo(() => {
     return customBackends
@@ -906,13 +929,83 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
       .sort((a, b) => (a.displayName || a.id).localeCompare(b.displayName || b.id));
   }, [customBackends]);
 
+  const fetchedModelOptions = isDeviceCliWorkspace ? cliModelOptions : serverModelOptions;
+
   const modelSuggestions = useMemo(() => {
     return [...new Set([
       group?.agent_model,
       selectedCustomBackend?.model,
+      ...fetchedModelOptions.map((model) => model.id),
       ...customBackends.map((backend) => backend.model),
     ].filter((value): value is string => !!value))].sort();
-  }, [customBackends, group?.agent_model, selectedCustomBackend?.model]);
+  }, [customBackends, fetchedModelOptions, group?.agent_model, selectedCustomBackend?.model]);
+
+  useEffect(() => {
+    if (!canEditRuntime || !group) return;
+    let cancelled = false;
+    const loadServerModels = async () => {
+      setModelsLoading(true);
+      try {
+        const providersData = await api.get<ProvidersListResponse>('/api/config/claude/providers');
+        const enabledProviders = (providersData.providers ?? []).filter((provider) => provider.enabled);
+        const provider = enabledProviders.find((item) => item.id === selectedCustomBackend?.providerId)
+          ?? enabledProviders[0];
+        if (!provider) {
+          if (!cancelled) setServerModelOptions([]);
+          return;
+        }
+        const fetched = await api.post<{ models: ModelInfo[]; provider?: { anthropicModel?: string } }>(
+          `/api/config/claude/providers/${encodeURIComponent(provider.id)}/models/fetch`,
+          {},
+        );
+        if (cancelled) return;
+        const configuredModels: ModelInfo[] = [
+          ...(provider.anthropicModel ? [{ id: provider.anthropicModel, displayName: provider.anthropicModel }] : []),
+          ...(provider.models ?? []).map((model) => ({ id: model.id, displayName: model.displayName || model.id })),
+        ];
+        const models = fetched.models?.length ? fetched.models : configuredModels;
+        setServerModelOptions(models.map((model) => ({ id: model.id, displayName: model.displayName ?? model.id })));
+      } catch (err) {
+        if (!cancelled) {
+          setServerModelOptions([]);
+          showToast('加载模型失败', err instanceof Error ? err.message : '从服务端模型端点获取模型失败');
+        }
+      } finally {
+        if (!cancelled) setModelsLoading(false);
+      }
+    };
+
+    const loadCliModels = async () => {
+      if (!workspaceDeviceId || !activeAgentClientId) {
+        setCliModelOptions([]);
+        return;
+      }
+      setModelsLoading(true);
+      try {
+        const data = await api.get<{ models: ModelInfo[] }>(
+          `/api/agent-links/${encodeURIComponent(workspaceDeviceId)}/providers/${encodeURIComponent(activeAgentClientId)}/models`,
+        );
+        if (!cancelled) setCliModelOptions((data.models ?? []).map((model) => ({ id: model.id, displayName: model.displayName ?? model.id })));
+      } catch (err) {
+        if (!cancelled) {
+          setCliModelOptions([]);
+          showToast('加载模型失败', err instanceof Error ? err.message : '从 CLI 获取模型失败');
+        }
+      } finally {
+        if (!cancelled) setModelsLoading(false);
+      }
+    };
+
+    if (isDeviceCliWorkspace) {
+      void loadCliModels();
+    } else {
+      void loadServerModels();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAgentClientId, canEditRuntime, group, isDeviceCliWorkspace, selectedCustomBackend?.providerId, workspaceDeviceId]);
 
   const executionTargetOptions = useMemo(() => [
     ...uniqueProviderIds(agentLinks).map((providerId) => {
@@ -1095,6 +1188,10 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
   };
 
   const handleDeleteClick = (item: FileEntry) => {
+    if (!canOperateWorkspaceDirectory) {
+      showToast('无法操作工作区目录', workspaceDirectoryDisabledReason);
+      return;
+    }
     setDeleteModal({
       open: true,
       path: item.path,
@@ -1104,6 +1201,10 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
   };
 
   const handleDeleteConfirm = async () => {
+    if (!canOperateWorkspaceDirectory) {
+      showToast('无法操作工作区目录', workspaceDirectoryDisabledReason);
+      return;
+    }
     setDeleteLoading(true);
     try {
       const ok = await deleteFile(groupJid, deleteModal.path);
@@ -1120,6 +1221,10 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
   };
 
   const handleOpenLocalFolder = async () => {
+    if (!canOperateWorkspaceDirectory) {
+      setOpenDirError(workspaceDirectoryDisabledReason);
+      return;
+    }
     setOpenDirLoading(true);
     setOpenDirError(null);
     try {
@@ -1143,11 +1248,19 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
   };
 
   const handleCreateDir = () => {
+    if (!canOperateWorkspaceDirectory) {
+      showToast('无法操作工作区目录', workspaceDirectoryDisabledReason);
+      return;
+    }
     setNewDirName('');
     setCreateDirModal(true);
   };
 
   const handleCreateDirConfirm = async () => {
+    if (!canOperateWorkspaceDirectory) {
+      showToast('无法操作工作区目录', workspaceDirectoryDisabledReason);
+      return;
+    }
     const name = newDirName.trim();
     if (!name) return;
     setCreateDirLoading(true);
@@ -1170,9 +1283,9 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
           {canOpenLocalFolder && (
             <button
               onClick={handleOpenLocalFolder}
-              disabled={openDirLoading}
+              disabled={openDirLoading || !canOperateWorkspaceDirectory}
               className="hidden md:inline-flex text-muted-foreground hover:text-foreground transition-colors p-2 rounded-md hover:bg-muted cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-              title="打开工作区文件夹"
+              title={canOperateWorkspaceDirectory ? '打开工作区文件夹' : workspaceDirectoryDisabledReason}
               aria-label="打开工作区文件夹"
             >
               {openDirLoading ? (
@@ -1228,6 +1341,12 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
       {openDirError && (
         <div className="px-4 py-2 border-b border-red-100 dark:border-red-800 bg-red-50 dark:bg-red-950/40 text-xs text-red-600 dark:text-red-400">
           {openDirError}
+        </div>
+      )}
+
+      {!canOperateWorkspaceDirectory && (
+        <div className="px-4 py-2 border-b border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-xs text-amber-700 dark:text-amber-300">
+          {workspaceDirectoryDisabledReason}
         </div>
       )}
 
@@ -1291,12 +1410,30 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
           <div className="space-y-1">
             <Label className="text-[11px] text-muted-foreground">模型</Label>
             <div className="flex gap-2">
+              <select
+                value={modelSuggestions.includes(modelDraft.trim()) ? modelDraft.trim() : ''}
+                onChange={(e) => setModelDraft(e.target.value)}
+                disabled={savingRuntime || modelsLoading || modelSuggestions.length === 0}
+                className="h-8 px-2 text-xs border border-border rounded-md bg-background min-w-0 flex-1"
+                title={isDeviceCliWorkspace ? '模型列表来自绑定 Device 的 Provider CLI' : '模型列表来自服务端模型端点'}
+              >
+                <option value="">
+                  {modelsLoading
+                    ? '加载模型中...'
+                    : modelSuggestions.length === 0
+                      ? '暂无模型，可手动输入'
+                      : isDeviceCliWorkspace
+                        ? '从 CLI 模型选择'
+                        : '从服务端模型选择'}
+                </option>
+                {modelSuggestions.map((model) => <option key={model} value={model}>{model}</option>)}
+              </select>
               <Input
                 value={modelDraft}
                 onChange={(e) => setModelDraft(e.target.value)}
                 list={`workspace-model-presets-${groupJid}`}
                 placeholder={selectedCustomBackend?.model || '输入模型 ID，留空使用默认'}
-                className="h-8 text-xs"
+                className="h-8 text-xs min-w-0 flex-1"
                 disabled={savingRuntime}
               />
               <Button
@@ -1314,7 +1451,7 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
               {modelSuggestions.map((model) => <option key={model} value={model} />)}
             </datalist>
             <div className="text-[11px] text-muted-foreground">
-              当前生效：{group.agent_model || selectedCustomBackend?.model || '系统/Agent 默认'}
+              当前生效：{group.agent_model || selectedCustomBackend?.model || '系统/Agent 默认'} · 列表来源：{isDeviceCliWorkspace ? 'Device CLI' : '服务端模型端点'}
             </div>
           </div>
         </div>
@@ -1405,8 +1542,9 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
                             e.stopPropagation();
                             setPreview({ kind: 'edit', file: item });
                           }}
-                          className="p-2.5 rounded hover:bg-brand-100 text-muted-foreground hover:text-primary transition-colors cursor-pointer"
-                          title="编辑"
+                          disabled={!canOperateWorkspaceDirectory}
+                          className="p-2.5 rounded hover:bg-brand-100 text-muted-foreground hover:text-primary transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+                          title={canOperateWorkspaceDirectory ? '编辑' : workspaceDirectoryDisabledReason}
                           aria-label="编辑文件"
                         >
                           <Pencil className="w-3.5 h-3.5" />
@@ -1431,8 +1569,9 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
                           e.stopPropagation();
                           handleDeleteClick(item);
                         }}
-                        className="p-2.5 rounded hover:bg-red-100 dark:hover:bg-red-950/40 text-muted-foreground hover:text-red-600 dark:hover:text-red-400 transition-colors cursor-pointer"
-                        title="删除"
+                        disabled={!canOperateWorkspaceDirectory}
+                        className="p-2.5 rounded hover:bg-red-100 dark:hover:bg-red-950/40 text-muted-foreground hover:text-red-600 dark:hover:text-red-400 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+                        title={canOperateWorkspaceDirectory ? '删除' : workspaceDirectoryDisabledReason}
                         aria-label="删除文件"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -1452,12 +1591,14 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
           variant="outline"
           size="sm"
           onClick={handleCreateDir}
+          disabled={!canOperateWorkspaceDirectory}
           className="w-full"
+          title={canOperateWorkspaceDirectory ? undefined : workspaceDirectoryDisabledReason}
         >
           <FolderPlus className="w-4 h-4" />
           新建文件夹
         </Button>
-        <FileUploadZone groupJid={groupJid} />
+        <FileUploadZone groupJid={groupJid} disabled={!canOperateWorkspaceDirectory} disabledReason={workspaceDirectoryDisabledReason} />
       </div>
 
       {/* Create Directory Dialog */}

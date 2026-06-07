@@ -225,7 +225,7 @@ func TestCheckDaemonUpdateUsesServerVersionEndpoint(t *testing.T) {
 			return
 		}
 		w.Header().Set("content-type", "application/json")
-		fmt.Fprint(w, `{"version":"octodeck-daemon/1.0.4"}`)
+		fmt.Fprint(w, `{"version":"octodeck-daemon/1.0.5"}`)
 	}))
 	defer server.Close()
 
@@ -236,7 +236,7 @@ func TestCheckDaemonUpdateUsesServerVersionEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest != "octodeck-daemon/1.0.4" || !available {
+	if latest != "octodeck-daemon/1.0.5" || !available {
 		t.Fatalf("unexpected update check result latest=%q available=%v", latest, available)
 	}
 }

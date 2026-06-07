@@ -127,7 +127,7 @@ func defaultTaskDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "task"), nil
+	return filepath.Join(home, "tasks"), nil
 }
 
 func defaultSessionDir() (string, error) {

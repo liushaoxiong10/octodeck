@@ -253,12 +253,11 @@ export class GroupQueue {
     return state?.active === true;
   }
 
-  /** Count active task runners whose JID starts with the given base JID + '#task:' */
+  /** Count active isolated runners whose JID starts with base JID + '#task:' or '#issue:' */
   countActiveTaskRunners(baseJid: string): number {
-    const prefix = baseJid + '#task:';
     let count = 0;
     for (const [jid, state] of this.groups.entries()) {
-      if (state.active && jid.startsWith(prefix)) {
+      if (state.active && (jid.startsWith(baseJid + '#task:') || jid.startsWith(baseJid + '#issue:'))) {
         count++;
       }
     }
@@ -267,8 +266,8 @@ export class GroupQueue {
 
   /**
    * List all active virtual-JID runners that belong to the same folder family
-   * as `baseJid` (i.e. sub-agents `{...}#agent:{id}` and scheduled tasks
-   * `{...}#task:{id}`), excluding the base JID itself. Used by workspace-level
+   * as `baseJid` (i.e. sub-agents `{...}#agent:{id}`, scheduled tasks
+   * `{...}#task:{id}`, and issue runs `{...}#issue:{id}`), excluding the base JID itself. Used by workspace-level
    * operations (e.g. clear-history) that need to stop every descendant process
    * before wiping the folder's filesystem.
    *
@@ -313,6 +312,19 @@ export class GroupQueue {
     const state = this.resolveActiveState(groupJid);
     if (!state?.active) return;
     state.hasIpcInjectedMessages = true;
+  }
+
+  /**
+   * Ask the active main runner to finish its current turn and restart after the
+   * next user message. Used when workspace-level repo visibility has changed:
+   * existing sessions keep running, while the next session picks up the fresh
+   * workspaceRepos payload from the server.
+   */
+  requestRepoVisibilityRefresh(groupJid: string): boolean {
+    return this.requestDrainForActiveRunner(
+      groupJid,
+      'Drain sentinel written to refresh workspace repo visibility on next message',
+    );
   }
 
   markRunnerQueryIdle(groupJid: string): void {

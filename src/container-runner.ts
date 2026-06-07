@@ -247,6 +247,8 @@ export interface ContainerInput {
    * this is that task's ID; propagated into agent-runner so MCP send_message
    * outputs can be attributed back to the task record. */
   messageTaskId?: string;
+  /** True when this scheduled task is explicitly bound to a workspace. */
+  scheduledTaskHasWorkspace?: boolean;
   images?: Array<{ data: string; mimeType?: string }>;
   agentId?: string;
   agentName?: string;
@@ -1012,7 +1014,7 @@ export async function runContainerAgent(
 
   try {
     // Determine if this is an admin home container (full privileges)
-    const isAdminHome = !!group.is_home && group.folder === 'main';
+    const isAdminHome = !!group.is_home && group.executionMode === 'host';
     const mounts = buildVolumeMounts(
       group,
       isAdminHome,

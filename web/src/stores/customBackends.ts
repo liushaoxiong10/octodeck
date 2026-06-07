@@ -23,6 +23,7 @@ export interface CustomBackendDef {
   providerId?: string | null;
   deviceLinkId?: string | null;
   agentClientId?: string | null;
+  agentMdId?: string | null;
   createdAt?: string;
   updatedAt?: string;
 }

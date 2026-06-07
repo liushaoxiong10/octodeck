@@ -7,6 +7,7 @@
 import fs from 'fs';
 
 import type { ExecutionMode } from '../types.js';
+import { getAgentMdDefinition } from '../agent-teams.js';
 import { resolveProviderById } from '../runtime-config.js';
 import { runViaAgentLink } from './agent-link-driver.js';
 import { runHostCli } from './host-cli-driver.js';
@@ -44,6 +45,8 @@ export interface CustomBackendDef {
   deviceLinkId?: string | null;
   /** Agent client discovered by octodeck-daemon on the selected device. */
   agentClientId?: string | null;
+  /** Optional reusable agent.md definition used as this Agent's identity. */
+  agentMdId?: string | null;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -105,6 +108,18 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
 
     run: (args) => {
       const model = args.group.agentModel || def.model;
+      const agentMdDefinition = def.agentMdId
+        ? getAgentMdDefinition(def.agentMdId)
+        : null;
+      const identityPrefixedArgs = agentMdDefinition
+        ? {
+            ...args,
+            input: {
+              ...args.input,
+              prompt: `<agent-identity name="${agentMdDefinition.name}">\n${agentMdDefinition.content}\n</agent-identity>\n\n${args.input.prompt}`,
+            },
+          }
+        : args;
       const cfg: HostCliDriverConfig = {
         backendId: def.id,
         resolveBinary,
@@ -151,10 +166,14 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
         def.runtime ?? (deviceLinkId ? 'local-device' : 'server-side');
       const runArgs =
         def.workdirMode === 'custom' && def.workdir
-          ? { ...args, group: { ...args.group, customCwd: def.workdir } }
-          : args;
-      if (runtime === 'local-device' && deviceLinkId)
-        return runViaAgentLink(runArgs, cfg, deviceLinkId);
+          ? { ...identityPrefixedArgs, group: { ...identityPrefixedArgs.group, customCwd: def.workdir } }
+          : identityPrefixedArgs;
+      if (runtime === 'local-device' && deviceLinkId) {
+        const target = def.agentClientId
+          ? `runtime:${deviceLinkId}:${def.agentClientId}`
+          : deviceLinkId;
+        return runViaAgentLink(runArgs, cfg, target);
+      }
       const hostArgs =
         runtime === 'server-side'
           ? {

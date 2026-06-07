@@ -26,7 +26,7 @@ import (
 func goos() string   { return runtime.GOOS }
 func goarch() string { return runtime.GOARCH }
 
-const daemonVersion = "octodeck-daemon/1.0.4"
+const daemonVersion = "octodeck-daemon/1.0.8"
 
 var daemonUpdateMu sync.Mutex
 
@@ -568,7 +568,26 @@ func agentTeamMCPTools() []map[string]any {
 	stringProp := func(description string) map[string]any {
 		return map[string]any{"type": "string", "description": description}
 	}
+	numberProp := func(description string, maximum int) map[string]any {
+		return map[string]any{"type": "integer", "minimum": 1, "maximum": maximum, "description": description}
+	}
+	boolProp := func(description string) map[string]any {
+		return map[string]any{"type": "boolean", "description": description}
+	}
+	enumProp := func(description string, values ...string) map[string]any {
+		return map[string]any{"type": "string", "enum": values, "description": description}
+	}
 	return []map[string]any{
+		{"name": "repo_knowledge_list", "description": "列出当前用户的仓库及其知识库状态。先用它发现 repo_id，再用 repo_knowledge_search / repo_knowledge_get_chunk。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "repo_knowledge_status", "description": "查看某个仓库知识库生成状态、摘要和统计信息。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"repo_id": stringProp("Repo ID")}, "required": []string{"repo_id"}}},
+		{"name": "repo_knowledge_search", "description": "在仓库知识库中搜索架构、文件、符号、依赖和文档片段。适合先理解代码图谱再动手修改。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": stringProp("搜索问题或关键词"), "repo_id": stringProp("可选 Repo ID；不传则搜索当前用户全部已生成知识库"), "limit": numberProp("返回条数，默认 20", 50), "kind": enumProp("按 chunk 类型过滤", "overview", "file", "symbol", "dependency", "doc", "graph"), "language": stringProp("按语言过滤，例如 typescript/python/go"), "path_prefix": stringProp("按路径前缀过滤"), "include_related": boolProp("是否返回相关图谱边")}, "required": []string{"query"}}},
+		{"name": "repo_knowledge_list_chunks", "description": "列出某个仓库知识库的 chunk，可按文件 path 过滤。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"repo_id": stringProp("Repo ID"), "path": stringProp("可选文件路径"), "kind": enumProp("可选 chunk 类型", "overview", "file", "symbol", "dependency", "doc", "graph"), "language": stringProp("可选语言过滤"), "path_prefix": stringProp("可选路径前缀过滤"), "limit": numberProp("返回条数，默认 100", 200)}, "required": []string{"repo_id"}}},
+		{"name": "repo_knowledge_get_chunk", "description": "读取知识库搜索结果中的完整 chunk 内容。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"chunk_id": stringProp("Chunk ID")}, "required": []string{"chunk_id"}}},
+		{"name": "repo_knowledge_graph", "description": "查看仓库知识库图谱边，包括 imports、depends_on、documents、references。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"repo_id": stringProp("Repo ID"), "path": stringProp("可选文件路径，返回与该文件相关的边"), "edge_kind": enumProp("边类型过滤", "imports", "imported_by", "depends_on", "exports", "documents", "references"), "limit": numberProp("返回条数，默认 100", 200)}, "required": []string{"repo_id"}}},
+		{"name": "repo_knowledge_related", "description": "根据 chunk_id 或 path 获取相关 chunks 和图谱边。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"repo_id": stringProp("Repo ID"), "chunk_id": stringProp("可选 chunk ID"), "path": stringProp("可选文件路径"), "limit": numberProp("返回条数，默认 30", 100)}, "required": []string{"repo_id"}}},
+		{"name": "repo_knowledge_context", "description": "获取面向改代码的上下文包：命中 chunk、同文件 chunks、相关 chunks、依赖、文档和图谱边。优先用它在修改前聚合上下文。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"repo_id": stringProp("Repo ID"), "query": stringProp("可选搜索问题；不传 chunk_id/path 时用它定位 anchor chunk"), "chunk_id": stringProp("可选 chunk ID，精确定位上下文 anchor"), "path": stringProp("可选文件路径，按文件聚合上下文"), "limit": numberProp("每类上下文返回上限，默认 20", 80)}, "required": []string{"repo_id"}}},
+		{"name": "repo_knowledge_plugins", "description": "查看 OctoDeck Repo 知识库生成器插件状态，包括 builtin、graphify、codegraph。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "repo_knowledge_search_backends", "description": "查看 Repo 知识库搜索后端状态，包括 SQLite、PostgreSQL、MongoDB。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 		{"name": "agent_team_list", "description": "列出当前用户可用的 OctoDeck Agent Team。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 		{"name": "agent_team_get", "description": "读取指定 OctoDeck Agent Team。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"team_id": stringProp("Agent Team ID")}, "required": []string{"team_id"}}},
 		{"name": "agent_team_run", "description": "启动一个 OctoDeck Agent Team 运行。", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"team_id": stringProp("Agent Team ID"), "prompt": stringProp("任务目标"), "runner_agent_id": stringProp("默认 Runner / Agent 后端 ID"), "role_assignments": map[string]any{"type": "object"}, "max_feedback_iterations": map[string]any{"type": "number"}}, "required": []string{"team_id", "prompt"}}},
@@ -584,6 +603,39 @@ func callAgentTeamHTTPTool(cfg *Config, toolName string, args map[string]any) (m
 		body[k] = v
 	}
 	switch toolName {
+	case "repo_knowledge_list":
+		body["operation"] = "list_repos"
+	case "repo_knowledge_status":
+		body["operation"] = "status"
+		body["repoId"] = body["repo_id"]
+	case "repo_knowledge_search":
+		body["operation"] = "search"
+		body["repoId"] = body["repo_id"]
+		body["pathPrefix"] = body["path_prefix"]
+		body["includeRelated"] = body["include_related"]
+	case "repo_knowledge_list_chunks":
+		body["operation"] = "list_chunks"
+		body["repoId"] = body["repo_id"]
+		body["pathPrefix"] = body["path_prefix"]
+	case "repo_knowledge_get_chunk":
+		body["operation"] = "get_chunk"
+		body["chunkId"] = body["chunk_id"]
+	case "repo_knowledge_graph":
+		body["operation"] = "graph"
+		body["repoId"] = body["repo_id"]
+		body["edgeKind"] = body["edge_kind"]
+	case "repo_knowledge_related":
+		body["operation"] = "related"
+		body["repoId"] = body["repo_id"]
+		body["chunkId"] = body["chunk_id"]
+	case "repo_knowledge_context":
+		body["operation"] = "context"
+		body["repoId"] = body["repo_id"]
+		body["chunkId"] = body["chunk_id"]
+	case "repo_knowledge_plugins":
+		body["operation"] = "plugins"
+	case "repo_knowledge_search_backends":
+		body["operation"] = "search_backends"
 	case "agent_team_list":
 		body["operation"] = "list_teams"
 	case "agent_team_get":
@@ -613,12 +665,24 @@ func callAgentTeamHTTPTool(cfg *Config, toolName string, args map[string]any) (m
 		return nil, err
 	}
 	url := strings.TrimRight(cfg.Server, "/") + "/api/agent-link/agent-team-tool"
+	isRepoKnowledgeTool := strings.HasPrefix(toolName, "repo_knowledge_")
+	if isRepoKnowledgeTool {
+		url = strings.TrimRight(cfg.Server, "/") + "/api/repo-knowledge/tool"
+	}
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Link-Token", cfg.Token)
+	if isRepoKnowledgeTool {
+		secret := strings.TrimSpace(os.Getenv("OCTODECK_AGENT_TOOL_TOKEN"))
+		if secret == "" {
+			return nil, errors.New("OCTODECK_AGENT_TOOL_TOKEN is required for repo knowledge tools")
+		}
+		req.Header.Set("Authorization", "Bearer "+secret)
+	} else {
+		req.Header.Set("X-Link-Token", cfg.Token)
+	}
 	client := &http.Client{Timeout: 10 * time.Minute}
 	res, err := client.Do(req)
 	if err != nil {
@@ -631,9 +695,9 @@ func callAgentTeamHTTPTool(cfg *Config, toolName string, args map[string]any) (m
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		if msg, ok := parsed["error"].(string); ok && msg != "" {
-			return nil, fmt.Errorf(msg)
+			return nil, errors.New(msg)
 		}
-		return nil, fmt.Errorf("agent team http %d", res.StatusCode)
+		return nil, fmt.Errorf("octodeck mcp tool http %d", res.StatusCode)
 	}
 	return parsed, nil
 }

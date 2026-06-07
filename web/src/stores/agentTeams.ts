@@ -1,7 +1,12 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
 
-export type AgentTeamShape = 'auto' | 'pipeline' | 'parallel' | 'leader-worker' | 'judge-route';
+export type AgentTeamShape =
+  | 'auto'
+  | 'pipeline'
+  | 'parallel'
+  | 'leader-worker'
+  | 'judge-route';
 
 export interface AgentTeamRole {
   id: string;
@@ -85,8 +90,19 @@ export interface AgentMdDefinition {
   summary: string;
   content: string;
   createdByAgentId: string;
+  createdByTeamId?: string;
+  createdByTeamName?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AgentMdReference {
+  kind: 'team' | 'agent';
+  id: string;
+  name: string;
+  detail?: string;
+  agentMdId?: string;
+  agentMdName?: string;
 }
 
 export interface AgentMdStoreEntry {
@@ -97,6 +113,173 @@ export interface AgentMdStoreEntry {
   category: string;
   size: number;
   sourceUrl: string;
+}
+
+interface JsDelivrFlatResponse {
+  files?: Array<{
+    name?: string;
+    size?: number;
+  }>;
+}
+
+const AGENCY_AGENTS_REPO_OWNER = 'msitarzewski';
+const AGENCY_AGENTS_REPO_NAME = 'agency-agents';
+const AGENCY_AGENTS_BRANCH = 'main';
+const AGENCY_AGENTS_INDEX_URL = `https://data.jsdelivr.com/v1/package/gh/${AGENCY_AGENTS_REPO_OWNER}/${AGENCY_AGENTS_REPO_NAME}@${AGENCY_AGENTS_BRANCH}/flat`;
+const AGENCY_AGENTS_RAW_BASE_URL = `https://cdn.jsdelivr.net/gh/${AGENCY_AGENTS_REPO_OWNER}/${AGENCY_AGENTS_REPO_NAME}@${AGENCY_AGENTS_BRANCH}`;
+const AGENT_MD_STORE_CACHE_TTL_MS = 60_000;
+const AGENT_TEAM_GENERATION_SUBMIT_TIMEOUT_MS = 30_000;
+const AGENCY_AGENTS_CATEGORIES = new Set([
+  'academic',
+  'design',
+  'engineering',
+  'finance',
+  'game-development',
+  'marketing',
+  'paid-media',
+  'product',
+  'project-management',
+  'sales',
+  'security',
+  'spatial-computing',
+  'specialized',
+  'support',
+  'testing',
+]);
+
+let agentMdStoreEntriesCache: AgentMdStoreEntry[] | null = null;
+let agentMdStoreEntriesCacheExpiresAt = 0;
+
+function isAgencyAgentMarkdownPath(filePath: string): boolean {
+  if (!filePath.endsWith('.md')) return false;
+  const segments = filePath.split('/');
+  const [category, fileName] = segments;
+  if (!category || !fileName) return false;
+  if (fileName.toLowerCase() === 'readme.md') return false;
+  if (AGENCY_AGENTS_CATEGORIES.has(category)) return true;
+  return (
+    filePath === 'integrations/mcp-memory/backend-architect-with-memory.md'
+  );
+}
+
+function titleFromAgentPath(filePath: string): string {
+  const fileName = filePath.split('/').pop()?.replace(/\.md$/i, '') || 'agent';
+  return fileName
+    .split('-')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+async function fetchJsonWithTimeout<T>(
+  url: string,
+  timeoutMs = 15_000,
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`failed to fetch ${url}: ${response.status}`);
+    }
+    return response.json() as Promise<T>;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchTextWithTimeout(
+  url: string,
+  timeoutMs = 15_000,
+): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`failed to fetch ${url}: ${response.status}`);
+    }
+    return response.text();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function agencyAgentRawUrl(filePath: string): string {
+  return `${AGENCY_AGENTS_RAW_BASE_URL}/${filePath
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/')}`;
+}
+
+function parseFrontmatter(content: string): Record<string, string> {
+  const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
+  if (!match) return {};
+  const result: Record<string, string> = {};
+  for (const line of match[1].split('\n')) {
+    const item = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!item) continue;
+    result[item[1]] = item[2].trim().replace(/^['"]|['"]$/g, '');
+  }
+  return result;
+}
+
+function firstContentSentence(content: string): string {
+  return (
+    content
+      .replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '')
+      .split('\n')
+      .map((line) => line.replace(/^#+\s*/, '').trim())
+      .find(Boolean)
+      ?.slice(0, 300) || '来自 agency-agents 商店的 agent.md 定义。'
+  );
+}
+
+async function loadAgentMdStoreEntries(): Promise<AgentMdStoreEntry[]> {
+  const now = Date.now();
+  if (agentMdStoreEntriesCache && agentMdStoreEntriesCacheExpiresAt > now) {
+    return agentMdStoreEntriesCache;
+  }
+  const indexUrl = `${AGENCY_AGENTS_INDEX_URL}?_=${Math.floor(now / AGENT_MD_STORE_CACHE_TTL_MS)}`;
+  const data = await fetchJsonWithTimeout<JsDelivrFlatResponse>(
+    indexUrl,
+  );
+  agentMdStoreEntriesCache = (data.files ?? [])
+    .map((item) => ({
+      path: (item.name || '').replace(/^\/+/, ''),
+      size: item.size ?? 0,
+    }))
+    .filter((item) => isAgencyAgentMarkdownPath(item.path))
+    .map((item) => {
+      const filePath = item.path;
+      const category = filePath.split('/')[0] || 'agency-agents';
+      return {
+        id: filePath.replace(/\.md$/i, '').replace(/[^a-zA-Z0-9]+/g, '-'),
+        path: filePath,
+        name: titleFromAgentPath(filePath),
+        summary: `${category} / ${filePath.split('/').pop()}`,
+        category,
+        size: item.size,
+        sourceUrl: `https://github.com/${AGENCY_AGENTS_REPO_OWNER}/${AGENCY_AGENTS_REPO_NAME}/blob/${AGENCY_AGENTS_BRANCH}/${filePath}`,
+      } satisfies AgentMdStoreEntry;
+    })
+    .sort((a, b) => a.path.localeCompare(b.path));
+  agentMdStoreEntriesCacheExpiresAt = now + AGENT_MD_STORE_CACHE_TTL_MS;
+  return agentMdStoreEntriesCache;
+}
+
+function filterAgentMdStoreEntries(
+  entries: AgentMdStoreEntry[],
+  query = '',
+): AgentMdStoreEntry[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return entries;
+  return entries.filter((entry) =>
+    [entry.name, entry.path, entry.category]
+      .join(' ')
+      .toLowerCase()
+      .includes(normalizedQuery),
+  );
 }
 
 export interface AgentTeamExecutionResult {
@@ -152,7 +335,13 @@ export interface AgentTeamRun {
   teamId: string;
   userId: string;
   prompt: string;
-  status: 'running' | 'waiting_approval' | 'paused' | 'success' | 'error' | 'cancelled';
+  status:
+    | 'running'
+    | 'waiting_approval'
+    | 'paused'
+    | 'success'
+    | 'error'
+    | 'cancelled';
   traceId: string;
   workflowShape: string;
   roleAssignments: unknown;
@@ -225,43 +414,97 @@ export interface AgentTeamBlackboardEntry {
   createdAt: string;
 }
 
+export interface AgentTeamGenerationJob {
+  id: string;
+  userId: string;
+  generatorAgentId: string;
+  goal: string;
+  shape: AgentTeamShape;
+  status: 'running' | 'success' | 'error';
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  team?: AgentTeam;
+  agentMdDefinitions?: AgentMdDefinition[];
+  error?: string;
+}
+
 export type AgentTeamInput = Omit<AgentTeam, 'id' | 'createdAt' | 'updatedAt'>;
 export type AgentTeamPatch = Partial<AgentTeamInput>;
-export type AgentMdDefinitionInput = Omit<AgentMdDefinition, 'id' | 'createdAt' | 'updatedAt'>;
+export type AgentMdDefinitionInput = Omit<
+  AgentMdDefinition,
+  'id' | 'createdAt' | 'updatedAt'
+>;
 export type AgentMdDefinitionPatch = Partial<AgentMdDefinitionInput>;
 
 interface AgentTeamsState {
   teams: AgentTeam[];
   agentMdDefinitions: AgentMdDefinition[];
+  generationJobs: AgentTeamGenerationJob[];
   loading: boolean;
   saving: boolean;
   error: string | null;
   load: () => Promise<void>;
-  generate: (input: { generatorAgentId: string; goal: string; shape: AgentTeamShape }) => Promise<AgentTeam>;
-  execute: (id: string, prompt: string, runnerAgentId?: string, roleAssignments?: Record<string, AgentTeamRoleAssignment>) => Promise<AgentTeamExecutionResult>;
-  createRun: (id: string, prompt: string, runnerAgentId?: string, roleAssignments?: Record<string, AgentTeamRoleAssignment>) => Promise<AgentTeamRunResponse>;
-  listRuns: (filters?: { teamId?: string; status?: AgentTeamRun['status']; limit?: number }) => Promise<AgentTeamRun[]>;
+  generate: (input: {
+    generatorAgentId: string;
+    goal: string;
+    shape: AgentTeamShape;
+  }) => Promise<AgentTeamGenerationJob>;
+  loadGenerationJobs: () => Promise<AgentTeamGenerationJob[]>;
+  loadGenerationJob: (jobId: string) => Promise<AgentTeamGenerationJob>;
+  execute: (
+    id: string,
+    prompt: string,
+    runnerAgentId?: string,
+    roleAssignments?: Record<string, AgentTeamRoleAssignment>,
+  ) => Promise<AgentTeamExecutionResult>;
+  createRun: (
+    id: string,
+    prompt: string,
+    runnerAgentId?: string,
+    roleAssignments?: Record<string, AgentTeamRoleAssignment>,
+  ) => Promise<AgentTeamRunResponse>;
+  listRuns: (filters?: {
+    teamId?: string;
+    status?: AgentTeamRun['status'];
+    limit?: number;
+  }) => Promise<AgentTeamRun[]>;
   loadRun: (runId: string) => Promise<AgentTeamRun>;
   loadRunTasks: (runId: string) => Promise<AgentTeamTaskView[]>;
-  loadRunEvents: (runId: string) => Promise<NonNullable<AgentTeamExecutionResult['traceEvents']>>;
+  loadRunEvents: (
+    runId: string,
+  ) => Promise<NonNullable<AgentTeamExecutionResult['traceEvents']>>;
   loadRunBlackboard: (runId: string) => Promise<AgentTeamBlackboardEntry[]>;
   loadRunApprovals: (runId: string) => Promise<AgentTeamApproval[]>;
   loadRunCheckpoints: (runId: string) => Promise<AgentTeamCheckpoint[]>;
-  decideRunApproval: (runId: string, approvalId: string, decision: 'approved' | 'rejected') => Promise<AgentTeamRunResponse>;
+  decideRunApproval: (
+    runId: string,
+    approvalId: string,
+    decision: 'approved' | 'rejected',
+  ) => Promise<AgentTeamRunResponse>;
   cancelRun: (runId: string) => Promise<{ run: AgentTeamRun }>;
   update: (id: string, patch: AgentTeamPatch) => Promise<AgentTeam>;
-  remove: (id: string) => Promise<void>;
+  remove: (id: string, options?: { deleteLinkedAgentMd?: boolean }) => Promise<void>;
   loadAgentMdDefinitions: () => Promise<void>;
-  createAgentMdDefinition: (input: AgentMdDefinitionInput) => Promise<AgentMdDefinition>;
+  createAgentMdDefinition: (
+    input: AgentMdDefinitionInput,
+  ) => Promise<AgentMdDefinition>;
   listAgentMdStoreEntries: (query?: string) => Promise<AgentMdStoreEntry[]>;
-  importAgentMdFromStore: (path: string, createdByAgentId: string) => Promise<AgentMdDefinition>;
-  updateAgentMdDefinition: (id: string, patch: AgentMdDefinitionPatch) => Promise<AgentMdDefinition>;
+  importAgentMdFromStore: (
+    path: string,
+    createdByAgentId: string,
+  ) => Promise<AgentMdDefinition>;
+  updateAgentMdDefinition: (
+    id: string,
+    patch: AgentMdDefinitionPatch,
+  ) => Promise<AgentMdDefinition>;
   removeAgentMdDefinition: (id: string) => Promise<void>;
 }
 
 export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
   teams: [],
   agentMdDefinitions: [],
+  generationJobs: [],
   loading: false,
   saving: false,
   error: null,
@@ -272,17 +515,30 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
       const data = await api.get<{ teams: AgentTeam[] }>('/api/agent-teams');
       set({ teams: data.teams ?? [], loading: false, error: null });
     } catch (err) {
-      set({ loading: false, error: err instanceof Error ? err.message : String(err) });
+      set({
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   },
 
   generate: async (input) => {
     set({ saving: true, error: null });
     try {
-      const data = await api.post<{ team: AgentTeam; agentMdDefinitions?: AgentMdDefinition[] }>('/api/agent-teams/generate', input, 600_000);
-      await get().load();
-      await get().loadAgentMdDefinitions();
-      return data.team;
+      const data = await api.post<{
+        job: AgentTeamGenerationJob;
+      }>(
+        '/api/agent-teams/generate',
+        input,
+        AGENT_TEAM_GENERATION_SUBMIT_TIMEOUT_MS,
+      );
+      set((state) => ({
+        generationJobs: [
+          data.job,
+          ...state.generationJobs.filter((job) => job.id !== data.job.id),
+        ],
+      }));
+      return data.job;
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
       throw err;
@@ -291,10 +547,35 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
     }
   },
 
+  loadGenerationJobs: async () => {
+    const data = await api.get<{ jobs: AgentTeamGenerationJob[] }>(
+      '/api/agent-teams/generation-jobs',
+    );
+    set({ generationJobs: data.jobs ?? [] });
+    return data.jobs ?? [];
+  },
+
+  loadGenerationJob: async (jobId) => {
+    const data = await api.get<{ job: AgentTeamGenerationJob }>(
+      `/api/agent-teams/generation-jobs/${encodeURIComponent(jobId)}`,
+    );
+    set((state) => ({
+      generationJobs: [
+        data.job,
+        ...state.generationJobs.filter((job) => job.id !== data.job.id),
+      ],
+    }));
+    return data.job;
+  },
+
   execute: async (id, prompt, runnerAgentId, roleAssignments) => {
     set({ saving: true, error: null });
     try {
-      const data = await api.post<{ execution: AgentTeamExecutionResult }>(`/api/agent-teams/${encodeURIComponent(id)}/execute`, { prompt, runnerAgentId, roleAssignments }, 600_000);
+      const data = await api.post<{ execution: AgentTeamExecutionResult }>(
+        `/api/agent-teams/${encodeURIComponent(id)}/execute`,
+        { prompt, runnerAgentId, roleAssignments },
+        600_000,
+      );
       return data.execution;
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
@@ -307,7 +588,11 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
   createRun: async (id, prompt, runnerAgentId, roleAssignments) => {
     set({ saving: true, error: null });
     try {
-      return await api.post<AgentTeamRunResponse>(`/api/agent-teams/${encodeURIComponent(id)}/runs`, { prompt, runnerAgentId, roleAssignments }, 600_000);
+      return await api.post<AgentTeamRunResponse>(
+        `/api/agent-teams/${encodeURIComponent(id)}/runs`,
+        { prompt, runnerAgentId, roleAssignments },
+        600_000,
+      );
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
       throw err;
@@ -322,44 +607,62 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
     if (filters.status) params.set('status', filters.status);
     if (filters.limit) params.set('limit', String(filters.limit));
     const suffix = params.toString() ? `?${params.toString()}` : '';
-    const data = await api.get<{ runs: AgentTeamRun[] }>(`/api/agent-teams/runs${suffix}`);
+    const data = await api.get<{ runs: AgentTeamRun[] }>(
+      `/api/agent-teams/runs${suffix}`,
+    );
     return data.runs ?? [];
   },
 
   loadRun: async (runId) => {
-    const data = await api.get<{ run: AgentTeamRun }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}`);
+    const data = await api.get<{ run: AgentTeamRun }>(
+      `/api/agent-teams/runs/${encodeURIComponent(runId)}`,
+    );
     return data.run;
   },
 
   loadRunTasks: async (runId) => {
-    const data = await api.get<{ tasks: AgentTeamTaskView[] }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/tasks`);
+    const data = await api.get<{ tasks: AgentTeamTaskView[] }>(
+      `/api/agent-teams/runs/${encodeURIComponent(runId)}/tasks`,
+    );
     return data.tasks ?? [];
   },
 
   loadRunEvents: async (runId) => {
-    const data = await api.get<{ events: NonNullable<AgentTeamExecutionResult['traceEvents']> }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/events`);
+    const data = await api.get<{
+      events: NonNullable<AgentTeamExecutionResult['traceEvents']>;
+    }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/events`);
     return data.events ?? [];
   },
 
   loadRunBlackboard: async (runId) => {
-    const data = await api.get<{ entries: AgentTeamBlackboardEntry[] }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/blackboard`);
+    const data = await api.get<{ entries: AgentTeamBlackboardEntry[] }>(
+      `/api/agent-teams/runs/${encodeURIComponent(runId)}/blackboard`,
+    );
     return data.entries ?? [];
   },
 
   loadRunApprovals: async (runId) => {
-    const data = await api.get<{ approvals: AgentTeamApproval[] }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/approvals`);
+    const data = await api.get<{ approvals: AgentTeamApproval[] }>(
+      `/api/agent-teams/runs/${encodeURIComponent(runId)}/approvals`,
+    );
     return data.approvals ?? [];
   },
 
   loadRunCheckpoints: async (runId) => {
-    const data = await api.get<{ checkpoints: AgentTeamCheckpoint[] }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/checkpoints`);
+    const data = await api.get<{ checkpoints: AgentTeamCheckpoint[] }>(
+      `/api/agent-teams/runs/${encodeURIComponent(runId)}/checkpoints`,
+    );
     return data.checkpoints ?? [];
   },
 
   decideRunApproval: async (runId, approvalId, decision) => {
     set({ saving: true, error: null });
     try {
-      return await api.post<AgentTeamRunResponse>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`, { decision }, 600_000);
+      return await api.post<AgentTeamRunResponse>(
+        `/api/agent-teams/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`,
+        { decision },
+        600_000,
+      );
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
       throw err;
@@ -371,7 +674,9 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
   cancelRun: async (runId) => {
     set({ saving: true, error: null });
     try {
-      return await api.post<{ run: AgentTeamRun }>(`/api/agent-teams/runs/${encodeURIComponent(runId)}/cancel`);
+      return await api.post<{ run: AgentTeamRun }>(
+        `/api/agent-teams/runs/${encodeURIComponent(runId)}/cancel`,
+      );
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
       throw err;
@@ -383,7 +688,10 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
   update: async (id, patch) => {
     set({ saving: true, error: null });
     try {
-      const data = await api.patch<{ team: AgentTeam }>(`/api/agent-teams/${encodeURIComponent(id)}`, patch);
+      const data = await api.patch<{ team: AgentTeam }>(
+        `/api/agent-teams/${encodeURIComponent(id)}`,
+        patch,
+      );
       await get().load();
       return data.team;
     } catch (err) {
@@ -394,11 +702,15 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
     }
   },
 
-  remove: async (id) => {
+  remove: async (id, options = {}) => {
     set({ saving: true, error: null });
     try {
-      await api.delete(`/api/agent-teams/${encodeURIComponent(id)}`);
+      const params = new URLSearchParams();
+      if (options.deleteLinkedAgentMd) params.set('deleteLinkedAgentMd', 'true');
+      const suffix = params.toString() ? `?${params.toString()}` : '';
+      await api.delete(`/api/agent-teams/${encodeURIComponent(id)}${suffix}`);
       await get().load();
+      if (options.deleteLinkedAgentMd) await get().loadAgentMdDefinitions();
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
       throw err;
@@ -410,17 +722,29 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
   loadAgentMdDefinitions: async () => {
     set({ loading: true });
     try {
-      const data = await api.get<{ definitions: AgentMdDefinition[] }>('/api/agent-teams/agent-md');
-      set({ agentMdDefinitions: data.definitions ?? [], loading: false, error: null });
+      const data = await api.get<{ definitions: AgentMdDefinition[] }>(
+        '/api/agent-teams/agent-md',
+      );
+      set({
+        agentMdDefinitions: data.definitions ?? [],
+        loading: false,
+        error: null,
+      });
     } catch (err) {
-      set({ loading: false, error: err instanceof Error ? err.message : String(err) });
+      set({
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   },
 
   createAgentMdDefinition: async (input) => {
     set({ saving: true, error: null });
     try {
-      const data = await api.post<{ definition: AgentMdDefinition }>('/api/agent-teams/agent-md', input);
+      const data = await api.post<{ definition: AgentMdDefinition }>(
+        '/api/agent-teams/agent-md',
+        input,
+      );
       await get().loadAgentMdDefinitions();
       return data.definition;
     } catch (err) {
@@ -432,17 +756,32 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
   },
 
   listAgentMdStoreEntries: async (query = '') => {
-    const params = new URLSearchParams();
-    if (query.trim()) params.set('query', query.trim());
-    const suffix = params.toString() ? `?${params.toString()}` : '';
-    const data = await api.get<{ entries: AgentMdStoreEntry[] }>(`/api/agent-teams/agent-md-store${suffix}`);
-    return data.entries ?? [];
+    const entries = await loadAgentMdStoreEntries();
+    return filterAgentMdStoreEntries(entries, query);
   },
 
   importAgentMdFromStore: async (path, createdByAgentId) => {
     set({ saving: true, error: null });
     try {
-      const data = await api.post<{ definition: AgentMdDefinition }>('/api/agent-teams/agent-md-store/import', { path, createdByAgentId }, 30_000);
+      const pathToImport = path.trim();
+      if (!isAgencyAgentMarkdownPath(pathToImport)) {
+        throw new Error('unsupported agency-agents store path');
+      }
+      const content = (await fetchTextWithTimeout(
+        agencyAgentRawUrl(pathToImport),
+        30_000,
+      )).trim();
+      const frontmatter = parseFrontmatter(content);
+      const data = await api.post<{ definition: AgentMdDefinition }>(
+        '/api/agent-teams/agent-md',
+        {
+          name: frontmatter.name || titleFromAgentPath(pathToImport),
+          summary: frontmatter.description || firstContentSentence(content),
+          content,
+          createdByAgentId,
+        },
+        30_000,
+      );
       await get().loadAgentMdDefinitions();
       return data.definition;
     } catch (err) {
@@ -456,7 +795,10 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
   updateAgentMdDefinition: async (id, patch) => {
     set({ saving: true, error: null });
     try {
-      const data = await api.patch<{ definition: AgentMdDefinition }>(`/api/agent-teams/agent-md/${encodeURIComponent(id)}`, patch);
+      const data = await api.patch<{ definition: AgentMdDefinition }>(
+        `/api/agent-teams/agent-md/${encodeURIComponent(id)}`,
+        patch,
+      );
       await get().loadAgentMdDefinitions();
       return data.definition;
     } catch (err) {

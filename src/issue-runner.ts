@@ -13,6 +13,7 @@ import {
   updateIssue,
   updateIssueAgentRun,
   updateIssueLastRun,
+  updateChatName,
 } from './db.js';
 import { logger } from './logger.js';
 import { resolveBackend } from './backends/registry.js';
@@ -63,12 +64,18 @@ function buildIssueGroup(baseGroup: RegisteredGroup, issue: WorkspaceIssue, run:
   };
 }
 
-function persistIssuePrompt(issue: WorkspaceIssue, senderId: string, text: string): void {
+function issueRunChatJid(issue: WorkspaceIssue, run: IssueAgentRun): string {
+  return `${issue.workspace_jid}#issue:${run.id}`;
+}
+
+function persistIssuePrompt(issue: WorkspaceIssue, run: IssueAgentRun, senderId: string, text: string): void {
   const msgId = crypto.randomUUID();
-  ensureChatExists(issue.workspace_jid);
+  const chatJid = issueRunChatJid(issue, run);
+  ensureChatExists(chatJid);
+  updateChatName(chatJid, `Issue · ${issue.title.slice(0, 80)}`);
   storeMessageDirect(
     msgId,
-    issue.workspace_jid,
+    chatJid,
     senderId,
     'Issue Agent',
     text,
@@ -174,7 +181,8 @@ export async function runIssueAgent(
       ? getUserHomeGroup(issueGroup.created_by)?.folder || issue.workspace_folder
       : issue.workspace_folder;
     const prompt = buildIssuePrompt(issue, run);
-    persistIssuePrompt(issue, issue.created_by, prompt);
+    const runChatJid = issueRunChatJid(issue, run);
+    persistIssuePrompt(issue, run, issue.created_by, prompt);
     auditIssueRunEvent(issueId, runId, 'input_prepared', {
       title: 'Issue prompt prepared',
       summary: `${prompt.length} chars`,
@@ -212,11 +220,14 @@ export async function runIssueAgent(
           prompt,
           sessionId: run.session_id ?? undefined,
           groupFolder: issue.workspace_folder,
-          chatJid: issue.workspace_jid,
+          chatJid: runChatJid,
           isMain: false,
           isHome: !!issueGroup.is_home,
           isAdminHome: false,
+          isScheduledTask: true,
+          messageTaskId: issue.id,
           taskRunId: run.id,
+          scheduledTaskHasWorkspace: true,
         },
         onProcess: (proc, identifier, selectedProviderId) => {
           auditIssueRunEvent(issueId, runId, 'process_registered', {
@@ -224,7 +235,7 @@ export async function runIssueAgent(
             summary: identifier,
             payload: { identifier, selectedProviderId: selectedProviderId ?? null, executionMode },
           });
-          deps.queue.registerProcess(issue.workspace_jid, proc, {
+          deps.queue.registerProcess(runChatJid, proc, {
             containerName: executionMode === 'container' ? identifier : null,
             groupFolder: issue.workspace_folder,
             displayName: identifier,
@@ -240,7 +251,7 @@ export async function runIssueAgent(
               detail: streamedOutput.streamEvent.detail || streamedOutput.streamEvent.text || null,
               payload: { streamEvent: streamedOutput.streamEvent },
             });
-            deps.broadcastStreamEvent?.(issue.workspace_jid, streamedOutput.streamEvent);
+            deps.broadcastStreamEvent?.(runChatJid, streamedOutput.streamEvent);
           }
           if (streamedOutput.result) {
             latestResult = streamedOutput.result;

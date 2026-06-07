@@ -1,4 +1,5 @@
 import { Loader2 } from 'lucide-react';
+import type { ReactNode } from 'react';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -21,6 +22,7 @@ export interface ConfirmDialogProps {
   cancelText?: string;
   confirmVariant?: 'primary' | 'danger';
   loading?: boolean;
+  children?: ReactNode;
 }
 
 export function ConfirmDialog({
@@ -33,6 +35,7 @@ export function ConfirmDialog({
   cancelText = '取消',
   confirmVariant = 'primary',
   loading = false,
+  children,
 }: ConfirmDialogProps) {
   return (
     <AlertDialog open={open} onOpenChange={(v) => !v && onClose()}>
@@ -41,6 +44,7 @@ export function ConfirmDialog({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>{message}</AlertDialogDescription>
         </AlertDialogHeader>
+        {children ? <div className="space-y-3">{children}</div> : null}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={loading}>{cancelText}</AlertDialogCancel>
           <AlertDialogAction

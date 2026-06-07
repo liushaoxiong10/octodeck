@@ -122,7 +122,8 @@ function enqueueIssueRun(issueId: string, runId: string): void {
   }
   const issue = getIssueById(issueId);
   if (!issue) return;
-  deps.queue.enqueueTask(issue.workspace_jid, `issue:${runId}`, async () => {
+  const runChatJid = `${issue.workspace_jid}#issue:${runId}`;
+  deps.queue.enqueueTask(runChatJid, `issue:${runId}`, async () => {
     await runIssueAgent(issueId, runId, {
       queue: deps.queue,
       broadcastStreamEvent: deps.broadcastStreamEvent,
@@ -449,7 +450,7 @@ issueRoutes.post('/:id/runs/:runId/cancel', authMiddleware, async (c) => {
   const deps = getWebDeps();
   if (deps?.queue) {
     try {
-      await deps.queue.cancelTaskRun(issue.workspace_jid, run.id);
+      await deps.queue.cancelTaskRun(`${issue.workspace_jid}#issue:${run.id}`, run.id);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }

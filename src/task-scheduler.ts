@@ -41,6 +41,7 @@ import { ExecutionMode, RegisteredGroup, ScheduledTask } from './types.js';
 import { checkBillingAccessFresh, isBillingEnabled } from './billing.js';
 import { checkOwnerActive } from './owner-gate.js';
 import { stripAgentInternalTags } from './utils.js';
+import { requestWorkspaceCleanup } from './agent-link/registry.js';
 
 /**
  * Resolve the actual group JID to send a task to.
@@ -91,6 +92,17 @@ function resolveTaskExecutionNode(
   if (task.execution_node) return task.execution_node;
   const group = deps.registeredGroups()[task.chat_jid];
   return group?.executionNode;
+}
+
+function deviceLinkIdFromExecutionTarget(
+  value: string | undefined | null,
+): string | undefined {
+  if (!value || value === 'server-local') return undefined;
+  const runtimeMatch = /^runtime:(cl_[0-9a-f]{16}):/.exec(value);
+  if (runtimeMatch) return runtimeMatch[1];
+  const legacyRuntimeMatch = /^(cl_[0-9a-f]{16}):/.exec(value);
+  if (legacyRuntimeMatch) return legacyRuntimeMatch[1];
+  return /^cl_[0-9a-f]{16}$/.test(value) ? value : undefined;
 }
 
 function resolveTaskSourceGroup(
@@ -304,6 +316,11 @@ async function runTask(
   const startTime = Date.now();
   const runLogId = logTaskRunStart(task.id);
   const taskRunId = options?.taskRunId || crypto.randomUUID();
+  const scheduledTaskHasWorkspace = !!(
+    task.workspace_jid &&
+    task.workspace_folder &&
+    deps.registeredGroups()[task.workspace_jid]
+  );
 
   // Background task mode: execute against the source workspace configuration
   // without registering/creating a new visible workspace. The daemon still gets
@@ -526,6 +543,7 @@ async function runTask(
           isScheduledTask: true,
           taskRunId,
           messageTaskId: task.id,
+          scheduledTaskHasWorkspace,
         },
         onProcess: (proc, identifier, selectedProviderId) =>
           deps.onProcess(
@@ -592,6 +610,20 @@ async function runTask(
     lastOutputTime = Date.now();
     logger.error({ taskId: task.id, error }, 'Task failed');
   } finally {
+    const cleanupDeviceLinkId =
+      taskGroup.deviceLinkId ||
+      deviceLinkIdFromExecutionTarget(taskGroup.executionNode) ||
+      deviceLinkIdFromExecutionTarget(task.execution_node);
+    if (cleanupDeviceLinkId) {
+      requestWorkspaceCleanup({
+        linkId: cleanupDeviceLinkId,
+        workspace: taskGroup.folder,
+        scope: 'task',
+        taskId: task.id,
+        taskRunId,
+      });
+    }
+
     // Clean up isolated task IPC directory
     if (taskRunId) {
       const taskRunDir = path.join(

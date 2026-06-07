@@ -48,13 +48,15 @@ export function isSystemMaintenanceNoise(text: string): boolean {
 }
 
 /**
- * Strip virtual JID suffixes (#task:xxx, #agent:xxx) to get the base JID.
+ * Strip virtual JID suffixes (#task:xxx, #agent:xxx, #issue:xxx) to get the base JID.
  */
 export function stripVirtualJidSuffix(jid: string): string {
   const taskSep = jid.indexOf('#task:');
   if (taskSep >= 0) return jid.slice(0, taskSep);
   const agentSep = jid.indexOf('#agent:');
   if (agentSep >= 0) return jid.slice(0, agentSep);
+  const issueSep = jid.indexOf('#issue:');
+  if (issueSep >= 0) return jid.slice(0, issueSep);
   return jid;
 }
 

@@ -317,38 +317,40 @@ type HelloAckFrame struct {
 }
 
 type RunRequestFrame struct {
-	Type                 frameType          `json:"type"`
-	ID                   int64              `json:"id"`
-	RunID                string             `json:"runId"`
-	BackendID            string             `json:"backendId"`
-	Binary               string             `json:"binary"`
-	Argv                 []string           `json:"argv"`
-	Cwd                  string             `json:"cwd"`
-	Env                  map[string]string  `json:"env,omitempty"`
-	OutputProtocol       string             `json:"outputProtocol"`
-	TimeoutMs            int64              `json:"timeoutMs"`
-	MaxOutputBytes       int64              `json:"maxOutputBytes"`
-	Context              any                `json:"context,omitempty"`
-	StdinJSON            string             `json:"stdinJson,omitempty"`
-	RemoteCwdPlaceholder string             `json:"remoteCwdPlaceholder,omitempty"`
-	WorkspaceRepo        *WorkspaceRepoSpec `json:"workspaceRepo,omitempty"`
+	Type                 frameType            `json:"type"`
+	ID                   int64                `json:"id"`
+	RunID                string               `json:"runId"`
+	BackendID            string               `json:"backendId"`
+	Binary               string               `json:"binary"`
+	Argv                 []string             `json:"argv"`
+	Cwd                  string               `json:"cwd"`
+	Env                  map[string]string    `json:"env,omitempty"`
+	OutputProtocol       string               `json:"outputProtocol"`
+	TimeoutMs            int64                `json:"timeoutMs"`
+	MaxOutputBytes       int64                `json:"maxOutputBytes"`
+	Context              any                  `json:"context,omitempty"`
+	StdinJSON            string               `json:"stdinJson,omitempty"`
+	RemoteCwdPlaceholder string               `json:"remoteCwdPlaceholder,omitempty"`
+	WorkspaceRepos       []*WorkspaceRepoSpec `json:"workspaceRepos,omitempty"`
+	WorkspaceRepo        *WorkspaceRepoSpec   `json:"workspaceRepo,omitempty"`
 }
 
 type AgentRunRequestFrame struct {
-	Type                 frameType          `json:"type"`
-	ID                   int64              `json:"id"`
-	RunID                string             `json:"runId"`
-	AgentID              string             `json:"agentId"`
-	Workspace            *AgentRunWorkspace `json:"workspace,omitempty"`
-	Input                AgentRunInput      `json:"input"`
-	Cwd                  string             `json:"cwd,omitempty"`
-	Env                  map[string]string  `json:"env,omitempty"`
-	TimeoutMs            int64              `json:"timeoutMs"`
-	MaxOutputBytes       int64              `json:"maxOutputBytes"`
-	Policy               AgentRunPolicy     `json:"policy,omitempty"`
-	Context              any                `json:"context,omitempty"`
-	RemoteCwdPlaceholder string             `json:"remoteCwdPlaceholder,omitempty"`
-	WorkspaceRepo        *WorkspaceRepoSpec `json:"workspaceRepo,omitempty"`
+	Type                 frameType            `json:"type"`
+	ID                   int64                `json:"id"`
+	RunID                string               `json:"runId"`
+	AgentID              string               `json:"agentId"`
+	Workspace            *AgentRunWorkspace   `json:"workspace,omitempty"`
+	Input                AgentRunInput        `json:"input"`
+	Cwd                  string               `json:"cwd,omitempty"`
+	Env                  map[string]string    `json:"env,omitempty"`
+	TimeoutMs            int64                `json:"timeoutMs"`
+	MaxOutputBytes       int64                `json:"maxOutputBytes"`
+	Policy               AgentRunPolicy       `json:"policy,omitempty"`
+	Context              any                  `json:"context,omitempty"`
+	RemoteCwdPlaceholder string               `json:"remoteCwdPlaceholder,omitempty"`
+	WorkspaceRepos       []*WorkspaceRepoSpec `json:"workspaceRepos,omitempty"`
+	WorkspaceRepo        *WorkspaceRepoSpec   `json:"workspaceRepo,omitempty"`
 }
 
 type AgentRunWorkspace struct {

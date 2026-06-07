@@ -43,3 +43,27 @@ export async function invalidateGroupCache(jid: string): Promise<void> {
     /* ignore */
   }
 }
+
+/** Invalidate cached group list responses (`/api/groups`). */
+export async function invalidateGroupsListCache(): Promise<void> {
+  if (typeof window === 'undefined' || !('caches' in window)) return;
+  try {
+    const cache = await caches.open('api-groups-cache');
+    const keys = await cache.keys();
+    await Promise.allSettled(
+      keys
+        .filter((req) => new URL(req.url).pathname === '/api/groups')
+        .map((req) => cache.delete(req)),
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Invalidate the group list plus all per-group cached API responses. */
+export async function invalidateWorkspaceGroupCaches(jids: string[]): Promise<void> {
+  await Promise.allSettled([
+    invalidateGroupsListCache(),
+    ...Array.from(new Set(jids)).map((jid) => invalidateGroupCache(jid)),
+  ]);
+}

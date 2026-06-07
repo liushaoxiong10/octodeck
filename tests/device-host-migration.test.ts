@@ -63,6 +63,37 @@ describe('device-first host migration', () => {
     expect(source).not.toContain('直接在服务器上执行');
   });
 
+  test('workspace rebuild can switch to cloud sdk or server side device runtime', () => {
+    const hook = readFileSync(join(repoRoot, 'web/src/hooks/useClearWorkspace.ts'), 'utf8');
+    const sidebar = readFileSync(join(repoRoot, 'web/src/components/layout/UnifiedSidebar.tsx'), 'utf8');
+    const chatPage = readFileSync(join(repoRoot, 'web/src/pages/ChatPage.tsx'), 'utf8');
+    const schemas = readFileSync(join(repoRoot, 'src/schemas.ts'), 'utf8');
+    const groupRoutes = readFileSync(join(repoRoot, 'src/routes/groups.ts'), 'utf8');
+
+    expect(sidebar).toContain('云端 SDK');
+    expect(chatPage).toContain('云端 SDK');
+    expect(hook).toContain('server-agent-device-tools');
+    expect(hook).toContain('device-cli-agent');
+    expect(hook).toContain('claude-sdk');
+    expect(sidebar).toContain('重建后使用的 Agent 配置');
+    expect(sidebar).toContain('服务端 Agent');
+    expect(sidebar).toContain('服务端 Agent + Device 执行');
+    expect(sidebar).toContain('Device CLI Agent');
+    expect(sidebar).toContain('执行 Device');
+    expect(chatPage).toContain('重建后使用的 Agent 配置');
+    expect(chatPage).toContain('服务端 Agent');
+    expect(chatPage).toContain('服务端 Agent + Device 执行');
+    expect(chatPage).toContain('Device CLI Agent');
+    expect(chatPage).toContain('执行 Device');
+    expect(hook).toContain('!currentGroup?.is_home');
+    expect(groupRoutes).toContain('execution_mode !== existingExecutionMode');
+    expect(groupRoutes).toContain('generateWorkspaceFolder(group, deps.getRegisteredGroups())');
+    expect(groupRoutes).toContain('moveWorkspaceFolderReferences(oldFolder, newFolder)');
+    expect(groupRoutes).toContain('workspace: oldFolder');
+    expect(groupRoutes).toContain('workspace_id: newFolder');
+    expect(schemas).toContain('backend: z.string().min(1).max(64).nullable().optional()');
+  });
+
   test('workspace details and tasks show device targets rather than server-local host wording', () => {
     const groupDetail = readFileSync(join(repoRoot, 'web/src/components/groups/GroupDetail.tsx'), 'utf8');
     const taskForm = readFileSync(join(repoRoot, 'web/src/components/tasks/CreateTaskForm.tsx'), 'utf8');

@@ -29,6 +29,7 @@ import {
   getJidsByFolder,
   updateChatName,
   deleteSession,
+  getSession as getStoredSession,
   deleteChatHistory,
   deleteGroupData,
   deleteImGroupRecord,
@@ -45,6 +46,7 @@ import {
   getUserById,
   getAgent,
   getManagedRepoById,
+  listManagedReposByUser,
   listUsers,
   listAgentsByJid,
   getGroupsByTargetAgent,
@@ -57,6 +59,7 @@ import {
   deleteAgent,
   deleteImContextBindingsByWorkspace,
   getAgentLinkById,
+  moveWorkspaceFolderReferences,
 } from '../db.js';
 import { logger } from '../logger.js';
 import { listCustomBackends } from '../backends/custom-loader.js';
@@ -83,6 +86,7 @@ import net from 'node:net';
 import { z } from 'zod';
 import { broadcastNewMessage, invalidateAllowedUserCache } from '../web.js';
 import { getStreamingSession } from '../feishu-streaming-card.js';
+import { requestAgentSessionDelete } from '../agent-link/agent-runtime-rpc.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -168,6 +172,19 @@ function deviceLinkIdFromExecutionTarget(
   return undefined;
 }
 
+function agentClientIdFromExecutionTarget(
+  value: string | undefined,
+): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const runtime = /^runtime:cl_[0-9a-f]{16}:([^:]+)$/.exec(value);
+  if (runtime) return runtime[1];
+  const legacyRuntime = /^cl_[0-9a-f]{16}:([^:]+)$/.exec(value);
+  if (legacyRuntime) return legacyRuntime[1];
+  const provider = /^provider:([^:]+)$/.exec(value);
+  if (provider) return provider[1];
+  return undefined;
+}
+
 interface GroupPayloadItem {
   name: string;
   folder: string;
@@ -189,6 +206,8 @@ interface GroupPayloadItem {
   repo_id?: string;
   repo_git_url?: string;
   repo_device_path?: string;
+  visible_repo_mode?: 'all' | 'selected';
+  visible_repo_ids?: string[];
   is_home?: boolean;
   is_my_home?: boolean;
   is_shared?: boolean;
@@ -313,6 +332,8 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       repo_id: isAdmin ? group.repoId : undefined,
       repo_git_url: isAdmin ? group.repoGitUrl : undefined,
       repo_device_path: isAdmin ? group.repoDevicePath : undefined,
+      visible_repo_mode: isAdmin ? group.visibleRepoMode ?? 'all' : undefined,
+      visible_repo_ids: isAdmin ? group.visibleRepoIds : undefined,
       is_home: isHome || undefined,
       is_my_home: (isHome && group.created_by === user.id) || undefined,
       is_shared: isShared || undefined,
@@ -332,8 +353,18 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
   return result;
 }
 
+function listAllVisibleRepoSnapshotIds(userId: string, linkId?: string): string[] {
+  return listManagedReposByUser(userId)
+    .filter((repo) => repo.kind !== 'device_path' || repo.deviceLinkId === linkId)
+    .map((repo) => repo.id)
+    .sort();
+}
+
 import { removeFlowArtifacts } from '../file-manager.js';
-import { requestWorkspaceCleanup } from '../agent-link/registry.js';
+import {
+  getSession as getAgentLinkSession,
+  requestWorkspaceCleanup,
+} from '../agent-link/registry.js';
 import { clearSessionFiles } from '../session-files.js';
 export { removeFlowArtifacts };
 
@@ -361,6 +392,65 @@ function resetWorkspaceForGroup(folder: string): void {
     recursive: true,
     force: true,
   });
+}
+
+async function clearDeviceMainAgentSession(opts: {
+  group: RegisteredGroup;
+  folder: string;
+  linkId?: string;
+  sessionId?: string;
+}): Promise<void> {
+  const { group, folder, linkId, sessionId } = opts;
+  if (!linkId || !sessionId) return;
+
+  const agentId =
+    group.agentClientId || agentClientIdFromExecutionTarget(group.executionNode);
+  if (!agentId) return;
+
+  const runtimeSession = getAgentLinkSession(linkId);
+  if (!runtimeSession || runtimeSession.state !== 'open') {
+    logger.info(
+      { folder, linkId, agentId, sessionId },
+      'Skip device main session cleanup: agent link is offline',
+    );
+    return;
+  }
+
+  try {
+    const result = await requestAgentSessionDelete(runtimeSession, {
+      linkId,
+      agentId,
+      workspace: folder,
+      sessionId,
+      timeoutMs: 15_000,
+    });
+    if (!result.ok) {
+      logger.warn(
+        { folder, linkId, agentId, sessionId, error: result.error },
+        'Device main session cleanup failed during workspace rebuild',
+      );
+    }
+  } catch (err) {
+    logger.warn(
+      { folder, linkId, agentId, sessionId, err },
+      'Device main session cleanup failed during workspace rebuild',
+    );
+  }
+}
+
+function generateWorkspaceFolder(
+  group: RegisteredGroup,
+  existingGroups: Record<string, RegisteredGroup>,
+): string {
+  const prefix = group.is_home ? 'home' : 'flow';
+  for (let i = 0; i < 20; i += 1) {
+    const suffix = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+    const folder = `${prefix}-${suffix}`;
+    if (!Object.values(existingGroups).some((g) => g.folder === folder)) {
+      return folder;
+    }
+  }
+  return `${prefix}-${crypto.randomUUID()}`;
 }
 
 function toPublicContainerEnvForUser(
@@ -418,12 +508,22 @@ groupRoutes.post('/', authMiddleware, async (c) => {
   const repoId = validation.data.repo_id;
   const repoGitUrl = validation.data.repo_git_url;
   const repoDevicePath = validation.data.repo_device_path;
+  const visibleRepoMode = validation.data.visible_repo_mode;
+  const visibleRepoIds = validation.data.visible_repo_ids;
   const initSourcePath = validation.data.init_source_path;
   const initGitUrl = validation.data.init_git_url;
   const authUser = c.get('user') as AuthUser;
   const selectedRepo = repoId ? getManagedRepoById(repoId) : undefined;
   if (repoId && (!selectedRepo || selectedRepo.createdBy !== authUser.id)) {
     return c.json({ error: 'repo_id not found' }, 400);
+  }
+  if (visibleRepoIds) {
+    for (const visibleRepoId of visibleRepoIds) {
+      const repo = getManagedRepoById(visibleRepoId);
+      if (!repo || repo.createdBy !== authUser.id) {
+        return c.json({ error: 'visible_repo_ids contains unknown repo' }, 400);
+      }
+    }
   }
   const effectiveRepoGitUrl =
     selectedRepo?.kind === 'git' ? selectedRepo.gitUrl : repoGitUrl;
@@ -713,6 +813,16 @@ groupRoutes.post('/', authMiddleware, async (c) => {
   const jid = `web:${crypto.randomUUID()}`;
   const folder = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const now = new Date().toISOString();
+  const resolvedVisibleRepoMode =
+    runtimeProfile !== 'server-agent'
+      ? visibleRepoMode ?? (repoId ? 'selected' : 'all')
+      : undefined;
+  const resolvedVisibleRepoIds =
+    runtimeProfile !== 'server-agent'
+      ? resolvedVisibleRepoMode === 'selected'
+        ? visibleRepoIds ?? (repoId ? [repoId] : [])
+        : listAllVisibleRepoSnapshotIds(authUser.id, effectiveExecutionNode)
+      : undefined;
 
   const group: RegisteredGroup = {
     name,
@@ -728,6 +838,8 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       runtimeProfile !== 'server-agent' ? effectiveRepoMainBranch : undefined,
     repoDevicePath:
       runtimeProfile !== 'server-agent' ? effectiveRepoDevicePath : undefined,
+    visibleRepoMode: resolvedVisibleRepoMode,
+    visibleRepoIds: resolvedVisibleRepoIds,
     initSourcePath: executionMode !== 'host' ? initSourcePath : undefined,
     initGitUrl: executionMode !== 'host' ? initGitUrl : undefined,
     created_by: authUser.id,
@@ -806,6 +918,12 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       repo_device_path: hasHostExecutionPermission(authUser)
         ? group.repoDevicePath
         : undefined,
+      visible_repo_mode: hasHostExecutionPermission(authUser)
+        ? group.visibleRepoMode ?? 'all'
+        : undefined,
+      visible_repo_ids: hasHostExecutionPermission(authUser)
+        ? group.visibleRepoIds
+        : undefined,
       kind: 'web',
       editable: true,
       deletable: true,
@@ -853,6 +971,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     agent_model,
     execution_mode,
     backend,
+    visible_repo_mode,
+    visible_repo_ids,
     execution_node,
   } = validation.data;
   const name = rawName ? normalizeGroupName(rawName) : undefined;
@@ -868,13 +988,15 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     agent_model === undefined &&
     execution_mode === undefined &&
     backend === undefined &&
+    visible_repo_mode === undefined &&
+    visible_repo_ids === undefined &&
     execution_node === undefined
   ) {
     return c.json({ error: 'No fields to update' }, 400);
   }
 
   // backend 必须在 SystemSettings.allowedBackends 白名单内（空字符串忽略，由前端表达"清空"语义未启用）
-  if (backend !== undefined) {
+  if (backend !== undefined && backend !== null) {
     const settings = getSystemSettings();
     if (!settings.allowedBackends.includes(backend)) {
       return c.json(
@@ -886,9 +1008,25 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     }
   }
 
-  const nextDeviceLinkId = device_link_id ?? execution_node;
+  if (visible_repo_ids) {
+    for (const visibleRepoId of visible_repo_ids) {
+      const repo = getManagedRepoById(visibleRepoId);
+      if (!repo || repo.createdBy !== authUser.id) {
+        return c.json({ error: 'visible_repo_ids contains unknown repo' }, 400);
+      }
+    }
+  }
+
+  const nextDeviceLinkId =
+    device_link_id !== undefined ? device_link_id : execution_node;
+  const existingDeviceLinkId =
+    existing.deviceLinkId || deviceLinkIdFromExecutionTarget(existing.executionNode);
+  const nextResolvedDeviceLinkId =
+    nextDeviceLinkId !== undefined && nextDeviceLinkId !== null
+      ? deviceLinkIdFromExecutionTarget(nextDeviceLinkId)
+      : undefined;
   // device_link_id / execution_node 校验：必须是当前用户拥有的、未吊销的 AgentLink ID
-  if (nextDeviceLinkId !== undefined) {
+  if (nextDeviceLinkId !== undefined && nextDeviceLinkId !== null) {
     const resolvedNextDeviceLinkId =
       deviceLinkIdFromExecutionTarget(nextDeviceLinkId);
     if (
@@ -918,8 +1056,16 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     }
   }
 
-  // 不允许修改 is_home=true 的主容器执行模式（主容器由 loadState 强制管理）
-  if (execution_mode !== undefined && existing.is_home) {
+  // 不允许修改 is_home=true 的主容器执行模式（主容器由 loadState 强制管理）。
+  // 重建工作区的旧前端会原样提交当前 execution_mode；如果值未变化则允许，
+  // 避免 web:main 在切换 runtime_profile/backend 前被无意义的 execution_mode 拦截为 403。
+  const existingExecutionMode =
+    existing.executionMode ?? (existing.folder === 'main' ? 'host' : 'container');
+  if (
+    execution_mode !== undefined &&
+    existing.is_home &&
+    execution_mode !== existingExecutionMode
+  ) {
     return c.json(
       { error: 'Cannot change execution mode of home containers' },
       403,
@@ -944,8 +1090,10 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     agent_client_id === undefined &&
     agent_model === undefined &&
     execution_mode === undefined &&
-    backend === undefined &&
-    execution_node === undefined;
+      backend === undefined &&
+      visible_repo_mode === undefined &&
+      visible_repo_ids === undefined &&
+      execution_node === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -997,8 +1145,23 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     agent_model !== undefined ||
     execution_mode !== undefined ||
     backend !== undefined ||
+    visible_repo_mode !== undefined ||
+    visible_repo_ids !== undefined ||
     execution_node !== undefined
   ) {
+    const nextVisibleRepoMode =
+      visible_repo_mode !== undefined
+        ? visible_repo_mode
+        : existing.visibleRepoMode;
+    const nextVisibleRepoIds =
+      visible_repo_ids !== undefined
+        ? visible_repo_ids ?? undefined
+        : visible_repo_mode === 'all'
+          ? listAllVisibleRepoSnapshotIds(
+              authUser.id,
+              nextResolvedDeviceLinkId ?? existing.deviceLinkId,
+            )
+          : existing.visibleRepoIds;
     const updated: RegisteredGroup = {
       name: name || existing.name,
       folder: existing.folder,
@@ -1017,6 +1180,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
       repoGitUrl: existing.repoGitUrl,
       repoMainBranch: existing.repoMainBranch,
       repoDevicePath: existing.repoDevicePath,
+      visibleRepoMode: nextVisibleRepoMode,
+      visibleRepoIds: nextVisibleRepoIds,
       initSourcePath: existing.initSourcePath,
       initGitUrl: existing.initGitUrl,
       created_by: existing.created_by,
@@ -1031,26 +1196,40 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
           : existing.activation_mode,
       deviceLinkId:
         nextDeviceLinkId !== undefined
-          ? nextDeviceLinkId
+          ? nextDeviceLinkId || undefined
           : existing.deviceLinkId,
       agentClientId:
         agent_client_id !== undefined
-          ? agent_client_id
+          ? agent_client_id || undefined
           : existing.agentClientId,
       agentModel:
         agent_model !== undefined
           ? agent_model.trim() || undefined
           : existing.agentModel,
-      backend: backend !== undefined ? backend : existing.backend,
+      backend: backend !== undefined ? backend || undefined : existing.backend,
       executionNode:
         nextDeviceLinkId !== undefined
-          ? nextDeviceLinkId
+          ? nextDeviceLinkId || undefined
           : existing.executionNode,
     };
 
     setRegisteredGroup(jid, updated);
     if (name) updateChatName(jid, name);
     deps.getRegisteredGroups()[jid] = updated;
+
+    const deviceDetached =
+      existingDeviceLinkId &&
+      (runtime_profile === 'server-agent' ||
+        nextDeviceLinkId === null ||
+        (nextDeviceLinkId !== undefined &&
+          nextResolvedDeviceLinkId !== existingDeviceLinkId));
+    if (deviceDetached) {
+      requestWorkspaceCleanup({
+        linkId: existingDeviceLinkId,
+        workspace: existing.folder,
+        scope: 'workspace',
+      });
+    }
   }
 
   return c.json({ success: true, pinned_at });
@@ -1429,8 +1608,11 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
     );
   }
 
+  const oldFolder = group.folder;
+  const newFolder = generateWorkspaceFolder(group, deps.getRegisteredGroups());
+
   // Collect all JIDs sharing the same folder (e.g., web:main + feishu groups)
-  const siblingJids = getJidsByFolder(group.folder);
+  const siblingJids = getJidsByFolder(oldFolder);
 
   // 1. Stop ALL active processes for this folder first to avoid writes during cleanup.
   //    This must include descendant virtual JIDs — sub-agents (`{jid}#agent:{id}`)
@@ -1456,12 +1638,31 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
     );
   }
 
-  // 2. Reset workspace: clear working directory, session files, and IPC artifacts.
+  const cleanupDeviceLinkId =
+    group.deviceLinkId || deviceLinkIdFromExecutionTarget(group.executionNode);
+  const mainNativeSessionId = getStoredSession(oldFolder) || undefined;
+  await clearDeviceMainAgentSession({
+    group,
+    folder: oldFolder,
+    linkId: cleanupDeviceLinkId,
+    sessionId: mainNativeSessionId,
+  });
+  if (cleanupDeviceLinkId) {
+    requestWorkspaceCleanup({
+      linkId: cleanupDeviceLinkId,
+      workspace: oldFolder,
+      scope: 'workspace',
+    });
+  }
+
+  // 2. Reset workspace: remove the old local workspace, create a fresh local
+  //    workspace id, and clear session/IPC artifacts for both ids.
   try {
-    resetWorkspaceForGroup(group.folder);
+    resetWorkspaceForGroup(oldFolder);
+    resetWorkspaceForGroup(newFolder);
   } catch (err) {
     logger.error(
-      { jid, folder: group.folder, err },
+      { jid, oldFolder, newFolder, err },
       'Failed to reset workspace while clearing history',
     );
     return c.json(
@@ -1470,10 +1671,22 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
     );
   }
 
-  // 3. Clear session state and message history for ALL sibling JIDs.
+  // 3. Move all folder-scoped records to the new workspace id, then clear the
+  //    main conversation/session state and message history for sibling JIDs.
   try {
-    deleteSession(group.folder);
-    delete deps.getSessions()[group.folder];
+    moveWorkspaceFolderReferences(oldFolder, newFolder);
+    for (const siblingJid of siblingJids) {
+      const sibling = getRegisteredGroup(siblingJid);
+      if (!sibling || sibling.folder !== oldFolder) continue;
+      const updated: RegisteredGroup = { ...sibling, folder: newFolder };
+      setRegisteredGroup(siblingJid, updated);
+      deps.getRegisteredGroups()[siblingJid] = updated;
+    }
+
+    deleteSession(oldFolder);
+    deleteSession(newFolder);
+    delete deps.getSessions()[oldFolder];
+    delete deps.getSessions()[newFolder];
     for (const siblingJid of siblingJids) {
       deleteChatHistory(siblingJid);
       // Re-create the chats row so subsequent messages work properly
@@ -1482,7 +1695,7 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
     }
   } catch (err) {
     logger.error(
-      { jid, folder: group.folder, err },
+      { jid, oldFolder, newFolder, err },
       'Failed to clear history state',
     );
     return c.json({ error: 'Failed to clear history' }, 500);
@@ -1521,7 +1734,7 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
     deleteImContextBindingsByWorkspace(jid);
     if (unboundCount > 0) {
       logger.info(
-        { jid, folder: group.folder, unboundCount },
+        { jid, oldFolder, newFolder, unboundCount },
         'Cleared IM agent bindings for rebuilt workspace',
       );
     }
@@ -1533,10 +1746,15 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
   }
 
   logger.info(
-    { jid, folder: group.folder, siblingJids },
+    { jid, oldFolder, newFolder, siblingJids, cleanupDeviceLinkId },
     'Cleared workspace, context and chat history for group and all siblings',
   );
-  return c.json({ success: true });
+  return c.json({
+    success: true,
+    workspace_id: newFolder,
+    old_workspace_id: oldFolder,
+    affected_jids: siblingJids,
+  });
 });
 
 // GET /api/groups/:jid/messages - 获取消息历史

@@ -46,6 +46,7 @@ export function buildAgentBackendFromClient(input: {
   providerId?: string | null;
   workdirMode?: 'auto' | 'custom';
   workdir?: string;
+  agentMdId?: string | null;
 }): CustomBackendDef {
   const template = templateForAgentClient(input.discoveredClient.id);
   return {
@@ -69,6 +70,7 @@ export function buildAgentBackendFromClient(input: {
     workdir: input.workdir,
     deviceLinkId: input.deviceLinkId,
     agentClientId: input.agentClientId,
+    agentMdId: input.agentMdId,
   };
 }
 

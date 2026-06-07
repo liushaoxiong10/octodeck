@@ -237,6 +237,45 @@ func hasAgentRunEvent(events []AgentRunEventFrame, eventType, text string) bool 
 	return false
 }
 
+func TestNormalizeAgentJSONLineFramesPreservesMixedContentBlocks(t *testing.T) {
+	line := `{"type":"assistant","session_id":"sess-mixed","message":{"content":[{"type":"thinking","thinking":"先分析"},{"type":"text","text":"准备读文件"},{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"README.md"}},{"type":"text","text":"继续回答"}]}}`
+	frames := normalizeAgentJSONLineFrames(line)
+	if len(frames) != 4 {
+		t.Fatalf("expected 4 frames, got %d: %#v", len(frames), frames)
+	}
+	expect := []struct {
+		eventType string
+		text      string
+	}{
+		{"thinking_delta", "先分析"},
+		{"text_delta", "准备读文件"},
+		{"tool_call", ""},
+		{"text_delta", "继续回答"},
+	}
+	for i, want := range expect {
+		if frames[i].EventType != want.eventType || frames[i].Text != want.text || frames[i].SessionID != "sess-mixed" {
+			t.Fatalf("frame %d mismatch: got %#v want type=%s text=%q", i, frames[i], want.eventType, want.text)
+		}
+	}
+	if frames[2].Payload["name"] != "Read" || frames[2].Payload["id"] != "tool-1" {
+		t.Fatalf("tool payload was not preserved: %#v", frames[2].Payload)
+	}
+}
+
+func TestNormalizeAgentJSONLineFramesPreservesToolResultBlock(t *testing.T) {
+	line := `{"type":"user","session_id":"sess-mixed","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"file contents"}]}}`
+	frames := normalizeAgentJSONLineFrames(line)
+	if len(frames) != 1 {
+		t.Fatalf("expected 1 frame, got %d: %#v", len(frames), frames)
+	}
+	if frames[0].EventType != "tool_result" || frames[0].SessionID != "sess-mixed" {
+		t.Fatalf("unexpected frame: %#v", frames[0])
+	}
+	if frames[0].Payload["tool_use_id"] != "tool-1" || frames[0].Payload["content"] != "file contents" {
+		t.Fatalf("tool result payload was not preserved: %#v", frames[0].Payload)
+	}
+}
+
 func TestACPAdapterRunDirectUsesDiscoveredClientArgs(t *testing.T) {
 	cfg := &Config{SessionDir: t.TempDir()}
 	client := AgentClientInfo{
@@ -264,6 +303,51 @@ func TestACPAdapterRunDirectUsesDiscoveredClientArgs(t *testing.T) {
 	}
 }
 
+func TestACPAdapterPrefersLoadSessionForExistingSession(t *testing.T) {
+	methodLog := filepath.Join(t.TempDir(), "methods.log")
+	entry := AgentRegistryEntry{
+		ID:        "custom-acp",
+		Transport: "acp",
+		Binary:    os.Args[0],
+		Args:      []string{"-test.run=TestACPHelperProcess"},
+		Env: map[string]string{
+			"GO_WANT_ACP_HELPER_PROCESS":   "1",
+			"ACP_HELPER_METHOD_LOG":        methodLog,
+			"ACP_HELPER_INITIALIZE_RESULT": `{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":true}}}`,
+			"ACP_HELPER_ALLOW_LOAD":        "1",
+		},
+	}
+	cfg := &Config{AgentRegistry: []AgentRegistryEntry{entry}, SessionDir: t.TempDir()}
+	adapter := &acpAdapter{
+		baseAgentAdapter: baseAgentAdapter{client: AgentClientInfo{ID: entry.ID, Binary: entry.Binary, Transport: entry.Transport}},
+		entry:            &entry,
+	}
+	req := &AgentRunRequestFrame{
+		RunID:          "run-acp-load",
+		AgentID:        entry.ID,
+		Cwd:            t.TempDir(),
+		MaxOutputBytes: 1024,
+		Input:          AgentRunInput{Prompt: "hello again", SessionID: "sess-existing"},
+		Context:        map[string]any{"group": map[string]any{"folder": "demo"}},
+	}
+	result, err := adapter.RunDirect(context.Background(), cfg, req, func(AgentRunEventFrame) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.SessionID != "sess-existing" {
+		t.Fatalf("expected loaded existing ACP session, got %#v", result)
+	}
+	data, err := os.ReadFile(methodLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	methods := strings.Split(strings.TrimSpace(string(data)), "\n")
+	want := []string{"initialize", "session/load", "session/prompt"}
+	if strings.Join(methods, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected ACP methods %v, got %v", want, methods)
+	}
+}
+
 func TestACPHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_ACP_HELPER_PROCESS") != "1" {
 		return
@@ -275,17 +359,37 @@ func TestACPHelperProcess(t *testing.T) {
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
 			os.Exit(2)
 		}
+		if p := os.Getenv("ACP_HELPER_METHOD_LOG"); p != "" {
+			f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if err == nil {
+				_, _ = f.WriteString(msg.Method + "\n")
+				_ = f.Close()
+			}
+		}
 		switch msg.Method {
 		case "initialize":
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(`{"protocolVersion":1}`)})
+			result := os.Getenv("ACP_HELPER_INITIALIZE_RESULT")
+			if result == "" {
+				result = `{"protocolVersion":1}`
+			}
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(result)})
+		case "session/load":
+			if os.Getenv("ACP_HELPER_ALLOW_LOAD") == "1" {
+				writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(`null`)})
+			} else {
+				writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Error: &runtimeRPCError{Code: -32601, Message: "method not found"}})
+			}
+		case "session/resume":
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(`{}`)})
 		case "session/new":
 			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(`{"sessionId":"sess-jsonrpc"}`)})
 		case "session/prompt":
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"sess-jsonrpc","reasoning":"thinking about it"}`)})
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"sess-jsonrpc","type":"tool_call","id":"tool-1","name":"Read","input":{"file":"README.md"}}`)})
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"sess-jsonrpc","type":"tool_result","tool_use_id":"tool-1","content":"ok"}`)})
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"sess-jsonrpc","usage":{"input_tokens":12,"output_tokens":3}}`)})
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"sess-jsonrpc","text":"assistant reply"}`)})
+			sessionID := acpHelperSessionIDFromParams(msg.Params)
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","reasoning":"thinking about it"}`)})
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","type":"tool_call","id":"tool-1","name":"Read","input":{"file":"README.md"}}`)})
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","type":"tool_result","tool_use_id":"tool-1","content":"ok"}`)})
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","usage":{"input_tokens":12,"output_tokens":3}}`)})
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","text":"assistant reply"}`)})
 			time.Sleep(20 * time.Millisecond)
 			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(`{"content":"assistant reply","usage":{"input_tokens":12,"output_tokens":3}}`)})
 			os.Exit(0)
@@ -294,6 +398,16 @@ func TestACPHelperProcess(t *testing.T) {
 		}
 	}
 	os.Exit(0)
+}
+
+func acpHelperSessionIDFromParams(raw json.RawMessage) string {
+	var params map[string]any
+	if len(raw) > 0 && json.Unmarshal(raw, &params) == nil {
+		if id, _ := params["sessionId"].(string); id != "" {
+			return id
+		}
+	}
+	return "sess-jsonrpc"
 }
 
 func rawACPHelperJSON(s string) json.RawMessage {

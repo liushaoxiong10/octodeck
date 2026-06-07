@@ -162,6 +162,15 @@ interface IncomingMessagePayload {
   senderName?: string;
 }
 
+function normalizeFeishuChatType(chatType: string | undefined): string | undefined {
+  if (!chatType) return chatType;
+  // Feishu topic/thread groups may surface as topic/thread-like chat types in
+  // some event/API payloads. Treat them as group chats so allowlist and mention
+  // gates still protect/process bound topic groups consistently.
+  if (chatType === 'topic' || chatType === 'thread') return 'group';
+  return chatType;
+}
+
 interface WsConnectionState {
   connected: boolean;
   isConnecting: boolean;
@@ -560,6 +569,8 @@ export function createFeishuConnection(
   // botInfoRefetchInFlight 防止并发拉取
   let lastBotInfoFetchAt = 0;
   let botInfoRefetchInFlight: Promise<void> | null = null;
+  let botUserId = '';
+  let botMentionName = '';
   // mention gate fail-closed 的 warn 节流：避免 botOpenId 长时间缺失时日志洪水
   let lastBotInfoMissingWarnAt = 0;
   let botInfoMissingDroppedSinceLastWarn = 0;
@@ -618,13 +629,17 @@ export function createFeishuConnection(
     stopHealthMonitor();
     healthTimer = setInterval(() => {
       void checkConnectionHealth();
-      // 兜底：botOpenId 缺失时让健康检查顺手 lazy refetch；
+      // 兜底：bot mention 身份缺失时让健康检查顺手 lazy refetch；
       // 启动期 retry 失败 / 飞书短暂抖动后能在几分钟内自动恢复 mention 守卫。
-      if (!botOpenId) {
+      if (!hasBotMentionIdentity()) {
         void ensureBotOpenIdFresh('health-check');
       }
     }, WS_HEALTH_CHECK_INTERVAL_MS);
     healthTimer.unref?.();
+  }
+
+  function hasBotMentionIdentity(): boolean {
+    return !!(botOpenId || botUserId || botMentionName);
   }
 
   /**
@@ -639,10 +654,20 @@ export function createFeishuConnection(
         url: '/open-apis/bot/v3/info/',
       });
       const info = botInfoRes as {
-        bot?: { open_id?: string };
-        data?: { bot?: { open_id?: string } };
+        bot?: { open_id?: string; user_id?: string; name?: string; app_name?: string };
+        data?: {
+          bot?: {
+            open_id?: string;
+            user_id?: string;
+            name?: string;
+            app_name?: string;
+          };
+        };
       };
-      return info?.bot?.open_id || info?.data?.bot?.open_id || '';
+      const bot = info?.bot || info?.data?.bot;
+      botUserId = bot?.user_id || '';
+      botMentionName = bot?.name || bot?.app_name || '';
+      return bot?.open_id || '';
     } catch (err) {
       logger.debug({ err }, 'fetchBotOpenIdOnce failed');
       return '';
@@ -660,18 +685,18 @@ export function createFeishuConnection(
       }
       const id = await fetchBotOpenIdOnce();
       lastBotInfoFetchAt = Date.now();
-      if (id) {
+      if (id || botUserId || botMentionName) {
         botOpenId = id;
         logger.info(
-          { botOpenId, attempt: attempt + 1 },
-          'Fetched bot open_id for mention detection',
+          { botOpenId, botUserId, botMentionName, attempt: attempt + 1 },
+          'Fetched bot mention identity for mention detection',
         );
         return;
       }
     }
     logger.warn(
       { attempts: BOT_INFO_FETCH_MAX_ATTEMPTS },
-      'Could not fetch bot open_id after retries; mention gating will fail-closed until recovered',
+      'Could not fetch bot mention identity after retries; mention gating will fail-closed until recovered',
     );
   }
 
@@ -679,24 +704,27 @@ export function createFeishuConnection(
    * 后台 lazy refetch：消息进入 mention 门控前若发现 botOpenId 仍空，触发一次。
    * 用 lastBotInfoFetchAt 节流，避免每条消息都打 OAPI；并发安全（in-flight Promise 复用）。
    */
-  function ensureBotOpenIdFresh(reason: string): Promise<void> {
-    if (botOpenId) return Promise.resolve();
+  function ensureBotOpenIdFresh(
+    reason: string,
+    force = false,
+  ): Promise<void> {
+    if (hasBotMentionIdentity()) return Promise.resolve();
     if (botInfoRefetchInFlight) return botInfoRefetchInFlight;
     const now = Date.now();
-    if (now - lastBotInfoFetchAt < BOT_INFO_REFETCH_MIN_INTERVAL_MS) {
+    if (!force && now - lastBotInfoFetchAt < BOT_INFO_REFETCH_MIN_INTERVAL_MS) {
       return Promise.resolve();
     }
     botInfoRefetchInFlight = (async () => {
       const id = await fetchBotOpenIdOnce();
       lastBotInfoFetchAt = Date.now();
-      if (id) {
+      if (id || botUserId || botMentionName) {
         botOpenId = id;
         logger.info(
-          { botOpenId, reason },
-          'Recovered bot open_id (lazy refetch)',
+          { botOpenId, botUserId, botMentionName, reason },
+          'Recovered bot mention identity (lazy refetch)',
         );
       } else {
-        logger.debug({ reason }, 'Lazy refetch of bot open_id still failed');
+        logger.debug({ reason }, 'Lazy refetch of bot mention identity still failed');
       }
     })().finally(() => {
       botInfoRefetchInFlight = null;
@@ -1024,6 +1052,7 @@ export function createFeishuConnection(
         }
       }
 
+      const normalizedChatType = normalizeFeishuChatType(chatType);
       const chatJid = `feishu:${chatId}`;
       const rootMessageId = rootId || messageId;
       const messageRouteTarget = buildFeishuRouteTarget(
@@ -1032,13 +1061,13 @@ export function createFeishuConnection(
         threadId ? rootMessageId : rootId,
       );
       const resolvedSenderName = senderName || getSenderName(senderOpenId);
-      const resolvedChatName = chatType === 'p2p' ? '飞书私聊' : '飞书群聊';
+      const resolvedChatName = normalizedChatType === 'p2p' ? '飞书私聊' : '飞书群聊';
 
       // 先注册会话，确保 resolveGroupFolder 能正确解析 folder（含首条文件消息场景）
       onNewChat?.(chatJid, resolvedChatName);
 
       // P2P 消息：通知调用方用于自动检测 owner open_id
-      if (chatType === 'p2p' && senderOpenId && onP2pSender) {
+      if (normalizedChatType === 'p2p' && senderOpenId && onP2pSender) {
         onP2pSender(senderOpenId);
       }
 
@@ -1169,7 +1198,7 @@ export function createFeishuConnection(
 
       const resolvedCreateTimeMs = createTimeMs > 0 ? createTimeMs : Date.now();
       const timestamp = new Date(resolvedCreateTimeMs).toISOString();
-      rememberChatProgress(chatId, resolvedCreateTimeMs, chatType);
+      rememberChatProgress(chatId, resolvedCreateTimeMs, normalizedChatType);
 
       // ── 斜杠指令：拦截已知 /xxx 命令，不进入消息流 ──
       // 群聊中 @机器人 后跟斜杠命令，mention 替换后文本为 "@botname /cmd"，
@@ -1225,7 +1254,7 @@ export function createFeishuConnection(
 
       // ── 群聊发言者白名单过滤（命令已处理后，非白名单发言者丢弃或软拒绝） ──
       if (
-        chatType === 'group' &&
+        normalizedChatType === 'group' &&
         isSenderAllowedInGroup &&
         !isSenderAllowedInGroup(chatJid, senderOpenId)
       ) {
@@ -1238,6 +1267,10 @@ export function createFeishuConnection(
           isBotMentioned(
             botOpenId,
             mentions as MentionGateMention[] | undefined,
+            {
+              botUserId,
+              botMentionNames: botMentionName ? [botMentionName] : undefined,
+            },
           )
         ) {
           addReaction(messageId, 'SILENT').catch(() => {});
@@ -1259,9 +1292,25 @@ export function createFeishuConnection(
       // 历史上这里曾因 botOpenId 缺失而 fail-open 静默失效；新版 fail-closed，
       // 并通过 ensureBotOpenIdFresh() 触发后台 lazy refetch 自愈。
       {
+        // 如果当前消息已经带了 @，但启动期 bot info 拉取刚失败过，旧逻辑会因为
+        // lazy refetch 节流而把这条消息 fail-closed 丢掉；健康检查随后恢复身份，
+        // 用户就表现为“需要 @ 第二次才响应”。这里对“疑似 @bot 的首条群消息”
+        // 做一次强制同步刷新，确保能在同一条消息内完成 mention 判定与 thread_map 路由。
+        if (
+          normalizedChatType === 'group' &&
+          shouldProcessGroupMessage &&
+          !shouldProcessGroupMessage(chatJid, senderOpenId) &&
+          mentions?.length &&
+          !hasBotMentionIdentity()
+        ) {
+          await ensureBotOpenIdFresh('mention-gate-precheck', true);
+        }
+
         const decision = evaluateMentionGate({
-          chatType,
+          chatType: normalizedChatType,
           botOpenId,
+          botUserId,
+          botMentionNames: botMentionName ? [botMentionName] : undefined,
           mentions: mentions as MentionGateMention[] | undefined,
           chatJid,
           senderOpenId,
@@ -1642,6 +1691,8 @@ export function createFeishuConnection(
       // 启动期失败后，健康检查 + 进入 mention 门控前的 lazy refetch 会兜底自愈，
       // 期间 mention 守卫维持 fail-closed（拒绝群消息），不会回退到默认放行。
       botOpenId = '';
+      botUserId = '';
+      botMentionName = '';
       lastBotInfoFetchAt = 0;
       await fetchBotOpenIdWithRetry();
 

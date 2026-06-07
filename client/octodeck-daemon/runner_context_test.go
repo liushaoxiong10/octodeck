@@ -440,6 +440,269 @@ func TestAgentRuntimeResolveCwdKeepsSessionRootForSingleRepo(t *testing.T) {
 	}
 }
 
+func TestAgentRuntimeResolveCwdUsesTopLevelWorkspaceRepos(t *testing.T) {
+	root := t.TempDir()
+	makeRepo := func(name string) string {
+		source := filepath.Join(root, name)
+		mustRun(t, root, "git", "init", source)
+		mustRun(t, source, "git", "branch", "-M", "main")
+		mustRun(t, source, "git", "config", "user.email", "test@example.com")
+		mustRun(t, source, "git", "config", "user.name", "Test")
+		if err := os.WriteFile(filepath.Join(source, "README.md"), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mustRun(t, source, "git", "add", "README.md")
+		mustRun(t, source, "git", "commit", "-m", "init")
+		return source
+	}
+	repoA := makeRepo("origin-a")
+	repoB := makeRepo("origin-b")
+
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	rt := &agentRuntimeProcess{cfg: cfg}
+	req := &AgentRunRequestFrame{
+		AgentID: "agent-abc",
+		Workspace: &AgentRunWorkspace{
+			Kind:    "workspace",
+			Folder:  "demo",
+			AgentID: "agent-abc",
+			Scope:   "session",
+			ScopeID: "sess-123",
+		},
+		WorkspaceRepos: []*WorkspaceRepoSpec{
+			{Kind: "git", Name: "repo-a", GitURL: repoA, GroupFolder: "demo", AgentID: "agent-abc", Scope: "session", ScopeID: "sess-123"},
+			{Kind: "git", Name: "repo-b", GitURL: repoB, GroupFolder: "demo", AgentID: "agent-abc", Scope: "session", ScopeID: "sess-123"},
+		},
+		Context: map[string]any{"group": map[string]any{"folder": "demo"}},
+	}
+
+	cwd, err := rt.resolveCwd(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedCwd := filepath.Join(cfg.WorkspaceDir, "demo", "sessions", "sess-123")
+	if cwd != expectedCwd {
+		t.Fatalf("expected session root cwd %q, got %q", expectedCwd, cwd)
+	}
+	for _, name := range []string{"repo-a", "repo-b"} {
+		if _, err := os.Stat(filepath.Join(cwd, name, "README.md")); err != nil {
+			t.Fatalf("expected %s mounted directly under session root: %v", name, err)
+		}
+	}
+}
+
+func TestAgentRuntimeResolveCwdDecouplesWorkspaceScopeFromNativeSession(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	rt := &agentRuntimeProcess{cfg: cfg}
+
+	first := &AgentRunRequestFrame{
+		AgentID: "traecli-acp",
+		Workspace: &AgentRunWorkspace{
+			Kind:    "workspace",
+			Folder:  "demo",
+			AgentID: "traecli-acp",
+			Scope:   "session",
+			ScopeID: "conversation-001",
+		},
+		Context: map[string]any{"group": map[string]any{"folder": "demo"}},
+	}
+	firstCwd, err := rt.resolveCwd(context.Background(), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second := &AgentRunRequestFrame{
+		AgentID: "traecli-acp",
+		Workspace: &AgentRunWorkspace{
+			Kind:    "workspace",
+			Folder:  "demo",
+			AgentID: "traecli-acp",
+			Scope:   "session",
+			ScopeID: "conversation-001",
+		},
+		Input:   AgentRunInput{SessionID: "native-session-001"},
+		Context: map[string]any{"group": map[string]any{"folder": "demo"}},
+	}
+	secondCwd, err := rt.resolveCwd(context.Background(), second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := filepath.Join(cfg.WorkspaceDir, "demo", "sessions", "conversation-001")
+	if firstCwd != expected || secondCwd != expected {
+		t.Fatalf("expected stable daemon workspace cwd %q, got first=%q second=%q", expected, firstCwd, secondCwd)
+	}
+	if second.Input.SessionID != "native-session-001" {
+		t.Fatalf("native session id should remain available for ACP resume, got %q", second.Input.SessionID)
+	}
+}
+
+func TestRunRequestWorkspaceScopeDecouplesFromNativeSession(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+
+	first := &RunRequestFrame{
+		BackendID: "mac-traecli",
+		WorkspaceRepo: &WorkspaceRepoSpec{
+			Kind:        "workspace",
+			GroupFolder: "demo",
+			AgentID:     "mac-traecli",
+			Scope:       "session",
+			ScopeID:     "conversation-001",
+		},
+	}
+	normalizeRunRequestWorkspaceScopes(first)
+	firstCwd, err := resolveWorkspaceReposRunCwd(context.Background(), cfg, []*WorkspaceRepoSpec{first.WorkspaceRepo})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second := &RunRequestFrame{
+		BackendID: "mac-traecli",
+		WorkspaceRepo: &WorkspaceRepoSpec{
+			Kind:        "workspace",
+			GroupFolder: "demo",
+			AgentID:     "mac-traecli",
+			Scope:       "session",
+			ScopeID:     "conversation-001",
+		},
+	}
+	normalizeRunRequestWorkspaceScopes(second)
+	secondCwd, err := resolveWorkspaceReposRunCwd(context.Background(), cfg, []*WorkspaceRepoSpec{second.WorkspaceRepo})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := filepath.Join(cfg.WorkspaceDir, "demo", "sessions", "conversation-001")
+	if firstCwd != expected || secondCwd != expected {
+		t.Fatalf("expected stable legacy device CLI workspace cwd %q, got first=%q second=%q", expected, firstCwd, secondCwd)
+	}
+	if second.WorkspaceRepo.ScopeID != "conversation-001" {
+		t.Fatalf("expected native session id to be decoupled from workspace scope, got %q", second.WorkspaceRepo.ScopeID)
+	}
+}
+
+func TestRunRequestWorkspaceScopePreservesConversationScopedID(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+
+	req := &RunRequestFrame{
+		BackendID: "mac-traecli",
+		WorkspaceRepo: &WorkspaceRepoSpec{
+			Kind:        "workspace",
+			GroupFolder: "demo",
+			AgentID:     "mac-traecli",
+			Scope:       "session",
+			ScopeID:     "33550d69-ed01-42ff-b4e5-23c4b3db1e20",
+		},
+	}
+	normalizeRunRequestWorkspaceScopes(req)
+	cwd, err := resolveWorkspaceReposRunCwd(context.Background(), cfg, []*WorkspaceRepoSpec{req.WorkspaceRepo})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := filepath.Join(cfg.WorkspaceDir, "demo", "sessions", "33550d69-ed01-42ff-b4e5-23c4b3db1e20")
+	if cwd != expected {
+		t.Fatalf("expected daemon to preserve server conversation-scoped workspace cwd %q, got %q", expected, cwd)
+	}
+}
+
+func TestResolveWorkspaceReposRunCwdKeepsSessionRootForSingleRepo(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "origin-project")
+	mustRun(t, root, "git", "init", source)
+	mustRun(t, source, "git", "branch", "-M", "main")
+	mustRun(t, source, "git", "config", "user.email", "test@example.com")
+	mustRun(t, source, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("legacy-runtime"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, source, "git", "add", "README.md")
+	mustRun(t, source, "git", "commit", "-m", "init")
+
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	cwd, err := resolveWorkspaceReposRunCwd(context.Background(), cfg, []*WorkspaceRepoSpec{{
+		Kind:        "git",
+		Name:        "kunlun",
+		GitURL:      source,
+		GroupFolder: "demo",
+		AgentID:     "agent-abc",
+		Scope:       "session",
+		ScopeID:     "sess-123",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedCwd := filepath.Join(cfg.WorkspaceDir, "demo", "sessions", "sess-123")
+	if cwd != expectedCwd {
+		t.Fatalf("expected legacy run.request session root cwd %q, got %q", expectedCwd, cwd)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "kunlun", "README.md")); err != nil {
+		t.Fatalf("expected repo mounted directly under session root: %v", err)
+	}
+}
+
+func TestResolveWorkspaceReposRunCwdMountsMultipleReposUnderSessionRoot(t *testing.T) {
+	root := t.TempDir()
+	makeRepo := func(name string) string {
+		source := filepath.Join(root, name)
+		mustRun(t, root, "git", "init", source)
+		mustRun(t, source, "git", "branch", "-M", "main")
+		mustRun(t, source, "git", "config", "user.email", "test@example.com")
+		mustRun(t, source, "git", "config", "user.name", "Test")
+		if err := os.WriteFile(filepath.Join(source, "README.md"), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mustRun(t, source, "git", "add", "README.md")
+		mustRun(t, source, "git", "commit", "-m", "init")
+		return source
+	}
+	repoA := makeRepo("origin-a")
+	repoB := makeRepo("origin-b")
+
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	cwd, err := resolveWorkspaceReposRunCwd(context.Background(), cfg, []*WorkspaceRepoSpec{
+		{Kind: "git", Name: "repo-a", GitURL: repoA, GroupFolder: "demo", AgentID: "agent-abc", Scope: "session", ScopeID: "sess-123"},
+		{Kind: "git", Name: "repo-b", GitURL: repoB, GroupFolder: "demo", AgentID: "agent-abc", Scope: "session", ScopeID: "sess-123"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedCwd := filepath.Join(cfg.WorkspaceDir, "demo", "sessions", "sess-123")
+	if cwd != expectedCwd {
+		t.Fatalf("expected legacy run.request multi-repo session root cwd %q, got %q", expectedCwd, cwd)
+	}
+	for _, name := range []string{"repo-a", "repo-b"} {
+		if _, err := os.Stat(filepath.Join(cwd, name, "README.md")); err != nil {
+			t.Fatalf("expected %s mounted directly under session root: %v", name, err)
+		}
+	}
+}
+
+func TestResolveWorkspaceReposRunCwdUsesSessionRootForWorkspaceOnly(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	cwd, err := resolveWorkspaceReposRunCwd(context.Background(), cfg, []*WorkspaceRepoSpec{{
+		Kind:        "workspace",
+		GroupFolder: "demo",
+		AgentID:     "agent-abc",
+		Scope:       "session",
+		ScopeID:     "sess-123",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedCwd := filepath.Join(cfg.WorkspaceDir, "demo", "sessions", "sess-123")
+	if cwd != expectedCwd {
+		t.Fatalf("expected workspace-only session root cwd %q, got %q", expectedCwd, cwd)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "repo")); !os.IsNotExist(err) {
+		t.Fatalf("workspace-only run should not create synthetic repo dir, stat err=%v", err)
+	}
+}
+
 func TestResolveWorkspaceRepoUsesDeviceDirectoryWhenNotGit(t *testing.T) {
 	root := t.TempDir()
 	dir := t.TempDir()
@@ -514,7 +777,7 @@ func TestResolveAgentWorkspaceCwdUsesGlobalTaskScopeWithoutWorkspace(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := filepath.Join(root, "task", "task-001", "run-001")
+	expected := filepath.Join(root, "tasks", "task-001", "run-001")
 	if cwd != expected {
 		t.Fatalf("expected global task cwd %q, got %q", expected, cwd)
 	}
@@ -539,13 +802,52 @@ func TestResolveAgentWorkspaceCwdUsesDirectSessionRoot(t *testing.T) {
 	}
 }
 
+func TestResolveAgentWorkspaceCwdDefaultsEmptySessionScopeToMain(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	cwd, err := resolveAgentWorkspaceCwd(cfg, &AgentRunWorkspace{Folder: "flow-demo", AgentID: "traecli-acp", Scope: "session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(cfg.WorkspaceDir, "flow-demo", "sessions", "main")
+	if cwd != expected {
+		t.Fatalf("expected main conversation cwd %q, got %q", expected, cwd)
+	}
+}
+
+func TestAgentRuntimeDirectSessionWithoutScopeIDUsesMain(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	rt := &agentRuntimeProcess{cfg: cfg}
+	req := &AgentRunRequestFrame{
+		AgentID: "traecli-acp",
+		Workspace: &AgentRunWorkspace{
+			Kind:   "workspace",
+			Folder: "flow-demo",
+			Scope:  "direct_session",
+		},
+		Context: map[string]any{"group": map[string]any{"folder": "flow-demo"}},
+	}
+	cwd, err := rt.resolveCwd(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(cfg.WorkspaceDir, "flow-demo", "sessions", "main")
+	if cwd != expected {
+		t.Fatalf("expected main direct-session cwd %q, got %q", expected, cwd)
+	}
+	if req.Workspace.ScopeID != "main" {
+		t.Fatalf("expected normalized scope id main, got %q", req.Workspace.ScopeID)
+	}
+}
+
 func TestDefaultRunCwdUsesOctodeckTaskDir(t *testing.T) {
 	root := t.TempDir()
 	cwd, err := defaultRunCwd(&Config{WorkspaceDir: filepath.Join(root, "workspace")}, "/server/groups/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedParent := filepath.Join(root, "task")
+	expectedParent := filepath.Join(root, "tasks")
 	if filepath.Dir(cwd) != expectedParent {
 		t.Fatalf("expected default cwd under %q, got %q", expectedParent, cwd)
 	}

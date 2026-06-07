@@ -4,9 +4,11 @@ import { useFileStore } from '../../stores/files';
 
 interface FileUploadZoneProps {
   groupJid: string;
+  disabled?: boolean;
+  disabledReason?: string;
 }
 
-export function FileUploadZone({ groupJid }: FileUploadZoneProps) {
+export function FileUploadZone({ groupJid, disabled = false, disabledReason }: FileUploadZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -15,12 +17,14 @@ export function FileUploadZone({ groupJid }: FileUploadZoneProps) {
   const handleDragOver = (e: DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    if (disabled) return;
     setIsDragging(true);
   };
 
   const handleDragLeave = (e: DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    if (disabled) return;
     setIsDragging(false);
   };
 
@@ -28,6 +32,7 @@ export function FileUploadZone({ groupJid }: FileUploadZoneProps) {
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(false);
+    if (disabled) return;
 
     const fileList = e.dataTransfer.files;
     if (fileList.length > 0) {
@@ -37,6 +42,7 @@ export function FileUploadZone({ groupJid }: FileUploadZoneProps) {
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
+    if (disabled) return;
     if (fileList && fileList.length > 0) {
       await uploadFiles(groupJid, Array.from(fileList));
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -45,6 +51,7 @@ export function FileUploadZone({ groupJid }: FileUploadZoneProps) {
 
   const handleFolderSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
+    if (disabled) return;
     if (fileList && fileList.length > 0) {
       await uploadFiles(groupJid, Array.from(fileList));
       if (folderInputRef.current) folderInputRef.current.value = '';
@@ -67,7 +74,8 @@ export function FileUploadZone({ groupJid }: FileUploadZoneProps) {
           isDragging
             ? 'border-primary bg-brand-50'
             : 'border-border'
-        } ${uploading ? 'pointer-events-none' : ''}`}
+        } ${uploading || disabled ? 'pointer-events-none opacity-60' : ''}`}
+        title={disabled ? disabledReason : undefined}
       >
         {/* Hidden inputs */}
         <input
@@ -76,7 +84,7 @@ export function FileUploadZone({ groupJid }: FileUploadZoneProps) {
           multiple
           onChange={handleFileSelect}
           className="hidden"
-          disabled={uploading}
+          disabled={uploading || disabled}
         />
         <input
           ref={folderInputRef}
@@ -85,7 +93,7 @@ export function FileUploadZone({ groupJid }: FileUploadZoneProps) {
           webkitdirectory=""
           onChange={handleFolderSelect}
           className="hidden"
-          disabled={uploading}
+          disabled={uploading || disabled}
         />
 
         {uploading && uploadProgress ? (
@@ -107,19 +115,21 @@ export function FileUploadZone({ groupJid }: FileUploadZoneProps) {
           /* Idle state */
           <div className="flex flex-col items-center gap-2 text-center py-1">
             <p className="text-xs text-muted-foreground">
-              {isDragging ? '释放以上传' : '拖拽文件到这里，或'}
+              {disabled ? (disabledReason || '当前不可上传') : isDragging ? '释放以上传' : '拖拽文件到这里，或'}
             </p>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-primary bg-brand-50 hover:bg-brand-100 rounded-md transition-colors cursor-pointer"
+                disabled={disabled}
+                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-primary bg-brand-50 hover:bg-brand-100 rounded-md transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Upload className="w-3.5 h-3.5" />
                 上传文件
               </button>
               <button
                 onClick={() => folderInputRef.current?.click()}
-                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-foreground bg-muted hover:bg-muted/80 rounded-md transition-colors cursor-pointer"
+                disabled={disabled}
+                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-foreground bg-muted hover:bg-muted/80 rounded-md transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <FolderUp className="w-3.5 h-3.5" />
                 上传文件夹

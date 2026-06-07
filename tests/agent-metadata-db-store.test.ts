@@ -90,6 +90,8 @@ describe('agent metadata sqlite storage', () => {
       supportsContainer: false,
       usesProviderPool: false,
       runtime: 'server-side',
+      providerId: 'test-provider',
+      model: 'test-model',
     }, 'admin');
 
     const payload = JSON.parse(readMetadataValue('custom_backends') || '{}') as {

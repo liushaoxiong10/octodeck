@@ -576,7 +576,11 @@ func (rt *agentRuntimeProcess) deleteSession(ctx context.Context, out io.Writer,
 	} else {
 		deleted, err = adapter.DeleteSession(ctx, rt.cfg, req.Workspace, req.SessionID)
 		if err == nil && req.Workspace != "" && req.SessionID != "" {
-			if localDir, dirErr := cleanupWorkspaceScopeDir(rt.cfg, req.Workspace, "session", req.SessionID, "", ""); dirErr != nil {
+			localScopeID := stableAgentWorkspaceScopeID(req.AgentID)
+			if localScopeID == "" {
+				localScopeID = req.SessionID
+			}
+			if localDir, dirErr := cleanupWorkspaceScopeDir(rt.cfg, req.Workspace, "session", localScopeID, "", ""); dirErr != nil {
 				err = dirErr
 			} else if removeErr := os.RemoveAll(localDir); removeErr != nil {
 				err = removeErr
@@ -773,10 +777,14 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 }
 
 func (rt *agentRuntimeProcess) resolveCwd(ctx context.Context, req *AgentRunRequestFrame) (string, error) {
+	normalizeAgentRunWorkspaceScope(req)
+
 	// Normalize to a unified list of repos: prefer Workspace.Repos, fall back to
 	// Workspace.Repo (single), then to the legacy WorkspaceRepo.
 	var repos []*WorkspaceRepoSpec
-	if req.Workspace != nil && len(req.Workspace.Repos) > 0 {
+	if len(req.WorkspaceRepos) > 0 {
+		repos = req.WorkspaceRepos
+	} else if req.Workspace != nil && len(req.Workspace.Repos) > 0 {
 		repos = req.Workspace.Repos
 	} else if req.Workspace != nil && req.Workspace.Repo != nil {
 		repos = []*WorkspaceRepoSpec{req.Workspace.Repo}
@@ -785,10 +793,19 @@ func (rt *agentRuntimeProcess) resolveCwd(ctx context.Context, req *AgentRunRequ
 	}
 
 	if len(repos) > 0 {
+		if repos[0] == nil {
+			return "", errors.New("workspace repo spec is required")
+		}
 		// First, resolve the workspace/session/task root (this handles
 		// octodeck-workspace:// URI or custom CWD folder fallback, or the
 		// scope-aware workspace directory).
-		wsRoot, err := rt.resolveWorkspaceRoot(req)
+		var wsRoot string
+		var err error
+		if req.Workspace != nil && (req.Workspace.AgentID != "" || req.Workspace.AgentRoot != "" || req.Workspace.Scope != "" || req.Workspace.ScopeID != "") {
+			wsRoot, err = rt.resolveWorkspaceRoot(req)
+		} else {
+			wsRoot, err = ensureWorkspaceRepoBaseDir(rt.cfg, repos[0])
+		}
 		if err != nil {
 			return "", err
 		}
@@ -796,6 +813,12 @@ func (rt *agentRuntimeProcess) resolveCwd(ctx context.Context, req *AgentRunRequ
 		// root. Keep cwd fixed at the root for both single-repo and multi-repo
 		// runs so paths remain stable when a workspace gains more repos later.
 		for _, spec := range repos {
+			if spec == nil {
+				return "", errors.New("workspace repo spec is required")
+			}
+			if spec.Kind == "workspace" {
+				continue
+			}
 			if _, err := mountWorkspaceRepoAt(ctx, rt.cfg, wsRoot, spec); err != nil {
 				return "", err
 			}
@@ -833,6 +856,74 @@ func (rt *agentRuntimeProcess) resolveCwd(ctx context.Context, req *AgentRunRequ
 		return "", fmt.Errorf("cwd outside runtime allowedWorkspaces: %s", req.Cwd)
 	}
 	return req.Cwd, nil
+}
+
+func normalizeAgentRunWorkspaceScope(req *AgentRunRequestFrame) {
+	if req == nil {
+		return
+	}
+	// Keep daemon workspace directories stable across turns. The native agent
+	// session id in req.Input.SessionID is still passed to the adapter for
+	// resume/load, but it must not decide the local cwd; otherwise the first turn
+	// may run under sessions/<turn-id> and the next under sessions/<native-id>.
+	// Newer servers send the OctoDeck conversation id directly as ScopeID; preserve
+	// any explicit ScopeID and only synthesize a legacy fallback when it is absent.
+	if req.Workspace != nil {
+		normalizeAgentRunWorkspace(req.Workspace, req.AgentID)
+	}
+	for _, spec := range req.WorkspaceRepos {
+		normalizeWorkspaceRepoSpecScope(spec, req.AgentID)
+	}
+	if req.WorkspaceRepo != nil {
+		normalizeWorkspaceRepoSpecScope(req.WorkspaceRepo, req.AgentID)
+	}
+}
+
+func normalizeAgentRunWorkspace(ws *AgentRunWorkspace, fallbackAgentID string) {
+	if ws == nil {
+		return
+	}
+	agentID := firstNonEmpty(ws.AgentID, fallbackAgentID)
+	if isAgentSessionScope(ws.Scope, ws.ScopeID) {
+		if ws.ScopeID != "" {
+			// Explicit server-provided session scope: this is the OctoDeck conversation
+			// id and must remain the directory name under sessions/<scopeId>.
+		} else if ws.Scope == "direct_session" {
+			ws.ScopeID = "main"
+		} else if scopeID := stableAgentWorkspaceScopeID(agentID); scopeID != "" {
+			ws.ScopeID = scopeID
+		}
+	}
+	if ws.Repo != nil {
+		normalizeWorkspaceRepoSpecScope(ws.Repo, agentID)
+	}
+	for _, spec := range ws.Repos {
+		normalizeWorkspaceRepoSpecScope(spec, agentID)
+	}
+}
+
+func normalizeWorkspaceRepoSpecScope(spec *WorkspaceRepoSpec, fallbackAgentID string) {
+	if spec == nil || !isAgentSessionScope(spec.Scope, spec.ScopeID) {
+		return
+	}
+	if spec.ScopeID != "" {
+		return
+	}
+	if scopeID := stableAgentWorkspaceScopeID(firstNonEmpty(spec.AgentID, fallbackAgentID)); scopeID != "" {
+		spec.ScopeID = scopeID
+	}
+}
+
+func isAgentSessionScope(scope, scopeID string) bool {
+	return scope == "session" || scope == "direct_session" || (scope == "" && scopeID != "")
+}
+
+func stableAgentWorkspaceScopeID(agentID string) string {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return ""
+	}
+	return "octodeck-" + agentID
 }
 
 func (rt *agentRuntimeProcess) finishErr(out io.Writer, req *AgentRunRequestFrame, started time.Time, err error, timedOut bool) {
@@ -1129,7 +1220,7 @@ func (a *customA2AAdapter) RunDirect(ctx context.Context, cfg *Config, req *Agen
 		"context":   req.Context,
 		"cwd":       req.Cwd,
 	}
-	if server, err := buildAgentTeamMCPServerConfig(cfg); err == nil {
+	if server, err := buildAgentTeamMCPServerConfig(cfg, req.Env); err == nil {
 		params["mcpServers"] = map[string]any{"octodeck_agent_team": server}
 	}
 	paramsJSON, _ := json.Marshal(params)
@@ -1390,7 +1481,7 @@ func (a *acpAdapter) runACPAgent(ctx context.Context, cfg *Config, req *AgentRun
 			finalText += frame.Text
 			finalMu.Unlock()
 		}
-		if frame.SessionID != "" {
+		if frame.SessionID != "" && (sessionID == "" || req.Input.SessionID == "") {
 			sessionID = frame.SessionID
 		}
 		if frame.EventType == "usage" {
@@ -1416,14 +1507,7 @@ func (a *acpAdapter) runACPAgent(ctx context.Context, cfg *Config, req *AgentRun
 		pumpAgentLog(stderr, req, &sent, emit)
 	}()
 
-	if _, err := client.call(ctx, "initialize", map[string]any{"protocolVersion": 1, "clientInfo": map[string]any{"name": "octodeck-daemon", "version": daemonVersion}}); err != nil {
-		_ = stdin.Close()
-		_ = cmd.Wait()
-		<-readDone
-		<-logDone
-		return AgentRunResultFrame{}, err
-	}
-	created, err := client.call(ctx, "session/new", map[string]any{"cwd": req.Cwd, "mcpServers": acpMCPServers(cfg), "_meta": map[string]any{"octodeckSessionId": req.Input.SessionID, "runId": req.RunID}})
+	initResult, err := client.call(ctx, "initialize", map[string]any{"protocolVersion": 1, "clientInfo": map[string]any{"name": "octodeck-daemon", "version": daemonVersion}})
 	if err != nil {
 		_ = stdin.Close()
 		_ = cmd.Wait()
@@ -1431,7 +1515,34 @@ func (a *acpAdapter) runACPAgent(ctx context.Context, cfg *Config, req *AgentRun
 		<-logDone
 		return AgentRunResultFrame{}, err
 	}
-	sessionID = acpSessionIDFromResult(created, req.Input.SessionID)
+	mcpServers := acpMCPServers(cfg, req.Env)
+	if req.Input.SessionID != "" {
+		// The daemon starts a fresh ACP process for each OctoDeck turn. For
+		// continuity across processes we must load the persisted ACP session first;
+		// session/resume is only a fallback for agents that support reconnecting to
+		// an already-live session.
+		if acpSupportsLoadSession(initResult) {
+			if _, err := callACPSessionMethod(ctx, client, "session/load", req.Cwd, req.Input.SessionID, mcpServers, map[string]any{"runId": req.RunID}); err == nil {
+				sessionID = req.Input.SessionID
+			}
+		}
+		if sessionID == "" && acpSupportsSessionResume(initResult) {
+			if _, err := callACPSessionMethod(ctx, client, "session/resume", req.Cwd, req.Input.SessionID, mcpServers, map[string]any{"runId": req.RunID}); err == nil {
+				sessionID = req.Input.SessionID
+			}
+		}
+	}
+	if sessionID == "" {
+		created, err := callACPSessionMethod(ctx, client, "session/new", req.Cwd, "", mcpServers, map[string]any{"octodeckSessionId": req.Input.SessionID, "runId": req.RunID})
+		if err != nil {
+			_ = stdin.Close()
+			_ = cmd.Wait()
+			<-readDone
+			<-logDone
+			return AgentRunResultFrame{}, err
+		}
+		sessionID = acpSessionIDFromResult(created, "")
+	}
 	if sessionID == "" {
 		sessionID = req.RunID
 	}
@@ -1464,6 +1575,33 @@ func (a *acpAdapter) runACPAgent(ctx context.Context, cfg *Config, req *AgentRun
 		errPtr = &msg
 	}
 	return AgentRunResultFrame{OK: errPtr == nil, Result: finalText, Error: errPtr, SessionID: sessionID, Usage: finalUsage, TimedOut: timedOut, DurationMs: time.Since(started).Milliseconds()}, nil
+}
+
+func callACPSessionMethod(ctx context.Context, client *acpClient, method, cwd, sessionID string, mcpServers map[string]any, meta map[string]any) (json.RawMessage, error) {
+	params := acpSessionParams(cwd, sessionID, mcpServers, meta)
+	result, err := client.call(ctx, method, params)
+	if err == nil || len(mcpServers) == 0 || !strings.Contains(strings.ToLower(err.Error()), "mcp") {
+		return result, err
+	}
+	// Some ACP bridges do not support per-session MCP server configuration. Retry
+	// without mcpServers instead of silently falling back to session/new, which
+	// would break OctoDeck session continuity.
+	params = acpSessionParams(cwd, sessionID, nil, meta)
+	return client.call(ctx, method, params)
+}
+
+func acpSessionParams(cwd, sessionID string, mcpServers map[string]any, meta map[string]any) map[string]any {
+	params := map[string]any{"cwd": cwd}
+	if sessionID != "" {
+		params["sessionId"] = sessionID
+	}
+	if len(mcpServers) > 0 {
+		params["mcpServers"] = mcpServers
+	}
+	if len(meta) > 0 {
+		params["_meta"] = meta
+	}
+	return params
 }
 
 func (c *acpClient) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
@@ -1608,6 +1746,36 @@ func acpSessionIDFromResult(raw json.RawMessage, fallback string) string {
 		}
 	}
 	return fallback
+}
+
+func acpSupportsLoadSession(raw json.RawMessage) bool {
+	var m map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	capabilities, _ := m["agentCapabilities"].(map[string]any)
+	if capabilities == nil {
+		return false
+	}
+	supported, _ := capabilities["loadSession"].(bool)
+	return supported
+}
+
+func acpSupportsSessionResume(raw json.RawMessage) bool {
+	var m map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	capabilities, _ := m["agentCapabilities"].(map[string]any)
+	if capabilities == nil {
+		return false
+	}
+	sessionCapabilities, _ := capabilities["sessionCapabilities"].(map[string]any)
+	if sessionCapabilities == nil {
+		return false
+	}
+	resume, ok := sessionCapabilities["resume"]
+	return ok && resume != nil
 }
 
 func acpTextFromResult(raw json.RawMessage) string {
@@ -1804,8 +1972,8 @@ func hasAnyKey(m map[string]any, keys ...string) bool {
 	return false
 }
 
-func acpMCPServers(cfg *Config) map[string]any {
-	server, err := buildAgentTeamMCPServerConfig(cfg)
+func acpMCPServers(cfg *Config, env ...map[string]string) map[string]any {
+	server, err := buildAgentTeamMCPServerConfig(cfg, env...)
 	if err != nil {
 		return nil
 	}
@@ -2019,17 +2187,23 @@ func pumpAgentStdout(ctx context.Context, r io.Reader, req *AgentRunRequestFrame
 			return
 		}
 		line := scanner.Text()
-		eventType, text, sessionID, payload := normalizeAgentJSONLine(line)
-		if text == "" && sessionID == "" && eventType == "log" {
-			continue
+		frames := normalizeAgentJSONLineFrames(line)
+		for _, frame := range frames {
+			if frame.Text == "" && frame.SessionID == "" && frame.EventType == "log" {
+				continue
+			}
+			if !allowAgentBytes(sent, int64(len(frame.Text)), req.MaxOutputBytes) {
+				continue
+			}
+			if frame.Text == "" && frame.SessionID != "" && frame.EventType == "log" {
+				frame.EventType = "session"
+			}
+			frame.Type = tAgentRunEvent
+			frame.RunID = req.RunID
+			frame.AgentID = req.AgentID
+			frame.At = formatTime(time.Now())
+			emit(frame)
 		}
-		if !allowAgentBytes(sent, int64(len(text)), req.MaxOutputBytes) {
-			continue
-		}
-		if text == "" && sessionID != "" {
-			eventType = "session"
-		}
-		emit(AgentRunEventFrame{Type: tAgentRunEvent, RunID: req.RunID, AgentID: req.AgentID, EventType: eventType, Text: text, SessionID: sessionID, Payload: payload, At: formatTime(time.Now())})
 	}
 }
 
@@ -2073,81 +2247,112 @@ func allowAgentBytes(sent *atomic.Int64, n, max int64) bool {
 }
 
 func normalizeAgentJSONLine(line string) (string, string, string, map[string]any) {
+	frames := normalizeAgentJSONLineFrames(line)
+	if len(frames) == 0 {
+		return "log", "", "", nil
+	}
+	frame := frames[0]
+	return frame.EventType, frame.Text, frame.SessionID, frame.Payload
+}
+
+func normalizeAgentJSONLineFrames(line string) []AgentRunEventFrame {
 	var evt map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &evt); err != nil {
-		return "log", "", "", nil
+		return []AgentRunEventFrame{{EventType: "log"}}
 	}
 	sessionID, _ := evt["session_id"].(string)
 	rawType, _ := evt["type"].(string)
 	if rawType == "thinking" || rawType == "reasoning" || rawType == "reasoning_delta" {
 		if text := firstString(evt, "thinking", "reasoning", "reason", "text", "content"); text != "" {
-			return "thinking_delta", text, sessionID, evt
+			return []AgentRunEventFrame{{EventType: "thinking_delta", Text: text, SessionID: sessionID, Payload: evt}}
 		}
 	}
 	if rawType == "tool_use" || rawType == "tool_call" || rawType == "tool_use_start" {
-		return "tool_call", "", sessionID, evt
+		return []AgentRunEventFrame{{EventType: "tool_call", SessionID: sessionID, Payload: evt}}
 	}
 	if rawType == "tool_result" || rawType == "tool_use_end" {
-		return "tool_result", "", sessionID, evt
+		return []AgentRunEventFrame{{EventType: "tool_result", SessionID: sessionID, Payload: evt}}
 	}
 	if rawType == "usage" {
-		return "usage", "", sessionID, evt
+		return []AgentRunEventFrame{{EventType: "usage", SessionID: sessionID, Payload: evt}}
 	}
 	if rawType == "permission_request" || rawType == "approval_request" {
-		return "permission_request", "", sessionID, evt
+		return []AgentRunEventFrame{{EventType: "permission_request", SessionID: sessionID, Payload: evt}}
 	}
 	if result, ok := evt["result"].(string); ok && result != "" {
-		return "text_delta", result, sessionID, evt
+		return []AgentRunEventFrame{{EventType: "text_delta", Text: result, SessionID: sessionID, Payload: evt}}
 	}
 	if text := firstString(evt, "thinking", "reasoning", "reason"); text != "" {
-		return "thinking_delta", text, sessionID, evt
+		return []AgentRunEventFrame{{EventType: "thinking_delta", Text: text, SessionID: sessionID, Payload: evt}}
 	}
 	if delta, ok := evt["delta"].(map[string]any); ok {
 		if thinking := firstString(delta, "thinking", "reasoning", "reason", "text"); thinking != "" {
-			return "thinking_delta", thinking, sessionID, evt
+			return []AgentRunEventFrame{{EventType: "thinking_delta", Text: thinking, SessionID: sessionID, Payload: evt}}
 		}
 		if role, _ := delta["role"].(string); role == "assistant" {
 			if content, _ := delta["content"].(string); content != "" {
-				return "text_delta", content, sessionID, evt
+				return []AgentRunEventFrame{{EventType: "text_delta", Text: content, SessionID: sessionID, Payload: evt}}
 			}
 		}
 	}
 	if msg, ok := evt["message"].(map[string]any); ok {
 		if content, ok := msg["content"].(string); ok && content != "" {
-			return "text_delta", content, sessionID, evt
+			return []AgentRunEventFrame{{EventType: "text_delta", Text: content, SessionID: sessionID, Payload: evt}}
 		}
 		if blocks, ok := msg["content"].([]any); ok {
-			var b strings.Builder
+			frames := make([]AgentRunEventFrame, 0, len(blocks))
 			for _, block := range blocks {
 				m, _ := block.(map[string]any)
 				typ, _ := m["type"].(string)
-				if typ == "tool_use" {
-					return "tool_call", "", sessionID, evt
+				payload := agentBlockPayload(evt, m)
+				if typ == "tool_use" || typ == "tool_call" || typ == "tool_use_start" {
+					frames = append(frames, AgentRunEventFrame{EventType: "tool_call", SessionID: sessionID, Payload: payload})
+					continue
 				}
-				if typ == "tool_result" {
-					return "tool_result", "", sessionID, evt
+				if typ == "tool_result" || typ == "tool_use_end" {
+					frames = append(frames, AgentRunEventFrame{EventType: "tool_result", SessionID: sessionID, Payload: payload})
+					continue
 				}
 				if typ == "thinking" || typ == "reasoning" {
 					if text := firstString(m, "thinking", "reasoning", "reason", "text", "content"); text != "" {
-						return "thinking_delta", text, sessionID, evt
+						frames = append(frames, AgentRunEventFrame{EventType: "thinking_delta", Text: text, SessionID: sessionID, Payload: payload})
+						continue
 					}
 				}
-				if typ == "text" {
+				if typ == "text" || typ == "output_text" || typ == "assistant" {
 					if text, _ := m["text"].(string); text != "" {
-						b.WriteString(text)
+						frames = append(frames, AgentRunEventFrame{EventType: "text_delta", Text: text, SessionID: sessionID, Payload: payload})
 					}
 				}
 			}
-			if b.Len() > 0 {
-				return "text_delta", b.String(), sessionID, evt
+			if len(frames) > 0 {
+				return frames
 			}
 		}
 	}
 	if usage, ok := evt["usage"].(map[string]any); ok {
 		evt["usage"] = usage
-		return "usage", "", sessionID, evt
+		return []AgentRunEventFrame{{EventType: "usage", SessionID: sessionID, Payload: evt}}
 	}
-	return "log", "", sessionID, evt
+	return []AgentRunEventFrame{{EventType: "log", SessionID: sessionID, Payload: evt}}
+}
+
+func agentBlockPayload(evt map[string]any, block map[string]any) map[string]any {
+	payload := make(map[string]any, len(block)+4)
+	for k, v := range block {
+		payload[k] = v
+	}
+	if sessionID, ok := evt["session_id"].(string); ok && sessionID != "" {
+		payload["session_id"] = sessionID
+	}
+	if msgUUID, ok := evt["uuid"].(string); ok && msgUUID != "" {
+		payload["message_uuid"] = msgUUID
+	}
+	if rawType, ok := evt["type"].(string); ok && rawType != "" {
+		payload["message_type"] = rawType
+	}
+	payload["rawEvent"] = evt
+	return payload
 }
 
 func firstString(m map[string]any, keys ...string) string {

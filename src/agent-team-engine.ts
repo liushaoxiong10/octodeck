@@ -453,8 +453,51 @@ async function executePipeline(
         state,
         result.error || result.result,
       );
-    if (isStructuredFailure(result.result) && feedbackUsed < maxFeedbackIterations) {
-      return summarize(team, 'error', roleResults, events, state, result.result);
+    if (isStructuredFailure(result.result)) {
+      if (feedbackUsed >= maxFeedbackIterations) {
+        return summarize(team, 'error', roleResults, events, state, result.result);
+      }
+      const target = team.roles[index - 1];
+      if (!target) {
+        return summarize(team, 'error', roleResults, events, state, result.result);
+      }
+      feedbackUsed += 1;
+      events.push({
+        kind: 'feedback',
+        fromRoleId: role.id,
+        toRoleId: target.id,
+        label: result.result,
+      });
+      const recovery = await runRole(
+        team,
+        target,
+        input.prompt,
+        'work',
+        roleResults,
+        runner,
+        result.result,
+        state,
+      );
+      roleResults.push(recovery);
+      events.push({ kind: 'role', roleId: target.id, phase: recovery.phase });
+      if (recovery.status === 'error') {
+        return summarize(team, 'error', roleResults, events, state, recovery.error || recovery.result);
+      }
+      const retry = await runRole(
+        team,
+        role,
+        input.prompt,
+        phase,
+        roleResults,
+        runner,
+        recovery.result,
+        state,
+      );
+      roleResults.push(retry);
+      events.push({ kind: 'role', roleId: role.id, phase: retry.phase });
+      if (retry.status === 'error' || isStructuredFailure(retry.result)) {
+        return summarize(team, 'error', roleResults, events, state, retry.error || retry.result);
+      }
     }
   }
 
@@ -995,7 +1038,7 @@ function parseRouteTarget(
 
 function isStructuredFailure(result: string): boolean {
   const jsonText = extractJsonObject(result);
-  if (!jsonText) return false;
+  if (!jsonText) return isPlainTextFailure(result);
   try {
     const parsed = JSON.parse(jsonText) as Record<string, unknown>;
     const status = String(parsed.status ?? parsed.resultStatus ?? '').toLowerCase();
@@ -1003,8 +1046,21 @@ function isStructuredFailure(result: string): boolean {
     if (parsed.success === false || parsed.ok === false) return true;
     return false;
   } catch {
-    return false;
+    return isPlainTextFailure(result);
   }
+}
+
+function isPlainTextFailure(result: string): boolean {
+  const normalized = result.trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    /^fail(?:ed|ure)?\b/.test(normalized) ||
+    normalized.includes('needs revision') ||
+    normalized.includes('need revision') ||
+    normalized.includes('需要返工') ||
+    normalized.includes('测试不通过') ||
+    normalized.includes('不通过')
+  );
 }
 
 function parseRouteDecision(

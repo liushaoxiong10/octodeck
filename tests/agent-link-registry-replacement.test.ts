@@ -93,7 +93,7 @@ describe('agent-link registry replacement handling', () => {
     expect(session.send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'daemon.update.request',
-        latestVersion: 'octodeck-daemon/1.0.4',
+        latestVersion: 'octodeck-daemon/1.0.8',
         currentVersion: 'octodeck-daemon/1.0.3',
       }),
     );

@@ -1,13 +1,22 @@
 import { useState, useMemo, useEffect } from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
-import { Plus, PanelLeftClose, Bug, LogOut, UserCog } from 'lucide-react';
+import { Plus, PanelLeftClose, Bug, LogOut, UserCog, Cloud, Monitor, Cpu, AlertTriangle } from 'lucide-react';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { useBillingStore } from '../../stores/billing';
 import { useGroupsStore } from '../../stores/groups';
+import { useReposStore } from '../../stores/repos';
 import { useClearWorkspace } from '../../hooks/useClearWorkspace';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/common';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { EmojiAvatar } from '../common/EmojiAvatar';
 import { BugReportDialog } from '../common/BugReportDialog';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -46,17 +55,47 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
   const [renameState, setRenameState] = useState({ open: false, jid: '', name: '' });
   const [deleteState, setDeleteState] = useState({ open: false, jid: '', name: '' });
   const [deleteLoading, setDeleteLoading] = useState(false);
-  const { clearState, clearLoading, openClear, closeClear, handleClearConfirm } = useClearWorkspace();
+  const [repoVisibilityState, setRepoVisibilityState] = useState<{
+    open: boolean;
+    jid: string;
+    name: string;
+    mode: 'all' | 'selected';
+    ids: string[];
+  }>({ open: false, jid: '', name: '', mode: 'all', ids: [] });
+  const [repoVisibilitySaving, setRepoVisibilitySaving] = useState(false);
+  const {
+    clearState,
+    clearLoading,
+    openClear,
+    closeClear,
+    handleClearConfirm,
+    canSelectResetAgent,
+    devices: resetDevices,
+    selectableAgentBackends: resetAgentOptions,
+    resetRuntimeProfile,
+    setResetRuntimeProfile,
+    resetExecutionNode,
+    setResetExecutionNode,
+    resetAgentBackendId,
+    setResetAgentBackendId,
+  } = useClearWorkspace();
 
   const {
     groups, currentGroup, selectGroup, loadGroups, loading,
-    deleteFlow, togglePin,
+    deleteFlow, togglePin, updateGroupConfig,
   } = useChatStore();
   const runnerStates = useGroupsStore((s) => s.runnerStates);
+  const repos = useReposStore((s) => s.repos);
+  const reposLoading = useReposStore((s) => s.loading);
+  const loadRepos = useReposStore((s) => s.load);
 
   useEffect(() => {
     if (isChatRoute) loadGroups();
   }, [isChatRoute, loadGroups]);
+
+  useEffect(() => {
+    if (repoVisibilityState.open) void loadRepos();
+  }, [repoVisibilityState.open, loadRepos]);
 
   const { mainGroup, otherGroups } = useMemo(() => {
     let main: GroupEntry | null = null;
@@ -85,6 +124,48 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
 
   const handleGroupSelect = (jid: string, folder: string) => { selectGroup(jid); navigate(`/chat/${folder}`); };
   const handleCreated = (jid: string, folder: string) => { selectGroup(jid); navigate(`/chat/${folder}`); };
+
+  const openRepoVisibility = (jid: string, name: string) => {
+    const group = groups[jid];
+    setRepoVisibilityState({
+      open: true,
+      jid,
+      name,
+      mode: group?.visible_repo_mode ?? 'all',
+      ids: group?.visible_repo_ids ?? [],
+    });
+  };
+
+  const closeRepoVisibility = () => {
+    if (repoVisibilitySaving) return;
+    setRepoVisibilityState({ open: false, jid: '', name: '', mode: 'all', ids: [] });
+  };
+
+  const toggleVisibleRepo = (repoId: string) => {
+    setRepoVisibilityState((state) => ({
+      ...state,
+      ids: state.ids.includes(repoId)
+        ? state.ids.filter((id) => id !== repoId)
+        : [...state.ids, repoId],
+    }));
+  };
+
+  const handleRepoVisibilitySave = async () => {
+    const { jid, mode, ids } = repoVisibilityState;
+    if (!jid) return;
+    setRepoVisibilitySaving(true);
+    try {
+      const ok = await updateGroupConfig(jid, {
+        visible_repo_mode: mode,
+        visible_repo_ids: mode === 'selected' ? ids : [],
+      });
+      if (ok) {
+        setRepoVisibilityState({ open: false, jid: '', name: '', mode: 'all', ids: [] });
+      }
+    } finally {
+      setRepoVisibilitySaving(false);
+    }
+  };
 
   const handleDeleteConfirm = async () => {
     setDeleteLoading(true);
@@ -134,6 +215,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
             onClearHistory={openClear}
             onDelete={(jid, name) => setDeleteState({ open: true, jid, name })}
             onTogglePin={(jid) => togglePin(jid)}
+            onConfigureRepoVisibility={openRepoVisibility}
           />
         ))}
       </div>
@@ -250,6 +332,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
                           onSelect={handleGroupSelect}
                           onRename={(jid, name) => setRenameState({ open: true, jid, name })}
                           onClearHistory={openClear}
+                          onConfigureRepoVisibility={openRepoVisibility}
                         />
                       </div>
                     )}
@@ -272,6 +355,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
                             onClearHistory={openClear}
                             onDelete={(jid, name) => setDeleteState({ open: true, jid, name })}
                             onTogglePin={(jid) => togglePin(jid)}
+                            onConfigureRepoVisibility={openRepoVisibility}
                           />
                         ))}
                       </div>
@@ -313,7 +397,146 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
         <BugReportDialog open={showBugReport} onClose={() => setShowBugReport(false)} />
         <CreateContainerDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={handleCreated} />
         <RenameDialog open={renameState.open} jid={renameState.jid} currentName={renameState.name} onClose={() => setRenameState({ open: false, jid: '', name: '' })} />
-        <ConfirmDialog open={clearState.open} onClose={closeClear} onConfirm={handleClearConfirm} title="重建工作区" message={`确认重建「${clearState.name}」？会清除全部聊天记录、上下文、所有子对话及其消息，并删除工作目录文件。持久化目录 (data/extra/) 与定时任务本身保留。不可撤销。`} confirmText="确认重建" confirmVariant="danger" loading={clearLoading} />
+        <Dialog open={repoVisibilityState.open} onOpenChange={(open) => !open && closeRepoVisibility()}>
+          <DialogContent className="sm:max-w-xl">
+            <DialogHeader>
+              <DialogTitle>可见 Repo 配置</DialogTitle>
+              <DialogDescription>
+                配置「{repoVisibilityState.name}」中新 Device 会话可见的 Repo。修改后对新增会话生效；全部可见会在会话有新消息时自动带上新增 Repo。
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="grid gap-2">
+                <label className="flex items-start gap-3 rounded-lg border p-3 cursor-pointer hover:bg-accent/50 transition-colors">
+                  <input
+                    type="radio"
+                    name="repo_visibility_mode"
+                    checked={repoVisibilityState.mode === 'all'}
+                    onChange={() => setRepoVisibilityState((s) => ({ ...s, mode: 'all' }))}
+                    disabled={repoVisibilitySaving}
+                    className="mt-1 accent-primary"
+                  />
+                  <div>
+                    <div className="text-sm font-medium">全部可见</div>
+                    <p className="text-xs text-muted-foreground mt-0.5">该账号下所有托管 Repo 都会挂载到新会话，新添加的 Repo 会在下一次新消息触发时生效。</p>
+                  </div>
+                </label>
+                <label className="flex items-start gap-3 rounded-lg border p-3 cursor-pointer hover:bg-accent/50 transition-colors">
+                  <input
+                    type="radio"
+                    name="repo_visibility_mode"
+                    checked={repoVisibilityState.mode === 'selected'}
+                    onChange={() => setRepoVisibilityState((s) => ({ ...s, mode: 'selected' }))}
+                    disabled={repoVisibilitySaving}
+                    className="mt-1 accent-primary"
+                  />
+                  <div>
+                    <div className="text-sm font-medium">指定可见</div>
+                    <p className="text-xs text-muted-foreground mt-0.5">仅挂载下方选中的 Repo。</p>
+                  </div>
+                </label>
+              </div>
+              {repoVisibilityState.mode === 'selected' ? (
+                <div className="rounded-lg border">
+                  <div className="flex items-center justify-between border-b px-3 py-2">
+                    <span className="text-xs font-medium text-muted-foreground">Repo 列表</span>
+                    <span className="text-xs text-muted-foreground">已选 {repoVisibilityState.ids.length}</span>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto p-2 space-y-1">
+                    {reposLoading ? (
+                      <div className="px-2 py-6 text-center text-xs text-muted-foreground">加载中…</div>
+                    ) : repos.length === 0 ? (
+                      <div className="px-2 py-6 text-center text-xs text-muted-foreground">暂无 Repo，请先在 Repos 页面添加。</div>
+                    ) : (
+                      repos.map((repo) => (
+                        <label key={repo.id} className="flex items-start gap-3 rounded-md px-2 py-2 hover:bg-accent/50 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={repoVisibilityState.ids.includes(repo.id)}
+                            onChange={() => toggleVisibleRepo(repo.id)}
+                            disabled={repoVisibilitySaving}
+                            className="mt-1 accent-primary"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm font-medium truncate">{repo.name}</div>
+                            <div className="text-xs text-muted-foreground truncate">
+                              {repo.kind === 'git' ? repo.git_url : repo.device_path}
+                            </div>
+                          </div>
+                          <span className="text-[10px] rounded bg-muted px-1.5 py-0.5 text-muted-foreground flex-shrink-0">
+                            {repo.kind === 'git' ? 'Git' : 'Device'}
+                          </span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={closeRepoVisibility} disabled={repoVisibilitySaving}>取消</Button>
+              <Button onClick={handleRepoVisibilitySave} disabled={repoVisibilitySaving}>保存</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+        <ConfirmDialog open={clearState.open} onClose={closeClear} onConfirm={handleClearConfirm} title="重建工作区" message={`确认重建「${clearState.name}」？会清除全部聊天记录、上下文、所有子对话及其消息，并删除工作目录文件。持久化目录 (data/extra/) 与定时任务本身保留。不可撤销。`} confirmText="确认重建" confirmVariant="danger" loading={clearLoading}>
+          {canSelectResetAgent ? (
+            <div className="space-y-3">
+              <div>
+                <div className="text-xs font-medium text-muted-foreground mb-2">重建后使用的 Agent 配置</div>
+                <div className="space-y-2">
+                  <label className="flex items-start gap-3 p-2 rounded-lg border cursor-pointer hover:bg-accent/50 transition-colors">
+                    <input type="radio" name="reset_runtime_profile" checked={resetRuntimeProfile === 'server-agent'} onChange={() => { setResetRuntimeProfile('server-agent'); setResetExecutionNode(''); setResetAgentBackendId(''); }} disabled={clearLoading} className="mt-0.5 accent-primary" />
+                    <div>
+                      <div className="flex items-center gap-1.5"><Cloud className="w-4 h-4 text-muted-foreground" /><span className="text-sm font-medium">服务端 Agent</span><span className="text-xs text-primary font-medium">云端 SDK</span></div>
+                      <p className="text-xs text-muted-foreground mt-0.5">仅使用云端 Claude SDK 推理和云端 MCP/Skill。</p>
+                    </div>
+                  </label>
+                  <label className="flex items-start gap-3 p-2 rounded-lg border cursor-pointer hover:bg-accent/50 transition-colors">
+                    <input type="radio" name="reset_runtime_profile" checked={resetRuntimeProfile === 'server-agent-device-tools'} onChange={() => { setResetRuntimeProfile('server-agent-device-tools'); setResetAgentBackendId(''); }} disabled={clearLoading} className="mt-0.5 accent-primary" />
+                    <div>
+                      <div className="flex items-center gap-1.5"><Monitor className="w-4 h-4 text-muted-foreground" /><span className="text-sm font-medium">服务端 Agent + Device 执行</span></div>
+                      <p className="text-xs text-muted-foreground mt-0.5">Agent 在服务端运行，命令和文件工具转发到选中的 Device。</p>
+                    </div>
+                  </label>
+                  <label className="flex items-start gap-3 p-2 rounded-lg border cursor-pointer hover:bg-accent/50 transition-colors">
+                    <input type="radio" name="reset_runtime_profile" checked={resetRuntimeProfile === 'device-cli-agent'} onChange={() => setResetRuntimeProfile('device-cli-agent')} disabled={clearLoading} className="mt-0.5 accent-primary" />
+                    <div>
+                      <div className="flex items-center gap-1.5"><Cpu className="w-4 h-4 text-muted-foreground" /><span className="text-sm font-medium">Device CLI Agent</span></div>
+                      <p className="text-xs text-muted-foreground mt-0.5">Agent CLI 直接在选中的 Device 上运行并使用本地工具链。</p>
+                    </div>
+                  </label>
+                </div>
+              </div>
+              {resetRuntimeProfile !== 'server-agent' ? (
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground mb-1">执行 Device</label>
+                  <select value={resetExecutionNode} onChange={(e) => { setResetExecutionNode(e.target.value); setResetAgentBackendId(''); }} disabled={clearLoading} className="h-9 w-full px-3 text-sm border border-border rounded-md bg-background">
+                    <option value="" disabled>请选择 Device</option>
+                    {resetDevices.map((device) => (
+                      <option key={device.id} value={device.id} disabled={!device.online}>{device.online ? '🟢' : '⚪️'} {device.displayName} ({device.id}) · running {device.runningRuns?.length ?? 0}{device.online ? '' : ' · 离线'}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
+              {resetRuntimeProfile === 'device-cli-agent' && resetExecutionNode ? (
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground mb-1">Device Agent</label>
+                  <select value={resetAgentBackendId} onChange={(e) => setResetAgentBackendId(e.target.value)} disabled={clearLoading || resetAgentOptions.length === 0} className="h-9 w-full px-3 text-sm border border-border rounded-md bg-background">
+                    {resetAgentOptions.length === 0 ? <option value="">该 Device 暂无已定义 Agent，请先在 Agents 页面创建</option> : resetAgentOptions.map((backend) => <option key={backend.id} value={backend.id}>{backend.displayName || backend.id} · {backend.agentClientId} · {backend.id}</option>)}
+                  </select>
+                  <p className="text-xs text-muted-foreground mt-1">工作区会绑定到这个已定义 Agent，后续会使用它的模型、参数和会话能力。</p>
+                </div>
+              ) : null}
+              {resetRuntimeProfile !== 'server-agent' ? (
+                <div className="flex items-start gap-2 p-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg">
+                  <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                  <p className="text-xs text-amber-700 dark:text-amber-300">Device 执行形态下 Agent 可访问所选 Device 的文件系统和工具链，请谨慎使用。</p>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </ConfirmDialog>
         <ConfirmDialog open={deleteState.open} onClose={() => setDeleteState({ open: false, jid: '', name: '' })} onConfirm={handleDeleteConfirm} title="删除工作区" message={`确认删除「${deleteState.name}」？不可撤销。`} confirmText="删除" confirmVariant="danger" loading={deleteLoading} />
     </TooltipProvider>
   );

@@ -4,7 +4,7 @@ import { wsManager } from '../api/ws';
 import { useFileStore } from './files';
 import { useAuthStore } from './auth';
 import { showToast, notifyIfHidden, shouldEmitBackgroundTaskNotice, showNotificationPromptToast } from '../utils/toast';
-import { invalidateGroupCache } from '../utils/pwaCache';
+import { invalidateGroupCache, invalidateWorkspaceGroupCaches } from '../utils/pwaCache';
 import {
   deleteAgentMessageSnapshot,
   deleteGroupMessageSnapshots,
@@ -229,6 +229,8 @@ interface ChatState {
   pendingThinkingDuration: Record<string, number>;
   /** Per-group lock: true while clearHistory is in-flight, prevents race re-injection */
   clearing: Record<string, boolean>;
+  /** Monotonic clear generation; async message loads started before a clear are discarded. */
+  clearEpoch: Record<string, number>;
   // Sub-agent state
   agents: Record<string, AgentInfo[]>;              // jid → agents
   agentStreaming: Record<string, StreamingState>;    // agentId → streaming state
@@ -258,8 +260,8 @@ interface ChatState {
   resetSession: (jid: string, agentId?: string) => Promise<boolean>;
   clearHistory: (jid: string) => Promise<boolean>;
   deleteMessage: (jid: string, messageId: string) => Promise<boolean>;
-  createFlow: (name: string, options?: { runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent'; device_link_id?: string; agent_client_id?: string; backend?: string; execution_mode?: 'container' | 'host'; execution_node?: string; custom_cwd?: string; repo_id?: string; repo_git_url?: string; repo_device_path?: string; init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
-  updateGroupConfig: (jid: string, patch: Partial<Pick<GroupInfo, 'runtime_profile' | 'device_link_id' | 'agent_client_id' | 'agent_model' | 'execution_mode' | 'backend' | 'execution_node'>>) => Promise<boolean>;
+  createFlow: (name: string, options?: { runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent'; device_link_id?: string; agent_client_id?: string; backend?: string; execution_mode?: 'container' | 'host'; execution_node?: string; custom_cwd?: string; repo_id?: string; repo_git_url?: string; repo_device_path?: string; visible_repo_mode?: 'all' | 'selected'; visible_repo_ids?: string[]; init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
+  updateGroupConfig: (jid: string, patch: Partial<Pick<GroupInfo, 'runtime_profile' | 'agent_model' | 'execution_mode' | 'visible_repo_mode' | 'visible_repo_ids'>> & { device_link_id?: string | null; agent_client_id?: string | null; backend?: string | null; execution_node?: string | null }) => Promise<boolean>;
   renameFlow: (jid: string, name: string) => Promise<void>;
   togglePin: (jid: string) => Promise<void>;
   deleteFlow: (jid: string) => Promise<void>;
@@ -1073,6 +1075,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingThinking: {},
   pendingThinkingDuration: {},
   clearing: {},
+  clearEpoch: {},
   agents: {},
   agentStreaming: {},
   // Active sub-conversation tab is mirrored from URL (?agent=...) by ChatView.
@@ -1128,6 +1131,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadMessages: async (jid: string, loadMore = false, sessionId?: string | null) => {
     const state = get();
+    if (state.clearing[jid]) return;
+    const epochAtStart = state.clearEpoch[jid] || 0;
     const existing = state.messages[jid] || [];
     const before = loadMore && existing.length > 0 ? existing[0].timestamp : undefined;
 
@@ -1137,6 +1142,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const data = await api.get<{ messages: Message[]; hasMore: boolean }>(
         `/api/groups/${encodeURIComponent(jid)}/messages?${params}`
       );
+      if (get().clearing[jid] || (get().clearEpoch[jid] || 0) !== epochAtStart) return;
       // Messages come in DESC order from API, reverse to chronological for display
       const sorted = [...data.messages].reverse();
       set((s) => {
@@ -1173,6 +1179,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (get().clearing[jid]) return;
 
     const state = get();
+    const epochAtStart = state.clearEpoch[jid] || 0;
     const existing = state.messages[jid] || [];
     const lastTs = existing.length > 0 ? existing[existing.length - 1].timestamp : undefined;
 
@@ -1188,6 +1195,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       // Re-check clearing lock after async fetch — clearHistory may have started mid-request
       if (get().clearing[jid]) return;
+      if ((get().clearEpoch[jid] || 0) !== epochAtStart) return;
 
       if (data.messages.length > 0) {
         // Messages from getMessagesAfter are already in ASC order
@@ -1443,54 +1451,94 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   clearHistory: async (jid: string) => {
     // Set clearing lock BEFORE the API call to block polling & WS injection
-    set((s) => ({ clearing: { ...s.clearing, [jid]: true } }));
+    set((s) => ({
+      clearing: { ...s.clearing, [jid]: true },
+      clearEpoch: { ...s.clearEpoch, [jid]: (s.clearEpoch[jid] || 0) + 1 },
+    }));
 
     try {
-      await api.post<{ success: boolean }>(
+      const result = await api.post<{
+        success: boolean;
+        affected_jids?: string[];
+        workspace_id?: string;
+        old_workspace_id?: string;
+      }>(
         `/api/groups/${encodeURIComponent(jid)}/clear-history`,
       );
+      const affectedJids = Array.from(new Set([jid, ...(result.affected_jids || [])]));
+
+      // Extend the clear lock/epoch to every sibling JID returned by the server.
+      // Home workspaces merge IM sibling messages; without this, a pending load
+      // for a sibling can reinsert messages that the backend has just archived.
+      set((s) => {
+        const nextClearing = { ...s.clearing };
+        const nextEpoch = { ...s.clearEpoch };
+        for (const affectedJid of affectedJids) {
+          nextClearing[affectedJid] = true;
+          if (affectedJid !== jid) {
+            nextEpoch[affectedJid] = (nextEpoch[affectedJid] || 0) + 1;
+          }
+        }
+        return { clearing: nextClearing, clearEpoch: nextEpoch };
+      });
 
       // Invalidate SW cache for this group so the next page load doesn't
       // serve a stale messages/agents response from before the clear (#467).
-      void invalidateGroupCache(jid);
-      void deleteGroupMessageSnapshots(jid);
+      void invalidateWorkspaceGroupCaches(affectedJids);
+      void Promise.allSettled(affectedJids.map((affectedJid) => deleteGroupMessageSnapshots(affectedJid)));
 
       set((s) => {
         // Delete the key entirely (not []==[]) so selectGroup/ChatView effect
         // will trigger loadMessages on re-entry
         const nextMessages = { ...s.messages };
-        delete nextMessages[jid];
+        for (const affectedJid of affectedJids) delete nextMessages[affectedJid];
         const nextStreaming = { ...s.streaming };
-        delete nextStreaming[jid];
-        const { [jid]: _pending, ...nextPendingThinking } = s.pendingThinking;
-        const { [jid]: _clearing, ...nextClearing } = s.clearing;
+        for (const affectedJid of affectedJids) delete nextStreaming[affectedJid];
+        const nextPendingThinking = { ...s.pendingThinking };
+        const nextPendingThinkingDuration = { ...s.pendingThinkingDuration };
+        const nextClearing = { ...s.clearing };
+        for (const affectedJid of affectedJids) {
+          delete nextPendingThinking[affectedJid];
+          delete nextPendingThinkingDuration[affectedJid];
+          delete nextClearing[affectedJid];
+        }
 
         // Collect sub-agent IDs that belonged to this workspace so we can
         // scrub their per-agent state — backend has deleted the agent rows
         // already, leaving these Maps orphaned otherwise.
-        const staleAgentIds = (s.agents[jid] || []).map((a) => a.id);
+        const staleAgentIds = affectedJids.flatMap((affectedJid) => (s.agents[affectedJid] || []).map((a) => a.id));
         const nextAgents = { ...s.agents };
-        delete nextAgents[jid];
+        for (const affectedJid of affectedJids) delete nextAgents[affectedJid];
         const nextAgentMessages = { ...s.agentMessages };
         const nextAgentStreaming = { ...s.agentStreaming };
         const nextAgentWaiting = { ...s.agentWaiting };
+        const nextAgentHasMore = { ...s.agentHasMore };
         for (const aid of staleAgentIds) {
           delete nextAgentMessages[aid];
           delete nextAgentStreaming[aid];
           delete nextAgentWaiting[aid];
+          delete nextAgentHasMore[aid];
         }
 
         // Reset UI-scoped state tied to this workspace jid.
         const nextDrafts = { ...s.drafts };
-        delete nextDrafts[jid];
         const nextActiveAgentTab = { ...s.activeAgentTab };
-        delete nextActiveAgentTab[jid];
+        const nextUnreadReplies = { ...s.unreadReplies };
+        const nextWaiting = { ...s.waiting };
+        const nextHasMore = { ...s.hasMore };
+        for (const affectedJid of affectedJids) {
+          delete nextDrafts[affectedJid];
+          delete nextActiveAgentTab[affectedJid];
+          delete nextUnreadReplies[affectedJid];
+          delete nextWaiting[affectedJid];
+          delete nextHasMore[affectedJid];
+        }
 
         // Purge SDK Task state that originated from this workspace.
         const nextSdkTasks = { ...s.sdkTasks };
         const droppedTaskKeys = new Set<string>();
         for (const [taskKey, info] of Object.entries(s.sdkTasks)) {
-          if (info.chatJid === jid) {
+          if (affectedJids.includes(info.chatJid)) {
             delete nextSdkTasks[taskKey];
             droppedTaskKeys.add(taskKey);
           }
@@ -1502,10 +1550,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         return {
           messages: nextMessages,
-          waiting: { ...s.waiting, [jid]: false },
-          hasMore: { ...s.hasMore, [jid]: false },
+          waiting: nextWaiting,
+          hasMore: nextHasMore,
           streaming: nextStreaming,
           pendingThinking: nextPendingThinking,
+          pendingThinkingDuration: nextPendingThinkingDuration,
           clearing: nextClearing,
           thinkingCache: retainThinkingCacheForMessages(
             nextMessages,
@@ -1519,8 +1568,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           agentMessages: nextAgentMessages,
           agentStreaming: nextAgentStreaming,
           agentWaiting: nextAgentWaiting,
+          agentHasMore: nextAgentHasMore,
           drafts: nextDrafts,
           activeAgentTab: nextActiveAgentTab,
+          unreadReplies: nextUnreadReplies,
           sdkTasks: nextSdkTasks,
           sdkTaskAliases: nextSdkTaskAliases,
           error: null,
@@ -1561,9 +1612,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  createFlow: async (name: string, options?: { runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent'; device_link_id?: string; agent_client_id?: string; backend?: string; execution_mode?: 'container' | 'host'; execution_node?: string; custom_cwd?: string; repo_id?: string; repo_git_url?: string; repo_device_path?: string; init_source_path?: string; init_git_url?: string }) => {
+  createFlow: async (name: string, options?: { runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent'; device_link_id?: string; agent_client_id?: string; backend?: string; execution_mode?: 'container' | 'host'; execution_node?: string; custom_cwd?: string; repo_id?: string; repo_git_url?: string; repo_device_path?: string; visible_repo_mode?: 'all' | 'selected'; visible_repo_ids?: string[]; init_source_path?: string; init_git_url?: string }) => {
     try {
-      const body: Record<string, string> = { name };
+      const body: Record<string, unknown> = { name };
       if (options?.runtime_profile) body.runtime_profile = options.runtime_profile;
       if (options?.device_link_id) body.device_link_id = options.device_link_id;
       if (options?.agent_client_id) body.agent_client_id = options.agent_client_id;
@@ -1574,6 +1625,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (options?.repo_id) body.repo_id = options.repo_id;
       if (options?.repo_git_url) body.repo_git_url = options.repo_git_url;
       if (options?.repo_device_path) body.repo_device_path = options.repo_device_path;
+      if (options?.visible_repo_mode) body.visible_repo_mode = options.visible_repo_mode;
+      if (options?.visible_repo_ids) body.visible_repo_ids = options.visible_repo_ids;
       if (options?.init_source_path) body.init_source_path = options.init_source_path;
       if (options?.init_git_url) body.init_git_url = options.init_git_url;
 
@@ -1606,12 +1659,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => {
         const group = s.groups[jid];
         if (!group) return { error: null } as Partial<ChatState>;
+        const { device_link_id, agent_client_id, backend, execution_node, ...restPatch } = patch;
+        const normalizedPatch: Partial<GroupInfo> = {
+          ...restPatch,
+          ...(device_link_id !== undefined ? { device_link_id: device_link_id ?? undefined } : {}),
+          ...(agent_client_id !== undefined ? { agent_client_id: agent_client_id ?? undefined } : {}),
+          ...(backend !== undefined ? { backend: backend ?? undefined } : {}),
+          ...(execution_node !== undefined ? { execution_node: execution_node ?? undefined } : {}),
+        };
         return {
           groups: {
             ...s.groups,
             [jid]: {
               ...group,
-              ...patch,
+              ...normalizedPatch,
             },
           },
           error: null,

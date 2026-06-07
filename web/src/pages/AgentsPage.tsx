@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Bot,
@@ -42,14 +42,18 @@ import { useIssuesStore, type WorkspaceIssue } from '../stores/issues';
 import {
   useAgentTeamsStore,
   type AgentMdStoreEntry,
+  type AgentMdReference,
   type AgentTeam,
   type AgentTeamApproval,
+  type AgentTeamBlackboardEntry,
   type AgentTeamCheckpoint,
   type AgentTeamExecutionResult,
+  type AgentTeamGenerationJob,
   type AgentTeamRole,
   type AgentTeamRoleAssignment,
   type AgentTeamRun,
   type AgentTeamShape,
+  type AgentTeamTaskView,
 } from '../stores/agentTeams';
 import CustomBackendFormDialog from '../components/settings/CustomBackendFormDialog';
 import type { BackendInfo, SystemSettings } from '../components/settings/types';
@@ -408,7 +412,9 @@ export function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [activeSection, setActiveSection] = useState<AgentSectionName>(
-    queryTeamId || queryRunId ? 'Agent Team' : (hashAnchor.section ?? 'Agent 管理'),
+    queryTeamId || queryRunId
+      ? 'Agent Team'
+      : (hashAnchor.section ?? 'Agent 管理'),
   );
   const [activeModule, setActiveModule] =
     useState<AgentModuleName>('Instructions');
@@ -608,10 +614,7 @@ export function AgentsPage() {
     : [];
 
   const loadAgentSkills = async (agent = selectedAgent) => {
-    if (
-      !agent?.custom?.deviceLinkId ||
-      !agent.custom.agentClientId
-    ) {
+    if (!agent?.custom?.deviceLinkId || !agent.custom.agentClientId) {
       setAgentSkills(null);
       setAgentSkillsError(null);
       return;
@@ -707,14 +710,6 @@ export function AgentsPage() {
     } finally {
       setRemoving(null);
     }
-  };
-
-  const toggleAllowed = (id: string, checked: boolean) => {
-    if (id === defaultBackend) return;
-    setAllowedBackends((prev) => {
-      if (checked) return prev.includes(id) ? prev : [...prev, id];
-      return prev.filter((x) => x !== id);
-    });
   };
 
   return (
@@ -885,8 +880,6 @@ export function AgentsPage() {
                       selectedDevice={selectedDeviceOrNull}
                       selectedClient={selectedClient}
                       defaultBackend={defaultBackend}
-                      allowedBackends={allowedBackends}
-                      toggleAllowed={toggleAllowed}
                       onSetDefault={handleSetDefaultAgent}
                       onEdit={handleEdit}
                       onDelete={handleDelete}
@@ -908,11 +901,8 @@ export function AgentsPage() {
                       agentSkillsError={agentSkillsError}
                       onReloadAgentSkills={() => loadAgentSkills(selectedAgent)}
                       defaultBackend={defaultBackend}
-                      allowedBackends={allowedBackends}
-                      toggleAllowed={toggleAllowed}
                       onSetDefault={handleSetDefaultAgent}
                       saving={saving}
-                      onSave={() => handleSave()}
                     />
                   </>
                 ) : (
@@ -962,8 +952,6 @@ function AgentSummary({
   selectedDevice,
   selectedClient,
   defaultBackend,
-  allowedBackends,
-  toggleAllowed,
   onSetDefault,
   onEdit,
   onDelete,
@@ -973,8 +961,6 @@ function AgentSummary({
   selectedDevice: AgentLink | null;
   selectedClient: AgentLink['agentClients'][number] | undefined;
   defaultBackend: string;
-  allowedBackends: string[];
-  toggleAllowed: (id: string, checked: boolean) => void;
   onSetDefault: (id: string) => void;
   onEdit: (backend: CustomBackendDef) => void;
   onDelete: (backend: CustomBackendDef) => void;
@@ -1069,17 +1055,6 @@ function AgentSummary({
               : ''}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-2 rounded-full border border-border px-3 py-1.5 text-xs">
-              <input
-                type="checkbox"
-                checked={allowedBackends.includes(agent.id)}
-                disabled={agent.id === defaultBackend}
-                onChange={(event) =>
-                  toggleAllowed(agent.id, event.target.checked)
-                }
-              />
-              允许使用
-            </label>
             <Button
               variant={agent.id === defaultBackend ? 'secondary' : 'outline'}
               size="sm"
@@ -1110,11 +1085,8 @@ function AgentModuleTabs({
   agentSkillsError,
   onReloadAgentSkills,
   defaultBackend,
-  allowedBackends,
-  toggleAllowed,
   onSetDefault,
   saving,
-  onSave,
 }: {
   activeModule: AgentModuleName;
   setActiveModule: (module: AgentModuleName) => void;
@@ -1130,11 +1102,8 @@ function AgentModuleTabs({
   agentSkillsError: string | null;
   onReloadAgentSkills: () => void;
   defaultBackend: string;
-  allowedBackends: string[];
-  toggleAllowed: (id: string, checked: boolean) => void;
   onSetDefault: (id: string) => void;
   saving: boolean;
-  onSave: () => void;
 }) {
   return (
     <Card className="overflow-hidden border-border/80 bg-background/95">
@@ -1203,11 +1172,8 @@ function AgentModuleTabs({
               agentSkillsError,
               onReloadAgentSkills,
               defaultBackend,
-              allowedBackends,
-              toggleAllowed,
               onSetDefault,
               saving,
-              onSave,
             })}
           </div>
         </div>
@@ -1230,11 +1196,8 @@ function renderModuleContent(args: {
   agentSkillsError: string | null;
   onReloadAgentSkills: () => void;
   defaultBackend: string;
-  allowedBackends: string[];
-  toggleAllowed: (id: string, checked: boolean) => void;
   onSetDefault: (id: string) => void;
   saving: boolean;
-  onSave: () => void;
 }) {
   const {
     module,
@@ -1344,7 +1307,9 @@ function renderModuleContent(args: {
                   </div>
                   <div className="mt-1 text-[11px] text-muted-foreground">
                     Issue · {issue.status} · {issue.priority}
-                    {issue.last_run_at ? ` · ${formatDateTime(issue.last_run_at)}` : ''}
+                    {issue.last_run_at
+                      ? ` · ${formatDateTime(issue.last_run_at)}`
+                      : ''}
                   </div>
                 </a>
               ))}
@@ -1384,7 +1349,8 @@ function renderModuleContent(args: {
         </div>
       ) : (
         <EmptyText>
-          暂无直接关联任务或 Issue run；创建 Issue 并选择这个 Agent 运行后会显示在这里。
+          暂无直接关联任务或 Issue run；创建 Issue 并选择这个 Agent
+          运行后会显示在这里。
         </EmptyText>
       );
     case 'Args':
@@ -1454,6 +1420,7 @@ function renderModuleContent(args: {
                 size="sm"
                 className="w-full justify-start"
                 onClick={() => args.onSetDefault(agent.id)}
+                disabled={args.saving}
               >
                 <CheckCircle2 className="size-4" />
                 {agent.id === args.defaultBackend
@@ -1461,30 +1428,6 @@ function renderModuleContent(args: {
                   : '设为默认 Agent'}
               </Button>
             </div>
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={args.allowedBackends.includes(agent.id)}
-                disabled={agent.id === args.defaultBackend}
-                onChange={(event) =>
-                  args.toggleAllowed(agent.id, event.target.checked)
-                }
-              />
-              加入允许列表
-            </label>
-            <Button
-              size="sm"
-              onClick={args.onSave}
-              disabled={args.saving}
-              className="w-full"
-            >
-              {args.saving ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Save className="size-4" />
-              )}
-              保存全局 Agent 设置
-            </Button>
           </div>
         </div>
       );
@@ -1541,6 +1484,33 @@ function Pill({
   );
 }
 
+function isActiveAgentTeamRunStatus(status: AgentTeamRun['status']): boolean {
+  return (
+    status === 'running' || status === 'waiting_approval' || status === 'paused'
+  );
+}
+
+function runStatusTone(
+  status: AgentTeamRun['status'],
+): 'muted' | 'green' | 'red' | 'blue' {
+  if (status === 'success') return 'green';
+  if (status === 'error' || status === 'cancelled') return 'red';
+  return 'blue';
+}
+
+function taskStatusTone(status: string): 'muted' | 'green' | 'red' | 'blue' {
+  if (status === 'success') return 'green';
+  if (status === 'error' || status === 'cancelled') return 'red';
+  if (
+    status === 'running' ||
+    status === 'waiting_approval' ||
+    status === 'paused'
+  ) {
+    return 'blue';
+  }
+  return 'muted';
+}
+
 function EmptyText({ children }: { children: React.ReactNode }) {
   return (
     <div className="rounded-2xl border border-dashed border-border bg-muted/20 px-4 py-6 text-center text-xs text-muted-foreground">
@@ -1564,17 +1534,23 @@ function AgentTeamWorkspace({
 }) {
   const {
     teams,
+    agentMdDefinitions,
+    generationJobs,
     loading,
     saving,
     error,
     load,
+    loadGenerationJobs,
+    loadGenerationJob,
     loadAgentMdDefinitions,
     update,
     remove,
     createRun,
     listRuns,
     loadRun,
+    loadRunTasks,
     loadRunEvents,
+    loadRunBlackboard,
     loadRunApprovals,
     loadRunCheckpoints,
     decideRunApproval,
@@ -1597,26 +1573,158 @@ function AgentTeamWorkspace({
   const [runCheckpoints, setRunCheckpoints] = useState<AgentTeamCheckpoint[]>(
     [],
   );
+  const [runTasks, setRunTasks] = useState<AgentTeamTaskView[]>([]);
+  const [runBlackboard, setRunBlackboard] = useState<
+    AgentTeamBlackboardEntry[]
+  >([]);
+  const [runTraceEvents, setRunTraceEvents] = useState<
+    NonNullable<AgentTeamExecutionResult['traceEvents']>
+  >([]);
+  const [runObservabilityLoading, setRunObservabilityLoading] = useState(false);
+  const [runObservabilityUpdatedAt, setRunObservabilityUpdatedAt] = useState<
+    string | null
+  >(null);
   const [runHistory, setRunHistory] = useState<AgentTeamRun[]>([]);
   const [roleAssignments, setRoleAssignments] = useState<
     Record<string, AgentTeamRoleAssignment>
   >({});
-  const selectedTeam =
-    teams.find((team) => team.id === selectedTeamId) ?? teams[0] ?? null;
+  const [selectedGenerationJobId, setSelectedGenerationJobId] = useState<
+    string | null
+  >(null);
+  const pollGenerationJobsRef = useRef(new Set<string>());
+  const pendingGenerationJobs = generationJobs.filter(
+    (job) => job.status === 'running',
+  );
+  const selectedGenerationJob = selectedGenerationJobId
+    ? (generationJobs.find((job) => job.id === selectedGenerationJobId) ?? null)
+    : null;
+  const selectedTeam = selectedGenerationJob
+    ? null
+    : (teams.find((team) => team.id === selectedTeamId) ?? teams[0] ?? null);
   const defaultGenerator =
     agents.find((agent) => agent.id === defaultGeneratorId) ??
     agents[0] ??
     null;
   const executionAgents = agents.filter((agent) => agent.status !== 'disabled');
   const openCreateDialog = () => setCreateOpen(true);
+  const selectGenerationJob = (jobId: string) => {
+    setSelectedGenerationJobId(jobId);
+    setSelectedTeamId(null);
+    onSelectedTeamIdChange(undefined);
+  };
   const selectTeam = (teamId: string | null) => {
     setSelectedTeamId(teamId);
+    setSelectedGenerationJobId(null);
     onSelectedTeamIdChange(teamId ?? undefined);
   };
 
+  const resetRunObservability = useCallback(() => {
+    setActiveRun(null);
+    setApprovalCard(null);
+    setExecutionResult(null);
+    setRunCheckpoints([]);
+    setRunTasks([]);
+    setRunBlackboard([]);
+    setRunTraceEvents([]);
+    setRunObservabilityUpdatedAt(null);
+  }, []);
+
+  const refreshRunHistory = useCallback(async () => {
+    if (!selectedTeam) return;
+    setRunHistory(await listRuns({ teamId: selectedTeam.id }));
+  }, [listRuns, selectedTeam]);
+
+  const refreshRunObservability = useCallback(
+    async (runId: string, options: { silent?: boolean } = {}) => {
+      if (!options.silent) setRunObservabilityLoading(true);
+      try {
+        const [
+          freshRun,
+          approvals,
+          checkpoints,
+          traceEvents,
+          tasks,
+          blackboard,
+        ] = await Promise.all([
+          loadRun(runId),
+          loadRunApprovals(runId),
+          loadRunCheckpoints(runId),
+          loadRunEvents(runId),
+          loadRunTasks(runId),
+          loadRunBlackboard(runId),
+        ]);
+        setActiveRun(freshRun);
+        setApprovalCard(
+          approvals.find((approval) => approval.status === 'pending') ?? null,
+        );
+        setRunCheckpoints(checkpoints);
+        setRunTraceEvents(traceEvents);
+        setRunTasks(tasks);
+        setRunBlackboard(blackboard);
+        setRunObservabilityUpdatedAt(new Date().toISOString());
+        if (freshRun.finalResult || freshRun.error || traceEvents.length) {
+          setExecutionResult({
+            status: freshRun.status === 'success' ? 'success' : 'error',
+            finalResult: freshRun.finalResult ?? freshRun.error ?? '',
+            runId: freshRun.id,
+            traceId: freshRun.traceId,
+            roleResults: [],
+            events: [],
+            traceEvents,
+            error: freshRun.error,
+          });
+        } else {
+          setExecutionResult(null);
+        }
+        return freshRun;
+      } finally {
+        if (!options.silent) setRunObservabilityLoading(false);
+      }
+    },
+    [
+      loadRun,
+      loadRunApprovals,
+      loadRunBlackboard,
+      loadRunCheckpoints,
+      loadRunEvents,
+      loadRunTasks,
+    ],
+  );
+
   useEffect(() => {
-    void load().then(() => loadAgentMdDefinitions());
-  }, [load, loadAgentMdDefinitions]);
+    void load().then(() => {
+      void loadAgentMdDefinitions();
+      void loadGenerationJobs();
+    });
+  }, [load, loadAgentMdDefinitions, loadGenerationJobs]);
+
+  useEffect(() => {
+    const runningJobs = generationJobs.filter(
+      (job) => job.status === 'running',
+    );
+    if (runningJobs.length === 0) return;
+    const timer = window.setInterval(() => {
+      for (const job of runningJobs) {
+        void loadGenerationJob(job.id)
+          .then(async (freshJob) => {
+            if (freshJob.status === 'running') return;
+            if (pollGenerationJobsRef.current.has(freshJob.id)) return;
+            pollGenerationJobsRef.current.add(freshJob.id);
+            if (freshJob.status === 'success' && freshJob.team) {
+              await load();
+              await loadAgentMdDefinitions();
+              selectTeam(freshJob.team.id);
+              setSelectedGenerationJobId(null);
+              toast.success(`Agent Team「${freshJob.team.name}」已生成`);
+            } else if (freshJob.status === 'error') {
+              toast.error(freshJob.error || 'Agent Team 生成失败');
+            }
+          })
+          .catch(() => undefined);
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [generationJobs, load, loadAgentMdDefinitions, loadGenerationJob]);
 
   useEffect(() => {
     if (
@@ -1645,6 +1753,10 @@ function AgentTeamWorkspace({
   }, [initialSelectedRunId, activeRun?.id, loadRun]);
 
   useEffect(() => {
+    if (selectedGenerationJob) {
+      setEditingJson('');
+      return;
+    }
     if (selectedTeamId && teams.length === 0) return;
     if (!selectedTeam) {
       selectTeam(null);
@@ -1655,7 +1767,7 @@ function AgentTeamWorkspace({
       selectTeam(selectedTeam.id);
     }
     setEditingJson(JSON.stringify(toEditableTeam(selectedTeam), null, 2));
-  }, [selectedTeam?.id, selectedTeam?.updatedAt]);
+  }, [selectedGenerationJob?.id, selectedTeam?.id, selectedTeam?.updatedAt]);
 
   useEffect(() => {
     const preferred =
@@ -1681,6 +1793,7 @@ function AgentTeamWorkspace({
     if (!selectedTeam) {
       setRunHistory([]);
       setRoleAssignments({});
+      resetRunObservability();
       return;
     }
     void listRuns({ teamId: selectedTeam.id })
@@ -1695,12 +1808,27 @@ function AgentTeamWorkspace({
         ? current
         : next;
     });
-  }, [listRuns, selectedTeam?.id]);
+  }, [listRuns, resetRunObservability, selectedTeam?.id]);
 
-  const refreshRunHistory = async () => {
-    if (!selectedTeam) return;
-    setRunHistory(await listRuns({ teamId: selectedTeam.id }));
-  };
+  useEffect(() => {
+    if (!activeRun || !isActiveAgentTeamRunStatus(activeRun.status)) return;
+    const intervalMs = activeRun.status === 'running' ? 2000 : 5000;
+    const timer = window.setInterval(() => {
+      void refreshRunObservability(activeRun.id, { silent: true })
+        .then((freshRun) => {
+          if (!isActiveAgentTeamRunStatus(freshRun.status)) {
+            void refreshRunHistory();
+          }
+        })
+        .catch(() => undefined);
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [
+    activeRun?.id,
+    activeRun?.status,
+    refreshRunHistory,
+    refreshRunObservability,
+  ]);
 
   const updateRoleAssignment = (roleId: string, runnerAgentId: string) => {
     setRoleAssignments((current) => {
@@ -1734,12 +1862,28 @@ function AgentTeamWorkspace({
 
   const handleDelete = async () => {
     if (!selectedTeam) return;
+    const linkedAgentMdDefinitions = agentMdDefinitions.filter(
+      (definition) => definition.createdByTeamId === selectedTeam.id,
+    );
+    let deleteLinkedAgentMd = false;
+    if (linkedAgentMdDefinitions.length > 0) {
+      const linkedNames = linkedAgentMdDefinitions.map((definition) => `「${definition.name}」`).join('、');
+      deleteLinkedAgentMd = confirm(
+        `Agent Team「${selectedTeam.name}」生成了 ${linkedAgentMdDefinitions.length} 个 agent.md：${linkedNames}\n\n是否在删除 Team 时一并删除这些 agent.md？\n选择“取消”将只删除 Team，保留 agent.md。`,
+      );
+    }
     if (!confirm(`确认删除 Agent Team「${selectedTeam.name}」？`)) return;
     try {
-      await remove(selectedTeam.id);
+      await remove(selectedTeam.id, { deleteLinkedAgentMd });
       selectTeam(null);
-      toast.success('Agent Team 已删除');
+      toast.success(deleteLinkedAgentMd ? 'Agent Team 及关联 agent.md 已删除' : 'Agent Team 已删除');
     } catch (err) {
+      const refs = ((err as { body?: { references?: AgentMdReference[] } })?.body?.references ?? []);
+      if (refs.length > 0) {
+        const refText = refs.map((ref) => `• agent.md「${ref.agentMdName ?? ref.name}」被 ${ref.kind === 'team' ? 'Team' : 'Agent'}「${ref.name}」引用${ref.detail ? `（${ref.detail}）` : ''}`).join('\n');
+        toast.error(`关联 agent.md 仍被引用，无法联动删除：\n${refText}`);
+        return;
+      }
       toast.error(getErrorMessage(err, '删除 Agent Team 失败'));
     }
   };
@@ -1756,6 +1900,7 @@ function AgentTeamWorkspace({
       return;
     }
     try {
+      resetRunObservability();
       const response = await createRun(
         selectedTeam.id,
         prompt,
@@ -1765,6 +1910,7 @@ function AgentTeamWorkspace({
       const run = response.run;
       setActiveRun(run);
       setApprovalCard(response.approval ?? null);
+      setRunTraceEvents(response.execution?.traceEvents ?? []);
       setRunCheckpoints(
         response.checkpoint
           ? [response.checkpoint]
@@ -1789,6 +1935,7 @@ function AgentTeamWorkspace({
         setExecutionResult(null);
         toast.info('Agent Team 已暂停，等待审批');
       }
+      await refreshRunObservability(run.id, { silent: true });
       await refreshRunHistory();
     } catch (err) {
       toast.error(getErrorMessage(err, '执行 Agent Team 失败'));
@@ -1806,10 +1953,12 @@ function AgentTeamWorkspace({
       setActiveRun(response.run);
       setRunCheckpoints(await loadRunCheckpoints(response.run.id));
       if (response.execution) setExecutionResult(response.execution);
+      setRunTraceEvents(response.execution?.traceEvents ?? []);
       const approvals = await loadRunApprovals(response.run.id);
       setApprovalCard(
         approvals.find((approval) => approval.status === 'pending') ?? null,
       );
+      await refreshRunObservability(response.run.id, { silent: true });
       await refreshRunHistory();
       toast.success(
         decision === 'approved'
@@ -1829,6 +1978,7 @@ function AgentTeamWorkspace({
       setActiveRun(response.run);
       setApprovalCard(null);
       setRunCheckpoints(await loadRunCheckpoints(response.run.id));
+      await refreshRunObservability(response.run.id, { silent: true });
       await refreshRunHistory();
       toast.success('Run 已取消');
     } catch (err) {
@@ -1838,33 +1988,7 @@ function AgentTeamWorkspace({
 
   const handleSelectRunHistory = async (run: AgentTeamRun) => {
     try {
-      const [freshRun, approvals, checkpoints, traceEvents] = await Promise.all(
-        [
-          loadRun(run.id),
-          loadRunApprovals(run.id),
-          loadRunCheckpoints(run.id),
-          loadRunEvents(run.id),
-        ],
-      );
-      setActiveRun(freshRun);
-      setApprovalCard(
-        approvals.find((approval) => approval.status === 'pending') ?? null,
-      );
-      setRunCheckpoints(checkpoints);
-      if (freshRun.finalResult || freshRun.error) {
-        setExecutionResult({
-          status: freshRun.status === 'success' ? 'success' : 'error',
-          finalResult: freshRun.finalResult ?? freshRun.error ?? '',
-          runId: freshRun.id,
-          traceId: freshRun.traceId,
-          roleResults: [],
-          events: [],
-          traceEvents,
-          error: freshRun.error,
-        });
-      } else {
-        setExecutionResult(null);
-      }
+      await refreshRunObservability(run.id);
     } catch (err) {
       toast.error(getErrorMessage(err, '加载 Run 历史失败'));
     }
@@ -1881,6 +2005,9 @@ function AgentTeamWorkspace({
               </h3>
               <p className="mt-1 text-xs text-muted-foreground">
                 {teams.length} 个已保存 Team
+                {pendingGenerationJobs.length > 0
+                  ? ` · ${pendingGenerationJobs.length} 个生成中`
+                  : ''}
               </p>
             </div>
             <Button
@@ -1898,12 +2025,32 @@ function AgentTeamWorkspace({
               正在加载 Team…
             </div>
           ) : null}
-          {teams.length === 0 ? (
+          {teams.length === 0 && pendingGenerationJobs.length === 0 ? (
             <EmptyText>
               还没有 Agent Team。点击「创建 Team」开始生成。
             </EmptyText>
           ) : (
             <div className="space-y-2">
+              {pendingGenerationJobs.map((job) => (
+                <button
+                  key={job.id}
+                  type="button"
+                  onClick={() => selectGenerationJob(job.id)}
+                  className={`w-full rounded-xl border p-3 text-left transition ${selectedGenerationJob?.id === job.id ? 'border-primary bg-primary/5' : 'border-border bg-background/80 hover:bg-muted/40'}`}
+                >
+                  <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                    <Loader2 className="size-4 animate-spin text-primary" />
+                    <span className="truncate">正在生成 Team</span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    <Pill tone="blue">{shapeLabel(job.shape)}</Pill>
+                    <Pill tone="green">生成中</Pill>
+                  </div>
+                  <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                    {job.goal}
+                  </div>
+                </button>
+              ))}
               {teams.map((team) => (
                 <button
                   key={team.id}
@@ -1934,6 +2081,7 @@ function AgentTeamWorkspace({
 
         <AgentTeamPanel
           selectedTeam={selectedTeam}
+          selectedGenerationJob={selectedGenerationJob}
           editingJson={editingJson}
           executionPrompt={executionPrompt}
           selectedExecutionAgentId={selectedExecutionAgentId}
@@ -1942,6 +2090,11 @@ function AgentTeamWorkspace({
           activeRun={activeRun}
           approvalCard={approvalCard}
           runCheckpoints={runCheckpoints}
+          runTasks={runTasks}
+          runBlackboard={runBlackboard}
+          runTraceEvents={runTraceEvents}
+          runObservabilityLoading={runObservabilityLoading}
+          runObservabilityUpdatedAt={runObservabilityUpdatedAt}
           runHistory={runHistory}
           roleAssignments={roleAssignments}
           saving={saving}
@@ -1964,7 +2117,7 @@ function AgentTeamWorkspace({
         onOpenChange={setCreateOpen}
         agents={agents}
         defaultGeneratorId={defaultGenerator?.id ?? defaultGeneratorId}
-        onCreated={(team) => selectTeam(team.id)}
+        onSubmitted={(job) => selectGenerationJob(job.id)}
       />
     </div>
   );
@@ -1972,6 +2125,7 @@ function AgentTeamWorkspace({
 
 function AgentTeamPanel({
   selectedTeam,
+  selectedGenerationJob,
   editingJson,
   executionPrompt,
   selectedExecutionAgentId,
@@ -1980,6 +2134,11 @@ function AgentTeamPanel({
   activeRun,
   approvalCard,
   runCheckpoints,
+  runTasks,
+  runBlackboard,
+  runTraceEvents,
+  runObservabilityLoading,
+  runObservabilityUpdatedAt,
   runHistory,
   roleAssignments,
   saving,
@@ -1996,6 +2155,7 @@ function AgentTeamPanel({
   onDelete,
 }: {
   selectedTeam: AgentTeam | null;
+  selectedGenerationJob: AgentTeamGenerationJob | null;
   editingJson: string;
   executionPrompt: string;
   selectedExecutionAgentId: string;
@@ -2004,6 +2164,11 @@ function AgentTeamPanel({
   activeRun: AgentTeamRun | null;
   approvalCard: AgentTeamApproval | null;
   runCheckpoints: AgentTeamCheckpoint[];
+  runTasks: AgentTeamTaskView[];
+  runBlackboard: AgentTeamBlackboardEntry[];
+  runTraceEvents: NonNullable<AgentTeamExecutionResult['traceEvents']>;
+  runObservabilityLoading: boolean;
+  runObservabilityUpdatedAt: string | null;
   runHistory: AgentTeamRun[];
   roleAssignments: Record<string, AgentTeamRoleAssignment>;
   saving: boolean;
@@ -2033,6 +2198,9 @@ function AgentTeamPanel({
     selectedTeam?.roles.find((role) => role.id === selectedRoleId) ??
     selectedTeam?.roles[0] ??
     null;
+  const visibleTraceEvents = runTraceEvents.length
+    ? runTraceEvents
+    : (executionResult?.traceEvents ?? []);
 
   useEffect(() => {
     if (!selectedTeam) {
@@ -2383,6 +2551,164 @@ function AgentTeamPanel({
                 ))}
               </div>
             </div>
+            {activeRun ? (
+              <div className="mt-4 rounded-2xl border border-primary/20 bg-primary/5 p-4">
+                <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-primary">
+                      {runObservabilityLoading ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="size-4" />
+                      )}
+                      当前 Run
+                    </div>
+                    <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                      run: {activeRun.id} · trace: {activeRun.traceId}
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+                      <span>
+                        created: {formatDateTime(activeRun.createdAt)}
+                      </span>
+                      {activeRun.startedAt ? (
+                        <span>
+                          started: {formatDateTime(activeRun.startedAt)}
+                        </span>
+                      ) : null}
+                      {activeRun.completedAt ? (
+                        <span>
+                          completed: {formatDateTime(activeRun.completedAt)}
+                        </span>
+                      ) : null}
+                      {runObservabilityUpdatedAt ? (
+                        <span>
+                          refreshed: {formatDateTime(runObservabilityUpdatedAt)}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Pill tone={runStatusTone(activeRun.status)}>
+                      {activeRun.status}
+                    </Pill>
+                    <Pill tone="blue">{activeRun.workflowShape}</Pill>
+                    {isActiveAgentTeamRunStatus(activeRun.status) ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={onCancelRun}
+                        disabled={saving}
+                      >
+                        取消 Run
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+                <p className="text-xs leading-5 text-muted-foreground">
+                  运行中会自动刷新 Run
+                  状态、角色任务、黑板产物、审批、检查点和执行轨迹；轨迹事件可能在
+                  Run 完成后才完整出现。
+                </p>
+              </div>
+            ) : null}
+            {runTasks.length ? (
+              <div className="mt-4 rounded-xl border border-border bg-background/70 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="text-xs font-semibold text-muted-foreground">
+                    角色任务
+                  </div>
+                  <Pill>{runTasks.length}</Pill>
+                </div>
+                <div className="max-h-72 space-y-2 overflow-auto">
+                  {runTasks.map((task) => (
+                    <div
+                      key={task.id}
+                      className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-xs"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Pill tone={taskStatusTone(task.status)}>
+                          {task.status}
+                        </Pill>
+                        {task.roleId ? <span>{task.roleId}</span> : null}
+                        {task.phase ? <span>{task.phase}</span> : null}
+                        {task.actorId ? (
+                          <span className="font-mono text-muted-foreground">
+                            {task.actorId}
+                          </span>
+                        ) : null}
+                        <span className="text-muted-foreground">
+                          attempt {task.attempt}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+                        {task.startedAt ? (
+                          <span>started: {formatDateTime(task.startedAt)}</span>
+                        ) : null}
+                        {task.completedAt ? (
+                          <span>
+                            completed: {formatDateTime(task.completedAt)}
+                          </span>
+                        ) : null}
+                      </div>
+                      {task.error ? (
+                        <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap text-[11px] text-red-600 dark:text-red-400">
+                          {task.error}
+                        </pre>
+                      ) : task.output ? (
+                        <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap text-[11px] text-muted-foreground">
+                          {task.output}
+                        </pre>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : activeRun ? (
+              <div className="mt-4 rounded-xl border border-dashed border-border bg-muted/20 px-3 py-4 text-center text-xs text-muted-foreground">
+                Run 已创建，正在等待第一个角色任务写入…
+              </div>
+            ) : null}
+            {runBlackboard.length ? (
+              <div className="mt-4 rounded-xl border border-border bg-background/70 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="text-xs font-semibold text-muted-foreground">
+                    黑板产物
+                  </div>
+                  <Pill>{runBlackboard.length}</Pill>
+                </div>
+                <div className="max-h-72 space-y-2 overflow-auto">
+                  {runBlackboard.map((entry) => (
+                    <div
+                      key={entry.id}
+                      className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-xs"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Pill>{entry.kind}</Pill>
+                        <span className="font-mono text-foreground">
+                          {entry.key}
+                        </span>
+                        {entry.roleId ? (
+                          <span className="text-muted-foreground">
+                            {entry.roleId}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+                        <span>{entry.contentType}</span>
+                        <span>{formatDateTime(entry.createdAt)}</span>
+                      </div>
+                      <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-[11px] text-muted-foreground">
+                        {entry.value}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : activeRun ? (
+              <div className="mt-4 rounded-xl border border-dashed border-border bg-muted/20 px-3 py-4 text-center text-xs text-muted-foreground">
+                暂无黑板产物。角色完成后会在这里显示输出。
+              </div>
+            ) : null}
             {executionResult ? (
               <div className="mt-4 rounded-2xl border border-border bg-muted/20 p-4">
                 <div className="mb-2 flex items-center justify-between gap-2">
@@ -2415,13 +2741,13 @@ function AgentTeamPanel({
                 <pre className="max-h-64 overflow-auto whitespace-pre-wrap text-xs leading-5 text-foreground">
                   {executionResult.finalResult}
                 </pre>
-                {executionResult.traceEvents?.length ? (
+                {visibleTraceEvents.length ? (
                   <div className="mt-4 rounded-xl border border-border bg-background/70 p-3">
                     <div className="mb-2 text-xs font-semibold text-muted-foreground">
                       执行轨迹
                     </div>
                     <div className="max-h-52 space-y-2 overflow-auto">
-                      {executionResult.traceEvents.map((event) => (
+                      {visibleTraceEvents.map((event) => (
                         <div
                           key={event.spanId}
                           className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-xs"
@@ -2584,6 +2910,49 @@ function AgentTeamPanel({
           </div>
 
           <AgentTeamSuccessCriteria criteria={selectedTeam.successCriteria} />
+        </div>
+      ) : selectedGenerationJob ? (
+        <div className="space-y-4 p-4">
+          <div className="rounded-2xl border border-primary/30 bg-primary/5 p-4">
+            <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+              <Loader2 className="size-4 animate-spin text-primary" />
+              Agent Team 正在后台生成
+            </div>
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">
+              前端已提交生成任务，不会再卡在弹窗等待；生成完成后会自动刷新 Team
+              列表并打开新 Team。
+            </p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <AgentTeamPropertyCard
+              label="任务"
+              value="生成中"
+              hint={selectedGenerationJob.id}
+            />
+            <AgentTeamPropertyCard
+              label="Shape"
+              value={shapeLabel(selectedGenerationJob.shape)}
+              hint={selectedGenerationJob.shape}
+            />
+            <AgentTeamPropertyCard
+              label="Generator"
+              value={selectedGenerationJob.generatorAgentId}
+              hint="generatorAgentId"
+            />
+            <AgentTeamPropertyCard
+              label="提交时间"
+              value={formatDateTime(selectedGenerationJob.createdAt)}
+              hint={formatDateTime(selectedGenerationJob.updatedAt)}
+            />
+          </div>
+          <div className="rounded-2xl border border-border bg-muted/20 p-4">
+            <div className="text-xs font-medium text-muted-foreground">
+              目标 / Goal
+            </div>
+            <p className="mt-2 text-sm leading-6 text-foreground">
+              {selectedGenerationJob.goal}
+            </p>
+          </div>
         </div>
       ) : (
         <div className="p-4">
@@ -2874,20 +3243,20 @@ function AgentTeamCreateDialog({
   onOpenChange,
   agents,
   defaultGeneratorId,
-  onCreated,
+  onSubmitted,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   agents: AgentListItem[];
   defaultGeneratorId: string;
-  onCreated: (team: AgentTeam) => void;
+  onSubmitted: (job: AgentTeamGenerationJob) => void;
 }) {
   const { saving, generate } = useAgentTeamsStore();
   const [generatorAgentId, setGeneratorAgentId] = useState(defaultGeneratorId);
   const [goal, setGoal] = useState('');
   const [shape, setShape] = useState<AgentTeamShape>('auto');
-  const [generatedPreviewTeam, setGeneratedPreviewTeam] =
-    useState<AgentTeam | null>(null);
+  const [submittedJob, setSubmittedJob] =
+    useState<AgentTeamGenerationJob | null>(null);
   const generatorAgent =
     agents.find((agent) => agent.id === generatorAgentId) ?? agents[0] ?? null;
   const shapeMeta =
@@ -2896,7 +3265,7 @@ function AgentTeamCreateDialog({
   useEffect(() => {
     if (!open) return;
     setGeneratorAgentId(defaultGeneratorId);
-    setGeneratedPreviewTeam(null);
+    setSubmittedJob(null);
   }, [open, defaultGeneratorId]);
 
   if (!open) return null;
@@ -2912,14 +3281,15 @@ function AgentTeamCreateDialog({
       return;
     }
     try {
-      const team = await generate({
+      const job = await generate({
         generatorAgentId: generatorAgent.id,
         goal: trimmedGoal,
         shape,
       });
-      setGeneratedPreviewTeam(team);
-      onCreated(team);
-      toast.success('Agent Team 已生成，右侧已展示 Agent 返回结果');
+      setSubmittedJob(job);
+      onSubmitted(job);
+      onOpenChange(false);
+      toast.success('Agent Team 生成任务已提交，Team 列表中会显示生成中');
     } catch (err) {
       toast.error(getErrorMessage(err, '生成 Agent Team 失败'));
     }
@@ -2934,8 +3304,7 @@ function AgentTeamCreateDialog({
               创建 Team
             </h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              左侧填写生成参数，右侧展示 Agent 返回后的 Team 结果。现有 agent.md
-              简介会提供给模型。
+              左侧填写生成参数并提交后台任务。现有 agent.md 简介会提供给模型。
             </p>
           </div>
           <Button
@@ -2964,7 +3333,7 @@ function AgentTeamCreateDialog({
                 value={generatorAgent?.id ?? ''}
                 onChange={(event) => {
                   setGeneratorAgentId(event.target.value);
-                  setGeneratedPreviewTeam(null);
+                  setSubmittedJob(null);
                 }}
                 className="rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
               >
@@ -2983,7 +3352,7 @@ function AgentTeamCreateDialog({
                 value={goal}
                 onChange={(event) => {
                   setGoal(event.target.value);
-                  setGeneratedPreviewTeam(null);
+                  setSubmittedJob(null);
                 }}
                 className="min-h-36 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
                 placeholder="例如：完成一个从需求分析、前端实现到上线验证的功能开发团队"
@@ -3005,7 +3374,7 @@ function AgentTeamCreateDialog({
                         checked={shape === item.value}
                         onChange={() => {
                           setShape(item.value);
-                          setGeneratedPreviewTeam(null);
+                          setSubmittedJob(null);
                         }}
                       />
                       <span className="text-sm font-medium text-foreground">
@@ -3048,13 +3417,12 @@ function AgentTeamCreateDialog({
                   Team 预览
                 </h4>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  生成完成后这里会展示真实的 Team
-                  pipeline、角色、工作流和验收标准。
+                  提交后会立即返回，Team 列表中会出现“生成中”状态。
                 </p>
               </div>
               <Pill tone="blue">
-                {generatedPreviewTeam
-                  ? shapeLabel(generatedPreviewTeam.shape)
+                {submittedJob
+                  ? shapeLabel(submittedJob.shape)
                   : shapeMeta.label}
               </Pill>
             </div>
@@ -3062,25 +3430,30 @@ function AgentTeamCreateDialog({
               <div className="rounded-2xl border border-primary/30 bg-primary/5 p-4 text-sm text-foreground">
                 <div className="flex items-center gap-2 font-semibold">
                   <Loader2 className="size-4 animate-spin" />
-                  正在等待 Agent 返回 Team 定义…
+                  正在提交后台生成任务…
                 </div>
                 <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                  不会使用本地草稿兜底；返回后会在这里展示真实生成结果。
+                  提交成功后可关闭弹窗，Team 列表会显示生成中并自动刷新结果。
                 </p>
               </div>
-            ) : generatedPreviewTeam ? (
-              <GeneratedTeamPreview
-                team={generatedPreviewTeam}
-                requestedShape={shape}
-              />
+            ) : submittedJob ? (
+              <div className="rounded-2xl border border-primary/30 bg-primary/5 p-4 text-sm text-foreground">
+                <div className="flex items-center gap-2 font-semibold">
+                  <Loader2 className="size-4 animate-spin" />
+                  生成任务已提交
+                </div>
+                <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                  任务 ID：{submittedJob.id}。可以在 Team 列表中查看生成中状态。
+                </p>
+              </div>
             ) : (
               <div className="space-y-3 rounded-2xl border border-dashed border-border bg-muted/10 p-4">
                 <div className="text-sm font-semibold text-foreground">
-                  等待 Agent 生成结果
+                  等待提交后台任务
                 </div>
                 <p className="text-xs leading-5 text-muted-foreground">
-                  点击「生成 Team」后，系统会等待生成器 Agent 返回完整 Team
-                  定义；这里不会显示内置角色或本地模拟流程。
+                  点击「生成 Team」后，系统会把请求提交到后台；这里不会阻塞等待
+                  Agent 返回完整 Team 定义。
                 </p>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <div className="rounded-xl border border-border bg-background/80 p-3">
@@ -3297,6 +3670,12 @@ function AgentMdPanel({
       selectAgentMd(null);
       toast.success('agent.md 已删除');
     } catch (err) {
+      const refs = ((err as { body?: { references?: AgentMdReference[] } })?.body?.references ?? []);
+      if (refs.length > 0) {
+        const refText = refs.map((ref) => `• ${ref.kind === 'team' ? 'Team' : 'Agent'}「${ref.name}」${ref.detail ? `（${ref.detail}）` : ''}`).join('\n');
+        toast.error(`该 agent.md 正在被引用，不能删除：\n${refText}`);
+        return;
+      }
       toast.error(getErrorMessage(err, '删除 agent.md 失败'));
     }
   };
@@ -3336,7 +3715,8 @@ function AgentMdPanel({
         </p>
         {agentMdDefinitions.length === 0 ? (
           <EmptyText>
-            还没有 agent.md。点击「从商店添加」导入，或点击「新增定义」开始创建。
+            还没有
+            agent.md。点击「从商店添加」导入，或点击「新增定义」开始创建。
           </EmptyText>
         ) : (
           <div className="max-h-[calc(100vh-19rem)] space-y-2 overflow-y-auto pr-1">
@@ -3353,6 +3733,11 @@ function AgentMdPanel({
                 <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
                   {definition.summary}
                 </div>
+                {definition.createdByTeamName ? (
+                  <div className="mt-2 inline-flex rounded-full border border-primary/20 bg-primary/5 px-2 py-0.5 text-[11px] text-primary">
+                    Team 生成 · {definition.createdByTeamName}
+                  </div>
+                ) : null}
               </button>
             ))}
           </div>
@@ -3370,6 +3755,11 @@ function AgentMdPanel({
                 <p className="mt-1 text-xs text-muted-foreground">
                   最近更新：{formatDateTime(selected.updatedAt)}
                 </p>
+                {selected.createdByTeamName ? (
+                  <p className="mt-1 text-xs text-primary">
+                    由 Agent Team「{selected.createdByTeamName}」生成
+                  </p>
+                ) : null}
               </div>
               <div className="flex shrink-0 flex-wrap gap-2">
                 <Button size="sm" onClick={handleSave} disabled={saving}>
@@ -3432,7 +3822,9 @@ function AgentMdPanel({
           </div>
         ) : (
           <div className="flex min-h-80 items-center justify-center">
-            <EmptyText>选择左侧 agent.md 查看详情，或点击「新增定义」创建。</EmptyText>
+            <EmptyText>
+              选择左侧 agent.md 查看详情，或点击「新增定义」创建。
+            </EmptyText>
           </div>
         )}
       </main>
@@ -3449,7 +3841,8 @@ function AgentMdPanel({
             <DialogHeader>
               <DialogTitle>新增 agent.md 定义</DialogTitle>
               <DialogDescription>
-                填写名称、简介和 agent.md 内容。创建后会自动选中并在右侧继续编辑。
+                填写名称、简介和 agent.md
+                内容。创建后会自动选中并在右侧继续编辑。
               </DialogDescription>
             </DialogHeader>
             <label className="grid gap-1.5">
@@ -3459,7 +3852,10 @@ function AgentMdPanel({
               <input
                 value={createDraft.name}
                 onChange={(event) =>
-                  setCreateDraft((prev) => ({ ...prev, name: event.target.value }))
+                  setCreateDraft((prev) => ({
+                    ...prev,
+                    name: event.target.value,
+                  }))
                 }
                 className="rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
                 placeholder="例如：Frontend Implementer"
@@ -3523,7 +3919,8 @@ function AgentMdPanel({
           <DialogHeader>
             <DialogTitle>从商店添加 agent.md</DialogTitle>
             <DialogDescription>
-              从 https://github.com/msitarzewski/agency-agents 读取角色定义，导入后会保存为当前用户的 agent.md。
+              从 https://github.com/msitarzewski/agency-agents
+              读取角色定义，导入后会保存为当前用户的 agent.md。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3">
@@ -3568,7 +3965,8 @@ function AgentMdPanel({
                         {entry.name}
                       </div>
                       <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                        {entry.path} · {entry.category} · {Math.ceil(entry.size / 1024)} KB
+                        {entry.path} · {entry.category} ·{' '}
+                        {Math.ceil(entry.size / 1024)} KB
                       </div>
                     </div>
                     <Button
@@ -3681,143 +4079,6 @@ function formatDateTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString('zh-CN');
-}
-
-function GeneratedTeamPreview({
-  team,
-  requestedShape,
-}: {
-  team: AgentTeam;
-  requestedShape: AgentTeamShape;
-}) {
-  return (
-    <div className="space-y-4">
-      <ShapeDecisionNotice team={team} requestedShape={requestedShape} />
-      <div className="rounded-2xl border border-green-500/30 bg-green-500/5 p-4">
-        <div className="flex items-center gap-2 text-xs font-semibold text-green-700 dark:text-green-300">
-          <CheckCircle2 className="size-4" />
-          Agent 返回结果
-        </div>
-        <h5 className="mt-2 text-base font-semibold text-foreground">
-          {team.name}
-        </h5>
-        <p className="mt-2 text-xs leading-5 text-muted-foreground">
-          {team.description}
-        </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <Pill tone="blue">{shapeLabel(team.shape)}</Pill>
-          <Pill>{team.roles.length} roles</Pill>
-          <Pill>by {team.createdByAgentId}</Pill>
-        </div>
-      </div>
-
-      <div className="rounded-2xl border border-border bg-muted/20 p-4">
-        <div className="text-xs font-medium text-muted-foreground">目标</div>
-        <p className="mt-2 text-sm leading-6 text-foreground">{team.goal}</p>
-      </div>
-
-      <div>
-        <div className="mb-2 text-xs font-medium text-muted-foreground">
-          角色定义
-        </div>
-        <div className="space-y-2">
-          {team.roles.map((role, index) => (
-            <div
-              key={role.id || `${role.name}-${index}`}
-              className="rounded-xl border border-border bg-muted/10 p-3"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="text-sm font-medium text-foreground">
-                    {role.name}
-                  </div>
-                  <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-                    {role.id}
-                  </div>
-                </div>
-                <Pill>Role {index + 1}</Pill>
-              </div>
-              <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                {role.responsibility}
-              </p>
-              <RoleList title="Inputs" values={role.inputs} />
-              <RoleList title="Outputs" values={role.outputs} />
-              <RoleList title="Skills / agent.md 建议" values={role.skills} />
-              <RoleList title="Guardrails" values={role.guardrails} />
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="rounded-2xl border border-border bg-muted/20 p-4">
-        <div className="text-xs font-medium text-muted-foreground">
-          Workflow
-        </div>
-        <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-foreground">
-          {team.workflow}
-        </p>
-      </div>
-
-      <div className="rounded-2xl border border-border bg-muted/20 p-4">
-        <div className="text-xs font-medium text-muted-foreground">
-          验收标准
-        </div>
-        <ul className="mt-2 space-y-1 text-sm leading-6 text-foreground">
-          {team.successCriteria.map((criterion, index) => (
-            <li key={`${criterion}-${index}`} className="flex gap-2">
-              <span className="text-muted-foreground">{index + 1}.</span>
-              <span>{criterion}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
-  );
-}
-
-function ShapeDecisionNotice({
-  team,
-  requestedShape,
-}: {
-  team: AgentTeam;
-  requestedShape: AgentTeamShape;
-}) {
-  const actualShape = shapeLabel(team.shape);
-  if (requestedShape === 'auto') {
-    return (
-      <div className="rounded-2xl border border-blue-500/30 bg-blue-500/5 p-4">
-        <div className="text-xs font-medium text-muted-foreground">
-          AI 选择的 Interaction shape
-        </div>
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <Pill tone="blue">{actualShape}</Pill>
-          <span className="text-sm text-foreground">
-            这次 Let AI decide 生成的是 {actualShape} Team。
-          </span>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="rounded-2xl border border-border bg-muted/20 p-4">
-      <div className="text-xs font-medium text-muted-foreground">
-        Interaction shape
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <Pill tone="blue">{actualShape}</Pill>
-        {team.shape !== requestedShape ? (
-          <span className="text-sm text-foreground">
-            Agent 返回的实际形态与请求不同：请求 {shapeLabel(requestedShape)}
-            ，返回 {actualShape}。
-          </span>
-        ) : (
-          <span className="text-sm text-foreground">
-            Agent 按请求生成了 {actualShape} Team。
-          </span>
-        )}
-      </div>
-    </div>
-  );
 }
 
 function RoleList({ title, values }: { title: string; values?: string[] }) {
@@ -3999,7 +4260,9 @@ function SkillGroup({
                               {skill.sourceProvider ? (
                                 <Pill tone="blue">{skill.sourceProvider}</Pill>
                               ) : null}
-                              <Pill>{skill.levelKey || skill.level || 'skill'}</Pill>
+                              <Pill>
+                                {skill.levelKey || skill.level || 'skill'}
+                              </Pill>
                             </div>
                           </div>
                           <span className="shrink-0">
@@ -4095,12 +4358,7 @@ function statusLabel(status: AgentListItem['status']) {
 function getRelatedTasks(agent: AgentListItem, tasks: ScheduledTask[]) {
   if (agent.runtime === 'local-device' && agent.custom?.deviceLinkId) {
     return tasks.filter((task) =>
-      matchesLocalAgentTarget(
-        agent,
-        task.execution_node,
-        null,
-        null,
-      ),
+      matchesLocalAgentTarget(agent, task.execution_node, null, null),
     );
   }
   if (agent.runtime === 'builtin' || agent.runtime === 'server-side') {
@@ -4123,7 +4381,9 @@ function getRelatedIssues(agent: AgentListItem, issues: WorkspaceIssue[]) {
     );
   }
   if (agent.runtime === 'builtin' || agent.runtime === 'server-side') {
-    return issues.filter((issue) => !issue.agent_link_id && !issue.execution_node);
+    return issues.filter(
+      (issue) => !issue.agent_link_id && !issue.execution_node,
+    );
   }
   return [];
 }

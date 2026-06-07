@@ -11,6 +11,7 @@ import {
 } from '../web/src/utils/skillsGrouping.js';
 
 const repoRoot = process.cwd();
+const compact = (value: string) => value.replace(/\s+/g, ' ');
 
 describe('frontend agents module', () => {
   test('shows Agent as a top-level entry next to Devices', () => {
@@ -27,14 +28,21 @@ describe('frontend agents module', () => {
       join(repoRoot, 'web/src/components/settings/SystemSettingsSection.tsx'),
       'utf8',
     );
-    const agentsPage = readFileSync(join(repoRoot, 'web/src/pages/AgentsPage.tsx'), 'utf8');
+    const agentsPage = readFileSync(
+      join(repoRoot, 'web/src/pages/AgentsPage.tsx'),
+      'utf8',
+    );
     const app = readFileSync(join(repoRoot, 'web/src/App.tsx'), 'utf8');
 
     expect(systemSettings).not.toContain('Agent 后端');
     expect(systemSettings).not.toContain('CustomBackendList');
     expect(agentsPage).toContain('Agent 后端列表');
-    expect(agentsPage).toContain("['Instructions', 'Skills', 'Tasks', 'Args', 'ENV', 'Settings']");
-    expect(agentsPage).toContain('lg:grid-cols-[minmax(280px,1fr)_minmax(0,2fr)]');
+    expect(agentsPage).toContain('const MODULES = [');
+    expect(agentsPage).toContain("'Instructions'");
+    expect(agentsPage).toContain("'Settings'");
+    expect(agentsPage).toContain(
+      'lg:grid-cols-[minmax(280px,1fr)_minmax(0,2fr)]',
+    );
     expect(agentsPage).toContain('role="tablist"');
     expect(agentsPage).toContain('role="tabpanel"');
     expect(agentsPage).toContain('activeModule');
@@ -46,16 +54,22 @@ describe('frontend agents module', () => {
     expect(agentsPage).toContain('id="agent-md"');
     expect(agentsPage).toContain('id="agent-team"');
     expect(agentsPage).toContain('hashAnchor.agentId ?? defaultBackend');
-    expect(agentsPage).toContain('!hashAnchor.agentId && selectedAgentId !== defaultBackend');
+    expect(compact(agentsPage)).toContain(
+      '!hashAnchor.agentId && selectedAgentId !== defaultBackend',
+    );
     expect(agentsPage).toContain('agentMdId');
     expect(agentsPage).toContain('teamId');
     expect(agentsPage).toContain("params.set('agentMd'");
     expect(agentsPage).toContain("params.set('team'");
     expect(agentsPage).toContain('initialSelectedId={hashAnchor.agentMdId}');
-    expect(agentsPage).toContain('initialSelectedTeamId={hashAnchor.teamId}');
+    expect(compact(agentsPage)).toContain(
+      'initialSelectedTeamId={queryTeamId ?? hashAnchor.teamId}',
+    );
     expect(agentsPage).toContain('onSelectedAgentMdIdChange');
     expect(agentsPage).toContain('onSelectedTeamIdChange');
-    expect(agentsPage).toContain("api.put<SystemSettings>('/api/config/system'");
+    expect(agentsPage).toContain(
+      "api.put<SystemSettings>('/api/config/system'",
+    );
     expect(app).toContain('path="/agents"');
   });
 
@@ -79,10 +93,16 @@ describe('frontend agents module', () => {
     expect(form).toContain('Server Side');
     expect(form).toContain("runtime === 'server-side'");
     const deviceValidation = form.indexOf('if (!form.deviceLinkId)');
-    const localRuntimeValidation = form.indexOf("if (form.runtime === 'local-device')");
+    const localRuntimeValidation = form.indexOf(
+      "if (form.runtime === 'local-device')",
+    );
     expect(deviceValidation).toBeGreaterThan(localRuntimeValidation);
-    expect(form).toContain("deviceLinkId: form.runtime === 'local-device' ? form.deviceLinkId.trim() : undefined");
-    expect(form).toContain("agentClientId: form.runtime === 'local-device' ? form.agentClientId : undefined");
+    expect(form).toContain(
+      'deviceLinkId: form.deviceLinkId.trim() || undefined',
+    );
+    expect(form).toContain(
+      "agentClientId: form.runtime === 'local-device' ? form.agentClientId : undefined",
+    );
     expect(form).toContain("form.runtime === 'local-device' ? (");
     expect(form).toContain('Server Side Provider');
   });
@@ -113,19 +133,28 @@ describe('frontend agents module', () => {
 
     expect(form).toContain('默认运行位置');
     expect(form).toContain('Agent 创建时默认不绑定 Workdir');
-    expect(form).toContain('form.workdirMode === \'custom\'');
+    expect(form).toContain("form.workdirMode === 'custom'");
     expect(list).toContain('自动继承任务/Workspace');
   });
 
   test('promotes model endpoints to a top-level page beside Agent', () => {
     const paths = baseNavItems.map((item) => item.path);
-    const modelEndpoints = baseNavItems.find((item) => item.path === '/model-endpoints');
+    const modelEndpoints = baseNavItems.find(
+      (item) => item.path === '/model-endpoints',
+    );
     const app = readFileSync(join(repoRoot, 'web/src/App.tsx'), 'utf8');
-    const settings = readFileSync(join(repoRoot, 'web/src/pages/SettingsPage.tsx'), 'utf8');
+    const settings = readFileSync(
+      join(repoRoot, 'web/src/pages/SettingsPage.tsx'),
+      'utf8',
+    );
 
     expect(modelEndpoints?.label).toBe('模型端点');
-    expect(paths.indexOf('/model-endpoints')).toBeGreaterThan(paths.indexOf('/agents'));
-    expect(paths.indexOf('/model-endpoints')).toBeLessThan(paths.indexOf('/settings'));
+    expect(paths.indexOf('/model-endpoints')).toBeGreaterThan(
+      paths.indexOf('/agents'),
+    );
+    expect(paths.indexOf('/model-endpoints')).toBeLessThan(
+      paths.indexOf('/settings'),
+    );
     expect(app).toContain('path="/model-endpoints"');
     expect(settings).not.toContain('Claude 提供商');
   });
@@ -138,12 +167,15 @@ describe('frontend agents module', () => {
 
     expect(editor).toContain("'/api/config/claude/providers/models/fetch'");
     expect(editor).toContain('请填写 Base URL 和 Token 后再拉取模型列表');
-    expect(editor).toContain("setModel(data.models?.[0]?.id || model)");
-    expect(editor).not.toContain("if (isCreate || !provider) {");
+    expect(editor).toContain('setModel(data.models?.[0]?.id || model)');
+    expect(editor).not.toContain('if (isCreate || !provider) {');
   });
 
   test('agents page fetches backend CLI skills and renders workspace and CLI groups', () => {
-    const agentsPage = readFileSync(join(repoRoot, 'web/src/pages/AgentsPage.tsx'), 'utf8');
+    const agentsPage = readFileSync(
+      join(repoRoot, 'web/src/pages/AgentsPage.tsx'),
+      'utf8',
+    );
 
     expect(agentsPage).toContain('/skills?cwd=');
     expect(agentsPage).toContain('Workspace Skills');
@@ -153,21 +185,37 @@ describe('frontend agents module', () => {
   });
 
   test('skills UI groups skills by package and exposes device workspace filters', () => {
-    const grouping = readFileSync(join(repoRoot, 'web/src/utils/skillsGrouping.ts'), 'utf8');
-    const agentsPage = readFileSync(join(repoRoot, 'web/src/pages/AgentsPage.tsx'), 'utf8');
-    const skillsPage = readFileSync(join(repoRoot, 'web/src/pages/SkillsPage.tsx'), 'utf8');
-    const skillsStore = readFileSync(join(repoRoot, 'web/src/stores/skills.ts'), 'utf8');
+    const grouping = readFileSync(
+      join(repoRoot, 'web/src/utils/skillsGrouping.ts'),
+      'utf8',
+    );
+    const agentsPage = readFileSync(
+      join(repoRoot, 'web/src/pages/AgentsPage.tsx'),
+      'utf8',
+    );
+    const skillsPage = readFileSync(
+      join(repoRoot, 'web/src/pages/SkillsPage.tsx'),
+      'utf8',
+    );
+    const skillsStore = readFileSync(
+      join(repoRoot, 'web/src/stores/skills.ts'),
+      'utf8',
+    );
 
     expect(grouping).toContain("CLOUD_SKILL_PACKAGE = 'Cloud'");
     expect(grouping).toContain("DEVICE_SKILL_PACKAGE = 'Device'");
     expect(grouping).toContain("WORKSPACE_SKILL_PACKAGE = 'Workspace'");
     expect(grouping).toContain('groupSkillsByPackage');
-    expect(agentsPage).toContain('groupSkillsByPackage(skills)');
-    expect(agentsPage).toContain('MarkdownRenderer content={skill.content}');
-    expect(skillsPage).toContain('groupSkillsByPackage(filtered)');
+    expect(compact(agentsPage)).toContain('groupSkillsByPackage(skills)');
+    expect(compact(agentsPage)).toContain(
+      'MarkdownRenderer content={skill.content}',
+    );
+    expect(compact(skillsPage)).toContain('groupSkillsByPackage(filtered)');
     expect(skillsPage).toContain('全部 Device');
     expect(skillsPage).toContain('全部 Workspace');
-    expect(skillsStore).toContain("source: 'user' | 'project' | 'external' | 'cli' | 'workspace'");
+    expect(skillsStore).toContain(
+      "source: 'cloud' | 'user' | 'project' | 'external' | 'cli' | 'workspace'",
+    );
     expect(skillsStore).toContain('deviceId?: string');
     expect(skillsStore).toContain('workspacePath?: string');
   });
@@ -187,7 +235,9 @@ describe('frontend agents module', () => {
     );
 
     expect(dialog).toContain('Claude SDK / Claude Code 可用的格式');
-    expect(dialog).toContain("if (target === 'cloud') return { target: 'cloud' }");
+    expect(dialog).toContain(
+      "if (target === 'cloud') return { target: 'cloud' }",
+    );
     expect(dialog).not.toContain('Skill 格式');
     expect(dialog).not.toContain('Skill 来源 Agent');
     expect(dialog).not.toContain('setSourceProvider');
@@ -208,33 +258,57 @@ describe('frontend agents module', () => {
       workspacePath: 'Agent A Workspace',
     };
 
-    expect(dedupeSkillsByIdentity([codexSkill, duplicateCodexSkill, workspaceSkill])).toHaveLength(2);
-    expect(getSkillIdentityKey(codexSkill)).not.toBe(getSkillIdentityKey(workspaceSkill));
+    expect(
+      dedupeSkillsByIdentity([codexSkill, duplicateCodexSkill, workspaceSkill]),
+    ).toHaveLength(2);
+    expect(getSkillIdentityKey(codexSkill)).not.toBe(
+      getSkillIdentityKey(workspaceSkill),
+    );
   });
 
   test('agents page exposes agent team generation and management tab', () => {
-    const agentsPage = readFileSync(join(repoRoot, 'web/src/pages/AgentsPage.tsx'), 'utf8');
-    const teamStore = readFileSync(join(repoRoot, 'web/src/stores/agentTeams.ts'), 'utf8');
-    const teamRoutes = readFileSync(join(repoRoot, 'src/routes/agent-teams.ts'), 'utf8');
+    const agentsPage = readFileSync(
+      join(repoRoot, 'web/src/pages/AgentsPage.tsx'),
+      'utf8',
+    );
+    const teamStore = readFileSync(
+      join(repoRoot, 'web/src/stores/agentTeams.ts'),
+      'utf8',
+    );
+    const teamRoutes = readFileSync(
+      join(repoRoot, 'src/routes/agent-teams.ts'),
+      'utf8',
+    );
 
-    expect(agentsPage).toContain("const AGENT_SECTIONS = ['Agent 管理', 'Agent.md', 'Agent Team']");
+    expect(agentsPage).toContain(
+      "const AGENT_SECTIONS = ['Agent 管理', 'Agent.md', 'Agent Team']",
+    );
     expect(agentsPage).toContain('activeSection');
     expect(agentsPage).toContain('AgentManagementSection');
     expect(agentsPage).toContain('AgentTeamWorkspace');
     expect(agentsPage).toContain('AgentTeamCreateDialog');
-    expect(agentsPage).toContain('lg:grid-cols-[minmax(260px,1fr)_minmax(0,2fr)]');
-    expect(agentsPage).toContain('lg:grid-cols-[minmax(0,1fr)_minmax(320px,1fr)]');
-    expect(agentsPage).toContain('左侧填写生成参数，右侧展示 Agent 返回后的 Team 结果。');
+    expect(agentsPage).toContain(
+      'lg:grid-cols-[minmax(260px,1fr)_minmax(0,2fr)]',
+    );
+    expect(agentsPage).toContain(
+      'lg:grid-cols-[minmax(0,1fr)_minmax(320px,1fr)]',
+    );
+    expect(agentsPage).toContain('左侧填写生成参数并提交后台任务。');
     expect(agentsPage).toContain('Team 预览');
-    expect(agentsPage).toContain('generatedPreviewTeam');
-    expect(agentsPage).toContain('生成完成后这里会展示真实的 Team pipeline、角色、工作流和验收标准。');
-    expect(agentsPage).toContain('AI 选择的 Interaction shape');
-    expect(agentsPage).toContain('ShapeDecisionNotice');
-    expect(agentsPage).toContain('requestedShape');
-    expect(agentsPage).toContain('Agent 返回结果');
+    expect(agentsPage).toContain('submittedJob');
+    expect(agentsPage).toContain('pendingGenerationJobs');
+    expect(agentsPage).toContain('selectedGenerationJob');
+    expect(compact(agentsPage)).toContain(
+      '提交后会立即返回，Team 列表中会出现“生成中”状态。',
+    );
+    expect(agentsPage).toContain('Agent Team 正在后台生成');
+    expect(agentsPage).toContain('生成任务已提交');
+    expect(agentsPage).toContain('提交成功后可关闭弹窗');
     expect(agentsPage).not.toContain('createPreviewRoles');
     expect(agentsPage).not.toContain('预计角色轮廓');
-    expect(agentsPage).not.toContain('生成器响应超时，已使用本地草稿创建 Agent Team');
+    expect(agentsPage).not.toContain(
+      '生成器响应超时，已使用本地草稿创建 Agent Team',
+    );
     expect(agentsPage).toContain('创建 Team');
     expect(agentsPage).toContain('Team 详情');
     expect(agentsPage).not.toContain('Team 节点');
@@ -259,8 +333,12 @@ describe('frontend agents module', () => {
     expect(agentsPage).toContain('draggable');
     expect(agentsPage).toContain('selectedRoleId');
     expect(agentsPage).toContain('openCreateDialog');
-    expect(agentsPage).not.toContain("const MODULES = ['Instructions', 'Skills', 'Tasks', 'Args', 'ENV', 'Settings', 'Agent.md'");
-    expect(agentsPage).not.toContain("const MODULES = ['Instructions', 'Skills', 'Tasks', 'Args', 'ENV', 'Settings', 'Agent Team'");
+    expect(agentsPage).not.toContain(
+      "const MODULES = ['Instructions', 'Skills', 'Tasks', 'Args', 'ENV', 'Settings', 'Agent.md'",
+    );
+    expect(agentsPage).not.toContain(
+      "const MODULES = ['Instructions', 'Skills', 'Tasks', 'Args', 'ENV', 'Settings', 'Agent Team'",
+    );
     expect(agentsPage).toContain("'Agent.md'");
     expect(agentsPage).toContain("'Agent Team'");
     expect(agentsPage).toContain('AgentTeamPanel');
@@ -269,18 +347,33 @@ describe('frontend agents module', () => {
     expect(agentsPage).toContain('Let AI decide');
     expect(agentsPage).toContain('Leader-worker');
     expect(agentsPage).toContain('Judge route');
-    expect(agentsPage).toContain('agent.md 管理');
+    expect(agentsPage).toContain('agent.md 定义');
     expect(agentsPage).toContain('AgentMdPanel');
     expect(agentsPage).toContain('从商店添加');
     expect(agentsPage).toContain('agency-agents');
     expect(teamStore).toContain('AgentMdStoreEntry');
-    expect(teamStore).toContain('/api/agent-teams/agent-md-store');
-    expect(teamStore).toContain('/api/agent-teams/agent-md-store/import');
-    expect(agentsPage).toContain('现有 agent.md 简介会在生成 Team 时提供给模型');
+    expect(teamStore).toContain('AGENCY_AGENTS_INDEX_URL');
+    expect(teamStore).toContain('data.jsdelivr.com');
+    expect(teamStore).toContain('cdn.jsdelivr.net');
+    expect(teamStore).toContain('AGENT_MD_STORE_CACHE_TTL_MS');
+    expect(teamStore).toContain("cache: 'no-store'");
+    expect(teamStore).not.toContain('api.github.com/repos');
+    expect(teamStore).not.toContain('/api/agent-teams/agent-md-store/import');
+    expect(teamStore).toContain('/api/agent-teams/agent-md');
+    expect(agentsPage).toContain(
+      '现有 agent.md 简介会在生成 Team 时提供给模型',
+    );
     expect(teamStore).toContain('/api/agent-teams/generate');
-    expect(teamStore).toContain('/api/agent-teams/${encodeURIComponent(id)}/execute');
+    expect(teamStore).toContain('AgentTeamGenerationJob');
+    expect(teamStore).toContain('loadGenerationJobs');
+    expect(teamStore).toContain('/api/agent-teams/generation-jobs');
+    expect(teamStore).toContain(
+      '/api/agent-teams/${encodeURIComponent(id)}/execute',
+    );
     expect(teamStore).toContain('runnerAgentId?: string');
-    expect(teamStore).toContain('roleAssignments?: Record<string, AgentTeamRoleAssignment>');
+    expect(teamStore).toContain(
+      'roleAssignments?: Record<string, AgentTeamRoleAssignment>',
+    );
     expect(teamStore).toContain('traceEvents');
     expect(teamStore).toContain('createRun');
     expect(teamStore).toContain('loadRunTasks');
@@ -294,8 +387,8 @@ describe('frontend agents module', () => {
     expect(teamStore).toContain('loadRunCheckpoints');
     expect(teamStore).toContain('decideRunApproval');
     expect(teamStore).toContain('cancelRun');
-    expect(teamStore).toContain("/approvals/${encodeURIComponent(approvalId)}");
-    expect(teamStore).toContain("/cancel");
+    expect(teamStore).toContain('/approvals/${encodeURIComponent(approvalId)}');
+    expect(teamStore).toContain('/cancel');
     expect(teamRoutes).toContain('runnerAgentId');
     expect(teamRoutes).toContain('roleAssignments');
     expect(teamRoutes).toContain("router.post('/:id/runs'");
@@ -305,7 +398,7 @@ describe('frontend agents module', () => {
     expect(teamRoutes).toContain("router.get('/runs/:runId/blackboard'");
     expect(teamRoutes).toContain("router.get('/runs/:runId/approvals'");
     expect(teamRoutes).toContain("router.get('/runs/:runId/checkpoints'");
-    expect(teamRoutes).toContain("router.post('/runs/:runId/approvals/:approvalId'");
+    expect(teamRoutes).toContain("'/runs/:runId/approvals/:approvalId'");
     expect(teamRoutes).toContain("router.post('/runs/:runId/cancel'");
     expect(teamRoutes).toContain('recordAgentTeamRun');
     expect(teamRoutes).toContain('recordAgentTeamTraceEvent');
@@ -316,7 +409,9 @@ describe('frontend agents module', () => {
     expect(agentsPage).toContain('setRoleAssignments');
     expect(agentsPage).toContain('updateRoleAssignment');
     expect(agentsPage).toContain('clearRoleAssignments');
-    expect(agentsPage).toContain('createRun(selectedTeam.id, prompt, selectedExecutionAgentId, roleAssignments)');
+    expect(compact(agentsPage)).toContain(
+      'createRun( selectedTeam.id, prompt, selectedExecutionAgentId, roleAssignments, )',
+    );
     expect(agentsPage).toContain('policy.permissionLevel');
     expect(agentsPage).toContain('workspacePolicy');
     expect(agentsPage).toContain('requiresApproval');
@@ -324,6 +419,11 @@ describe('frontend agents module', () => {
     expect(agentsPage).toContain('executionResult');
     expect(agentsPage).toContain('执行轨迹');
     expect(agentsPage).toContain('traceEvents');
+    expect(agentsPage).toContain('当前 Run');
+    expect(agentsPage).toContain('角色任务');
+    expect(agentsPage).toContain('黑板产物');
+    expect(agentsPage).toContain('refreshRunObservability');
+    expect(agentsPage).toContain('runObservabilityUpdatedAt');
     expect(agentsPage).toContain('approvalCard');
     expect(agentsPage).toContain('runHistory');
     expect(agentsPage).toContain('Run 历史');
@@ -334,13 +434,26 @@ describe('frontend agents module', () => {
     expect(agentsPage).toContain('拒绝审批');
     expect(agentsPage).toContain('取消 Run');
     expect(agentsPage).toContain('检查点');
-    expect(agentsPage).toContain('createRun(selectedTeam.id');
-    expect(agentsPage).toContain("decideRunApproval(approvalCard.runId");
-    expect(agentsPage).toContain('loadRunCheckpoints(run.id)');
-    expect(teamStore).toContain('600_000');
+    expect(compact(agentsPage)).toContain('createRun( selectedTeam.id');
+    expect(compact(agentsPage)).toContain(
+      'decideRunApproval( approvalCard.runId',
+    );
+    expect(compact(agentsPage)).toContain('loadRunTasks(runId)');
+    expect(compact(agentsPage)).toContain('loadRunBlackboard(runId)');
+    expect(compact(agentsPage)).toContain('loadRunCheckpoints(run.id)');
+    expect(teamStore).toContain(
+      'AGENT_TEAM_GENERATION_SUBMIT_TIMEOUT_MS = 30_000',
+    );
     expect(teamStore).not.toContain('fallbackUsed');
-    expect(teamRoutes).toContain('AGENT_TEAM_GENERATION_TIMEOUT_MS = 600_000');
-    expect(teamRoutes).toContain('containerConfig: { timeout: AGENT_TEAM_GENERATION_TIMEOUT_MS }');
+    expect(teamRoutes).toContain(
+      'AGENT_TEAM_GENERATION_TIMEOUT_MS = 1_800_000',
+    );
+    expect(teamRoutes).toContain("router.get('/generation-jobs'");
+    expect(teamRoutes).toContain("router.get('/generation-jobs/:jobId'");
+    expect(teamRoutes).toContain('runAgentTeamGenerationJob');
+    expect(teamRoutes).toContain(
+      'containerConfig: { timeout: AGENT_TEAM_GENERATION_TIMEOUT_MS }',
+    );
     expect(teamRoutes).toContain('earlyGenerated');
     expect(teamRoutes).toContain('agentTeamGeneratorProc');
     expect(teamRoutes).toContain('agentTeamGeneratorProc.kill');
@@ -349,7 +462,10 @@ describe('frontend agents module', () => {
   });
 
   test('Agent definition form treats agent id as server-generated and read-only', () => {
-    const definitionsPage = readFileSync(join(repoRoot, 'web/src/pages/AgentDefinitionsPage.tsx'), 'utf8');
+    const definitionsPage = readFileSync(
+      join(repoRoot, 'web/src/pages/AgentDefinitionsPage.tsx'),
+      'utf8',
+    );
 
     expect(definitionsPage).not.toContain('const slug = createName.trim()');
     expect(definitionsPage).not.toContain('name: ${slug}');
@@ -358,11 +474,20 @@ describe('frontend agents module', () => {
   });
 
   test('Agents page persists agent selection into hash state before auto-default reconciliation', () => {
-    const agentsPage = readFileSync(join(repoRoot, 'web/src/pages/AgentsPage.tsx'), 'utf8');
+    const agentsPage = readFileSync(
+      join(repoRoot, 'web/src/pages/AgentsPage.tsx'),
+      'utf8',
+    );
 
-    expect(agentsPage).toContain('const handleSelectAgent = (agentId: string) => {');
-    expect(agentsPage).toContain('setHashAnchor((prev) => ({ ...prev, agentId }))');
+    expect(agentsPage).toContain(
+      'const handleSelectAgent = (agentId: string) => {',
+    );
+    expect(agentsPage).toContain(
+      'setHashAnchor((prev) => ({ ...prev, agentId }))',
+    );
     expect(agentsPage).toContain('onClick={() => handleSelectAgent(agent.id)}');
-    expect(agentsPage).not.toContain('onClick={() => setSelectedAgentId(agent.id)}');
+    expect(agentsPage).not.toContain(
+      'onClick={() => setSelectedAgentId(agent.id)}',
+    );
   });
 });

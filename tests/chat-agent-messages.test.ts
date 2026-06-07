@@ -8,6 +8,7 @@ const {
   apiPatchMock,
   apiDeleteMock,
   wsSendMock,
+  invalidateWorkspaceGroupCachesMock,
   deleteAgentMessageSnapshotMock,
   deleteGroupMessageSnapshotsMock,
   loadAgentMessageSnapshotMock,
@@ -18,6 +19,7 @@ const {
   apiPatchMock: vi.fn(),
   apiDeleteMock: vi.fn(),
   wsSendMock: vi.fn(() => true),
+  invalidateWorkspaceGroupCachesMock: vi.fn(),
   deleteAgentMessageSnapshotMock: vi.fn(),
   deleteGroupMessageSnapshotsMock: vi.fn(),
   loadAgentMessageSnapshotMock: vi.fn(),
@@ -68,6 +70,7 @@ vi.mock('../web/src/utils/toast', () => ({
 
 vi.mock('../web/src/utils/pwaCache', () => ({
   invalidateGroupCache: vi.fn(),
+  invalidateWorkspaceGroupCaches: invalidateWorkspaceGroupCachesMock,
 }));
 
 vi.mock('../web/src/utils/messageSnapshotCache', () => ({
@@ -125,6 +128,7 @@ function resetChatStore(): void {
     pendingThinking: {},
     pendingThinkingDuration: {},
     clearing: {},
+    clearEpoch: {},
     agents: {},
     agentStreaming: {},
     activeAgentTab: {},
@@ -238,6 +242,103 @@ describe('loadAgentMessages', () => {
     expect(useChatStore.getState().agentHasMore[agentId]).toBe(false);
     expect(saveAgentMessageSnapshotMock).not.toHaveBeenCalled();
     expect(deleteAgentMessageSnapshotMock).toHaveBeenCalledWith(jid, agentId);
+  });
+});
+
+describe('clearHistory', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    apiGetMock.mockReset();
+    apiPostMock.mockReset();
+    invalidateWorkspaceGroupCachesMock.mockResolvedValue(undefined);
+    deleteGroupMessageSnapshotsMock.mockResolvedValue(undefined);
+    resetChatStore();
+  });
+
+  it('purges main and sibling chat state returned by workspace rebuild', async () => {
+    const jid = 'web:main';
+    const siblingJid = 'feishu:chat-1';
+    const agentId = 'agent-1';
+    const oldMain = mainMessage('old-main', '2026-01-02T10:00:00.000Z');
+    const oldSibling = mainMessage('old-sibling', '2026-01-02T10:01:00.000Z', {
+      chat_jid: siblingJid,
+    });
+
+    useChatStore.setState({
+      messages: { [jid]: [oldMain], [siblingJid]: [oldSibling] },
+      waiting: { [jid]: true, [siblingJid]: true },
+      hasMore: { [jid]: true, [siblingJid]: true },
+      streaming: { [jid]: { text: 'stale main' }, [siblingJid]: { text: 'stale sibling' } },
+      pendingThinking: { [jid]: 'main thinking', [siblingJid]: 'sibling thinking' },
+      pendingThinkingDuration: { [jid]: 100, [siblingJid]: 200 },
+      agents: { [jid]: [{ id: agentId, name: 'Agent', prompt: '', status: 'idle', kind: 'conversation', created_at: '2026-01-02T09:00:00.000Z' }] },
+      agentMessages: { [agentId]: [message('agent-old', '2026-01-02T10:02:00.000Z')] },
+      agentStreaming: { [agentId]: { text: 'stale agent' } },
+      agentWaiting: { [agentId]: true },
+      agentHasMore: { [agentId]: true },
+      drafts: { [jid]: 'draft', [siblingJid]: 'sibling draft' },
+      activeAgentTab: { [jid]: agentId, [siblingJid]: null },
+      unreadReplies: { [jid]: 1, [siblingJid]: 2 },
+      sdkTasks: { task1: { chatJid: siblingJid, description: 'task', status: 'running' } },
+      sdkTaskAliases: { alias1: 'task1' },
+    });
+    apiPostMock.mockResolvedValueOnce({
+      success: true,
+      workspace_id: 'home-new',
+      old_workspace_id: 'home-old',
+      affected_jids: [jid, siblingJid],
+    });
+    apiGetMock.mockImplementation((url: string) => {
+      if (url === '/api/groups') return Promise.resolve({ groups: {} });
+      if (url === `/api/groups/${encodeURIComponent(jid)}/agents`) return Promise.resolve({ agents: [] });
+      return Promise.resolve({ messages: [], hasMore: false });
+    });
+
+    await expect(useChatStore.getState().clearHistory(jid)).resolves.toBe(true);
+
+    const state = useChatStore.getState();
+    expect(state.messages[jid]).toBeUndefined();
+    expect(state.messages[siblingJid]).toBeUndefined();
+    expect(state.waiting[jid]).toBeUndefined();
+    expect(state.waiting[siblingJid]).toBeUndefined();
+    expect(state.streaming[jid]).toBeUndefined();
+    expect(state.streaming[siblingJid]).toBeUndefined();
+    expect(state.agentMessages[agentId]).toBeUndefined();
+    expect(state.agentWaiting[agentId]).toBeUndefined();
+    expect(state.agentHasMore[agentId]).toBeUndefined();
+    expect(state.drafts[jid]).toBeUndefined();
+    expect(state.drafts[siblingJid]).toBeUndefined();
+    expect(state.sdkTasks.task1).toBeUndefined();
+    expect(state.sdkTaskAliases.alias1).toBeUndefined();
+    expect(state.clearing[jid]).toBeUndefined();
+    expect(state.clearing[siblingJid]).toBeUndefined();
+    expect(invalidateWorkspaceGroupCachesMock).toHaveBeenCalledWith([jid, siblingJid]);
+    expect(deleteGroupMessageSnapshotsMock).toHaveBeenCalledWith(jid);
+    expect(deleteGroupMessageSnapshotsMock).toHaveBeenCalledWith(siblingJid);
+  });
+
+  it('drops an in-flight message load that started before workspace rebuild', async () => {
+    const jid = 'web:main';
+    let resolveLoad!: (value: { messages: Message[]; hasMore: boolean }) => void;
+    const loadPromise = new Promise<{ messages: Message[]; hasMore: boolean }>((resolve) => {
+      resolveLoad = resolve;
+    });
+    apiGetMock.mockReturnValueOnce(loadPromise);
+
+    const loading = useChatStore.getState().loadMessages(jid);
+    await Promise.resolve();
+    useChatStore.setState((s) => ({
+      clearing: { ...s.clearing, [jid]: true },
+      clearEpoch: { ...s.clearEpoch, [jid]: (s.clearEpoch[jid] || 0) + 1 },
+    }));
+    resolveLoad({
+      messages: [mainMessage('stale-after-clear', '2026-01-02T10:00:00.000Z')],
+      hasMore: false,
+    });
+    await loading;
+
+    expect(useChatStore.getState().messages[jid]).toBeUndefined();
   });
 });
 

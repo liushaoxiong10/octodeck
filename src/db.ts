@@ -37,6 +37,15 @@ import {
   MessageSourceKind,
   ManagedRepo,
   ManagedRepoKind,
+  RepoKnowledgeChunk,
+  RepoKnowledgeChunkKind,
+  RepoKnowledgeGraphEdge,
+  RepoKnowledgeGraphEdgeKind,
+  RepoKnowledgeIndex,
+  RepoKnowledgeRun,
+  RepoKnowledgeRunStatus,
+  RepoKnowledgeSearchHit,
+  RepoKnowledgeStatus,
   ImContextBinding,
   IssueAgentRun,
   IssueAgentRunEvent,
@@ -63,6 +72,7 @@ import {
 import { getDefaultPermissions, normalizePermissions } from './permissions.js';
 
 let db: InstanceType<typeof Database>;
+let repoKnowledgeFtsAvailable = false;
 let persistenceController: RemotePersistenceController =
   new NoopPersistenceController();
 let persistenceExitHookRegistered = false;
@@ -991,7 +1001,92 @@ function initializeSqliteDatabase(
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_repos_created_by ON repos(created_by);
+
+    CREATE TABLE IF NOT EXISTS repo_knowledge_indexes (
+      repo_id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      source_revision TEXT,
+      summary TEXT,
+      stats_json TEXT NOT NULL DEFAULT '{}',
+      error TEXT,
+      generated_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_repo_knowledge_indexes_user ON repo_knowledge_indexes(user_id, updated_at);
+
+    CREATE TABLE IF NOT EXISTS repo_knowledge_runs (
+      id TEXT PRIMARY KEY,
+      repo_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      source_kind TEXT,
+      execution_device_link_id TEXT,
+      stats_json TEXT NOT NULL DEFAULT '{}',
+      error TEXT,
+      queued_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_repo_knowledge_runs_repo ON repo_knowledge_runs(repo_id, user_id, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_repo_knowledge_runs_user ON repo_knowledge_runs(user_id, updated_at);
+
+    CREATE TABLE IF NOT EXISTS repo_knowledge_chunks (
+      id TEXT PRIMARY KEY,
+      repo_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      path TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      name TEXT,
+      language TEXT,
+      start_line INTEGER,
+      end_line INTEGER,
+      content TEXT NOT NULL,
+      keywords TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_repo_knowledge_chunks_repo ON repo_knowledge_chunks(repo_id, kind, path);
+    CREATE INDEX IF NOT EXISTS idx_repo_knowledge_chunks_user ON repo_knowledge_chunks(user_id, updated_at);
+
+    CREATE TABLE IF NOT EXISTS repo_knowledge_graph_edges (
+      id TEXT PRIMARY KEY,
+      repo_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      from_path TEXT NOT NULL,
+      to_path TEXT,
+      edge_kind TEXT NOT NULL,
+      symbol TEXT,
+      package_name TEXT,
+      source TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_repo_knowledge_edges_from ON repo_knowledge_graph_edges(repo_id, user_id, from_path, edge_kind);
+    CREATE INDEX IF NOT EXISTS idx_repo_knowledge_edges_to ON repo_knowledge_graph_edges(repo_id, user_id, to_path, edge_kind);
+    CREATE INDEX IF NOT EXISTS idx_repo_knowledge_edges_package ON repo_knowledge_graph_edges(repo_id, user_id, package_name);
   `);
+
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS repo_knowledge_chunks_fts USING fts5(
+        chunk_id UNINDEXED,
+        repo_id UNINDEXED,
+        user_id UNINDEXED,
+        path,
+        kind,
+        name,
+        language,
+        keywords,
+        content
+      );
+    `);
+    repoKnowledgeFtsAvailable = true;
+  } catch (err) {
+    repoKnowledgeFtsAvailable = false;
+    logger.warn({ err }, 'SQLite FTS5 unavailable for repo knowledge; falling back to LIKE search');
+  }
 
   // Lightweight migrations for existing DBs
   ensureColumn('users', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
@@ -1004,6 +1099,7 @@ function initializeSqliteDatabase(
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
   ensureColumn('repos', 'main_branch', 'TEXT');
+  ensureColumn('repo_knowledge_chunks', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn('chats', 'archived_at', 'TEXT');
   ensureColumn('chats', 'archive_reason', 'TEXT');
   ensureColumn(
@@ -1016,6 +1112,8 @@ function initializeSqliteDatabase(
   ensureColumn('registered_groups', 'repo_git_url', 'TEXT');
   ensureColumn('registered_groups', 'repo_main_branch', 'TEXT');
   ensureColumn('registered_groups', 'repo_device_path', 'TEXT');
+  ensureColumn('registered_groups', 'visible_repo_mode', 'TEXT');
+  ensureColumn('registered_groups', 'visible_repo_ids', 'TEXT');
   ensureColumn('registered_groups', 'init_source_path', 'TEXT');
   ensureColumn('registered_groups', 'init_git_url', 'TEXT');
   ensureColumn('messages', 'attachments', 'TEXT');
@@ -4237,6 +4335,8 @@ type RegisteredGroupRow = {
   repo_git_url: string | null;
   repo_main_branch: string | null;
   repo_device_path: string | null;
+  visible_repo_mode: string | null;
+  visible_repo_ids: string | null;
   init_source_path: string | null;
   init_git_url: string | null;
   created_by: string | null;
@@ -4282,6 +4382,14 @@ function parseGroupRow(
     repoGitUrl: row.repo_git_url ?? undefined,
     repoMainBranch: row.repo_main_branch ?? undefined,
     repoDevicePath: row.repo_device_path ?? undefined,
+    visibleRepoMode:
+      row.visible_repo_mode === 'selected' || row.visible_repo_mode === 'all'
+        ? row.visible_repo_mode
+        : undefined,
+    visibleRepoIds:
+      row.visible_repo_ids != null
+        ? (JSON.parse(row.visible_repo_ids) as string[])
+        : undefined,
     initSourcePath: row.init_source_path ?? undefined,
     initGitUrl: row.init_git_url ?? undefined,
     created_by: row.created_by ?? undefined,
@@ -4348,8 +4456,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, repo_id, repo_git_url, repo_main_branch, repo_device_path, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist, runtime_profile, device_link_id, agent_client_id, agent_model, backend, execution_node)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, repo_id, repo_git_url, repo_main_branch, repo_device_path, visible_repo_mode, visible_repo_ids, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist, runtime_profile, device_link_id, agent_client_id, agent_model, backend, execution_node)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -4362,6 +4470,8 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.repoGitUrl ?? null,
     group.repoMainBranch ?? null,
     group.repoDevicePath ?? null,
+    group.visibleRepoMode ?? null,
+    group.visibleRepoIds != null ? JSON.stringify(group.visibleRepoIds) : null,
     group.initSourcePath ?? null,
     group.initGitUrl ?? null,
     group.created_by ?? null,
@@ -4394,6 +4504,32 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
 
 export function deleteRegisteredGroup(jid: string): void {
   db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
+}
+
+export function moveWorkspaceFolderReferences(
+  oldFolder: string,
+  newFolder: string,
+): void {
+  if (!oldFolder || !newFolder || oldFolder === newFolder) return;
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE group_members SET group_folder = ? WHERE group_folder = ?').run(
+      newFolder,
+      oldFolder,
+    );
+    db.prepare('UPDATE scheduled_tasks SET group_folder = ? WHERE group_folder = ?').run(
+      newFolder,
+      oldFolder,
+    );
+    db.prepare('UPDATE scheduled_tasks SET workspace_folder = ? WHERE workspace_folder = ?').run(
+      newFolder,
+      oldFolder,
+    );
+    db.prepare('UPDATE agents SET group_folder = ? WHERE group_folder = ?').run(
+      newFolder,
+      oldFolder,
+    );
+  });
+  tx();
 }
 
 type ManagedRepoRow = {
@@ -4481,10 +4617,708 @@ export function getManagedRepoById(id: string): ManagedRepo | undefined {
 }
 
 export function deleteManagedRepo(id: string, userId: string): boolean {
-  const result = db
-    .prepare('DELETE FROM repos WHERE id = ? AND created_by = ?')
-    .run(id, userId);
-  return result.changes > 0;
+  const transaction = db.transaction(() => {
+    const result = db
+      .prepare('DELETE FROM repos WHERE id = ? AND created_by = ?')
+      .run(id, userId);
+    if (result.changes > 0) {
+      db.prepare('DELETE FROM repo_knowledge_chunks WHERE repo_id = ? AND user_id = ?').run(id, userId);
+      if (repoKnowledgeFtsAvailable) {
+        db.prepare('DELETE FROM repo_knowledge_chunks_fts WHERE repo_id = ? AND user_id = ?').run(id, userId);
+      }
+      db.prepare('DELETE FROM repo_knowledge_graph_edges WHERE repo_id = ? AND user_id = ?').run(id, userId);
+      db.prepare('DELETE FROM repo_knowledge_indexes WHERE repo_id = ? AND user_id = ?').run(id, userId);
+      db.prepare('DELETE FROM repo_knowledge_runs WHERE repo_id = ? AND user_id = ?').run(id, userId);
+    }
+    return result.changes > 0;
+  });
+  return transaction();
+}
+
+type RepoKnowledgeIndexRow = {
+  repo_id: string;
+  user_id: string;
+  status: string;
+  source_revision: string | null;
+  summary: string | null;
+  stats_json: string | null;
+  error: string | null;
+  generated_at: string | null;
+  updated_at: string;
+};
+
+type RepoKnowledgeRunRow = {
+  id: string;
+  repo_id: string;
+  user_id: string;
+  status: string;
+  source_kind: string | null;
+  execution_device_link_id: string | null;
+  stats_json: string | null;
+  error: string | null;
+  queued_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+};
+
+type RepoKnowledgeChunkRow = {
+  id: string;
+  repo_id: string;
+  user_id: string;
+  path: string;
+  kind: string;
+  name: string | null;
+  language: string | null;
+  start_line: number | null;
+  end_line: number | null;
+  content: string;
+  keywords: string | null;
+  metadata_json: string | null;
+  updated_at: string;
+};
+
+type RepoKnowledgeGraphEdgeRow = {
+  id: string;
+  repo_id: string;
+  user_id: string;
+  from_path: string;
+  to_path: string | null;
+  edge_kind: string;
+  symbol: string | null;
+  package_name: string | null;
+  source: string;
+  metadata_json: string | null;
+  updated_at: string;
+};
+
+function parseJsonObject(value: string | null | undefined): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseRepoKnowledgeIndexRow(row: RepoKnowledgeIndexRow): RepoKnowledgeIndex {
+  const status: RepoKnowledgeStatus =
+    row.status === 'indexing' || row.status === 'ready' || row.status === 'error'
+      ? row.status
+      : 'none';
+  return {
+    repoId: row.repo_id,
+    userId: row.user_id,
+    status,
+    sourceRevision: row.source_revision ?? undefined,
+    summary: row.summary ?? undefined,
+    stats: parseJsonObject(row.stats_json),
+    error: row.error ?? undefined,
+    generatedAt: row.generated_at ?? undefined,
+    updatedAt: row.updated_at,
+  };
+}
+
+function parseRepoKnowledgeRunRow(row: RepoKnowledgeRunRow): RepoKnowledgeRun {
+  const status: RepoKnowledgeRunStatus =
+    row.status === 'queued' || row.status === 'running' || row.status === 'ready' || row.status === 'error'
+      ? row.status
+      : 'error';
+  return {
+    id: row.id,
+    repoId: row.repo_id,
+    userId: row.user_id,
+    status,
+    sourceKind: row.source_kind ?? undefined,
+    executionDeviceLinkId: row.execution_device_link_id ?? undefined,
+    stats: parseJsonObject(row.stats_json),
+    error: row.error ?? undefined,
+    queuedAt: row.queued_at,
+    startedAt: row.started_at ?? undefined,
+    completedAt: row.completed_at ?? undefined,
+    updatedAt: row.updated_at,
+  };
+}
+
+function parseRepoKnowledgeChunkRow(row: RepoKnowledgeChunkRow): RepoKnowledgeChunk {
+  const kind: RepoKnowledgeChunkKind =
+    row.kind === 'overview' || row.kind === 'symbol' || row.kind === 'dependency' || row.kind === 'doc' || row.kind === 'graph'
+      ? row.kind
+      : 'file';
+  return {
+    id: row.id,
+    repoId: row.repo_id,
+    userId: row.user_id,
+    path: row.path,
+    kind,
+    name: row.name ?? undefined,
+    language: row.language ?? undefined,
+    startLine: row.start_line ?? undefined,
+    endLine: row.end_line ?? undefined,
+    content: row.content,
+    keywords: row.keywords ?? undefined,
+    metadata: parseJsonObject(row.metadata_json),
+    updatedAt: row.updated_at,
+  };
+}
+
+function parseRepoKnowledgeGraphEdgeRow(row: RepoKnowledgeGraphEdgeRow): RepoKnowledgeGraphEdge {
+  const edgeKind: RepoKnowledgeGraphEdgeKind =
+    row.edge_kind === 'imports' ||
+    row.edge_kind === 'imported_by' ||
+    row.edge_kind === 'depends_on' ||
+    row.edge_kind === 'exports' ||
+    row.edge_kind === 'documents' ||
+    row.edge_kind === 'references'
+      ? row.edge_kind
+      : 'references';
+  return {
+    id: row.id,
+    repoId: row.repo_id,
+    userId: row.user_id,
+    fromPath: row.from_path,
+    toPath: row.to_path ?? undefined,
+    edgeKind,
+    symbol: row.symbol ?? undefined,
+    packageName: row.package_name ?? undefined,
+    source: row.source,
+    metadata: parseJsonObject(row.metadata_json),
+    updatedAt: row.updated_at,
+  };
+}
+
+export function getRepoKnowledgeIndex(
+  repoId: string,
+  userId: string,
+): RepoKnowledgeIndex | undefined {
+  const row = db
+    .prepare('SELECT * FROM repo_knowledge_indexes WHERE repo_id = ? AND user_id = ?')
+    .get(repoId, userId) as RepoKnowledgeIndexRow | undefined;
+  return row ? parseRepoKnowledgeIndexRow(row) : undefined;
+}
+
+export function listRepoKnowledgeIndexesByUser(userId: string): RepoKnowledgeIndex[] {
+  const rows = db
+    .prepare('SELECT * FROM repo_knowledge_indexes WHERE user_id = ? ORDER BY updated_at DESC')
+    .all(userId) as RepoKnowledgeIndexRow[];
+  return rows.map(parseRepoKnowledgeIndexRow);
+}
+
+export function createRepoKnowledgeRun(input: {
+  id: string;
+  repoId: string;
+  userId: string;
+  status?: RepoKnowledgeRunStatus;
+  sourceKind?: string;
+  executionDeviceLinkId?: string;
+  stats?: Record<string, unknown>;
+  error?: string;
+  queuedAt?: string;
+  startedAt?: string;
+}): RepoKnowledgeRun {
+  const now = new Date().toISOString();
+  const queuedAt = input.queuedAt ?? now;
+  db.prepare(
+    `INSERT INTO repo_knowledge_runs (
+      id, repo_id, user_id, status, source_kind, execution_device_link_id, stats_json, error, queued_at, started_at, completed_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+  ).run(
+    input.id,
+    input.repoId,
+    input.userId,
+    input.status ?? 'queued',
+    input.sourceKind ?? null,
+    input.executionDeviceLinkId ?? null,
+    JSON.stringify(input.stats ?? {}),
+    input.error ?? null,
+    queuedAt,
+    input.startedAt ?? null,
+    now,
+  );
+  return getRepoKnowledgeRun(input.id, input.userId)!;
+}
+
+export function getRepoKnowledgeRun(id: string, userId: string): RepoKnowledgeRun | undefined {
+  const row = db
+    .prepare('SELECT * FROM repo_knowledge_runs WHERE id = ? AND user_id = ?')
+    .get(id, userId) as RepoKnowledgeRunRow | undefined;
+  return row ? parseRepoKnowledgeRunRow(row) : undefined;
+}
+
+export function updateRepoKnowledgeRun(
+  id: string,
+  userId: string,
+  patch: {
+    status?: RepoKnowledgeRunStatus;
+    stats?: Record<string, unknown>;
+    error?: string | null;
+    startedAt?: string | null;
+    completedAt?: string | null;
+    updatedAt?: string;
+  },
+): RepoKnowledgeRun | undefined {
+  const current = getRepoKnowledgeRun(id, userId);
+  if (!current) return undefined;
+  const updatedAt = patch.updatedAt ?? new Date().toISOString();
+  db.prepare(
+    `UPDATE repo_knowledge_runs SET
+      status = ?, stats_json = ?, error = ?, started_at = ?, completed_at = ?, updated_at = ?
+     WHERE id = ? AND user_id = ?`,
+  ).run(
+    patch.status ?? current.status,
+    JSON.stringify(patch.stats ?? current.stats ?? {}),
+    patch.error === undefined ? current.error ?? null : patch.error,
+    patch.startedAt === undefined ? current.startedAt ?? null : patch.startedAt,
+    patch.completedAt === undefined ? current.completedAt ?? null : patch.completedAt,
+    updatedAt,
+    id,
+    userId,
+  );
+  return getRepoKnowledgeRun(id, userId);
+}
+
+export function listRepoKnowledgeRuns(input: {
+  repoId: string;
+  userId: string;
+  limit?: number;
+}): RepoKnowledgeRun[] {
+  const limit = Math.max(1, Math.min(input.limit ?? 20, 100));
+  const rows = db
+    .prepare('SELECT * FROM repo_knowledge_runs WHERE repo_id = ? AND user_id = ? ORDER BY queued_at DESC LIMIT ?')
+    .all(input.repoId, input.userId, limit) as RepoKnowledgeRunRow[];
+  return rows.map(parseRepoKnowledgeRunRow);
+}
+
+export function upsertRepoKnowledgeIndex(input: {
+  repoId: string;
+  userId: string;
+  status: RepoKnowledgeStatus;
+  sourceRevision?: string;
+  summary?: string;
+  stats?: Record<string, unknown>;
+  error?: string;
+  generatedAt?: string;
+  updatedAt?: string;
+}): RepoKnowledgeIndex {
+  const updatedAt = input.updatedAt ?? new Date().toISOString();
+  db.prepare(
+    `INSERT INTO repo_knowledge_indexes (
+      repo_id, user_id, status, source_revision, summary, stats_json, error, generated_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(repo_id) DO UPDATE SET
+      user_id = excluded.user_id,
+      status = excluded.status,
+      source_revision = excluded.source_revision,
+      summary = excluded.summary,
+      stats_json = excluded.stats_json,
+      error = excluded.error,
+      generated_at = excluded.generated_at,
+      updated_at = excluded.updated_at
+    WHERE repo_knowledge_indexes.user_id = excluded.user_id`,
+  ).run(
+    input.repoId,
+    input.userId,
+    input.status,
+    input.sourceRevision ?? null,
+    input.summary ?? null,
+    JSON.stringify(input.stats ?? {}),
+    input.error ?? null,
+    input.generatedAt ?? null,
+    updatedAt,
+  );
+  return getRepoKnowledgeIndex(input.repoId, input.userId)!;
+}
+
+export function replaceRepoKnowledgeChunks(input: {
+  repoId: string;
+  userId: string;
+  chunks: Array<Omit<RepoKnowledgeChunk, 'updatedAt' | 'repoId' | 'userId'>>;
+  edges?: Array<Omit<RepoKnowledgeGraphEdge, 'updatedAt' | 'repoId' | 'userId'>>;
+}): void {
+  const now = new Date().toISOString();
+  const transaction = db.transaction(() => {
+    db.prepare('DELETE FROM repo_knowledge_chunks WHERE repo_id = ? AND user_id = ?').run(input.repoId, input.userId);
+    db.prepare('DELETE FROM repo_knowledge_graph_edges WHERE repo_id = ? AND user_id = ?').run(input.repoId, input.userId);
+    if (repoKnowledgeFtsAvailable) {
+      db.prepare('DELETE FROM repo_knowledge_chunks_fts WHERE repo_id = ? AND user_id = ?').run(input.repoId, input.userId);
+    }
+    const insert = db.prepare(
+      `INSERT INTO repo_knowledge_chunks (
+        id, repo_id, user_id, path, kind, name, language, start_line, end_line, content, keywords, metadata_json, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const chunk of input.chunks) {
+      insert.run(
+        chunk.id,
+        input.repoId,
+        input.userId,
+        chunk.path,
+        chunk.kind,
+        chunk.name ?? null,
+        chunk.language ?? null,
+        chunk.startLine ?? null,
+        chunk.endLine ?? null,
+        chunk.content,
+        chunk.keywords ?? null,
+        JSON.stringify(chunk.metadata ?? {}),
+        now,
+      );
+    }
+    if (repoKnowledgeFtsAvailable) {
+      const insertFts = db.prepare(
+        `INSERT INTO repo_knowledge_chunks_fts (
+          chunk_id, repo_id, user_id, path, kind, name, language, keywords, content
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const chunk of input.chunks) {
+        insertFts.run(
+          chunk.id,
+          input.repoId,
+          input.userId,
+          chunk.path,
+          chunk.kind,
+          chunk.name ?? '',
+          chunk.language ?? '',
+          chunk.keywords ?? '',
+          chunk.content,
+        );
+      }
+    }
+    const insertEdge = db.prepare(
+      `INSERT INTO repo_knowledge_graph_edges (
+        id, repo_id, user_id, from_path, to_path, edge_kind, symbol, package_name, source, metadata_json, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const edge of input.edges ?? []) {
+      insertEdge.run(
+        edge.id,
+        input.repoId,
+        input.userId,
+        edge.fromPath,
+        edge.toPath ?? null,
+        edge.edgeKind,
+        edge.symbol ?? null,
+        edge.packageName ?? null,
+        edge.source,
+        JSON.stringify(edge.metadata ?? {}),
+        now,
+      );
+    }
+  });
+  transaction();
+}
+
+export function getRepoKnowledgeChunk(
+  chunkId: string,
+  userId: string,
+): RepoKnowledgeChunk | undefined {
+  const row = db
+    .prepare('SELECT * FROM repo_knowledge_chunks WHERE id = ? AND user_id = ?')
+    .get(chunkId, userId) as RepoKnowledgeChunkRow | undefined;
+  return row ? parseRepoKnowledgeChunkRow(row) : undefined;
+}
+
+export function listRepoKnowledgeChunks(input: {
+  repoId: string;
+  userId: string;
+  path?: string;
+  kind?: RepoKnowledgeChunkKind;
+  language?: string;
+  pathPrefix?: string;
+  limit?: number;
+}): RepoKnowledgeChunk[] {
+  const limit = Math.max(1, Math.min(input.limit ?? 100, 500));
+  const where = ['repo_id = ?', 'user_id = ?'];
+  const args: unknown[] = [input.repoId, input.userId];
+  if (input.path) {
+    where.push('path = ?');
+    args.push(input.path);
+  }
+  if (input.kind) {
+    where.push('kind = ?');
+    args.push(input.kind);
+  }
+  if (input.language) {
+    where.push('language = ?');
+    args.push(input.language);
+  }
+  if (input.pathPrefix) {
+    where.push('path LIKE ?');
+    args.push(`${input.pathPrefix.replace(/[%_]/g, '\\$&')}%`);
+  }
+  args.push(limit);
+  const rows = db
+    .prepare(
+      `SELECT * FROM repo_knowledge_chunks
+       WHERE ${where.join(' AND ')}
+       ORDER BY kind ASC, path ASC, start_line IS NULL, start_line ASC
+       LIMIT ?`,
+    )
+    .all(...args) as RepoKnowledgeChunkRow[];
+  return rows.map(parseRepoKnowledgeChunkRow);
+}
+
+export function listRepoKnowledgeGraphEdges(input: {
+  repoId: string;
+  userId: string;
+  path?: string;
+  edgeKind?: RepoKnowledgeGraphEdgeKind;
+  packageName?: string;
+  limit?: number;
+}): RepoKnowledgeGraphEdge[] {
+  const limit = Math.max(1, Math.min(input.limit ?? 100, 500));
+  const where = ['repo_id = ?', 'user_id = ?'];
+  const args: unknown[] = [input.repoId, input.userId];
+  if (input.path) {
+    where.push('(from_path = ? OR to_path = ?)');
+    args.push(input.path, input.path);
+  }
+  if (input.edgeKind) {
+    where.push('edge_kind = ?');
+    args.push(input.edgeKind);
+  }
+  if (input.packageName) {
+    where.push('package_name = ?');
+    args.push(input.packageName);
+  }
+  args.push(limit);
+  const rows = db
+    .prepare(
+      `SELECT * FROM repo_knowledge_graph_edges
+       WHERE ${where.join(' AND ')}
+       ORDER BY edge_kind ASC, from_path ASC, to_path ASC
+       LIMIT ?`,
+    )
+    .all(...args) as RepoKnowledgeGraphEdgeRow[];
+  return rows.map(parseRepoKnowledgeGraphEdgeRow);
+}
+
+export function listRelatedRepoKnowledge(input: {
+  repoId: string;
+  userId: string;
+  path?: string;
+  chunkId?: string;
+  limit?: number;
+}): { edges: RepoKnowledgeGraphEdge[]; chunks: RepoKnowledgeChunk[] } {
+  const chunk = input.chunkId ? getRepoKnowledgeChunk(input.chunkId, input.userId) : undefined;
+  const pathRef = input.path ?? chunk?.path;
+  if (!pathRef) return { edges: [], chunks: [] };
+  const edges = listRepoKnowledgeGraphEdges({
+    repoId: input.repoId,
+    userId: input.userId,
+    path: pathRef,
+    limit: input.limit,
+  });
+  const relatedPaths = Array.from(new Set(edges.flatMap((edge) => [edge.fromPath, edge.toPath].filter(Boolean) as string[]))).filter((p) => p !== pathRef);
+  const chunks = relatedPaths.slice(0, Math.max(1, Math.min(input.limit ?? 20, 50))).flatMap((pathName) =>
+    listRepoKnowledgeChunks({ repoId: input.repoId, userId: input.userId, path: pathName, limit: 3 }),
+  );
+  return { edges, chunks };
+}
+
+export function getRepoKnowledgeContext(input: {
+  repoId: string;
+  userId: string;
+  chunkId?: string;
+  path?: string;
+  query?: string;
+  limit?: number;
+}): {
+  anchor?: RepoKnowledgeChunk;
+  sameFileChunks: RepoKnowledgeChunk[];
+  relatedChunks: RepoKnowledgeChunk[];
+  edges: RepoKnowledgeGraphEdge[];
+  dependencies: RepoKnowledgeChunk[];
+  docs: RepoKnowledgeChunk[];
+} {
+  const limit = Math.max(1, Math.min(input.limit ?? 20, 80));
+  const anchor = input.chunkId
+    ? getRepoKnowledgeChunk(input.chunkId, input.userId)
+    : input.query
+      ? searchRepoKnowledge({ repoId: input.repoId, userId: input.userId, query: input.query, limit: 1 })[0]
+      : input.path
+        ? listRepoKnowledgeChunks({ repoId: input.repoId, userId: input.userId, path: input.path, limit: 1 })[0]
+        : undefined;
+  const pathRef = input.path ?? anchor?.path;
+  if (!pathRef) {
+    return { anchor, sameFileChunks: [], relatedChunks: [], edges: [], dependencies: [], docs: [] };
+  }
+  const sameFileChunks = listRepoKnowledgeChunks({
+    repoId: input.repoId,
+    userId: input.userId,
+    path: pathRef,
+    limit,
+  });
+  const related = listRelatedRepoKnowledge({
+    repoId: input.repoId,
+    userId: input.userId,
+    path: pathRef,
+    limit,
+  });
+  const dependencies = [
+    ...sameFileChunks.filter((chunk) => chunk.kind === 'dependency'),
+    ...related.chunks.filter((chunk) => chunk.kind === 'dependency'),
+  ].slice(0, Math.min(limit, 20));
+  const docs = [
+    ...sameFileChunks.filter((chunk) => chunk.kind === 'doc'),
+    ...related.chunks.filter((chunk) => chunk.kind === 'doc'),
+  ].slice(0, Math.min(limit, 20));
+  return {
+    anchor,
+    sameFileChunks,
+    relatedChunks: related.chunks.slice(0, limit),
+    edges: related.edges.slice(0, limit),
+    dependencies,
+    docs,
+  };
+}
+
+function scoreKnowledgeChunk(chunk: RepoKnowledgeChunk, terms: string[]): number {
+  const haystack = [chunk.name, chunk.path, chunk.language, chunk.keywords, chunk.content]
+    .filter(Boolean)
+    .join('\n')
+    .toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (!term) continue;
+    const occurrences = haystack.split(term).length - 1;
+    score += occurrences;
+    if (chunk.path.toLowerCase().includes(term)) score += 3;
+    if (chunk.name?.toLowerCase().includes(term)) score += 4;
+    if (chunk.keywords?.toLowerCase().includes(term)) score += 2;
+  }
+  if (chunk.kind === 'overview') score += 1;
+  return score;
+}
+
+function buildKnowledgeSnippet(content: string, terms: string[], maxLength = 700): string {
+  const lower = content.toLowerCase();
+  const firstHit = terms
+    .map((term) => lower.indexOf(term))
+    .filter((idx) => idx >= 0)
+    .sort((a, b) => a - b)[0];
+  const start = firstHit == null ? 0 : Math.max(0, firstHit - 180);
+  const snippet = content.slice(start, start + maxLength).trim();
+  return `${start > 0 ? '…' : ''}${snippet}${start + maxLength < content.length ? '…' : ''}`;
+}
+
+function escapeFtsTerm(term: string): string {
+  return term.replace(/"/g, '""');
+}
+
+function buildRepoKnowledgeFtsQuery(terms: string[]): string {
+  return terms.map((term) => `"${escapeFtsTerm(term)}"*`).join(' OR ');
+}
+
+export function isRepoKnowledgeFtsAvailable(): boolean {
+  return repoKnowledgeFtsAvailable;
+}
+
+export function searchRepoKnowledge(input: {
+  repoId?: string;
+  userId: string;
+  query: string;
+  limit?: number;
+  kind?: RepoKnowledgeChunkKind;
+  language?: string;
+  pathPrefix?: string;
+  includeRelated?: boolean;
+}): RepoKnowledgeSearchHit[] {
+  const terms = input.query
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}_./:-]+/u)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 2)
+    .slice(0, 12);
+  if (terms.length === 0) return [];
+  const limit = Math.max(1, Math.min(input.limit ?? 20, 100));
+  if (repoKnowledgeFtsAvailable) {
+    try {
+      const where = ['repo_knowledge_chunks_fts.user_id = ?'];
+      const args: unknown[] = [input.userId];
+      if (input.repoId) {
+        where.push('repo_knowledge_chunks_fts.repo_id = ?');
+        args.push(input.repoId);
+      }
+      if (input.kind) {
+        where.push('c.kind = ?');
+        args.push(input.kind);
+      }
+      if (input.language) {
+        where.push('c.language = ?');
+        args.push(input.language);
+      }
+      if (input.pathPrefix) {
+        where.push('c.path LIKE ?');
+        args.push(`${input.pathPrefix.replace(/[%_]/g, '\\$&')}%`);
+      }
+      args.push(buildRepoKnowledgeFtsQuery(terms), Math.max(limit * 8, 80));
+      const rows = db
+        .prepare(
+          `SELECT c.*
+           FROM repo_knowledge_chunks_fts
+           JOIN repo_knowledge_chunks c ON c.id = repo_knowledge_chunks_fts.chunk_id
+           WHERE ${where.join(' AND ')} AND repo_knowledge_chunks_fts MATCH ?
+           ORDER BY bm25(repo_knowledge_chunks_fts) ASC
+           LIMIT ?`,
+        )
+        .all(...args) as RepoKnowledgeChunkRow[];
+      return rows
+        .map(parseRepoKnowledgeChunkRow)
+        .map((chunk) => ({
+          ...chunk,
+          score: scoreKnowledgeChunk(chunk, terms) + 5,
+          snippet: buildKnowledgeSnippet(chunk.content, terms),
+          related: input.includeRelated && input.repoId
+            ? listRepoKnowledgeGraphEdges({ repoId: input.repoId, userId: input.userId, path: chunk.path, limit: 10 })
+            : undefined,
+        }))
+        .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
+        .slice(0, limit);
+    } catch (err) {
+      logger.warn({ err }, 'Repo knowledge FTS query failed; falling back to LIKE search');
+    }
+  }
+  const where = ['user_id = ?'];
+  const args: unknown[] = [input.userId];
+  if (input.repoId) {
+    where.push('repo_id = ?');
+    args.push(input.repoId);
+  }
+  if (input.kind) {
+    where.push('kind = ?');
+    args.push(input.kind);
+  }
+  if (input.language) {
+    where.push('language = ?');
+    args.push(input.language);
+  }
+  if (input.pathPrefix) {
+    where.push('path LIKE ?');
+    args.push(`${input.pathPrefix.replace(/[%_]/g, '\\$&')}%`);
+  }
+  const like = `%${terms[0].replace(/[%_]/g, '\\$&')}%`;
+  where.push('(path LIKE ? OR name LIKE ? OR keywords LIKE ? OR content LIKE ?)');
+  args.push(like, like, like, like);
+  const rows = db
+    .prepare(`SELECT * FROM repo_knowledge_chunks WHERE ${where.join(' AND ')} LIMIT 1000`)
+    .all(...args) as RepoKnowledgeChunkRow[];
+  return rows
+    .map(parseRepoKnowledgeChunkRow)
+    .map((chunk) => ({
+      ...chunk,
+      score: scoreKnowledgeChunk(chunk, terms),
+      snippet: buildKnowledgeSnippet(chunk.content, terms),
+      related: input.includeRelated && input.repoId
+        ? listRepoKnowledgeGraphEdges({ repoId: input.repoId, userId: input.userId, path: chunk.path, limit: 10 })
+        : undefined,
+    }))
+    .filter((hit) => hit.score > 0)
+    .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
+    .slice(0, limit);
 }
 
 /**
@@ -5656,11 +6490,17 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
            WHEN instr(m.chat_jid, '#agent:') > 0 THEN substr(m.chat_jid, 1, instr(m.chat_jid, '#agent:') - 1)
            ELSE m.chat_jid
          END`;
+    const hasAccessFilters =
+      accessibleWorkspaceJids.length > 0 ||
+      accessibleGroupFolders.length > 0 ||
+      Boolean(scopedUserId);
     const messageWhere = includeAllUsers
       ? ''
       : accessibleWorkspaceJids.length > 0
         ? `WHERE ${baseChatJidExpr} IN (${placeholders(accessibleWorkspaceJids)})`
-        : 'WHERE 1 = 0';
+        : hasAccessFilters
+          ? 'WHERE 1 = 0'
+          : '';
     const messageValues = includeAllUsers ? [] : accessibleWorkspaceJids;
     const rows = db
       .prepare(

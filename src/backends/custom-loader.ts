@@ -266,6 +266,7 @@ export function upsertCustomBackend(
     workdir: def.workdir ?? null,
     deviceLinkId: def.deviceLinkId ?? null,
     agentClientId: def.agentClientId ?? null,
+    agentMdId: def.agentMdId ?? null,
   });
   return { ...stored };
 }

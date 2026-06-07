@@ -1409,7 +1409,8 @@ function collectWorkspaces(userId: string): WorkspaceInfo[] {
     workspaces.push({ folder: g.folder, name: g.name, agents });
   }
 
-  if (isAdmin && !seen.has(MAIN_GROUP_FOLDER)) {
+  const hasAdminHomeGroup = ownedGroups.some((g) => g.jid === DEFAULT_MAIN_JID);
+  if (isAdmin && !hasAdminHomeGroup && !seen.has(MAIN_GROUP_FOLDER)) {
     const agents = listAgentsByJid(DEFAULT_MAIN_JID)
       .filter((a) => a.kind === 'conversation')
       .map((a) => ({ id: a.id, name: a.name, status: a.status }));
@@ -2526,7 +2527,7 @@ function loadState(): void {
 
     // Determine expected mode based on the owner's role
     // Admin home groups use host mode, member home groups use container mode
-    const isAdminHome = group.folder === MAIN_GROUP_FOLDER;
+    const isAdminHome = jid === DEFAULT_MAIN_JID || group.executionMode === 'host';
     const expectedMode = isAdminHome ? 'host' : 'container';
 
     if (group.executionMode !== expectedMode) {
@@ -4169,7 +4170,7 @@ async function runAgent(
 ): Promise<{ status: 'success' | 'error' | 'closed'; error?: string }> {
   const isHome = !!group.is_home;
   // For the agent-runner: isMain means this is an admin home container (full privileges)
-  const isAdminHome = isHome && group.folder === MAIN_GROUP_FOLDER;
+  const isAdminHome = isHome && group.executionMode === 'host';
   const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
@@ -4759,7 +4760,7 @@ function startIpcWatcher(): void {
       (g) => g.folder === sourceGroup,
     );
     const isAdminHome = !!(
-      sourceGroupEntry?.is_home && sourceGroup === MAIN_GROUP_FOLDER
+      sourceGroupEntry?.is_home && sourceGroupEntry.executionMode === 'host'
     );
     const isHome = !!sourceGroupEntry?.is_home;
 
@@ -9662,6 +9663,14 @@ async function main(): Promise<void> {
       const taskId = groupJid.slice(taskSep + 6);
       const group = registeredGroups[baseJid];
       return `${group?.folder || baseJid}#task:${taskId}`;
+    }
+    // Issue virtual JIDs: {chatJid}#issue:{runId} → separate serialization key
+    const issueSep = groupJid.indexOf('#issue:');
+    if (issueSep >= 0) {
+      const baseJid = groupJid.slice(0, issueSep);
+      const runId = groupJid.slice(issueSep + 7);
+      const group = registeredGroups[baseJid];
+      return `${group?.folder || baseJid}#issue:${runId}`;
     }
     const group = registeredGroups[groupJid];
     return group?.folder || groupJid;

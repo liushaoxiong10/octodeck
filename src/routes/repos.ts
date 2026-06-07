@@ -5,12 +5,24 @@ import {
   createManagedRepo,
   deleteManagedRepo,
   getAgentLinkById,
+  getManagedRepoById,
+  getRepoKnowledgeContext,
+  getRepoKnowledgeIndex,
+  listRepoKnowledgeGraphEdges,
+  listRepoKnowledgeRuns,
+  listRelatedRepoKnowledge,
+  listRepoKnowledgeChunks,
   listManagedReposByUser,
+  searchRepoKnowledge,
 } from '../db.js';
 import { getSession } from '../agent-link/registry.js';
 import { invokeRemoteTool } from '../agent-link/tool-rpc.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { RepoCreateSchema } from '../schemas.js';
+import { RepoCreateSchema, RepoKnowledgeGenerateSchema, RepoKnowledgeSearchSchema } from '../schemas.js';
+import { startRepoKnowledgeGenerationTask } from '../repo-knowledge.js';
+import { listRepoKnowledgePlugins } from '../repo-knowledge-plugins.js';
+import { listRepoKnowledgeSearchBackends } from '../repo-knowledge-search.js';
+import type { RepoKnowledgeChunkKind, RepoKnowledgeGraphEdgeKind } from '../types.js';
 import type { AuthUser, ManagedRepo } from '../types.js';
 import type { Variables } from '../web-context.js';
 
@@ -28,6 +40,7 @@ function toPayload(repo: ManagedRepo) {
     created_by: repo.createdBy,
     created_at: repo.createdAt,
     updated_at: repo.updatedAt,
+    knowledge: getRepoKnowledgeIndex(repo.id, repo.createdBy) ?? null,
   };
 }
 
@@ -194,6 +207,172 @@ export async function listDeviceDirectories(
 repoRoutes.get('/', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   return c.json({ repos: listManagedReposByUser(user.id).map(toPayload) });
+});
+
+repoRoutes.post('/knowledge/search', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const body = await c.req.json().catch(() => ({}));
+  const validation = RepoKnowledgeSearchSchema.safeParse(body);
+  if (!validation.success)
+    return c.json({ error: 'Invalid request body' }, 400);
+  const { repo_id, query, limit, kind, language, path_prefix, include_related } = validation.data;
+  if (repo_id) {
+    const repo = getManagedRepoById(repo_id);
+    if (!repo || repo.createdBy !== user.id) return c.json({ error: 'Repo not found' }, 404);
+  }
+  return c.json({ hits: searchRepoKnowledge({ repoId: repo_id, userId: user.id, query, limit, kind, language, pathPrefix: path_prefix, includeRelated: include_related }) });
+});
+
+repoRoutes.get('/knowledge/plugins', authMiddleware, (c) => {
+  return c.json({ plugins: listRepoKnowledgePlugins(c.req.query('provider')) });
+});
+
+repoRoutes.get('/knowledge/search-backends', authMiddleware, () => {
+  return new Response(JSON.stringify({ backends: listRepoKnowledgeSearchBackends() }), {
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
+});
+
+repoRoutes.get('/:id/knowledge', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const repo = getManagedRepoById(c.req.param('id'));
+  if (!repo || repo.createdBy !== user.id) return c.json({ error: 'Repo not found' }, 404);
+  return c.json({ index: getRepoKnowledgeIndex(repo.id, user.id) ?? null });
+});
+
+repoRoutes.get('/:id/knowledge/runs', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const repo = getManagedRepoById(c.req.param('id'));
+  if (!repo || repo.createdBy !== user.id) return c.json({ error: 'Repo not found' }, 404);
+  const rawLimit = Number(c.req.query('limit') || '20');
+  return c.json({
+    runs: listRepoKnowledgeRuns({
+      repoId: repo.id,
+      userId: user.id,
+      limit: Number.isFinite(rawLimit) ? rawLimit : 20,
+    }),
+  });
+});
+
+repoRoutes.post('/:id/knowledge/generate', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const repo = getManagedRepoById(c.req.param('id'));
+  if (!repo || repo.createdBy !== user.id) return c.json({ error: 'Repo not found' }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const validation = RepoKnowledgeGenerateSchema.safeParse(body);
+  if (!validation.success)
+    return c.json({ error: 'Invalid request body' }, 400);
+  const executionDeviceLinkId = validation.data.execution_device_link_id;
+  if (executionDeviceLinkId) {
+    const link = getAgentLinkById(executionDeviceLinkId);
+    if (!link || link.userId !== user.id || link.revokedAt) {
+      return c.json({ error: 'execution_device_link_id not found' }, 400);
+    }
+    if (repo.kind === 'device_path' && repo.deviceLinkId !== executionDeviceLinkId) {
+      return c.json({ error: 'Device Path repo can only use its bound device' }, 400);
+    }
+  }
+  const task = startRepoKnowledgeGenerationTask(repo, user.id, {
+    includePatterns: validation.data.include_patterns,
+    excludePatterns: validation.data.exclude_patterns,
+    maxFiles: validation.data.max_files,
+    maxFileBytes: validation.data.max_file_bytes,
+    provider: validation.data.provider,
+    plugins: validation.data.plugins,
+    useExternalGraph: validation.data.use_external_graph,
+    fallbackBuiltin: validation.data.fallback_builtin,
+    includeDocs: validation.data.include_docs,
+    includeDependencies: validation.data.include_dependencies,
+    includeImportGraph: validation.data.include_import_graph,
+    searchBackend: validation.data.search_backend,
+    sourceKind: validation.data.source_kind,
+    sourceGitUrl: validation.data.source_git_url,
+    sourceMainBranch: validation.data.source_main_branch,
+    sourceDevicePath: validation.data.source_device_path,
+    sourceDeviceLinkId: validation.data.source_device_link_id,
+    executionDeviceLinkId,
+  });
+  return c.json({
+    index: task.index,
+    task: {
+      id: task.taskId,
+      status: task.alreadyRunning ? 'running' : 'queued',
+    },
+  }, 202);
+});
+
+repoRoutes.get('/:id/knowledge/chunks', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const repo = getManagedRepoById(c.req.param('id'));
+  if (!repo || repo.createdBy !== user.id) return c.json({ error: 'Repo not found' }, 404);
+  const rawLimit = Number(c.req.query('limit') || '100');
+  return c.json({
+    chunks: listRepoKnowledgeChunks({
+      repoId: repo.id,
+      userId: user.id,
+      path: c.req.query('path'),
+      kind: c.req.query('kind') as RepoKnowledgeChunkKind | undefined,
+      language: c.req.query('language') || undefined,
+      pathPrefix: c.req.query('path_prefix') || undefined,
+      limit: Number.isFinite(rawLimit) ? rawLimit : 100,
+    }),
+  });
+});
+
+repoRoutes.get('/:id/knowledge/graph', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const repo = getManagedRepoById(c.req.param('id'));
+  if (!repo || repo.createdBy !== user.id) return c.json({ error: 'Repo not found' }, 404);
+  const rawLimit = Number(c.req.query('limit') || '100');
+  return c.json({
+    edges: listRepoKnowledgeGraphEdges({
+      repoId: repo.id,
+      userId: user.id,
+      path: c.req.query('path') || undefined,
+      edgeKind: c.req.query('edge_kind') as RepoKnowledgeGraphEdgeKind | undefined,
+      packageName: c.req.query('package_name') || undefined,
+      limit: Number.isFinite(rawLimit) ? rawLimit : 100,
+    }),
+  });
+});
+
+repoRoutes.get('/:id/knowledge/related', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const repo = getManagedRepoById(c.req.param('id'));
+  if (!repo || repo.createdBy !== user.id) return c.json({ error: 'Repo not found' }, 404);
+  const rawLimit = Number(c.req.query('limit') || '30');
+  return c.json(listRelatedRepoKnowledge({
+    repoId: repo.id,
+    userId: user.id,
+    path: c.req.query('path') || undefined,
+    chunkId: c.req.query('chunk_id') || undefined,
+    limit: Number.isFinite(rawLimit) ? rawLimit : 30,
+  }));
+});
+
+repoRoutes.get('/:id/knowledge/context', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const repo = getManagedRepoById(c.req.param('id'));
+  if (!repo || repo.createdBy !== user.id) return c.json({ error: 'Repo not found' }, 404);
+  const rawLimit = Number(c.req.query('limit') || '20');
+  return c.json({ context: getRepoKnowledgeContext({
+    repoId: repo.id,
+    userId: user.id,
+    chunkId: c.req.query('chunk_id') || undefined,
+    path: c.req.query('path') || undefined,
+    query: c.req.query('query') || undefined,
+    limit: Number.isFinite(rawLimit) ? rawLimit : 20,
+  }) });
+});
+
+repoRoutes.get('/:id/knowledge/dependencies', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const repo = getManagedRepoById(c.req.param('id'));
+  if (!repo || repo.createdBy !== user.id) return c.json({ error: 'Repo not found' }, 404);
+  return c.json({
+    chunks: listRepoKnowledgeChunks({ repoId: repo.id, userId: user.id, kind: 'dependency', limit: 200 }),
+    edges: listRepoKnowledgeGraphEdges({ repoId: repo.id, userId: user.id, edgeKind: 'depends_on', limit: 300 }),
+  });
 });
 
 repoRoutes.get('/device-directories', authMiddleware, async (c) => {

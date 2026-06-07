@@ -16,7 +16,9 @@
  */
 
 export interface MentionGateMention {
-  id?: { open_id?: string };
+  key?: string;
+  name?: string;
+  id?: { open_id?: string; user_id?: string; union_id?: string };
 }
 
 export interface MentionGateInput {
@@ -24,6 +26,10 @@ export interface MentionGateInput {
   chatType: string | undefined;
   /** bot 的 open_id；空串 / undefined 视为"启动期拉取失败、当前未知" */
   botOpenId: string;
+  /** bot 的 user_id；部分飞书话题群事件 mention 只带 user_id，不带 open_id */
+  botUserId?: string;
+  /** bot 的展示名；作为 ID 字段缺失时的兜底匹配 */
+  botMentionNames?: string[];
   /** 消息附带的 @mention 列表 */
   mentions: MentionGateMention[] | undefined;
   /** 群 jid（仅用于把上下文透传给两个回调） */
@@ -68,9 +74,21 @@ const ALLOW: MentionGateDecision = { allow: true };
 export function isBotMentioned(
   botOpenId: string | undefined,
   mentions: MentionGateMention[] | undefined,
+  opts?: { botUserId?: string; botMentionNames?: string[] },
 ): boolean {
-  if (!botOpenId) return false;
-  return mentions?.some((m) => m.id?.open_id === botOpenId) ?? false;
+  if (!mentions?.length) return false;
+  const botNameSet = new Set(
+    (opts?.botMentionNames ?? [])
+      .map((name) => name.trim())
+      .filter(Boolean),
+  );
+  return mentions.some((m) => {
+    if (botOpenId && m.id?.open_id === botOpenId) return true;
+    if (opts?.botUserId && m.id?.user_id === opts.botUserId) return true;
+    // Some topic-group callbacks omit mention IDs. Keep this as a last-resort
+    // fallback and only compare exact names captured from bot info.
+    return !!m.name && botNameSet.has(m.name.trim());
+  });
 }
 
 /**
@@ -102,11 +120,16 @@ export function evaluateMentionGate(
     return ALLOW;
   }
 
-  if (!input.botOpenId) {
+  if (!input.botOpenId && !input.botUserId && !input.botMentionNames?.length) {
     return { allow: false, reason: 'bot_open_id_missing' };
   }
 
-  if (!isBotMentioned(input.botOpenId, input.mentions)) {
+  if (
+    !isBotMentioned(input.botOpenId, input.mentions, {
+      botUserId: input.botUserId,
+      botMentionNames: input.botMentionNames,
+    })
+  ) {
     return { allow: false, reason: 'not_mentioned' };
   }
 

@@ -72,6 +72,7 @@ import {
   handleAgentLinkToolHttpRequest,
   handleCloudMemoryToolHttpRequest,
   handleCloudSkillToolHttpRequest,
+  handleRepoKnowledgeToolHttpRequest,
 } from './routes/agent-link-tool.js';
 import {
   checkBillingAccess,
@@ -82,6 +83,7 @@ import {
 import {
   ensureChatExists,
   getRegisteredGroup,
+  setRegisteredGroup,
   getJidsByFolder,
   storeMessageDirect,
   deleteUserSession,
@@ -92,12 +94,14 @@ import {
   getUserById,
   updateAgentContextInfo,
   updateChatName,
+  listManagedReposByUser,
 } from './db.js';
 import { markdownToPlainText } from './im-utils.js';
 import { isSessionExpired } from './auth.js';
 import type {
   AgentStatus,
   NewMessage,
+  RegisteredGroup,
   WsMessageOut,
   WsMessageIn,
   AuthUser,
@@ -117,6 +121,7 @@ import type { ExpandContext } from './plugin-expander-context.js';
 import { PLUGIN_EXPANSION_ATTACHMENT_TYPE } from './plugin-expander-sentinel.js';
 import { resolvePerMessageRuntimeOwner } from './runtime-owner.js';
 import { persistPluginExpansion } from './plugin-expander-store.js';
+import { parseAgentLinkTarget } from './backends/agent-link-driver.js';
 import { logger } from './logger.js';
 import { IssueAutoDriver } from './issue-auto-driver.js';
 import {
@@ -203,6 +208,36 @@ function buildWebExpandContext(
   });
 }
 
+function syncAllVisibleRepoSnapshotOnMessage(
+  chatJid: string,
+  group: RegisteredGroup | undefined,
+): boolean {
+  if (!group || group.visibleRepoMode !== 'all' || !group.created_by) return false;
+  const runtimeProfile = group.runtimeProfile ?? 'server-agent';
+  if (runtimeProfile === 'server-agent') return false;
+  const linkId =
+    group.deviceLinkId ||
+    (group.executionNode
+      ? parseAgentLinkTarget(group.executionNode, group.created_by)?.linkId
+      : undefined);
+  if (!linkId) return false;
+  const nextRepoIds = listManagedReposByUser(group.created_by)
+    .filter((repo) => repo.kind !== 'device_path' || repo.deviceLinkId === linkId)
+    .map((repo) => repo.id)
+    .sort();
+  const prevRepoIds = [...(group.visibleRepoIds ?? [])].sort();
+  const changed =
+    nextRepoIds.length !== prevRepoIds.length ||
+    nextRepoIds.some((id, index) => id !== prevRepoIds[index]);
+  if (!changed) return false;
+
+  const updated: RegisteredGroup = { ...group, visibleRepoIds: nextRepoIds };
+  setRegisteredGroup(chatJid, updated);
+  const groups = getWebDeps()?.getRegisteredGroups();
+  if (groups) groups[chatJid] = updated;
+  return true;
+}
+
 function releaseTerminalOwnership(ws: WebSocket, groupJid: string): void {
   if (wsTerminals.get(ws) === groupJid) {
     wsTerminals.delete(ws);
@@ -286,6 +321,9 @@ app.post('/api/cloud-memory/tool', async (c) => {
 });
 app.post('/api/cloud-skills/tool', async (c) => {
   return handleCloudSkillToolHttpRequest(c.req.raw);
+});
+app.post('/api/repo-knowledge/tool', async (c) => {
+  return handleRepoKnowledgeToolHttpRequest(c.req.raw);
 });
 app.route('/api/devices', agentLinkRoutes);
 app.route('/api/agent-link', agentLinkRoutes);
@@ -404,6 +442,7 @@ async function handleWebUserMessage(
     if (!dbGroup) return { ok: false, status: 404, error: 'Group not found' };
     group = dbGroup;
   }
+  const refreshRepoVisibility = syncAllVisibleRepoSnapshotOnMessage(chatJid, group);
 
   ensureChatExists(chatJid);
 
@@ -609,6 +648,12 @@ async function handleWebUserMessage(
   let pipedToActive = false;
   const images = toAgentImages(normalizedAttachments);
   const updateRoute = deps.updateReplyRoute;
+  if (refreshRepoVisibility) {
+    deps.queue.requestRepoVisibilityRefresh(chatJid);
+    deps.queue.enqueueMessageCheck(chatJid);
+    deps.advanceGlobalCursor({ timestamp, id: messageId });
+    return { ok: true, messageId, timestamp };
+  }
   const sendResult = deps.queue.sendMessage(
     chatJid,
     formatted,

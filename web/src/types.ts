@@ -21,6 +21,8 @@ export interface GroupInfo {
   repo_id?: string;
   repo_git_url?: string;
   repo_device_path?: string;
+  visible_repo_mode?: 'all' | 'selected';
+  visible_repo_ids?: string[];
   created_by?: string;
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'owner_mentioned' | 'disabled';

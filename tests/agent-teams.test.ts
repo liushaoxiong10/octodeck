@@ -4,7 +4,9 @@ import path from 'path';
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-let tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'octodeck-agent-teams-'));
+let tmpDataDir = fs.mkdtempSync(
+  path.join(os.tmpdir(), 'octodeck-agent-teams-'),
+);
 
 vi.mock('../src/config.js', () => ({
   get DATA_DIR() {
@@ -28,7 +30,8 @@ describe('agent team definitions', () => {
     const created = agentTeams.createAgentMdDefinition({
       name: 'Frontend Implementer',
       summary: '负责 React 页面实现、状态管理和交互细节。',
-      content: '# Frontend Implementer\n\n你负责把产品需求实现为可靠的前端页面。',
+      content:
+        '# Frontend Implementer\n\n你负责把产品需求实现为可靠的前端页面。',
       createdByAgentId: 'claude-sdk',
     });
 
@@ -45,51 +48,150 @@ describe('agent team definitions', () => {
     expect(agentTeams.listAgentMdDefinitions()).toEqual([]);
   });
 
-  test('isolates agent.md definitions and teams by owner user', () => {
-    const userOneDefinition = agentTeams.createAgentMdDefinition({
-      name: 'User One Writer',
-      summary: '只属于用户一的 agent.md。',
-      content: '# User One Writer',
-      createdByAgentId: 'claude-sdk',
-    }, 'user_one');
-    const userTwoDefinition = agentTeams.createAgentMdDefinition({
-      name: 'User Two Writer',
-      summary: '只属于用户二的 agent.md。',
-      content: '# User Two Writer',
-      createdByAgentId: 'claude-sdk',
-    }, 'user_two');
-
-    expect(agentTeams.listAgentMdDefinitions('user_one')).toEqual([userOneDefinition]);
-    expect(agentTeams.listAgentMdDefinitions('user_two')).toEqual([userTwoDefinition]);
-    expect(agentTeams.getAgentMdDefinition(userTwoDefinition.id, 'user_one')).toBeNull();
-    expect(agentTeams.updateAgentMdDefinition(userTwoDefinition.id, { summary: 'leak' }, 'user_one')).toBeNull();
-    expect(agentTeams.deleteAgentMdDefinition(userTwoDefinition.id, 'user_one')).toBe(false);
-
-    const userOneTeam = agentTeams.createAgentTeam({
-      name: 'User One Team',
-      goal: '用户一目标',
+  test('marks team-generated agent.md and finds team references', () => {
+    const team = agentTeams.createAgentTeam({
+      name: 'Generated Team',
+      goal: '交付一个功能',
       shape: 'pipeline',
-      description: '用户一团队',
-      roles: [{ id: 'lead', name: 'Lead', responsibility: '负责用户一目标。' }],
-      workflow: 'Pipeline workflow',
-      successCriteria: ['只对用户一可见'],
+      description: '测试团队',
+      roles: [
+        {
+          id: 'impl',
+          name: 'Implementer',
+          responsibility: '实现功能',
+          preferredAgentMd: ['agent_md_known'],
+        },
+      ],
+      workflow: 'impl 完成实现',
+      successCriteria: ['功能可用'],
       createdByAgentId: 'claude-sdk',
-    }, 'user_one');
-    const userTwoTeam = agentTeams.createAgentTeam({
-      ...agentTeams.buildAgentTeamDraft({
-        generatorAgentId: 'claude-sdk',
-        goal: '用户二目标',
-        shape: 'leader-worker',
-      }),
-      name: 'User Two Team',
-    }, 'user_two');
+    });
+    const generatedMd = agentTeams.createAgentMdDefinition({
+      name: 'Generated Implementer',
+      summary: '由 Team 生成的实现者身份。',
+      content: '# Generated Implementer',
+      createdByAgentId: 'claude-sdk',
+      createdByTeamId: team.id,
+      createdByTeamName: team.name,
+    });
+
+    expect(generatedMd.createdByTeamId).toBe(team.id);
+    expect(generatedMd.createdByTeamName).toBe('Generated Team');
+    expect(agentTeams.findAgentMdTeamReferences('agent_md_known')).toEqual([
+      {
+        kind: 'team',
+        id: team.id,
+        name: team.name,
+        detail: '角色：Implementer',
+      },
+    ]);
+  });
+
+  test('deletes team with optional linked team-generated agent.md cleanup', () => {
+    const team = agentTeams.createAgentTeam({
+      name: 'Team With MD',
+      goal: '目标',
+      shape: 'pipeline',
+      description: '描述',
+      roles: [{ id: 'lead', name: 'Lead', responsibility: '负责' }],
+      workflow: 'lead',
+      successCriteria: ['完成'],
+      createdByAgentId: 'claude-sdk',
+    });
+    const linked = agentTeams.createAgentMdDefinition({
+      name: 'Linked MD',
+      summary: 'linked',
+      content: '# Linked',
+      createdByAgentId: 'claude-sdk',
+      createdByTeamId: team.id,
+      createdByTeamName: team.name,
+    });
+
+    const result = agentTeams.deleteAgentTeamWithLinkedAgentMd(team.id, undefined, {
+      deleteLinkedAgentMd: true,
+    });
+
+    expect(result.deleted).toBe(true);
+    expect(result.linkedAgentMdDefinitions).toHaveLength(1);
+    expect(agentTeams.getAgentTeam(team.id)).toBeNull();
+    expect(agentTeams.getAgentMdDefinition(linked.id)).toBeNull();
+  });
+
+  test('isolates agent.md definitions and teams by owner user', () => {
+    const userOneDefinition = agentTeams.createAgentMdDefinition(
+      {
+        name: 'User One Writer',
+        summary: '只属于用户一的 agent.md。',
+        content: '# User One Writer',
+        createdByAgentId: 'claude-sdk',
+      },
+      'user_one',
+    );
+    const userTwoDefinition = agentTeams.createAgentMdDefinition(
+      {
+        name: 'User Two Writer',
+        summary: '只属于用户二的 agent.md。',
+        content: '# User Two Writer',
+        createdByAgentId: 'claude-sdk',
+      },
+      'user_two',
+    );
+
+    expect(agentTeams.listAgentMdDefinitions('user_one')).toEqual([
+      userOneDefinition,
+    ]);
+    expect(agentTeams.listAgentMdDefinitions('user_two')).toEqual([
+      userTwoDefinition,
+    ]);
+    expect(
+      agentTeams.getAgentMdDefinition(userTwoDefinition.id, 'user_one'),
+    ).toBeNull();
+    expect(
+      agentTeams.updateAgentMdDefinition(
+        userTwoDefinition.id,
+        { summary: 'leak' },
+        'user_one',
+      ),
+    ).toBeNull();
+    expect(
+      agentTeams.deleteAgentMdDefinition(userTwoDefinition.id, 'user_one'),
+    ).toBe(false);
+
+    const userOneTeam = agentTeams.createAgentTeam(
+      {
+        name: 'User One Team',
+        goal: '用户一目标',
+        shape: 'pipeline',
+        description: '用户一团队',
+        roles: [
+          { id: 'lead', name: 'Lead', responsibility: '负责用户一目标。' },
+        ],
+        workflow: 'Pipeline workflow',
+        successCriteria: ['只对用户一可见'],
+        createdByAgentId: 'claude-sdk',
+      },
+      'user_one',
+    );
+    const userTwoTeam = agentTeams.createAgentTeam(
+      {
+        ...agentTeams.buildAgentTeamDraft({
+          generatorAgentId: 'claude-sdk',
+          goal: '用户二目标',
+          shape: 'leader-worker',
+        }),
+        name: 'User Two Team',
+      },
+      'user_two',
+    );
 
     expect(userOneDefinition.createdByUserId).toBe('user_one');
     expect(userOneTeam.createdByUserId).toBe('user_one');
     expect(agentTeams.listAgentTeams('user_one')).toEqual([userOneTeam]);
     expect(agentTeams.listAgentTeams('user_two')).toEqual([userTwoTeam]);
     expect(agentTeams.getAgentTeam(userTwoTeam.id, 'user_one')).toBeNull();
-    expect(agentTeams.updateAgentTeam(userTwoTeam.id, { name: 'leak' }, 'user_one')).toBeNull();
+    expect(
+      agentTeams.updateAgentTeam(userTwoTeam.id, { name: 'leak' }, 'user_one'),
+    ).toBeNull();
     expect(agentTeams.deleteAgentTeam(userTwoTeam.id, 'user_one')).toBe(false);
   });
 
@@ -112,13 +214,17 @@ describe('agent team definitions', () => {
     expect(prompt).toContain('擅长 React 页面实现');
     expect(prompt).toContain('优先复用现有 agent.md');
     expect(prompt).toContain('只有当现有 agent.md 无法覆盖某个必要角色时');
-    expect(prompt).toContain('在角色的 skills 或 guardrails 中写明建议使用的 agent.md 名称');
+    expect(prompt).toContain(
+      '在角色的 skills 或 guardrails 中写明建议使用的 agent.md 名称',
+    );
     expect(prompt).toContain('agentMdDefinitionsToCreate');
     expect(prompt).toContain('如果现有 agent.md 不满足需求');
     expect(prompt).toContain('单轮结构化 JSON 输出任务');
     expect(prompt).toContain('不要调用任何工具或 Skill');
     expect(prompt).toContain('每个新 agent.md content 控制在 1200 字以内');
-    expect(prompt).toContain('如果 Interaction shape 是 auto，team.shape 必须返回模型实际选择的具体形态');
+    expect(prompt).toContain(
+      '如果 Interaction shape 是 auto，team.shape 必须返回模型实际选择的具体形态',
+    );
     expect(prompt).toContain('不要在生成结果的 team.shape 中继续返回 auto');
   });
 
@@ -134,33 +240,15 @@ description: Senior backend architect specializing in scalable system design.
 Designs robust backend systems.`;
     global.fetch = vi.fn(async (url: string | URL | Request) => {
       const requestUrl = String(url);
-      if (requestUrl.includes('/git/trees/main?recursive=1')) {
-        return new Response(
-          JSON.stringify({
-            tree: [
-              {
-                path: 'engineering/engineering-backend-architect.md',
-                type: 'blob',
-                size: 1234,
-              },
-              { path: 'README.md', type: 'blob', size: 999 },
-            ],
-          }),
-          { status: 200 },
-        );
-      }
-      if (requestUrl.includes('/engineering/engineering-backend-architect.md')) {
+      if (
+        requestUrl.includes('/engineering/engineering-backend-architect.md')
+      ) {
         return new Response(storeContent, { status: 200 });
       }
       return new Response('not found', { status: 404 });
     }) as typeof fetch;
 
     try {
-      const entries = await agentTeams.listAgentMdStoreEntries('backend');
-      expect(entries).toHaveLength(1);
-      expect(entries[0].path).toBe('engineering/engineering-backend-architect.md');
-      expect(entries[0].sourceUrl).toContain('msitarzewski/agency-agents');
-
       const imported = await agentTeams.createAgentMdDefinitionFromStore(
         'engineering/engineering-backend-architect.md',
         'claude-sdk',
@@ -169,7 +257,9 @@ Designs robust backend systems.`;
       expect(imported.name).toBe('Backend Architect');
       expect(imported.summary).toContain('Senior backend architect');
       expect(imported.content).toContain('# Backend Architect');
-      expect(agentTeams.listAgentMdDefinitions('user_store')).toEqual([imported]);
+      expect(agentTeams.listAgentMdDefinitions('user_store')).toEqual([
+        imported,
+      ]);
     } finally {
       global.fetch = originalFetch;
     }
@@ -183,10 +273,13 @@ Designs robust backend systems.`;
     });
 
     expect(agentTeams.isAbstractAgentTeamDefinition(draft)).toBe(true);
-    expect(agentTeams.isAbstractAgentTeamDefinition({
-      ...draft,
-      workflow: '让 builder 在 /Users/alice/project 中调用 claude-code provider 执行。',
-    })).toBe(false);
+    expect(
+      agentTeams.isAbstractAgentTeamDefinition({
+        ...draft,
+        workflow:
+          '让 builder 在 /Users/alice/project 中调用 claude-code provider 执行。',
+      }),
+    ).toBe(false);
   });
 
   test('creates and persists a team definition without binding concrete agent cli', () => {
@@ -282,7 +375,9 @@ Designs robust backend systems.`;
   });
 
   test('does not expose local timeout fallback for agent team generation', () => {
-    expect(agentTeams).not.toHaveProperty('resolveAgentTeamGenerationWithTimeout');
+    expect(agentTeams).not.toHaveProperty(
+      'resolveAgentTeamGenerationWithTimeout',
+    );
   });
 
   test('updates and deletes an existing team definition', () => {

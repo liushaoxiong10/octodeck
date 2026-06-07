@@ -1,4 +1,4 @@
-import { MoreHorizontal, Pencil, Trash2, RotateCcw, Star, Pin, Timer } from 'lucide-react';
+import { MoreHorizontal, Pencil, Trash2, RotateCcw, Star, Pin, Timer, FolderGit2 } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,6 +28,7 @@ export interface ChatGroupItemProps {
   onClearHistory: (jid: string, name: string) => void;
   onDelete?: (jid: string, name: string) => void;
   onTogglePin?: (jid: string) => void;
+  onConfigureRepoVisibility?: (jid: string, name: string) => void;
 }
 
 export function ChatGroupItem({
@@ -49,6 +50,7 @@ export function ChatGroupItem({
   onClearHistory,
   onDelete,
   onTogglePin,
+  onConfigureRepoVisibility,
 }: ChatGroupItemProps) {
   const currentUser = useAuthStore((s) => s.user);
   const defaultHomeName = '我的工作区';
@@ -142,6 +144,12 @@ export function ChatGroupItem({
               <DropdownMenuItem onClick={() => onRename(jid, name)}>
                 <Pencil className="w-4 h-4" />
                 重命名
+              </DropdownMenuItem>
+            )}
+            {editable && onConfigureRepoVisibility && (
+              <DropdownMenuItem onClick={() => onConfigureRepoVisibility(jid, displayName)}>
+                <FolderGit2 className="w-4 h-4" />
+                可见 Repo
               </DropdownMenuItem>
             )}
             <DropdownMenuItem

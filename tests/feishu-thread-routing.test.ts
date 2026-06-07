@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { parseFeishuRouteTarget } from '../src/feishu.js';
 import { StreamingCardController } from '../src/feishu-streaming-card.js';
 
@@ -96,5 +97,13 @@ describe('StreamingCardController Feishu thread reply', () => {
     expect(finalContent).toContain('查看完整运行轨迹');
     expect(finalContent).toContain('happy.example/chat/main');
     expect(finalContent).toContain('10 / 5 tokens');
+  });
+});
+
+describe('Feishu mention gate precheck', () => {
+  test('forces bot identity refresh before dropping the first mentioned group message', () => {
+    const source = readFileSync('src/feishu.ts', 'utf8');
+    expect(source).toContain("ensureBotOpenIdFresh('mention-gate-precheck', true)");
+    expect(source).toContain('hasBotMentionIdentity()');
   });
 });

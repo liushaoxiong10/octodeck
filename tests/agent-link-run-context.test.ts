@@ -88,7 +88,9 @@ describe('agent-link run context forwarding', () => {
         groupFolder: 'repo-demo',
         agentId: 'coco',
         scope: 'session',
-        scopeId: expect.any(String),
+        scopeId: expect.stringMatching(
+          /^octodeck-repo-demo-coco-[a-f0-9]{12}$/,
+        ),
       },
       remoteCwdPlaceholder: '__OCTODECK_REMOTE_CWD__',
       context: {
@@ -102,7 +104,6 @@ describe('agent-link run context forwarding', () => {
       },
     });
     expect(sent[0].argv).toContain('--cwd=__OCTODECK_REMOTE_CWD__');
-    expect(sent[0].workspaceRepo.scopeId).not.toBe('coco');
 
     registerRunMock.mock.calls
       .at(-1)?.[0]
@@ -228,14 +229,129 @@ describe('agent-link run context forwarding', () => {
       groupFolder: 'repo-conv',
       agentId: 'conversation-1',
       scope: 'session',
-      scopeId: expect.any(String),
+      scopeId: expect.stringMatching(
+        /^octodeck-web-repo-conv-conversation-1-[a-f0-9]{12}$/,
+      ),
     });
-    expect(sent[0].workspaceRepo.scopeId).not.toBe('conversation-1');
 
     registerRunMock.mock.calls
       .at(-1)?.[0]
       .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
     await promise;
+  });
+
+  test('runViaAgentLink keeps device workspace scope stable across native session changes', async () => {
+    const sent: any[] = [];
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const commonGroup = {
+      name: 'Flow Demo',
+      folder: 'flow-mq3z0g6r-d007b379',
+      added_at: '2026-01-01T00:00:00.000Z',
+      executionMode: 'host',
+      executionNode: 'cl_1234567890abcdef',
+      repoDevicePath: '/Users/me/work/project',
+    } as any;
+    const cfg = {
+      backendId: 'mac-traecli',
+      resolveBinary: () => '/bin/echo',
+      buildArgv: ({ prompt }) => [prompt],
+      outputProtocol: 'plain-text' as const,
+    };
+
+    const first = runViaAgentLink(
+      {
+        group: commonGroup,
+        input: {
+          prompt: 'pwd',
+          turnId: 'turn-001',
+          chatJid: 'web:session-a',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      cfg,
+      'cl_1234567890abcdef',
+    );
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await first;
+
+    const second = runViaAgentLink(
+      {
+        group: commonGroup,
+        input: {
+          prompt: 'ls',
+          turnId: 'turn-002',
+          sessionId: 'native-session-001',
+          chatJid: 'web:session-a',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      cfg,
+      'cl_1234567890abcdef',
+    );
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await second;
+
+    expect(sent[0].workspaceRepo).toMatchObject({
+      groupFolder: 'flow-mq3z0g6r-d007b379',
+      agentId: 'mac-traecli',
+      scope: 'session',
+      scopeId: expect.stringMatching(
+        /^octodeck-web-session-a-mac-traecli-[a-f0-9]{12}$/,
+      ),
+    });
+    expect(sent[1].workspaceRepo).toMatchObject({
+      groupFolder: 'flow-mq3z0g6r-d007b379',
+      agentId: 'mac-traecli',
+      scope: 'session',
+      scopeId: sent[0].workspaceRepo.scopeId,
+    });
+    expect(sent[1].stdinJson).toContain('"sessionId":"native-session-001"');
+
+    const third = runViaAgentLink(
+      {
+        group: commonGroup,
+        input: {
+          prompt: 'pwd',
+          turnId: 'turn-003',
+          chatJid: 'web:session-b',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      cfg,
+      'cl_1234567890abcdef',
+    );
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await third;
+
+    expect(sent[2].workspaceRepo).toMatchObject({
+      groupFolder: 'flow-mq3z0g6r-d007b379',
+      agentId: 'mac-traecli',
+      scope: 'session',
+      scopeId: expect.stringMatching(
+        /^octodeck-web-session-b-mac-traecli-[a-f0-9]{12}$/,
+      ),
+    });
+    expect(sent[2].workspaceRepo.scopeId).not.toBe(
+      sent[0].workspaceRepo.scopeId,
+    );
   });
 
   test('runViaAgentLink strips Agent Team MCP config from nested team role runs', async () => {
@@ -402,6 +518,122 @@ describe('agent-link run context forwarding', () => {
     await promise;
   });
 
+  test('runViaAgentLink does not create repo worktrees for scheduled jobs without workspace binding', async () => {
+    const sent: any[] = [];
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Scheduled Repo Demo',
+          folder: 'scheduled-repo-demo',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'cl_1234567890abcdef',
+          repoGitUrl: 'https://github.com/acme/project.git',
+        } as any,
+        input: {
+          prompt: 'run scheduled job',
+          isScheduledTask: true,
+          taskRunId: 'run-123',
+          messageTaskId: 'task-123',
+          scheduledTaskHasWorkspace: false,
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: 'coco',
+        resolveBinary: () => '/bin/echo',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'plain-text',
+      },
+      'cl_1234567890abcdef',
+    );
+
+    expect(sent[0].workspaceRepos).toBeUndefined();
+    expect(sent[0].workspaceRepo).toMatchObject({
+      kind: 'workspace',
+      groupFolder: 'scheduled-repo-demo',
+      scope: 'task',
+      scopeId: 'run-123',
+      taskId: 'task-123',
+      taskRunId: 'run-123',
+    });
+    expect(sent[0].workspaceRepo.gitUrl).toBeUndefined();
+
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await promise;
+  });
+
+  test('runViaAgentLink keeps repo worktrees for scheduled jobs with workspace binding', async () => {
+    const sent: any[] = [];
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Bound Scheduled Repo Demo',
+          folder: 'bound-scheduled-repo-demo',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'cl_1234567890abcdef',
+          repoGitUrl: 'https://github.com/acme/project.git',
+        } as any,
+        input: {
+          prompt: 'run bound scheduled job',
+          isScheduledTask: true,
+          taskRunId: 'run-456',
+          messageTaskId: 'task-456',
+          scheduledTaskHasWorkspace: true,
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: 'coco',
+        resolveBinary: () => '/bin/echo',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'plain-text',
+      },
+      'cl_1234567890abcdef',
+    );
+
+    expect(sent[0].workspaceRepos).toHaveLength(1);
+    expect(sent[0].workspaceRepo).toMatchObject({
+      kind: 'git',
+      gitUrl: 'https://github.com/acme/project.git',
+      groupFolder: 'bound-scheduled-repo-demo',
+      scope: 'task',
+      scopeId: 'run-456',
+      taskId: 'task-456',
+      taskRunId: 'run-456',
+    });
+
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await promise;
+  });
+
   test('runViaAgentLink forwards OctoDeck system prompt to device agent.run clients', async () => {
     const sent: any[] = [];
     getOnlineMetaMock.mockImplementation((linkId: string) =>
@@ -462,9 +694,13 @@ describe('agent-link run context forwarding', () => {
     expect(sent[0].policy.systemPrompt).toContain('<channel-format>');
     expect(sent[0].policy.systemPrompt).toContain('飞书');
 
-    registerRunMock.mock.calls
-      .at(-1)?.[0]
-      .finish({ ok: true, result: 'ok', error: null, timedOut: false, durationMs: 1 });
+    registerRunMock.mock.calls.at(-1)?.[0].finish({
+      ok: true,
+      result: 'ok',
+      error: null,
+      timedOut: false,
+      durationMs: 1,
+    });
     await promise;
   });
 
@@ -597,10 +833,12 @@ describe('agent-link run context forwarding', () => {
         'text_delta',
       ]),
     );
-    expect(streamEvents.find((event) => event.eventType === 'tool_use_start'))
-      .toMatchObject({ toolName: 'Bash', toolUseId: 'tool-1' });
-    expect(streamEvents.find((event) => event.eventType === 'tool_use_end'))
-      .toMatchObject({ toolUseId: 'tool-1', detail: '/repo' });
+    expect(
+      streamEvents.find((event) => event.eventType === 'tool_use_start'),
+    ).toMatchObject({ toolName: 'Bash', toolUseId: 'tool-1' });
+    expect(
+      streamEvents.find((event) => event.eventType === 'tool_use_end'),
+    ).toMatchObject({ toolUseId: 'tool-1', detail: '/repo' });
   });
 
   test('runViaAgentLink parses legacy device stream-json thinking and tool events', async () => {
@@ -651,13 +889,22 @@ describe('agent-link run context forwarding', () => {
     controller.onChunk(
       'stdout',
       [
-        JSON.stringify({ type: 'reasoning', session_id: 'sess-1', reasoning: '先想一下' }),
+        JSON.stringify({
+          type: 'reasoning',
+          session_id: 'sess-1',
+          reasoning: '先想一下',
+        }),
         JSON.stringify({
           type: 'assistant',
           session_id: 'sess-1',
           message: {
             content: [
-              { type: 'tool_use', id: 'tool-legacy', name: 'Bash', input: { command: 'pwd' } },
+              {
+                type: 'tool_use',
+                id: 'tool-legacy',
+                name: 'Bash',
+                input: { command: 'pwd' },
+              },
             ],
           },
         }),
@@ -666,26 +913,138 @@ describe('agent-link run context forwarding', () => {
           session_id: 'sess-1',
           message: {
             content: [
-              { type: 'tool_result', tool_use_id: 'tool-legacy', content: '/repo' },
+              {
+                type: 'tool_result',
+                tool_use_id: 'tool-legacy',
+                content: '/repo',
+              },
             ],
           },
         }),
-        JSON.stringify({ type: 'assistant', session_id: 'sess-1', message: { content: [{ type: 'text', text: '最终回答' }] } }),
+        JSON.stringify({
+          type: 'assistant',
+          session_id: 'sess-1',
+          message: { content: [{ type: 'text', text: '最终回答' }] },
+        }),
         '',
       ].join('\n'),
     );
-    controller.finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    controller.finish({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      durationMs: 1,
+    });
 
     const result = await promise;
     expect(result.result).toBe('最终回答');
-    const streamEvents = outputs.map((output) => output.streamEvent).filter(Boolean);
+    const streamEvents = outputs
+      .map((output) => output.streamEvent)
+      .filter(Boolean);
     expect(streamEvents.map((event) => event.eventType)).toEqual(
-      expect.arrayContaining(['thinking_delta', 'tool_use_start', 'tool_use_end', 'text_delta']),
+      expect.arrayContaining([
+        'thinking_delta',
+        'tool_use_start',
+        'tool_use_end',
+        'text_delta',
+      ]),
     );
-    expect(streamEvents.find((event) => event.eventType === 'thinking_delta'))
-      .toMatchObject({ text: '先想一下' });
-    expect(streamEvents.find((event) => event.eventType === 'tool_use_start'))
-      .toMatchObject({ toolName: 'Bash', toolUseId: 'tool-legacy' });
+    expect(
+      streamEvents.find((event) => event.eventType === 'thinking_delta'),
+    ).toMatchObject({ text: '先想一下' });
+    expect(
+      streamEvents.find((event) => event.eventType === 'tool_use_start'),
+    ).toMatchObject({ toolName: 'Bash', toolUseId: 'tool-legacy' });
+  });
+
+  test('agent runtime tool results keep toolName by toolUseId', async () => {
+    const sent: any[] = [];
+    const outputs: any[] = [];
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef'
+        ? { capabilities: ['agent.run'] }
+        : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Agent Runtime Tool Names',
+          folder: 'agent-runtime-tool-names',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:claude-code',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: 'hello',
+          chatJid: 'web:agent-runtime-tool-names',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+        onOutput: vi.fn(async (output) => outputs.push(output)),
+      },
+      {
+        backendId: 'mac-claude-code',
+        resolveBinary: () => '/usr/local/bin/claude',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:claude-code',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'agent.run.request' });
+    const controller = registerRunMock.mock.calls.at(-1)?.[0] as any;
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'tool_call',
+      sessionId: 'sess-tool-name',
+      payload: {
+        id: 'tool-name-1',
+        name: 'Read',
+        input: { file_path: 'README.md' },
+      },
+    });
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'tool_result',
+      sessionId: 'sess-tool-name',
+      payload: { tool_use_id: 'tool-name-1', content: 'ok' },
+    });
+    controller.finish({
+      type: 'agent.run.result',
+      runId: controller.runId,
+      ok: true,
+      result: 'done',
+      error: null,
+      sessionId: 'sess-tool-name',
+      timedOut: false,
+      durationMs: 1,
+    });
+
+    await promise;
+    const streamEvents = outputs
+      .map((output) => output.streamEvent)
+      .filter(Boolean);
+    expect(
+      streamEvents.find((event) => event.eventType === 'tool_use_end'),
+    ).toMatchObject({
+      toolName: 'Read',
+      toolUseId: 'tool-name-1',
+      detail: 'ok',
+    });
   });
 
   test('runViaAgentLink appends OctoDeck system prompt to legacy device Claude CLI argv', async () => {

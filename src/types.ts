@@ -64,6 +64,10 @@ export interface RegisteredGroup {
   repoGitUrl?: string; // Device 原生执行：远端 Git 仓库地址，在 device workspace/repo 下缓存并基于 worktree 执行
   repoMainBranch?: string; // Device 原生执行：Git Repo 指定主分支；缺失时使用远端默认分支
   repoDevicePath?: string; // Device 原生执行：指定当前 device 上的项目目录；若支持 git 则基于 worktree，否则直接操作目录
+  /** Repo visibility for future Device sessions. 'all' also picks up newly-created repos on the next message. */
+  visibleRepoMode?: WorkspaceRepoVisibilityMode;
+  /** Explicit repo allowlist when visibleRepoMode='selected'. */
+  visibleRepoIds?: string[];
   initSourcePath?: string; // 容器模式下复制来源的宿主机绝对路径
   initGitUrl?: string; // 容器模式下 clone 来源的 Git URL
   created_by?: string;
@@ -106,6 +110,7 @@ export interface RegisteredGroup {
 }
 
 export type ManagedRepoKind = 'git' | 'device_path';
+export type WorkspaceRepoVisibilityMode = 'all' | 'selected';
 
 export interface ManagedRepo {
   id: string;
@@ -118,6 +123,89 @@ export interface ManagedRepo {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export type RepoKnowledgeStatus = 'none' | 'indexing' | 'ready' | 'error';
+
+export type RepoKnowledgeChunkKind =
+  | 'overview'
+  | 'file'
+  | 'symbol'
+  | 'dependency'
+  | 'doc'
+  | 'graph';
+
+export type RepoKnowledgeGraphEdgeKind =
+  | 'imports'
+  | 'imported_by'
+  | 'depends_on'
+  | 'exports'
+  | 'documents'
+  | 'references';
+
+export interface RepoKnowledgeIndex {
+  repoId: string;
+  userId: string;
+  status: RepoKnowledgeStatus;
+  sourceRevision?: string;
+  summary?: string;
+  stats: Record<string, unknown>;
+  error?: string;
+  generatedAt?: string;
+  updatedAt: string;
+}
+
+export type RepoKnowledgeRunStatus = 'queued' | 'running' | 'ready' | 'error';
+
+export interface RepoKnowledgeRun {
+  id: string;
+  repoId: string;
+  userId: string;
+  status: RepoKnowledgeRunStatus;
+  sourceKind?: string;
+  executionDeviceLinkId?: string;
+  stats: Record<string, unknown>;
+  error?: string;
+  queuedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt: string;
+}
+
+export interface RepoKnowledgeChunk {
+  id: string;
+  repoId: string;
+  userId: string;
+  path: string;
+  kind: RepoKnowledgeChunkKind;
+  name?: string;
+  language?: string;
+  startLine?: number;
+  endLine?: number;
+  content: string;
+  keywords?: string;
+  metadata?: Record<string, unknown>;
+  updatedAt: string;
+}
+
+export interface RepoKnowledgeGraphEdge {
+  id: string;
+  repoId: string;
+  userId: string;
+  fromPath: string;
+  toPath?: string;
+  edgeKind: RepoKnowledgeGraphEdgeKind;
+  symbol?: string;
+  packageName?: string;
+  source: string;
+  metadata?: Record<string, unknown>;
+  updatedAt: string;
+}
+
+export interface RepoKnowledgeSearchHit extends RepoKnowledgeChunk {
+  score: number;
+  snippet: string;
+  related?: RepoKnowledgeGraphEdge[];
 }
 
 /**

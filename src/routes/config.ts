@@ -1494,6 +1494,7 @@ configRoutes.post(
               providerId: validation.data.providerId ?? null,
               workdirMode,
               workdir,
+              agentMdId: validation.data.agentMdId ?? null,
             });
           })()
         : {
@@ -1518,6 +1519,7 @@ configRoutes.post(
               user,
             ),
             agentClientId: validation.data.agentClientId ?? null,
+            agentMdId: validation.data.agentMdId ?? null,
           };
       const def = upsertCustomBackend(payload, user.username);
       return c.json(def, 201);
@@ -1578,6 +1580,7 @@ configRoutes.patch(
               providerId: merged.providerId ?? null,
               workdirMode,
               workdir,
+              agentMdId: merged.agentMdId ?? null,
             });
           })()
         : {

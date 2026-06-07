@@ -222,6 +222,8 @@ export const GroupCreateSchema = z.object({
     .string()
     .optional()
     .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  visible_repo_mode: z.enum(['all', 'selected']).optional(),
+  visible_repo_ids: z.array(z.string().min(1).max(128)).max(200).optional(),
   init_source_path: z
     .string()
     .optional()
@@ -256,6 +258,39 @@ export const RepoCreateSchema = z.object({
     .string()
     .optional()
     .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+});
+
+export const RepoKnowledgeGenerateSchema = z.object({
+  include_patterns: z.array(z.string().min(1)).optional(),
+  exclude_patterns: z.array(z.string().min(1)).optional(),
+  max_files: z.number().int().min(1).max(5000).optional(),
+  max_file_bytes: z.number().int().min(512).max(512 * 1024).optional(),
+  provider: z.enum(['builtin', 'auto', 'graphify', 'codegraph']).optional(),
+  plugins: z.array(z.string().min(1)).optional(),
+  use_external_graph: z.boolean().optional(),
+  fallback_builtin: z.boolean().optional(),
+  include_docs: z.boolean().optional(),
+  include_dependencies: z.boolean().optional(),
+  include_import_graph: z.boolean().optional(),
+  search_backend: z.enum(['auto', 'sqlite', 'postgres', 'mongo']).optional(),
+  source_kind: z.enum(['repo', 'git', 'device_path']).optional(),
+  source_git_url: z.string().optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  source_main_branch: z.string().optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  source_device_path: z.string().optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  source_device_link_id: z.string().optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  execution_device_link_id: z.string().optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  async: z.boolean().optional(),
+  wait: z.boolean().optional(),
+});
+
+export const RepoKnowledgeSearchSchema = z.object({
+  query: z.string().min(1).max(500),
+  repo_id: z.string().optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+  kind: z.enum(['overview', 'file', 'symbol', 'dependency', 'doc', 'graph']).optional(),
+  language: z.string().min(1).max(64).optional(),
+  path_prefix: z.string().min(1).max(500).optional(),
+  include_related: z.boolean().optional(),
 });
 
 export const GroupMemberAddSchema = z.object({
@@ -322,13 +357,16 @@ export const GroupPatchSchema = z.object({
   device_link_id: z
     .string()
     .regex(/^cl_[0-9a-f]{16}$/)
+    .nullable()
     .optional(),
-  agent_client_id: z.string().min(1).max(64).optional(),
+  agent_client_id: z.string().min(1).max(64).nullable().optional(),
   agent_model: z.string().max(256).optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
-  backend: z.string().min(1).max(64).optional(),
+  backend: z.string().min(1).max(64).nullable().optional(),
+  visible_repo_mode: z.enum(['all', 'selected']).optional(),
+  visible_repo_ids: z.array(z.string().min(1).max(128)).max(200).nullable().optional(),
   // 'server-local' | cl_xxx | runtime:cl_xxx:agentClient | provider:agentClient
-  execution_node: z.string().min(1).max(128).optional(),
+  execution_node: z.string().min(1).max(128).nullable().optional(),
 });
 
 export const LoginSchema = z.object({
@@ -424,6 +462,7 @@ const CustomBackendBaseShape = {
     .nullable()
     .optional(),
   agentClientId: z.string().min(1).max(64).nullable().optional(),
+  agentMdId: z.string().min(1).max(128).nullable().optional(),
 };
 
 export const CustomBackendCreateSchema = z
@@ -546,6 +585,7 @@ export const CustomBackendPatchSchema = z
     providerId: CustomBackendBaseShape.providerId,
     deviceLinkId: CustomBackendBaseShape.deviceLinkId,
     agentClientId: CustomBackendBaseShape.agentClientId,
+    agentMdId: CustomBackendBaseShape.agentMdId,
   })
   .superRefine((data, ctx) => {
     if (data.supportsContainer === true) {

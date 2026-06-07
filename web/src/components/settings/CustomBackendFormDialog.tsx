@@ -16,6 +16,7 @@ import {
   type CustomBackendDef,
 } from '../../stores/customBackends';
 import { useAgentLinksStore } from '../../stores/agentLinks';
+import { useAgentTeamsStore } from '../../stores/agentTeams';
 import { getErrorMessage, type ProvidersListResponse } from './types';
 
 type RuntimeMode = 'local-device' | 'server-side';
@@ -43,6 +44,7 @@ interface FormState {
   agentClientId: string;
   serverProviderId: string;
   model: string;
+  agentMdId: string;
   workdirMode: WorkdirMode;
   workdir: string;
 }
@@ -57,6 +59,7 @@ const INITIAL: FormState = {
   agentClientId: '',
   serverProviderId: '',
   model: '',
+  agentMdId: '',
   workdirMode: 'auto',
   workdir: '',
 };
@@ -76,6 +79,7 @@ function backendToForm(b: CustomBackendDef): FormState {
     agentClientId: b.agentClientId ?? '',
     serverProviderId: b.providerId ?? '',
     model: b.model ?? '',
+    agentMdId: b.agentMdId ?? '',
     workdirMode: b.workdirMode ?? 'auto',
     workdir: b.workdir ?? '',
   };
@@ -88,6 +92,7 @@ export default function CustomBackendFormDialog({
 }: CustomBackendFormDialogProps) {
   const { create, update } = useCustomBackendsStore();
   const { links: devices, load: loadDevices } = useAgentLinksStore();
+  const { agentMdDefinitions, loadAgentMdDefinitions } = useAgentTeamsStore();
   const [form, setForm] = useState<FormState>(INITIAL);
   const [submitting, setSubmitting] = useState(false);
   const [serverModels, setServerModels] = useState<ModelInfo[]>([]);
@@ -106,8 +111,9 @@ export default function CustomBackendFormDialog({
     setServerModels([]);
     setLocalModels([]);
     void loadDevices();
+    void loadAgentMdDefinitions();
     void loadServerProviders();
-  }, [open, backend, loadDevices]);
+  }, [open, backend, loadDevices, loadAgentMdDefinitions]);
 
   const set = <K extends keyof FormState>(key: K, val: FormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: val }));
@@ -247,6 +253,7 @@ export default function CustomBackendFormDialog({
         maxOutputBytes,
         runtime: form.runtime,
         model: form.model.trim(),
+        agentMdId: form.agentMdId || null,
         providerId: form.runtime === 'server-side' ? form.serverProviderId : undefined,
         ...workspaceOverride,
         deviceLinkId: form.deviceLinkId.trim() || undefined,
@@ -440,6 +447,25 @@ export default function CustomBackendFormDialog({
           </section>
 
           <section className="space-y-3 rounded-2xl border border-border bg-muted/20 p-4">
+            <div>
+              <label className="block text-xs text-zinc-500 mb-1">Agent 身份 agent.md（选填）</label>
+              <select
+                value={form.agentMdId}
+                onChange={(e) => set('agentMdId', e.target.value)}
+                className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+              >
+                <option value="">不绑定 agent.md 身份</option>
+                {agentMdDefinitions.map((definition) => (
+                  <option key={definition.id} value={definition.id}>
+                    {definition.name}{definition.createdByTeamName ? ` · Team: ${definition.createdByTeamName}` : ''}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-muted-foreground">
+                运行该 Agent 时会把所选 agent.md 内容作为身份说明注入到用户提示前。
+              </p>
+            </div>
+
             <div>
               <div className="text-xs font-medium text-muted-foreground">默认运行位置</div>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">

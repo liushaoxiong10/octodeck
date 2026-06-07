@@ -46,7 +46,7 @@ import {
 } from './agent-runtime-rpc.js';
 import { AgentLinkSession } from './session.js';
 
-const LATEST_DAEMON_VERSION = 'octodeck-daemon/1.0.4';
+const LATEST_DAEMON_VERSION = 'octodeck-daemon/1.0.8';
 
 export interface OnlineLinkInfo {
   linkId: string;

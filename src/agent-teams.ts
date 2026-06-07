@@ -108,8 +108,20 @@ export interface AgentMdDefinition {
   content: string;
   createdByAgentId: string;
   createdByUserId?: string;
+  /** agent.md definitions generated as part of an Agent Team carry this marker. */
+  createdByTeamId?: string;
+  createdByTeamName?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export type AgentMdReferenceKind = 'team' | 'agent';
+
+export interface AgentMdReference {
+  kind: AgentMdReferenceKind;
+  id: string;
+  name: string;
+  detail?: string;
 }
 
 export interface AgentMdSummary {
@@ -117,16 +129,6 @@ export interface AgentMdSummary {
   name: string;
   summary: string;
   content?: string;
-}
-
-export interface AgentMdStoreEntry {
-  id: string;
-  path: string;
-  name: string;
-  summary: string;
-  category: string;
-  size: number;
-  sourceUrl: string;
 }
 
 export type AgentTeamInput = Omit<AgentTeam, 'id' | 'createdAt' | 'updatedAt'>;
@@ -174,7 +176,6 @@ const AGENT_MD_METADATA_KEY = 'agent_md_definitions';
 const AGENCY_AGENTS_REPO_OWNER = 'msitarzewski';
 const AGENCY_AGENTS_REPO_NAME = 'agency-agents';
 const AGENCY_AGENTS_BRANCH = 'main';
-const AGENCY_AGENTS_TREE_URL = `https://api.github.com/repos/${AGENCY_AGENTS_REPO_OWNER}/${AGENCY_AGENTS_REPO_NAME}/git/trees/${AGENCY_AGENTS_BRANCH}?recursive=1`;
 const AGENCY_AGENTS_RAW_BASE_URL = `https://raw.githubusercontent.com/${AGENCY_AGENTS_REPO_OWNER}/${AGENCY_AGENTS_REPO_NAME}/${AGENCY_AGENTS_BRANCH}`;
 const AGENCY_AGENTS_CATEGORIES = new Set([
   'academic',
@@ -193,14 +194,6 @@ const AGENCY_AGENTS_CATEGORIES = new Set([
   'support',
   'testing',
 ]);
-
-interface GitHubTreeResponse {
-  tree?: Array<{
-    path?: string;
-    type?: string;
-    size?: number;
-  }>;
-}
 
 function ensureDir(filePath = AGENT_TEAMS_FILE): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -433,6 +426,8 @@ function normalizeAgentMdInput(
       '# Untitled agent.md\n\n请在这里定义该角色的职责、工作方式和边界。',
     createdByAgentId: input.createdByAgentId?.trim() || 'unknown',
     createdByUserId: input.createdByUserId?.trim() || undefined,
+    createdByTeamId: input.createdByTeamId?.trim() || undefined,
+    createdByTeamName: input.createdByTeamName?.trim() || undefined,
   };
 }
 
@@ -443,19 +438,13 @@ function requestTimeoutSignal(timeoutMs: number): AbortSignal {
 }
 
 async function fetchText(url: string, timeoutMs = 15_000): Promise<string> {
-  const response = await fetch(url, { signal: requestTimeoutSignal(timeoutMs) });
+  const response = await fetch(url, {
+    signal: requestTimeoutSignal(timeoutMs),
+  });
   if (!response.ok) {
     throw new Error(`failed to fetch ${url}: ${response.status}`);
   }
   return response.text();
-}
-
-async function fetchJson<T>(url: string, timeoutMs = 15_000): Promise<T> {
-  const response = await fetch(url, { signal: requestTimeoutSignal(timeoutMs) });
-  if (!response.ok) {
-    throw new Error(`failed to fetch ${url}: ${response.status}`);
-  }
-  return response.json() as Promise<T>;
 }
 
 function isAgencyAgentMarkdownPath(filePath: string): boolean {
@@ -465,7 +454,9 @@ function isAgencyAgentMarkdownPath(filePath: string): boolean {
   if (!category || !fileName) return false;
   if (fileName.toLowerCase() === 'readme.md') return false;
   if (AGENCY_AGENTS_CATEGORIES.has(category)) return true;
-  return filePath === 'integrations/mcp-memory/backend-architect-with-memory.md';
+  return (
+    filePath === 'integrations/mcp-memory/backend-architect-with-memory.md'
+  );
 }
 
 function agencyAgentRawUrl(filePath: string): string {
@@ -497,12 +488,14 @@ function parseFrontmatter(content: string): Record<string, string> {
 }
 
 function firstContentSentence(content: string): string {
-  return content
-    .replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '')
-    .split('\n')
-    .map((line) => line.replace(/^#+\s*/, '').trim())
-    .find(Boolean)
-    ?.slice(0, 300) || '来自 agency-agents 商店的 agent.md 定义。';
+  return (
+    content
+      .replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '')
+      .split('\n')
+      .map((line) => line.replace(/^#+\s*/, '').trim())
+      .find(Boolean)
+      ?.slice(0, 300) || '来自 agency-agents 商店的 agent.md 定义。'
+  );
 }
 
 function readFile(): StoredAgentTeamsFile {
@@ -674,6 +667,29 @@ export function deleteAgentTeam(id: string, ownerUserId?: string): boolean {
   return true;
 }
 
+export function deleteAgentTeamWithLinkedAgentMd(
+  id: string,
+  ownerUserId?: string,
+  options: { deleteLinkedAgentMd?: boolean } = {},
+): { deleted: boolean; linkedAgentMdDefinitions: AgentMdDefinition[] } {
+  const teamDeleted = deleteAgentTeam(id, ownerUserId);
+  if (!teamDeleted) return { deleted: false, linkedAgentMdDefinitions: [] };
+  const linkedAgentMdDefinitions = listAgentMdDefinitions(ownerUserId).filter(
+    (definition) => definition.createdByTeamId === id,
+  );
+  if (options.deleteLinkedAgentMd && linkedAgentMdDefinitions.length > 0) {
+    const linkedIds = new Set(linkedAgentMdDefinitions.map((definition) => definition.id));
+    const file = readAgentMdFile();
+    writeAgentMdFile(
+      file.definitions.filter(
+        (definition) =>
+          !linkedIds.has(definition.id) || !belongsToUser(definition, ownerUserId),
+      ),
+    );
+  }
+  return { deleted: true, linkedAgentMdDefinitions };
+}
+
 export function listAgentMdDefinitions(
   ownerUserId?: string,
 ): AgentMdDefinition[] {
@@ -700,6 +716,26 @@ export function getAgentMdDefinition(
         definition.id === id && belongsToUser(definition, ownerUserId),
     ) ?? null
   );
+}
+
+export function findAgentMdTeamReferences(
+  id: string,
+  ownerUserId?: string,
+  options: { excludeTeamId?: string } = {},
+): AgentMdReference[] {
+  return listAgentTeams(ownerUserId).flatMap((team) => {
+    if (team.id === options.excludeTeamId) return [];
+    const roleNames = team.roles
+      .filter((role) => role.preferredAgentMd?.includes(id))
+      .map((role) => role.name);
+    if (roleNames.length === 0) return [];
+    return [{
+      kind: 'team' as const,
+      id: team.id,
+      name: team.name,
+      detail: `角色：${roleNames.join('、')}`,
+    }];
+  });
 }
 
 export function createAgentMdDefinition(
@@ -738,6 +774,8 @@ export function updateAgentMdDefinition(
     content: patch.content ?? existing.content,
     createdByAgentId: patch.createdByAgentId ?? existing.createdByAgentId,
     createdByUserId: existing.createdByUserId,
+    createdByTeamId: patch.createdByTeamId ?? existing.createdByTeamId,
+    createdByTeamName: patch.createdByTeamName ?? existing.createdByTeamName,
   });
   const updated: AgentMdDefinition = {
     ...existing,
@@ -764,37 +802,6 @@ export function deleteAgentMdDefinition(
   if (next.length === file.definitions.length) return false;
   writeAgentMdFile(next);
   return true;
-}
-
-export async function listAgentMdStoreEntries(
-  query = '',
-): Promise<AgentMdStoreEntry[]> {
-  const data = await fetchJson<GitHubTreeResponse>(AGENCY_AGENTS_TREE_URL);
-  const normalizedQuery = query.trim().toLowerCase();
-  return (data.tree ?? [])
-    .filter((item) => item.type === 'blob' && item.path)
-    .filter((item) => isAgencyAgentMarkdownPath(item.path || ''))
-    .map((item) => {
-      const filePath = item.path || '';
-      const category = filePath.split('/')[0] || 'agency-agents';
-      return {
-        id: filePath.replace(/\.md$/i, '').replace(/[^a-zA-Z0-9]+/g, '-'),
-        path: filePath,
-        name: titleFromAgentPath(filePath),
-        summary: `${category} / ${filePath.split('/').pop()}`,
-        category,
-        size: item.size ?? 0,
-        sourceUrl: `https://github.com/${AGENCY_AGENTS_REPO_OWNER}/${AGENCY_AGENTS_REPO_NAME}/blob/${AGENCY_AGENTS_BRANCH}/${filePath}`,
-      } satisfies AgentMdStoreEntry;
-    })
-    .filter((entry) => {
-      if (!normalizedQuery) return true;
-      return [entry.name, entry.path, entry.category]
-        .join(' ')
-        .toLowerCase()
-        .includes(normalizedQuery);
-    })
-    .sort((a, b) => a.path.localeCompare(b.path));
 }
 
 export async function createAgentMdDefinitionFromStore(
@@ -854,7 +861,15 @@ export function buildAgentTeamGenerationPrompt(
         .slice(0, 30)
         .map(
           (definition) =>
-            `- ${definition.name} (${definition.id}): ${definition.summary}${definition.content ? `\n  agent.md:\n${definition.content.slice(0, 4000).split('\n').map((line) => `  ${line}`).join('\n')}` : ''}`,
+            `- ${definition.name} (${definition.id}): ${definition.summary}${
+              definition.content
+                ? `\n  agent.md:\n${definition.content
+                    .slice(0, 4000)
+                    .split('\n')
+                    .map((line) => `  ${line}`)
+                    .join('\n')}`
+                : ''
+            }`,
         )
         .join('\n')
     : '- 暂无现有 agent.md 定义。';
@@ -1116,7 +1131,13 @@ function workflowStepsForShape(
   if (shape === 'leader-worker') {
     const [lead, ...workers] = roles;
     return [
-      { id: 'lead_plan', type: 'role', roleId: lead.id, phase: 'plan', outputKey: 'plan' },
+      {
+        id: 'lead_plan',
+        type: 'role',
+        roleId: lead.id,
+        phase: 'plan',
+        outputKey: 'plan',
+      },
       {
         id: 'worker_parallel',
         type: 'parallel',
@@ -1125,7 +1146,13 @@ function workflowStepsForShape(
           { roleId: worker.id, phase: 'work', outputKey: worker.id },
         ]),
       },
-      { id: 'lead_finalize', type: 'role', roleId: lead.id, phase: 'finalize', outputKey: 'final' },
+      {
+        id: 'lead_finalize',
+        type: 'role',
+        roleId: lead.id,
+        phase: 'finalize',
+        outputKey: 'final',
+      },
     ];
   }
   if (shape === 'judge-route' && roles.length > 1) {
@@ -1147,7 +1174,8 @@ function workflowStepsForShape(
     id: `step_${index + 1}`,
     type: 'role',
     roleId: candidate.id,
-    phase: index === 0 ? 'plan' : index === roles.length - 1 ? 'finalize' : 'work',
+    phase:
+      index === 0 ? 'plan' : index === roles.length - 1 ? 'finalize' : 'work',
     outputKey: candidate.id,
   }));
 }

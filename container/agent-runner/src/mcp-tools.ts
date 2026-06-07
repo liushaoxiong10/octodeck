@@ -98,6 +98,23 @@ async function invokeAgentTeamTool(ctx: McpContext, payload: Record<string, unkn
   return data;
 }
 
+async function invokeRepoKnowledgeTool(ctx: McpContext, payload: Record<string, unknown>): Promise<any> {
+  if (!ctx.ownerUserId) throw new Error('ownerUserId is required for repo knowledge tools');
+  const baseUrl = ctx.serverBaseUrl || process.env.OCTODECK_SERVER_URL || 'http://127.0.0.1:3000';
+  const secret = ctx.agentToolToken || ctx.agentRunnerSecret || process.env.OCTODECK_AGENT_TOOL_TOKEN || process.env.OCTODECK_AGENT_RUNNER_SECRET || '';
+  const res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/repo-knowledge/tool`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${secret}`,
+    },
+    body: JSON.stringify({ userId: ctx.ownerUserId, ...payload }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `repo_knowledge_http_${res.status}`);
+  return data;
+}
+
 function toolJson(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
 }
@@ -276,6 +293,193 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
   const toRelativePath = createToRelativePath(ctx);
 
   const tools: SdkMcpToolDefinition<any>[] = [
+    tool(
+      'repo_knowledge_list',
+      '列出当前用户的仓库及其知识库状态。先用它发现 repo_id，再用 repo_knowledge_search / repo_knowledge_get_chunk。',
+      {},
+      async () => {
+        try {
+          return toolJson(await invokeRepoKnowledgeTool(ctx, { operation: 'list_repos' }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'repo_knowledge_status',
+      '查看某个仓库知识库生成状态、摘要和统计信息。',
+      { repo_id: z.string().describe('Repo ID') },
+      async (args) => {
+        try {
+          return toolJson(await invokeRepoKnowledgeTool(ctx, { operation: 'status', repoId: args.repo_id }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'repo_knowledge_search',
+      '在仓库知识库中搜索架构、文件、符号、依赖和文档片段。适合先理解代码图谱再动手修改。',
+      {
+        query: z.string().describe('搜索问题或关键词'),
+        repo_id: z.string().optional().describe('可选 Repo ID；不传则搜索当前用户全部已生成知识库'),
+        limit: z.number().int().min(1).max(50).optional().describe('返回条数，默认 20'),
+        kind: z.enum(['overview', 'file', 'symbol', 'dependency', 'doc', 'graph']).optional().describe('按 chunk 类型过滤'),
+        language: z.string().optional().describe('按语言过滤，例如 typescript/python/go'),
+        path_prefix: z.string().optional().describe('按路径前缀过滤'),
+        include_related: z.boolean().optional().describe('是否返回相关图谱边'),
+      },
+      async (args) => {
+        try {
+          return toolJson(await invokeRepoKnowledgeTool(ctx, {
+            operation: 'search',
+            query: args.query,
+            repoId: args.repo_id,
+            limit: args.limit,
+            kind: args.kind,
+            language: args.language,
+            pathPrefix: args.path_prefix,
+            includeRelated: args.include_related,
+          }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'repo_knowledge_list_chunks',
+      '列出某个仓库知识库的 chunk，可按文件 path 过滤。',
+      {
+        repo_id: z.string().describe('Repo ID'),
+        path: z.string().optional().describe('可选文件路径'),
+        kind: z.enum(['overview', 'file', 'symbol', 'dependency', 'doc', 'graph']).optional().describe('可选 chunk 类型'),
+        language: z.string().optional().describe('可选语言过滤'),
+        path_prefix: z.string().optional().describe('可选路径前缀过滤'),
+        limit: z.number().int().min(1).max(200).optional().describe('返回条数，默认 100'),
+      },
+      async (args) => {
+        try {
+          return toolJson(await invokeRepoKnowledgeTool(ctx, {
+            operation: 'list_chunks',
+            repoId: args.repo_id,
+            path: args.path,
+            kind: args.kind,
+            language: args.language,
+            pathPrefix: args.path_prefix,
+            limit: args.limit,
+          }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'repo_knowledge_get_chunk',
+      '读取知识库搜索结果中的完整 chunk 内容。',
+      { chunk_id: z.string().describe('Chunk ID') },
+      async (args) => {
+        try {
+          return toolJson(await invokeRepoKnowledgeTool(ctx, { operation: 'get_chunk', chunkId: args.chunk_id }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'repo_knowledge_graph',
+      '查看仓库知识库图谱边，包括 imports、depends_on、documents、references。',
+      {
+        repo_id: z.string().describe('Repo ID'),
+        path: z.string().optional().describe('可选文件路径，返回与该文件相关的边'),
+        edge_kind: z.enum(['imports', 'imported_by', 'depends_on', 'exports', 'documents', 'references']).optional().describe('边类型过滤'),
+        limit: z.number().int().min(1).max(200).optional().describe('返回条数，默认 100'),
+      },
+      async (args) => {
+        try {
+          return toolJson(await invokeRepoKnowledgeTool(ctx, {
+            operation: 'graph',
+            repoId: args.repo_id,
+            path: args.path,
+            edgeKind: args.edge_kind,
+            limit: args.limit,
+          }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'repo_knowledge_related',
+      '根据 chunk_id 或 path 获取相关 chunks 和图谱边。',
+      {
+        repo_id: z.string().describe('Repo ID'),
+        chunk_id: z.string().optional().describe('可选 chunk ID'),
+        path: z.string().optional().describe('可选文件路径'),
+        limit: z.number().int().min(1).max(100).optional().describe('返回条数，默认 30'),
+      },
+      async (args) => {
+        try {
+          return toolJson(await invokeRepoKnowledgeTool(ctx, {
+            operation: 'related',
+            repoId: args.repo_id,
+            chunkId: args.chunk_id,
+            path: args.path,
+            limit: args.limit,
+          }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'repo_knowledge_context',
+      '获取面向改代码的上下文包：命中 chunk、同文件 chunks、相关 chunks、依赖、文档和图谱边。优先用它在修改前聚合上下文。',
+      {
+        repo_id: z.string().describe('Repo ID'),
+        query: z.string().optional().describe('可选搜索问题；不传 chunk_id/path 时用它定位 anchor chunk'),
+        chunk_id: z.string().optional().describe('可选 chunk ID，精确定位上下文 anchor'),
+        path: z.string().optional().describe('可选文件路径，按文件聚合上下文'),
+        limit: z.number().int().min(1).max(80).optional().describe('每类上下文返回上限，默认 20'),
+      },
+      async (args) => {
+        try {
+          return toolJson(await invokeRepoKnowledgeTool(ctx, {
+            operation: 'context',
+            repoId: args.repo_id,
+            query: args.query,
+            chunkId: args.chunk_id,
+            path: args.path,
+            limit: args.limit,
+          }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'repo_knowledge_plugins',
+      '查看 OctoDeck Repo 知识库生成器插件状态，包括 builtin、graphify、codegraph。',
+      {},
+      async () => {
+        try {
+          return toolJson(await invokeRepoKnowledgeTool(ctx, { operation: 'plugins' }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+    tool(
+      'repo_knowledge_search_backends',
+      '查看 Repo 知识库搜索后端状态，包括 SQLite、PostgreSQL、MongoDB。',
+      {},
+      async () => {
+        try {
+          return toolJson(await invokeRepoKnowledgeTool(ctx, { operation: 'search_backends' }));
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
     tool(
       'agent_team_list',
       '列出当前用户可用的 OctoDeck Agent Team。用于先发现 team_id，再调用 agent_team_run。',

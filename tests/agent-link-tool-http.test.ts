@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 const getSessionMock = vi.hoisted(() => vi.fn());
 const invokeRemoteToolMock = vi.hoisted(() => vi.fn());
+const getAgentLinkByIdMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/agent-link/registry.js', () => ({
   getSession: getSessionMock,
@@ -11,11 +12,33 @@ vi.mock('../src/agent-link/tool-rpc.js', () => ({
   invokeRemoteTool: invokeRemoteToolMock,
 }));
 
+vi.mock('../src/db.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/db.js')>();
+  return {
+    ...actual,
+    getAgentLinkById: getAgentLinkByIdMock,
+  };
+});
+
 describe('agent-link tool HTTP bridge', () => {
   beforeEach(() => {
     getSessionMock.mockReset();
     invokeRemoteToolMock.mockReset();
+    getAgentLinkByIdMock.mockReset();
+    getAgentLinkByIdMock.mockReturnValue({
+      id: 'cl_1234567890abcdef',
+      userId: 'test-user',
+      revokedAt: null,
+    });
   });
+
+  async function authHeaders(): Promise<Record<string, string>> {
+    const { createAgentToolToken } = await import('../src/config.js');
+    return {
+      authorization: `Bearer ${createAgentToolToken('test-user')}`,
+      'content-type': 'application/json',
+    };
+  }
 
   test('devices tool endpoint remains compatible with agent-link tool bridge', async () => {
     process.env.OCTODECK_AGENT_RUNNER_SECRET = 'secret';
@@ -31,7 +54,7 @@ describe('agent-link tool HTTP bridge', () => {
     const res = await handleAgentLinkToolHttpRequest(
       new Request('http://localhost/api/devices/tool', {
         method: 'POST',
-        headers: { authorization: 'Bearer secret', 'content-type': 'application/json' },
+        headers: await authHeaders(),
         body: JSON.stringify({
           linkId: 'cl_1234567890abcdef',
           toolName: 'Read',
@@ -75,7 +98,7 @@ describe('agent-link tool HTTP bridge', () => {
     const res = await handleAgentLinkToolHttpRequest(
       new Request('http://localhost/api/agent-link/tool', {
         method: 'POST',
-        headers: { authorization: 'Bearer secret', 'content-type': 'application/json' },
+        headers: await authHeaders(),
         body: JSON.stringify({
           linkId: 'cl_1234567890abcdef',
           toolName: 'Read',
@@ -110,7 +133,7 @@ describe('agent-link tool HTTP bridge', () => {
     const res = await handleAgentLinkToolHttpRequest(
       new Request('http://localhost/api/agent-link/tool', {
         method: 'POST',
-        headers: { authorization: 'Bearer secret', 'content-type': 'application/json' },
+        headers: await authHeaders(),
         body: JSON.stringify({
           linkId: 'cl_1234567890abcdef',
           toolName: 'Bash',

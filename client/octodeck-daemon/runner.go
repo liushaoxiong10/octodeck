@@ -62,9 +62,14 @@ func (r *runner) spawn(parent context.Context, req *RunRequestFrame) {
 	timeout := time.Duration(req.TimeoutMs) * time.Millisecond
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	normalizeRunRequestWorkspaceScopes(req)
 
-	if req.WorkspaceRepo != nil {
-		cwd, err := resolveWorkspaceRepo(ctx, r.cfg, req.WorkspaceRepo)
+	if len(req.WorkspaceRepos) > 0 || req.WorkspaceRepo != nil {
+		repos := req.WorkspaceRepos
+		if len(repos) == 0 && req.WorkspaceRepo != nil {
+			repos = []*WorkspaceRepoSpec{req.WorkspaceRepo}
+		}
+		cwd, err := resolveWorkspaceReposRunCwd(ctx, r.cfg, repos)
 		if err != nil {
 			r.sendErr(req.RunID, fmt.Errorf("workspace repo: %w", err))
 			return
@@ -197,6 +202,18 @@ func (r *runner) spawn(parent context.Context, req *RunRequestFrame) {
 	})
 }
 
+func normalizeRunRequestWorkspaceScopes(req *RunRequestFrame) {
+	if req == nil {
+		return
+	}
+	for _, spec := range req.WorkspaceRepos {
+		normalizeWorkspaceRepoSpecScope(spec, req.BackendID)
+	}
+	if req.WorkspaceRepo != nil {
+		normalizeWorkspaceRepoSpecScope(req.WorkspaceRepo, req.BackendID)
+	}
+}
+
 func resolveWorkspaceRepo(ctx context.Context, cfg *Config, spec *WorkspaceRepoSpec) (string, error) {
 	if spec == nil {
 		return "", errors.New("workspace repo spec is required")
@@ -284,6 +301,34 @@ func resolveWorkspaceRepo(ctx context.Context, cfg *Config, spec *WorkspaceRepoS
 	default:
 		return "", fmt.Errorf("unknown workspace repo kind: %q", spec.Kind)
 	}
+}
+
+// resolveWorkspaceReposRunCwd materializes one or more repos under the resolved
+// workspace/session/task root and returns that root as the process cwd. This is
+// the legacy run.request counterpart of agent_runtime.resolveCwd: both single
+// repo and multi-repo workspaces expose repos as direct children of
+// workspace/<workspace-id>/sessions/<session-id>/ (or task/workspace scopes)
+// while keeping the agent's cwd fixed at that root.
+func resolveWorkspaceReposRunCwd(ctx context.Context, cfg *Config, repos []*WorkspaceRepoSpec) (string, error) {
+	if len(repos) == 0 || repos[0] == nil {
+		return "", errors.New("workspace repo spec is required")
+	}
+	baseDir, err := ensureWorkspaceRepoBaseDir(cfg, repos[0])
+	if err != nil {
+		return "", err
+	}
+	for _, spec := range repos {
+		if spec == nil {
+			return "", errors.New("workspace repo spec is required")
+		}
+		if spec.Kind == "workspace" {
+			continue
+		}
+		if _, err := mountWorkspaceRepoAt(ctx, cfg, baseDir, spec); err != nil {
+			return "", err
+		}
+	}
+	return baseDir, nil
 }
 
 // resolveWorkspaceRoot determines the absolute workspace root directory for an
@@ -535,7 +580,7 @@ func agentScopedDir(cfg *Config, groupFolder, legacyAgentID, customRoot, scope, 
 	switch scope {
 	case "direct_session", "session":
 		if scopeID == "" {
-			scopeID = "new"
+			scopeID = "main"
 		}
 		return filepath.Join(root, "sessions", safeGroupFolder(scopeID)), nil
 	case "task":
@@ -979,7 +1024,7 @@ func writeAgentTeamMCPProjectConfig(cfg *Config, cwd string, env ...map[string]s
 			return fmt.Errorf("parse existing Trae MCP config: %w", err)
 		}
 	}
-	server, err := buildAgentTeamMCPServerConfig(cfg)
+	server, err := buildAgentTeamMCPServerConfig(cfg, env...)
 	if err != nil {
 		return err
 	}
@@ -1011,7 +1056,7 @@ func writeCodexMCPConfig(cfg *Config, req *AgentRunRequestFrame, cwd string) err
 	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		return err
 	}
-	server, err := buildAgentTeamMCPServerConfig(cfg)
+	server, err := buildAgentTeamMCPServerConfig(cfg, req.Env)
 	if err != nil {
 		return err
 	}
@@ -1153,7 +1198,7 @@ func tomlStringArray(items []string) string {
 }
 
 func buildAgentTeamMCPConfigJSON(cfg *Config, env ...map[string]string) ([]byte, error) {
-	server, err := buildAgentTeamMCPServerConfig(cfg)
+	server, err := buildAgentTeamMCPServerConfig(cfg, env...)
 	if err != nil {
 		return nil, err
 	}
@@ -1187,7 +1232,7 @@ func loadUserMCPServersFromEnv(env ...map[string]string) map[string]any {
 	return parsed
 }
 
-func buildAgentTeamMCPServerConfig(cfg *Config) (map[string]any, error) {
+func buildAgentTeamMCPServerConfig(cfg *Config, env ...map[string]string) (map[string]any, error) {
 	if cfg == nil {
 		return nil, errors.New("config is required")
 	}
@@ -1202,13 +1247,22 @@ func buildAgentTeamMCPServerConfig(cfg *Config) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	serverEnv := map[string]string{
+		"OCTODECK_AGENT_TEAM_MCP": "1",
+	}
+	if len(env) > 0 && env[0] != nil {
+		if token := strings.TrimSpace(env[0]["OCTODECK_AGENT_TOOL_TOKEN"]); token != "" {
+			serverEnv["OCTODECK_AGENT_TOOL_TOKEN"] = token
+		}
+	}
+	if token := strings.TrimSpace(os.Getenv("OCTODECK_AGENT_TOOL_TOKEN")); token != "" && serverEnv["OCTODECK_AGENT_TOOL_TOKEN"] == "" {
+		serverEnv["OCTODECK_AGENT_TOOL_TOKEN"] = token
+	}
 	return map[string]any{
 		"type":    "stdio",
 		"command": command,
 		"args":    []string{"mcp-agent-team", "--config", configPath},
-		"env": map[string]string{
-			"OCTODECK_AGENT_TEAM_MCP": "1",
-		},
+		"env":     serverEnv,
 		"timeout": 30,
 	}, nil
 }
@@ -1251,11 +1305,11 @@ func taskDir(cfg *Config) string {
 		return cfg.TaskDir
 	}
 	if cfg != nil && cfg.WorkspaceDir != "" {
-		return filepath.Join(filepath.Dir(cfg.WorkspaceDir), "task")
+		return filepath.Join(filepath.Dir(cfg.WorkspaceDir), "tasks")
 	}
 	task, err := defaultTaskDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "octodeck", "task")
+		return filepath.Join(os.TempDir(), "octodeck", "tasks")
 	}
 	return task
 }

@@ -119,6 +119,8 @@ export const RunRequestFrame = z.object({
   context: z.unknown().optional(),
   stdinJson: z.string().optional(),
   remoteCwdPlaceholder: z.string().max(128).optional(),
+  /** Multiple repos mounted under the resolved workspace/session/task root. */
+  workspaceRepos: z.array(WorkspaceRepoSpecSchema).max(100).optional(),
   workspaceRepo: WorkspaceRepoSpecSchema.optional(),
 });
 export type RunRequestFrame = z.infer<typeof RunRequestFrame>;
@@ -186,6 +188,7 @@ export const AgentRunRequestFrame = z.object({
   policy: AgentRunPolicySchema.optional(),
   context: z.unknown().optional(),
   remoteCwdPlaceholder: z.string().max(128).optional(),
+  workspaceRepos: z.array(WorkspaceRepoSpecSchema).max(100).optional(),
   workspaceRepo: WorkspaceRepoSpecSchema.optional(),
 });
 export type AgentRunRequestFrame = z.infer<typeof AgentRunRequestFrame>;

@@ -99,6 +99,20 @@ describe('PR #547: conversation agent stays warm after final reply', () => {
     expect(files.length).toBe(1);
   });
 
+  test('repo visibility refresh drains warm runner without IPC-injecting the triggering message', () => {
+    const q = new GroupQueue();
+    const jid = `web:${folder}`;
+    seedRunner(q, jid, { groupFolder: folder, queryInFlight: false });
+
+    expect(q.requestRepoVisibilityRefresh(jid)).toBe(true);
+    expect(getState(q, jid).drainSentinelWritten).toBe(true);
+
+    q.enqueueMessageCheck(jid);
+    expect(getState(q, jid).pendingMessages).toBe(true);
+    expect(getState(q, jid).queryInFlight).toBe(false);
+    expect(fs.existsSync(path.join(ipcDir, 'input', '_drain'))).toBe(true);
+  });
+
   test('markRunnerActivity refreshes lastActivityAt so IDLE_TIMEOUT reclaims the warm runner', () => {
     const q = new GroupQueue();
     const jid = `web:${folder}`;

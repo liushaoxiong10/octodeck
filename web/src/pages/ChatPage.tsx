@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Plus, UserCog, LogOut } from 'lucide-react';
+import { Plus, UserCog, LogOut, Cloud, Monitor, Cpu, AlertTriangle } from 'lucide-react';
 import { useChatStore } from '../stores/chat';
 import { useAuthStore } from '../stores/auth';
 import { useGroupsStore } from '../stores/groups';
@@ -18,7 +18,22 @@ export function ChatPage() {
   const { groupFolder } = useParams<{ groupFolder?: string }>();
   const navigate = useNavigate();
   const { groups, currentGroup, selectGroup, loadGroups } = useChatStore();
-  const { clearState, clearLoading, openClear, closeClear, handleClearConfirm } = useClearWorkspace();
+  const {
+    clearState,
+    clearLoading,
+    openClear,
+    closeClear,
+    handleClearConfirm,
+    canSelectResetAgent,
+    devices: resetDevices,
+    selectableAgentBackends: resetAgentOptions,
+    resetRuntimeProfile,
+    setResetRuntimeProfile,
+    resetExecutionNode,
+    setResetExecutionNode,
+    resetAgentBackendId,
+    setResetAgentBackendId,
+  } = useClearWorkspace();
   const [createOpen, setCreateOpen] = useState(false);
   const user = useAuthStore((s) => s.user);
   const appearance = useAuthStore((s) => s.appearance);
@@ -263,7 +278,64 @@ export function ChatPage() {
         cancelText="取消"
         confirmVariant="danger"
         loading={clearLoading}
-      />
+      >
+        {canSelectResetAgent ? (
+          <div className="space-y-3">
+            <div>
+              <div className="text-xs font-medium text-muted-foreground mb-2">重建后使用的 Agent 配置</div>
+              <div className="space-y-2">
+                <label className="flex items-start gap-3 p-2 rounded-lg border cursor-pointer hover:bg-accent/50 transition-colors">
+                  <input type="radio" name="reset_runtime_profile" checked={resetRuntimeProfile === 'server-agent'} onChange={() => { setResetRuntimeProfile('server-agent'); setResetExecutionNode(''); setResetAgentBackendId(''); }} disabled={clearLoading} className="mt-0.5 accent-primary" />
+                  <div>
+                    <div className="flex items-center gap-1.5"><Cloud className="w-4 h-4 text-muted-foreground" /><span className="text-sm font-medium">服务端 Agent</span><span className="text-xs text-primary font-medium">云端 SDK</span></div>
+                    <p className="text-xs text-muted-foreground mt-0.5">仅使用云端 Claude SDK 推理和云端 MCP/Skill。</p>
+                  </div>
+                </label>
+                <label className="flex items-start gap-3 p-2 rounded-lg border cursor-pointer hover:bg-accent/50 transition-colors">
+                  <input type="radio" name="reset_runtime_profile" checked={resetRuntimeProfile === 'server-agent-device-tools'} onChange={() => { setResetRuntimeProfile('server-agent-device-tools'); setResetAgentBackendId(''); }} disabled={clearLoading} className="mt-0.5 accent-primary" />
+                  <div>
+                    <div className="flex items-center gap-1.5"><Monitor className="w-4 h-4 text-muted-foreground" /><span className="text-sm font-medium">服务端 Agent + Device 执行</span></div>
+                    <p className="text-xs text-muted-foreground mt-0.5">Agent 在服务端运行，命令和文件工具转发到选中的 Device。</p>
+                  </div>
+                </label>
+                <label className="flex items-start gap-3 p-2 rounded-lg border cursor-pointer hover:bg-accent/50 transition-colors">
+                  <input type="radio" name="reset_runtime_profile" checked={resetRuntimeProfile === 'device-cli-agent'} onChange={() => setResetRuntimeProfile('device-cli-agent')} disabled={clearLoading} className="mt-0.5 accent-primary" />
+                  <div>
+                    <div className="flex items-center gap-1.5"><Cpu className="w-4 h-4 text-muted-foreground" /><span className="text-sm font-medium">Device CLI Agent</span></div>
+                    <p className="text-xs text-muted-foreground mt-0.5">Agent CLI 直接在选中的 Device 上运行并使用本地工具链。</p>
+                  </div>
+                </label>
+              </div>
+            </div>
+            {resetRuntimeProfile !== 'server-agent' ? (
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">执行 Device</label>
+                <select value={resetExecutionNode} onChange={(e) => { setResetExecutionNode(e.target.value); setResetAgentBackendId(''); }} disabled={clearLoading} className="h-9 w-full px-3 text-sm border border-border rounded-md bg-background">
+                  <option value="" disabled>请选择 Device</option>
+                  {resetDevices.map((device) => (
+                    <option key={device.id} value={device.id} disabled={!device.online}>{device.online ? '🟢' : '⚪️'} {device.displayName} ({device.id}) · running {device.runningRuns?.length ?? 0}{device.online ? '' : ' · 离线'}</option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+            {resetRuntimeProfile === 'device-cli-agent' && resetExecutionNode ? (
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Device Agent</label>
+                <select value={resetAgentBackendId} onChange={(e) => setResetAgentBackendId(e.target.value)} disabled={clearLoading || resetAgentOptions.length === 0} className="h-9 w-full px-3 text-sm border border-border rounded-md bg-background">
+                  {resetAgentOptions.length === 0 ? <option value="">该 Device 暂无已定义 Agent，请先在 Agents 页面创建</option> : resetAgentOptions.map((backend) => <option key={backend.id} value={backend.id}>{backend.displayName || backend.id} · {backend.agentClientId} · {backend.id}</option>)}
+                </select>
+                <p className="text-xs text-muted-foreground mt-1">工作区会绑定到这个已定义 Agent，后续会使用它的模型、参数和会话能力。</p>
+              </div>
+            ) : null}
+            {resetRuntimeProfile !== 'server-agent' ? (
+              <div className="flex items-start gap-2 p-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg">
+                <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                <p className="text-xs text-amber-700 dark:text-amber-300">Device 执行形态下 Agent 可访问所选 Device 的文件系统和工具链，请谨慎使用。</p>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </ConfirmDialog>
       <CreateContainerDialog
         open={createOpen}
         onClose={() => setCreateOpen(false)}

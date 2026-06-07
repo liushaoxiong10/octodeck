@@ -142,7 +142,7 @@ export function CreateContainerDialog({
         toast.error('请选择执行形态');
         return;
       }
-      const options: Record<string, string> = {};
+      const options: Parameters<typeof createFlow>[1] = {};
       options.runtime_profile = runtimeProfile;
       if (runtimeProfile !== 'server-agent') {
         if (!executionNode) {
@@ -164,9 +164,13 @@ export function CreateContainerDialog({
         }
         if (hostRepoMode === 'repo' && selectedRepoId) {
           options.repo_id = selectedRepoId;
+          options.visible_repo_mode = 'selected';
+          options.visible_repo_ids = [selectedRepoId];
         } else if (hostRepoMode === 'repo') {
           toast.error('请选择项目 Repo');
           return;
+        } else {
+          options.visible_repo_mode = 'all';
         }
       }
       const created = await createFlow(trimmed, Object.keys(options).length ? options : undefined);

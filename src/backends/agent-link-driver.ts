@@ -67,23 +67,40 @@ interface CocoEvent {
   };
 }
 
+const TOOL_RESULT_NAME_BY_ID = new Map<string, string>();
+
 function compactJson(value: unknown, max = 2000): string | null {
   if (value === undefined || value === null) return null;
-  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  const text =
+    typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
 function summarizeToolInput(input: unknown): string | undefined {
-  if (!input || typeof input !== 'object') return compactJson(input, 240) ?? undefined;
+  if (!input || typeof input !== 'object')
+    return compactJson(input, 240) ?? undefined;
   const record = input as Record<string, unknown>;
-  for (const key of ['description', 'command', 'file_path', 'path', 'pattern', 'query', 'url', 'prompt']) {
+  for (const key of [
+    'description',
+    'command',
+    'file_path',
+    'path',
+    'pattern',
+    'query',
+    'url',
+    'prompt',
+  ]) {
     const value = record[key];
-    if (typeof value === 'string' && value.trim()) return `${key}: ${value.slice(0, 220)}`;
+    if (typeof value === 'string' && value.trim())
+      return `${key}: ${value.slice(0, 220)}`;
   }
   return compactJson(record, 240) ?? undefined;
 }
 
-function firstContentBlock(evt: CocoEvent, type: string): Record<string, unknown> | null {
+function firstContentBlock(
+  evt: CocoEvent,
+  type: string,
+): Record<string, unknown> | null {
   const content = evt.message?.content;
   if (!Array.isArray(content)) return null;
   return content.find((block) => block?.type === type) ?? null;
@@ -104,7 +121,8 @@ function streamEventFromCocoEvent(evt: CocoEvent): StreamEvent | null {
   const sessionId = evt.session_id;
   const toolUseBlock = firstContentBlock(evt, 'tool_use');
   const toolResultBlock = firstContentBlock(evt, 'tool_result');
-  const thinkingBlock = firstContentBlock(evt, 'thinking') ?? firstContentBlock(evt, 'reasoning');
+  const thinkingBlock =
+    firstContentBlock(evt, 'thinking') ?? firstContentBlock(evt, 'reasoning');
   if (
     evt.type === 'thinking' ||
     evt.type === 'reasoning' ||
@@ -128,31 +146,52 @@ function streamEventFromCocoEvent(evt: CocoEvent): StreamEvent | null {
       };
     }
   }
-  if (evt.type === 'tool_use' || evt.type === 'tool_call' || evt.type === 'tool_use_start' || toolUseBlock) {
+  if (
+    evt.type === 'tool_use' ||
+    evt.type === 'tool_call' ||
+    evt.type === 'tool_use_start' ||
+    toolUseBlock
+  ) {
     const source = toolUseBlock ?? (evt as unknown as Record<string, unknown>);
     const input = source.input;
-    const toolInput = input && typeof input === 'object' && !Array.isArray(input)
-      ? (input as Record<string, unknown>)
-      : undefined;
+    const toolInput =
+      input && typeof input === 'object' && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : undefined;
     return {
       eventType: 'tool_use_start',
       sessionId,
       toolName: typeof source.name === 'string' ? source.name : 'unknown',
-      toolUseId: typeof source.id === 'string' ? source.id : typeof source.tool_use_id === 'string' ? source.tool_use_id : undefined,
+      toolUseId:
+        typeof source.id === 'string'
+          ? source.id
+          : typeof source.tool_use_id === 'string'
+            ? source.tool_use_id
+            : undefined,
       toolInputSummary: summarizeToolInput(input),
       toolInput,
       detail: compactJson(input) ?? undefined,
       rawEvent: evt as unknown as Record<string, unknown>,
     };
   }
-  if (evt.type === 'tool_result' || evt.type === 'tool_use_end' || toolResultBlock) {
-    const source = toolResultBlock ?? (evt as unknown as Record<string, unknown>);
+  if (
+    evt.type === 'tool_result' ||
+    evt.type === 'tool_use_end' ||
+    toolResultBlock
+  ) {
+    const source =
+      toolResultBlock ?? (evt as unknown as Record<string, unknown>);
     const content = source.content ?? source.result ?? source.text;
     const isError = Boolean(source.is_error ?? evt.is_error);
     return {
       eventType: 'tool_use_end',
       sessionId,
-      toolUseId: typeof source.tool_use_id === 'string' ? source.tool_use_id : typeof source.id === 'string' ? source.id : undefined,
+      toolUseId:
+        typeof source.tool_use_id === 'string'
+          ? source.tool_use_id
+          : typeof source.id === 'string'
+            ? source.id
+            : undefined,
       statusText: isError ? 'error' : 'completed',
       summary: isError ? 'Tool returned error' : 'Tool response received',
       detail: compactJson(content) ?? undefined,
@@ -162,13 +201,17 @@ function streamEventFromCocoEvent(evt: CocoEvent): StreamEvent | null {
   return null;
 }
 
-function valueFromPayload(payload: Record<string, unknown> | undefined, keys: string[]): unknown {
+function valueFromPayload(
+  payload: Record<string, unknown> | undefined,
+  keys: string[],
+): unknown {
   if (!payload) return undefined;
   for (const key of keys) {
     const value = payload[key];
     if (value !== undefined && value !== null) return value;
   }
-  const blocks = (payload.message as Record<string, unknown> | undefined)?.content;
+  const blocks = (payload.message as Record<string, unknown> | undefined)
+    ?.content;
   if (Array.isArray(blocks)) {
     for (const block of blocks) {
       if (!block || typeof block !== 'object') continue;
@@ -192,22 +235,45 @@ function nestedObjectFromPayload(
     : undefined;
 }
 
-function normalizeUsagePayload(payload: Record<string, unknown> | undefined): StreamEvent['usage'] | undefined {
+function normalizeUsagePayload(
+  payload: Record<string, unknown> | undefined,
+): StreamEvent['usage'] | undefined {
   const usage = nestedObjectFromPayload(payload, ['usage']) ?? payload;
   if (!usage) return undefined;
   const num = (...keys: string[]) => {
     for (const key of keys) {
       const value = usage[key];
       if (typeof value === 'number' && Number.isFinite(value)) return value;
-      if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value);
+      if (
+        typeof value === 'string' &&
+        value.trim() &&
+        Number.isFinite(Number(value))
+      )
+        return Number(value);
     }
     return 0;
   };
   const normalized = {
-    inputTokens: num('inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens'),
-    outputTokens: num('outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens'),
-    cacheReadInputTokens: num('cacheReadInputTokens', 'cache_read_input_tokens'),
-    cacheCreationInputTokens: num('cacheCreationInputTokens', 'cache_creation_input_tokens'),
+    inputTokens: num(
+      'inputTokens',
+      'input_tokens',
+      'promptTokens',
+      'prompt_tokens',
+    ),
+    outputTokens: num(
+      'outputTokens',
+      'output_tokens',
+      'completionTokens',
+      'completion_tokens',
+    ),
+    cacheReadInputTokens: num(
+      'cacheReadInputTokens',
+      'cache_read_input_tokens',
+    ),
+    cacheCreationInputTokens: num(
+      'cacheCreationInputTokens',
+      'cache_creation_input_tokens',
+    ),
     costUSD: num('costUSD', 'cost_usd', 'cost'),
     durationMs: num('durationMs', 'duration_ms'),
     numTurns: num('numTurns', 'num_turns'),
@@ -223,15 +289,29 @@ function streamEventFromAgentRunFrame(frame: {
   payload?: Record<string, unknown>;
 }): StreamEvent | null {
   if (frame.eventType === 'tool_call' || frame.eventType === 'tool_use_start') {
-    const input = valueFromPayload(frame.payload, ['input', 'arguments', 'params']);
-    const toolInput = input && typeof input === 'object' && !Array.isArray(input)
-      ? (input as Record<string, unknown>)
-      : undefined;
+    const input = valueFromPayload(frame.payload, [
+      'input',
+      'arguments',
+      'params',
+    ]);
+    const toolUseId = String(
+      valueFromPayload(frame.payload, ['id', 'toolUseId', 'tool_use_id']) || '',
+    );
+    const toolName = String(
+      valueFromPayload(frame.payload, ['name', 'toolName']) || 'unknown',
+    );
+    if (toolUseId && toolName !== 'unknown') {
+      TOOL_RESULT_NAME_BY_ID.set(toolUseId, toolName);
+    }
+    const toolInput =
+      input && typeof input === 'object' && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : undefined;
     return {
       eventType: 'tool_use_start',
       sessionId: frame.sessionId,
-      toolName: String(valueFromPayload(frame.payload, ['name', 'toolName']) || 'unknown'),
-      toolUseId: String(valueFromPayload(frame.payload, ['id', 'toolUseId', 'tool_use_id']) || ''),
+      toolName,
+      toolUseId,
       toolInputSummary: summarizeToolInput(input),
       toolInput,
       detail: compactJson(input) ?? undefined,
@@ -239,12 +319,29 @@ function streamEventFromAgentRunFrame(frame: {
     };
   }
   if (frame.eventType === 'tool_result' || frame.eventType === 'tool_use_end') {
-    const content = valueFromPayload(frame.payload, ['content', 'result', 'text', 'output']);
-    const isError = Boolean(valueFromPayload(frame.payload, ['is_error', 'isError', 'error']));
+    const content = valueFromPayload(frame.payload, [
+      'content',
+      'result',
+      'text',
+      'output',
+    ]);
+    const isError = Boolean(
+      valueFromPayload(frame.payload, ['is_error', 'isError', 'error']),
+    );
+    const toolUseId = String(
+      valueFromPayload(frame.payload, ['toolUseId', 'tool_use_id', 'id']) || '',
+    );
+    const toolName = String(
+      valueFromPayload(frame.payload, ['name', 'toolName']) ||
+        TOOL_RESULT_NAME_BY_ID.get(toolUseId) ||
+        'unknown',
+    );
+    if (toolUseId) TOOL_RESULT_NAME_BY_ID.delete(toolUseId);
     return {
       eventType: 'tool_use_end',
       sessionId: frame.sessionId,
-      toolUseId: String(valueFromPayload(frame.payload, ['toolUseId', 'tool_use_id', 'id']) || ''),
+      toolName,
+      toolUseId,
       statusText: isError ? 'error' : 'completed',
       summary: isError ? 'Tool returned error' : 'Tool response received',
       detail: compactJson(content) ?? undefined,
@@ -252,13 +349,30 @@ function streamEventFromAgentRunFrame(frame: {
     };
   }
   if (frame.eventType === 'permission_request') {
-    return { eventType: 'permission_denied', sessionId: frame.sessionId, detail: compactJson(frame.payload) ?? undefined, rawEvent: frame.payload };
+    return {
+      eventType: 'permission_denied',
+      sessionId: frame.sessionId,
+      detail: compactJson(frame.payload) ?? undefined,
+      rawEvent: frame.payload,
+    };
   }
   if (frame.eventType === 'usage') {
-    return { eventType: 'usage', sessionId: frame.sessionId, usage: normalizeUsagePayload(frame.payload), detail: compactJson(frame.payload) ?? undefined, rawEvent: frame.payload };
+    return {
+      eventType: 'usage',
+      sessionId: frame.sessionId,
+      usage: normalizeUsagePayload(frame.payload),
+      detail: compactJson(frame.payload) ?? undefined,
+      rawEvent: frame.payload,
+    };
   }
   if (frame.eventType === 'session') {
-    return { eventType: 'status', sessionId: frame.sessionId, statusText: 'session', detail: compactJson(frame.payload) ?? undefined, rawEvent: frame.payload };
+    return {
+      eventType: 'status',
+      sessionId: frame.sessionId,
+      statusText: 'session',
+      detail: compactJson(frame.payload) ?? undefined,
+      rawEvent: frame.payload,
+    };
   }
   return null;
 }
@@ -305,13 +419,21 @@ interface ParseState {
 
 const REMOTE_CWD_PLACEHOLDER = '__OCTODECK_REMOTE_CWD__';
 const DEVICE_WORKSPACE_URI_PREFIX = 'octodeck-workspace://';
+const MAIN_CONVERSATION_SCOPE_ID = 'main';
 
-const PROMPTS_DIR = path.join(process.cwd(), 'container', 'agent-runner', 'prompts');
+const PROMPTS_DIR = path.join(
+  process.cwd(),
+  'container',
+  'agent-runner',
+  'prompts',
+);
 
 const deviceSystemPromptCache = new Map<string, string | null>();
 
 function loadPromptFile(...segments: string[]): string {
-  return fs.readFileSync(path.join(PROMPTS_DIR, ...segments), 'utf-8').trimEnd();
+  return fs
+    .readFileSync(path.join(PROMPTS_DIR, ...segments), 'utf-8')
+    .trimEnd();
 }
 
 function getChannelFromJid(jid: string | undefined): string | null {
@@ -322,7 +444,9 @@ function getChannelFromJid(jid: string | undefined): string | null {
   return channel === 'web' ? null : channel;
 }
 
-function buildDeviceCliSystemPrompt(input: BackendRunArgs['input']): string | undefined {
+function buildDeviceCliSystemPrompt(
+  input: BackendRunArgs['input'],
+): string | undefined {
   const channel = getChannelFromJid(input.currentSourceJid || input.chatJid);
   const cacheKey = JSON.stringify({
     isHome: !!input.isHome,
@@ -361,7 +485,9 @@ function buildDeviceCliSystemPrompt(input: BackendRunArgs['input']): string | un
         ? [`<channel-format>\n${channelGuidelines}\n</channel-format>`]
         : []),
       ...(input.agentId
-        ? [`<agent-override>\n${loadPromptFile('agent-override.md')}\n</agent-override>`]
+        ? [
+            `<agent-override>\n${loadPromptFile('agent-override.md')}\n</agent-override>`,
+          ]
         : []),
     ];
 
@@ -397,7 +523,12 @@ function appendClaudeCodeSystemPromptArg(
   return [...argv, '--append-system-prompt', systemPrompt];
 }
 
-type RemoteWorkspaceScope = 'workspace' | 'session' | 'direct_session' | 'task' | 'skills';
+type RemoteWorkspaceScope =
+  | 'workspace'
+  | 'session'
+  | 'direct_session'
+  | 'task'
+  | 'skills';
 
 interface RemoteWorkspaceMeta {
   agentId: string;
@@ -431,10 +562,7 @@ export function parseAgentLinkTarget(
   const providerMatch = /^provider:([^:]+)$/.exec(trimmed);
   if (providerMatch) {
     if (!userId) return null;
-    const selected = listOnlineRuntimesByProvider(
-      providerMatch[1],
-      userId,
-    )[0];
+    const selected = listOnlineRuntimesByProvider(providerMatch[1], userId)[0];
     if (selected)
       return {
         linkId: selected.deviceLinkId,
@@ -495,16 +623,33 @@ function buildRepoContext(
 }
 
 type WorkspaceRepo =
-  | ({ kind: 'git'; gitUrl: string; mainBranch?: string; groupFolder: string; name?: string } & Partial<RemoteWorkspaceMeta>)
-  | ({ kind: 'device_path'; devicePath: string; groupFolder: string; name?: string } & Partial<RemoteWorkspaceMeta>)
-  | ({ kind: 'workspace'; groupFolder: string; name?: string } & Partial<RemoteWorkspaceMeta>);
+  | ({
+      kind: 'git';
+      gitUrl: string;
+      mainBranch?: string;
+      groupFolder: string;
+      name?: string;
+    } & Partial<RemoteWorkspaceMeta>)
+  | ({
+      kind: 'device_path';
+      devicePath: string;
+      groupFolder: string;
+      name?: string;
+    } & Partial<RemoteWorkspaceMeta>)
+  | ({
+      kind: 'workspace';
+      groupFolder: string;
+      name?: string;
+    } & Partial<RemoteWorkspaceMeta>);
 
 function buildWorkspaceRepos(
   group: BackendRunArgs['group'],
   linkId: string,
   userId: string | undefined,
   meta?: RemoteWorkspaceMeta,
+  options?: { includeRepos?: boolean },
 ): WorkspaceRepo[] {
+  if (options?.includeRepos === false) return [];
   const workspaceFields = meta
     ? {
         agentId: meta.agentId,
@@ -516,6 +661,24 @@ function buildWorkspaceRepos(
         taskRunId: meta.taskRunId,
       }
     : {};
+
+  const managedRepos = userId ? listManagedReposByUser(userId) : [];
+  const explicitVisibleRepoMode = group.visibleRepoMode;
+  if (explicitVisibleRepoMode) {
+    const sourceRepos =
+      explicitVisibleRepoMode === 'selected'
+        ? managedRepos.filter((repo) =>
+            (group.visibleRepoIds ?? []).includes(repo.id),
+          )
+        : managedRepos;
+    return managedReposToWorkspaceRepos(
+      sourceRepos,
+      group.folder,
+      linkId,
+      workspaceFields,
+    );
+  }
+
   // 指定单一 repo
   if (group.repoGitUrl) {
     return [
@@ -541,11 +704,23 @@ function buildWorkspaceRepos(
     ];
   }
   // 全部可见：枚举该用户所有 managed repo
-  if (!userId) return [];
-  const allRepos = listManagedReposByUser(userId);
+  return managedReposToWorkspaceRepos(
+    managedRepos,
+    group.folder,
+    linkId,
+    workspaceFields,
+  );
+}
+
+function managedReposToWorkspaceRepos(
+  repos: ManagedRepo[],
+  groupFolder: string,
+  linkId: string,
+  workspaceFields: Partial<RemoteWorkspaceMeta>,
+): WorkspaceRepo[] {
   const out: WorkspaceRepo[] = [];
   const seen = new Set<string>();
-  for (const r of allRepos) {
+  for (const r of repos) {
     if (r.kind === 'git' && r.gitUrl) {
       const key = `git:${r.gitUrl}:${r.mainBranch ?? ''}`;
       if (seen.has(key)) continue;
@@ -555,7 +730,7 @@ function buildWorkspaceRepos(
         name: r.name || deriveRepoNameFromGitUrl(r.gitUrl),
         gitUrl: r.gitUrl,
         mainBranch: r.mainBranch,
-        groupFolder: group.folder,
+        groupFolder,
         ...workspaceFields,
       });
     } else if (
@@ -568,9 +743,10 @@ function buildWorkspaceRepos(
       seen.add(key);
       out.push({
         kind: 'device_path',
-        name: r.name || path.basename(path.normalize(r.devicePath)) || undefined,
+        name:
+          r.name || path.basename(path.normalize(r.devicePath)) || undefined,
         devicePath: r.devicePath,
-        groupFolder: group.folder,
+        groupFolder,
         ...workspaceFields,
       });
     }
@@ -596,23 +772,17 @@ function deriveRepoNameFromGitUrl(gitUrl: string): string {
 function buildRemoteWorkspaceMeta(
   args: BackendRunArgs,
   cfg: HostCliDriverConfig,
-  fallbackSessionId?: string,
 ): RemoteWorkspaceMeta {
   const { input, group } = args;
   const agentId = input.agentId || cfg.backendId;
-  const sessionScopeId = input.sessionId || fallbackSessionId;
   const scope: RemoteWorkspaceScope = input.isScheduledTask
     ? 'task'
-    : sessionScopeId
-      ? group.is_home && !input.agentId
-        ? 'direct_session'
-        : 'session'
-      : 'workspace';
+    : group.is_home && !input.agentId
+      ? 'direct_session'
+      : 'session';
   const scopeId = input.isScheduledTask
     ? input.taskRunId
-    : scope === 'session' || scope === 'direct_session'
-      ? sessionScopeId
-      : undefined;
+    : input.agentId || MAIN_CONVERSATION_SCOPE_ID;
   return {
     agentId,
     agentRoot: cfg.workdirMode === 'custom' ? cfg.workdir : undefined,
@@ -840,7 +1010,10 @@ async function runViaAgentRuntime(opts: {
           (frame.eventType === 'text_delta' ||
             frame.eventType === 'thinking_delta')
         ) {
-          if (frame.eventType !== 'thinking_delta' && textAccum.length < maxOutputBytes) {
+          if (
+            frame.eventType !== 'thinking_delta' &&
+            textAccum.length < maxOutputBytes
+          ) {
             textAccum += frame.text.slice(0, maxOutputBytes - textAccum.length);
           }
           void emitWrapped({
@@ -880,17 +1053,23 @@ async function runViaAgentRuntime(opts: {
     };
 
     registerAgentRun(controller);
-    const remoteEnv = buildRemoteEnv(cfg.envOverrides, group.created_by, linkId);
+    const remoteEnv = buildRemoteEnv(
+      cfg.envOverrides,
+      group.created_by,
+      linkId,
+    );
     const primaryRepo = workspaceRepos[0];
+    const remoteWorkspaceFolder =
+      input.isScheduledTask && !input.scheduledTaskHasWorkspace
+        ? ''
+        : group.folder;
     const workspacePayload: Record<string, unknown> = {
-      kind: workspaceRepos.length > 1 ? 'workspace' : primaryRepo?.kind ?? 'workspace',
+      kind: 'workspace',
       cwd: groupDir,
-      folder: group.folder,
+      folder: remoteWorkspaceFolder,
       ...workspaceMeta,
     };
-    if (workspaceRepos.length === 1) {
-      workspacePayload.repo = primaryRepo;
-    } else if (workspaceRepos.length > 1) {
+    if (workspaceRepos.length > 0) {
       workspacePayload.repos = workspaceRepos;
     }
     const ok = session.send({
@@ -911,6 +1090,7 @@ async function runViaAgentRuntime(opts: {
       policy: buildAgentRunPolicy(cfg, input),
       context: runContext,
       remoteCwdPlaceholder: REMOTE_CWD_PLACEHOLDER,
+      workspaceRepos: workspaceRepos.length > 0 ? workspaceRepos : undefined,
       workspaceRepo: primaryRepo,
     });
     if (!ok) {
@@ -951,18 +1131,24 @@ export async function runViaAgentLink(
   //    落在同一个 .octodeck/workspace/<agentId>/）。
   const defaultGroupDir = path.join(GROUPS_DIR, group.folder);
   fs.mkdirSync(defaultGroupDir, { recursive: true });
-  const workspaceSessionId = input.sessionId || input.turnId || newRunId();
-  const workspaceMeta = buildRemoteWorkspaceMeta(args, cfg, workspaceSessionId);
+  const workspaceMeta = buildRemoteWorkspaceMeta(args, cfg);
   const workspaceRepos = buildWorkspaceRepos(
     group,
     linkId,
     group.created_by,
     workspaceMeta,
+    {
+      includeRepos: !input.isScheduledTask || !!input.scheduledTaskHasWorkspace,
+    },
   );
+  const remoteWorkspaceFolder =
+    input.isScheduledTask && !input.scheduledTaskHasWorkspace
+      ? ''
+      : group.folder;
   const groupDir =
     group.customCwd ||
     workspaceMeta.agentRoot ||
-    `${DEVICE_WORKSPACE_URI_PREFIX}${group.folder}`;
+    `${DEVICE_WORKSPACE_URI_PREFIX}${remoteWorkspaceFolder || group.folder}`;
   if (
     !path.isAbsolute(groupDir) &&
     !groupDir.startsWith(DEVICE_WORKSPACE_URI_PREFIX)
@@ -984,7 +1170,7 @@ export async function runViaAgentLink(
   const runContext = buildRunContext(args, cfg, contextCwd);
   const workspaceOnlySpec: WorkspaceRepo = {
     kind: 'workspace',
-    groupFolder: group.folder,
+    groupFolder: remoteWorkspaceFolder,
     agentId: workspaceMeta.agentId,
     agentRoot: workspaceMeta.agentRoot,
     workdirMode: workspaceMeta.workdirMode,
@@ -1331,7 +1517,11 @@ export async function runViaAgentLink(
 
     registerRun(controller);
 
-    const remoteEnv = buildRemoteEnv(cfg.envOverrides, group.created_by, linkId);
+    const remoteEnv = buildRemoteEnv(
+      cfg.envOverrides,
+      group.created_by,
+      linkId,
+    );
     const ok = session.send({
       type: 'run.request',
       id: 0,
@@ -1347,7 +1537,8 @@ export async function runViaAgentLink(
       context: runContext,
       stdinJson: JSON.stringify(input),
       remoteCwdPlaceholder: REMOTE_CWD_PLACEHOLDER,
-      workspaceRepo: workspaceRepos[0] ?? (input.isScheduledTask ? workspaceOnlySpec : undefined),
+      workspaceRepos: workspaceRepos.length > 0 ? workspaceRepos : undefined,
+      workspaceRepo: workspaceRepos[0] ?? workspaceOnlySpec,
     });
     if (!ok) {
       clearTimeout(timer);

@@ -56,7 +56,7 @@ describe('daemon install script', () => {
     );
     expect(script).toContain('chmod +x "${INSTALL_DIR}/bin/octodeck-daemon"');
     expect(script).toContain('"linkId": "cl_1234567890abcdef"');
-    expect(script).toContain('"version": "octodeck-daemon/1.0.4"');
+    expect(script).toContain('"version": "octodeck-daemon/1.0.8"');
     expect(script).toContain('"autoUpdate": true');
     expect(script).toContain('launchctl bootstrap "gui/$(id -u)" "${PLIST}"');
     expect(script).toContain(

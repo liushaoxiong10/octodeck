@@ -16,12 +16,12 @@ import {
   createAgentMdDefinition,
   createAgentTeam,
   deleteAgentMdDefinition,
-  deleteAgentTeam,
+  deleteAgentTeamWithLinkedAgentMd,
+  findAgentMdTeamReferences,
   getAgentMdDefinition,
   getAgentTeam,
   isAbstractAgentTeamDefinition,
   listAgentMdDefinitions,
-  listAgentMdStoreEntries,
   listAgentMdSummaries,
   listAgentTeams,
   updateAgentMdDefinition,
@@ -32,6 +32,9 @@ import {
 } from '../agent-teams.js';
 import type { AgentMdDefinitionInput, AgentTeamInput } from '../agent-teams.js';
 import { executeAgentTeam } from '../agent-team-engine.js';
+import { listCustomBackends } from '../backends/custom-loader.js';
+import { parseAgentLinkTarget } from '../backends/agent-link-driver.js';
+import { requestWorkspaceCleanup } from '../agent-link/registry.js';
 import type {
   AgentTeamRoleResult,
   AgentTeamExecutionPhase,
@@ -56,7 +59,34 @@ import {
 } from '../db.js';
 
 const router = new Hono<{ Variables: Variables }>();
-const AGENT_TEAM_GENERATION_TIMEOUT_MS = 600_000;
+const AGENT_TEAM_GENERATION_TIMEOUT_MS = 1_800_000;
+
+type AgentTeamGenerationJobStatus = 'running' | 'success' | 'error';
+
+interface AgentTeamGenerationJob {
+  id: string;
+  userId: string;
+  generatorAgentId: string;
+  goal: string;
+  shape: AgentTeamShape;
+  status: AgentTeamGenerationJobStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  team?: AgentTeam;
+  agentMdDefinitions?: ReturnType<typeof createAgentMdDefinition>[];
+  error?: string;
+}
+
+const agentTeamGenerationJobs = new Map<string, AgentTeamGenerationJob>();
+
+function toPublicGenerationJob(job: AgentTeamGenerationJob): AgentTeamGenerationJob {
+  if (job.status !== 'success') return job;
+  return {
+    ...job,
+    agentMdDefinitions: undefined,
+  };
+}
 
 const ShapeSchema = z.enum([
   'auto',
@@ -125,7 +155,10 @@ const WorkflowStepSchema = z.object({
   inputKeys: z.array(z.string().max(128)).max(12).optional(),
   outputKey: z.string().min(1).max(128).optional(),
   dependsOn: z.array(z.string().max(128)).max(12).optional(),
-  parallel: z.array(z.array(WorkflowActionSchema).min(1).max(8)).max(8).optional(),
+  parallel: z
+    .array(z.array(WorkflowActionSchema).min(1).max(8))
+    .max(8)
+    .optional(),
   route: z
     .object({
       judgeRoleId: z.string().min(1).max(64),
@@ -208,6 +241,19 @@ const ExecuteSchema = z.object({
 });
 type ExecuteRequest = z.infer<typeof ExecuteSchema>;
 
+function resolveAgentTeamDeviceLink(input: {
+  runnerAgentId: string;
+  assignment?: NonNullable<ExecuteRequest['roleAssignments']>[string];
+  userId?: string;
+}): string | undefined {
+  if (input.assignment?.linkId) return input.assignment.linkId;
+  const customBackend = listCustomBackends().find(
+    (backend) => backend.id === input.runnerAgentId,
+  );
+  if (customBackend?.deviceLinkId) return customBackend.deviceLinkId;
+  return parseAgentLinkTarget(input.runnerAgentId, input.userId)?.linkId;
+}
+
 const ApprovalDecisionSchema = z.object({
   decision: z.enum(['approved', 'rejected']),
 });
@@ -232,6 +278,28 @@ const AgentTeamToolSchema = z.object({
   maxFeedbackIterations: z.number().int().min(0).max(5).optional(),
   decision: z.enum(['approved', 'rejected']).optional(),
 });
+
+function agentReferencesForAgentMd(id: string, _ownerUserId: string) {
+  return listCustomBackends()
+    .filter((backend) => backend.agentMdId === id)
+    .map((backend) => ({
+      kind: 'agent' as const,
+      id: backend.id,
+      name: backend.displayName || backend.id,
+      detail: 'Agent 身份引用',
+    }));
+}
+
+function allReferencesForAgentMd(
+  id: string,
+  ownerUserId: string,
+  options: { excludeTeamId?: string } = {},
+) {
+  return [
+    ...findAgentMdTeamReferences(id, ownerUserId, options),
+    ...agentReferencesForAgentMd(id, ownerUserId),
+  ];
+}
 
 router.get('/', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
@@ -290,29 +358,37 @@ router.post('/generate', authMiddleware, systemConfigMiddleware, async (c) => {
     goal: parsed.data.goal,
     shape: parsed.data.shape as AgentTeamShape,
   });
-  const generated = await generateDraftWithAgent(
-    parsed.data.generatorAgentId,
-    fallback,
-    user.id,
-  ).catch(() => null);
-  if (!generated) {
-    return c.json(
-      { error: 'agent team generator did not return a valid team definition' },
-      502,
-    );
+  const now = new Date().toISOString();
+  const job: AgentTeamGenerationJob = {
+    id: `team_gen_${crypto.randomBytes(6).toString('hex')}`,
+    userId: user.id,
+    generatorAgentId: parsed.data.generatorAgentId,
+    goal: parsed.data.goal,
+    shape: parsed.data.shape as AgentTeamShape,
+    status: 'running',
+    createdAt: now,
+    updatedAt: now,
+  };
+  agentTeamGenerationJobs.set(job.id, job);
+  void runAgentTeamGenerationJob(job.id, fallback);
+  return c.json({ job: toPublicGenerationJob(job) }, 202);
+});
+
+router.get('/generation-jobs', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const jobs = [...agentTeamGenerationJobs.values()]
+    .filter((job) => job.userId === user.id)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return c.json({ jobs: jobs.map(toPublicGenerationJob) });
+});
+
+router.get('/generation-jobs/:jobId', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const job = agentTeamGenerationJobs.get(c.req.param('jobId'));
+  if (!job || job.userId !== user.id) {
+    return c.json({ error: 'agent team generation job not found' }, 404);
   }
-  const createdAgentMdDefinitions = generated.agentMdDefinitionsToCreate.map(
-    (definition) =>
-      createAgentMdDefinition(
-        {
-          ...definition,
-          createdByAgentId: parsed.data.generatorAgentId,
-        },
-        user.id,
-      ),
-  );
-  const team = createAgentTeam(generated.draft, user.id);
-  return c.json({ team, agentMdDefinitions: createdAgentMdDefinitions }, 201);
+  return c.json({ job: toPublicGenerationJob(job) });
 });
 
 router.get('/agent-md', authMiddleware, (c) => {
@@ -341,15 +417,6 @@ router.post('/agent-md', authMiddleware, systemConfigMiddleware, async (c) => {
 router.get('/agent-md-summaries', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   return c.json({ summaries: listAgentMdSummaries(user.id) });
-});
-
-router.get('/agent-md-store', authMiddleware, async (c) => {
-  const query = c.req.query('query')?.trim() || '';
-  try {
-    return c.json({ entries: await listAgentMdStoreEntries(query) });
-  } catch {
-    return c.json({ error: 'failed to load agent.md store' }, 502);
-  }
 });
 
 router.post(
@@ -417,7 +484,20 @@ router.patch(
 
 router.delete('/agent-md/:id', authMiddleware, systemConfigMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
-  const deleted = deleteAgentMdDefinition(c.req.param('id'), user.id);
+  const id = c.req.param('id');
+  const existing = getAgentMdDefinition(id, user.id);
+  if (!existing) return c.json({ error: 'agent.md definition not found' }, 404);
+  const references = allReferencesForAgentMd(id, user.id);
+  if (references.length > 0) {
+    return c.json(
+      {
+        error: 'agent.md definition is still referenced',
+        references,
+      },
+      409,
+    );
+  }
+  const deleted = deleteAgentMdDefinition(id, user.id);
   if (!deleted) return c.json({ error: 'agent.md definition not found' }, 404);
   return c.json({ ok: true });
 });
@@ -722,8 +802,7 @@ export async function handleAgentTeamToolRequest(c: any): Promise<Response> {
         ? String(body.userId || '')
         : null)
     : null;
-  if (!tokenUser)
-    return c.json({ error: 'unauthorized' }, 401);
+  if (!tokenUser) return c.json({ error: 'unauthorized' }, 401);
   return handleAgentTeamToolBody(c, {
     ...(isRecord(body) ? body : {}),
     userId: tokenUser,
@@ -1086,29 +1165,51 @@ async function executePreparedRun(
         status: 'running',
         input: rolePrompt,
       });
-      const output = await roleBackend.run({
-        group: {
-          name: `Agent Team ${team.name}`,
-          folder: `agent-team-${team.id}-${role.id}`,
-          added_at: new Date().toISOString(),
-          containerConfig: { timeout: AGENT_TEAM_GENERATION_TIMEOUT_MS },
-          executionMode: 'host',
-          backend: roleRunnerAgentId,
-          created_by: user.id,
-        },
-        executionMode: 'host',
-        input: {
-          prompt: rolePrompt,
-          groupFolder: runtimeContext?.groupFolder ?? `agent-team-${team.id}-${role.id}`,
-          chatJid: runtimeContext?.chatJid ?? `system:agent-team:${team.id}`,
-          isMain: false,
-          isHome: false,
-          isAdminHome: false,
-          remoteToolCwd: runtimeContext?.remoteToolCwd,
-          executionProfile: 'single-turn-json',
-        },
-        onProcess: () => undefined,
+      const roleGroupFolder =
+        runtimeContext?.groupFolder ?? `agent-team-${team.id}-${role.id}`;
+      const roleTurnId = `${taskId}:turn`;
+      const cleanupDeviceLinkId = resolveAgentTeamDeviceLink({
+        runnerAgentId: roleRunnerAgentId,
+        assignment,
+        userId: user.id,
       });
+      const output = await (async () => {
+        try {
+          return await roleBackend.run({
+            group: {
+              name: `Agent Team ${team.name}`,
+              folder: roleGroupFolder,
+              added_at: new Date().toISOString(),
+              containerConfig: { timeout: AGENT_TEAM_GENERATION_TIMEOUT_MS },
+              executionMode: 'host',
+              backend: roleRunnerAgentId,
+              created_by: user.id,
+            },
+            executionMode: 'host',
+            input: {
+              prompt: rolePrompt,
+              groupFolder: roleGroupFolder,
+              chatJid: runtimeContext?.chatJid ?? `system:agent-team:${team.id}`,
+              isMain: false,
+              isHome: false,
+              isAdminHome: false,
+              turnId: roleTurnId,
+              remoteToolCwd: runtimeContext?.remoteToolCwd,
+              executionProfile: 'single-turn-json',
+            },
+            onProcess: () => undefined,
+          });
+        } finally {
+          if (cleanupDeviceLinkId) {
+            requestWorkspaceCleanup({
+              linkId: cleanupDeviceLinkId,
+              workspace: roleGroupFolder,
+              scope: 'session',
+              sessionId: roleTurnId,
+            });
+          }
+        }
+      })();
       recordAgentTeamTask({
         id: taskId,
         runId,
@@ -1290,12 +1391,81 @@ router.patch('/:id', authMiddleware, systemConfigMiddleware, async (c) => {
 
 router.delete('/:id', authMiddleware, systemConfigMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
-  const deleted = deleteAgentTeam(c.req.param('id'), user.id);
-  if (!deleted) return c.json({ error: 'team not found' }, 404);
-  return c.json({ ok: true });
+  const id = c.req.param('id');
+  const deleteLinkedAgentMd = c.req.query('deleteLinkedAgentMd') === 'true';
+  const linkedAgentMdDefinitions = listAgentMdDefinitions(user.id).filter(
+    (definition) => definition.createdByTeamId === id,
+  );
+  if (deleteLinkedAgentMd) {
+    const blockingReferences = linkedAgentMdDefinitions.flatMap((definition) =>
+      allReferencesForAgentMd(definition.id, user.id, { excludeTeamId: id }).map(
+        (reference) => ({ ...reference, agentMdId: definition.id, agentMdName: definition.name }),
+      ),
+    );
+    if (blockingReferences.length > 0) {
+      return c.json(
+        {
+          error: 'linked agent.md definition is still referenced',
+          references: blockingReferences,
+        },
+        409,
+      );
+    }
+  }
+  const result = deleteAgentTeamWithLinkedAgentMd(id, user.id, {
+    deleteLinkedAgentMd,
+  });
+  if (!result.deleted) return c.json({ error: 'team not found' }, 404);
+  return c.json({ ok: true, linkedAgentMdDefinitions: result.linkedAgentMdDefinitions });
 });
 
 export default router;
+
+async function runAgentTeamGenerationJob(
+  jobId: string,
+  fallback: AgentTeamInput,
+): Promise<void> {
+  const job = agentTeamGenerationJobs.get(jobId);
+  if (!job) return;
+  try {
+    const generated = await generateDraftWithAgent(
+      job.generatorAgentId,
+      fallback,
+      job.userId,
+    );
+    const team = createAgentTeam(generated.draft, job.userId);
+    const createdAgentMdDefinitions = generated.agentMdDefinitionsToCreate.map(
+      (definition) =>
+        createAgentMdDefinition(
+          {
+            ...definition,
+            createdByAgentId: job.generatorAgentId,
+            createdByTeamId: team.id,
+            createdByTeamName: team.name,
+          },
+          job.userId,
+        ),
+    );
+    const completedAt = new Date().toISOString();
+    agentTeamGenerationJobs.set(jobId, {
+      ...job,
+      status: 'success',
+      team,
+      agentMdDefinitions: createdAgentMdDefinitions,
+      updatedAt: completedAt,
+      completedAt,
+    });
+  } catch (err) {
+    const completedAt = new Date().toISOString();
+    agentTeamGenerationJobs.set(jobId, {
+      ...job,
+      status: 'error',
+      error: err instanceof Error ? err.message : String(err),
+      updatedAt: completedAt,
+      completedAt,
+    });
+  }
+}
 
 async function generateDraftWithAgent(
   generatorAgentId: string,
@@ -1421,7 +1591,12 @@ function buildAgentTeamRolePrompt(
     instructions?: string;
     busMessages?: unknown[];
     artifacts?: Record<string, string>;
-    agentMdDefinitions?: Array<{ id: string; name: string; summary: string; content: string }>;
+    agentMdDefinitions?: Array<{
+      id: string;
+      name: string;
+      summary: string;
+      content: string;
+    }>;
     runtimeContext?: ExecuteRequest['runtimeContext'];
   } = {},
 ): string {
@@ -1511,9 +1686,12 @@ function resolveRoleAgentMdDefinitions(
   if (wanted.size === 0) return [];
   return definitions
     .filter((definition) =>
-      [definition.id, definition.name, definition.summary].some((value) =>
-        wanted.has(value.toLowerCase()) ||
-        Array.from(wanted).some((needle) => value.toLowerCase().includes(needle)),
+      [definition.id, definition.name, definition.summary].some(
+        (value) =>
+          wanted.has(value.toLowerCase()) ||
+          Array.from(wanted).some((needle) =>
+            value.toLowerCase().includes(needle),
+          ),
       ),
     )
     .slice(0, 3)

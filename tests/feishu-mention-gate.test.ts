@@ -6,12 +6,17 @@ import {
 } from '../src/feishu-mention-gate.js';
 
 const BOT_OPEN_ID = 'ou_bot_xyz';
+const BOT_USER_ID = 'cli_bot_xyz';
 const SENDER = 'ou_user_abc';
 const OWNER = 'ou_owner_def';
 const CHAT = 'feishu:oc_test';
 
 function mention(openId: string): MentionGateMention {
   return { id: { open_id: openId } };
+}
+
+function mentionUser(userId: string): MentionGateMention {
+  return { id: { user_id: userId } };
 }
 
 function input(overrides: Partial<MentionGateInput> = {}): MentionGateInput {
@@ -56,6 +61,28 @@ describe('evaluateMentionGate', () => {
   test('require_mention 模式 + bot 被 @ → 放行', () => {
     const decision = evaluateMentionGate(
       input({ mentions: [mention('ou_other'), mention(BOT_OPEN_ID)] }),
+    );
+    expect(decision).toEqual({ allow: true });
+  });
+
+  test('话题群 mention 只带 user_id 时也能识别 bot 被 @', () => {
+    const decision = evaluateMentionGate(
+      input({
+        botOpenId: '',
+        botUserId: BOT_USER_ID,
+        mentions: [mentionUser('cli_other'), mentionUser(BOT_USER_ID)],
+      }),
+    );
+    expect(decision).toEqual({ allow: true });
+  });
+
+  test('话题群 mention 缺少 ID 时可用 bot 名称兜底识别', () => {
+    const decision = evaluateMentionGate(
+      input({
+        botOpenId: '',
+        botMentionNames: ['OctoDeck Bot'],
+        mentions: [{ name: 'OctoDeck Bot' }],
+      }),
     );
     expect(decision).toEqual({ allow: true });
   });
