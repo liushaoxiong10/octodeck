@@ -54,6 +54,17 @@ function registerTestBackend(id: string) {
     run: vi.fn(async ({ input, group }) => {
       calls.push({ backendId: id, prompt: input.prompt, folder: group.folder });
       const roleMatch = input.prompt.match(/Current role: .*\(([^)]+)\)/);
+      if (input.prompt.includes('REQUEST_RUNTIME_APPROVAL') && roleMatch?.[1] === 'judge') {
+        return {
+          status: 'success',
+          result: JSON.stringify({
+            action: 'request_approval',
+            target: 'executor',
+            reason: '运行时路由需要人工确认',
+            confidence: 0.86,
+          }),
+        };
+      }
       return { status: 'success', result: `${id}:${roleMatch?.[1] ?? 'unknown'}` };
     }),
   });
@@ -396,5 +407,66 @@ describe('agent team runtime persistence and role assignments', () => {
 
     expect(cancelRes.status).toBe(200);
     expect(cancelled.run.status).toBe('cancelled');
+  });
+
+  test('persists route approval requests and resumes approved workflow from checkpoint', async () => {
+    const team = agentTeams.createAgentTeam({
+      name: 'Route Approval Team',
+      goal: '运行中路由审批',
+      shape: 'judge-route',
+      description: 'route step 可在运行时请求人工审批。',
+      roles: [
+        { id: 'judge', name: 'Judge', responsibility: '判断是否审批。' },
+        { id: 'executor', name: 'Executor', responsibility: '执行审批后的动作。' },
+      ],
+      workflow: 'Judge 请求审批，审批通过后 Executor 执行。',
+      workflowSteps: [
+        {
+          id: 'route',
+          type: 'route',
+          route: { judgeRoleId: 'judge', candidateRoleIds: ['executor'], fallbackRoleId: 'executor' },
+          outputKey: 'route_output',
+        },
+      ],
+      successCriteria: ['审批通过后继续运行'],
+      createdByAgentId: 'runner_a',
+    }, 'alice');
+
+    const createRes = await agentTeamRoutes.request(`/${team.id}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'REQUEST_RUNTIME_APPROVAL', runnerAgentId: 'runner_a' }),
+    });
+    const created = await createRes.json() as {
+      run: { id: string; status: string };
+      approval: { id: string; status: string; payload: { action: string; scope: { stepId: string; targetRoleId: string }; rollback: string } };
+      execution: { status: string; waitingApproval: { stepId: string; targetRoleId: string } };
+    };
+
+    expect(createRes.status).toBe(202);
+    expect(created.run.status).toBe('waiting_approval');
+    expect(created.execution.status).toBe('waiting_approval');
+    expect(created.approval).toMatchObject({
+      status: 'pending',
+      payload: {
+        action: 'agent_team.route_approval',
+        scope: { stepId: 'route', targetRoleId: 'executor' },
+      },
+    });
+    expect(created.approval.payload.rollback).toContain('Reject approval');
+    expect(calls.map((call) => call.prompt.includes('Current role: Judge (judge)'))).toEqual([true]);
+
+    const approveRes = await agentTeamRoutes.request(`/runs/${created.run.id}/approvals/${created.approval.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision: 'approved' }),
+    });
+    const approved = await approveRes.json() as { run: { status: string }; execution: { status: string; finalResult: string } };
+
+    expect(approveRes.status).toBe(200);
+    expect(approved.run.status).toBe('success');
+    expect(approved.execution.status).toBe('success');
+    expect(approved.execution.finalResult).toContain('runner_a:executor');
+    expect(calls.map((call) => call.prompt.includes('Current role:'))).toEqual([true, true]);
   });
 });

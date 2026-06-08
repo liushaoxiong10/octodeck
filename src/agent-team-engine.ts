@@ -40,6 +40,7 @@ export interface AgentTeamRoleResult {
   phase: AgentTeamExecutionPhase;
   status: 'success' | 'error';
   result: string;
+  outputKey?: string;
   error?: string;
 }
 
@@ -58,6 +59,13 @@ export interface AgentTeamExecutionInput {
   runId?: string;
   traceId?: string;
   sessionId?: string;
+  resumeFromCheckpoint?: AgentTeamRuntimeCheckpoint;
+  approvalDecision?: {
+    approvalId: string;
+    status: 'approved' | 'rejected' | 'granted';
+    targetRoleId?: string;
+    comment?: string;
+  };
 }
 
 export interface AgentTeamTraceEvent {
@@ -74,8 +82,63 @@ export interface AgentTeamTraceEvent {
   schemaVersion: 1;
 }
 
+export type AgentTeamWorkflowRuntimeStatus =
+  | 'running'
+  | 'success'
+  | 'error'
+  | 'waiting_approval'
+  | 'cancelled';
+
+export type AgentTeamWorkflowStepStatus =
+  | 'pending'
+  | 'ready'
+  | 'running'
+  | 'success'
+  | 'failed'
+  | 'skipped'
+  | 'waiting_approval';
+
+export interface AgentTeamRuntimeStepState {
+  status: AgentTeamWorkflowStepStatus;
+  attempt: number;
+  startedAt?: string;
+  completedAt?: string;
+  outputKey?: string;
+  error?: string | null;
+}
+
+export interface AgentTeamWaitingApproval {
+  approvalId: string;
+  runId: string;
+  traceId: string;
+  stepId: string;
+  requestedBy: string;
+  reason: string;
+  confidence: number;
+  targetRoleId?: string;
+  candidateRoleIds: string[];
+  riskLevel: 'medium' | 'high' | 'critical';
+  payload: Record<string, unknown>;
+}
+
+export interface AgentTeamRuntimeCheckpoint {
+  schemaVersion: 2;
+  runId: string;
+  traceId: string;
+  workflowNode: string;
+  status: AgentTeamWorkflowRuntimeStatus;
+  stepStatuses: Record<string, AgentTeamRuntimeStepState>;
+  artifacts: Record<string, string>;
+  waitingApproval?: AgentTeamWaitingApproval;
+  busMessageSeq: number;
+  spanSeq: number;
+  messageSeq: number;
+  lastError?: string | null;
+  updatedAt: string;
+}
+
 export interface AgentTeamExecutionResult {
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'waiting_approval';
   finalResult: string;
   roleResults: AgentTeamRoleResult[];
   events: AgentTeamExecutionEvent[];
@@ -83,6 +146,8 @@ export interface AgentTeamExecutionResult {
   traceId?: string;
   traceEvents?: AgentTeamTraceEvent[];
   busMessages?: AgentTeamBusMessage[];
+  waitingApproval?: AgentTeamWaitingApproval;
+  checkpoint?: AgentTeamRuntimeCheckpoint;
   error?: string;
 }
 
@@ -97,6 +162,10 @@ interface ExecutionState {
   traceEvents: AgentTeamTraceEvent[];
   busMessages: AgentTeamBusMessage[];
   artifacts: Record<string, string>;
+  stepStatuses: Record<string, AgentTeamRuntimeStepState>;
+  waitingApproval?: AgentTeamWaitingApproval;
+  lastError?: string | null;
+  workflowNode?: string;
   spanSeq: number;
   messageSeq: number;
 }
@@ -132,6 +201,42 @@ async function executeWorkflowSteps(
   const state = createExecutionState(input);
   const roleResults: AgentTeamRoleResult[] = [];
   const events: AgentTeamExecutionEvent[] = [];
+  const graph = validateWorkflowGraph(team.workflowSteps ?? []);
+  if ('error' in graph) {
+    state.lastError = graph.error;
+    emitTrace(state, {
+      actor: 'orchestrator',
+      type: 'workflow.validation.failed',
+      payload: { teamId: team.id, error: graph.error },
+    });
+    return summarize(team, 'error', roleResults, events, state, graph.error);
+  }
+  for (const step of graph.steps) {
+    state.stepStatuses[step.id] = { status: 'pending', attempt: 0, outputKey: step.outputKey, error: null };
+  }
+  if (input.resumeFromCheckpoint) {
+    state.artifacts = { ...input.resumeFromCheckpoint.artifacts };
+    state.stepStatuses = cloneStepStatuses(input.resumeFromCheckpoint.stepStatuses);
+    state.workflowNode = input.resumeFromCheckpoint.workflowNode;
+    state.lastError = input.resumeFromCheckpoint.lastError;
+    state.waitingApproval = input.resumeFromCheckpoint.waitingApproval;
+    state.spanSeq = input.resumeFromCheckpoint.spanSeq;
+    state.messageSeq = input.resumeFromCheckpoint.messageSeq;
+    if (input.approvalDecision?.status === 'rejected') {
+      const error = `approval ${input.approvalDecision.approvalId} rejected`;
+      state.lastError = error;
+      return summarize(team, 'error', roleResults, events, state, error);
+    }
+    if (input.approvalDecision && state.waitingApproval) {
+      const waitingStep = state.waitingApproval.stepId;
+      state.stepStatuses[waitingStep] = {
+        ...(state.stepStatuses[waitingStep] ?? { attempt: 0 }),
+        status: 'pending',
+        error: null,
+      };
+      state.waitingApproval = undefined;
+    }
+  }
   emitBus(state, {
     from: 'orchestrator',
     kind: 'control',
@@ -143,21 +248,137 @@ async function executeWorkflowSteps(
     },
   });
 
-  for (const step of team.workflowSteps ?? []) {
-    const outcome = await executeWorkflowStep(
-      team,
-      input,
-      runner,
-      step,
-      roleResults,
-      events,
-      state,
+  while (hasPendingSteps(state)) {
+    const readySteps = getReadySteps(state, graph);
+    if (!readySteps.length) {
+      const error = 'workflow deadlock: no ready steps remain';
+      state.lastError = error;
+      emitTrace(state, { actor: 'orchestrator', type: 'workflow.deadlock', payload: { teamId: team.id, stepStatuses: state.stepStatuses } });
+      return summarize(team, 'error', roleResults, events, state, error);
+    }
+    for (const step of readySteps) {
+      updateStepStatus(state, step.id, 'ready', { outputKey: step.outputKey });
+      emitTrace(state, { actor: 'orchestrator', type: 'workflow.step.ready', taskId: step.id, payload: { stepId: step.id, dependsOn: graph.dependencies.get(step.id) ?? [] } });
+    }
+    const outcomes = await Promise.all(
+      readySteps.map(async (step) => {
+        updateStepStatus(state, step.id, 'running', { outputKey: step.outputKey });
+        return {
+          step,
+          outcome: await executeWorkflowStep(team, input, runner, step, roleResults, events, state),
+        };
+      }),
     );
-    if (outcome.status === 'error') {
-      return summarize(team, 'error', roleResults, events, state, outcome.error);
+    for (const { step, outcome } of outcomes) {
+      if (outcome.status === 'waiting_approval') {
+        updateStepStatus(state, step.id, 'waiting_approval', { outputKey: step.outputKey });
+        return summarize(team, 'waiting_approval', roleResults, events, state);
+      }
+      if (outcome.status === 'error') {
+        updateStepStatus(state, step.id, 'failed', { outputKey: step.outputKey, error: outcome.error });
+        return summarize(team, 'error', roleResults, events, state, outcome.error);
+      }
+      updateStepStatus(state, step.id, 'success', { outputKey: step.outputKey });
     }
   }
   return summarize(team, 'success', roleResults, events, state);
+}
+
+function cloneStepStatuses(
+  statuses: Record<string, AgentTeamRuntimeStepState>,
+): Record<string, AgentTeamRuntimeStepState> {
+  return Object.fromEntries(Object.entries(statuses).map(([key, value]) => [key, { ...value }]));
+}
+
+interface WorkflowGraph {
+  steps: AgentTeamWorkflowStep[];
+  byId: Map<string, AgentTeamWorkflowStep>;
+  dependencies: Map<string, string[]>;
+}
+
+function validateWorkflowGraph(
+  steps: AgentTeamWorkflowStep[],
+): WorkflowGraph | { error: string } {
+  const byId = new Map<string, AgentTeamWorkflowStep>();
+  for (const step of steps) {
+    if (byId.has(step.id)) return { error: `duplicate workflow step id ${step.id}` };
+    byId.set(step.id, step);
+  }
+  const dependencies = new Map<string, string[]>();
+  const hasExplicitDependencies = steps.some((step) => (step.dependsOn ?? []).length > 0);
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index];
+    const deps = hasExplicitDependencies ? step.dependsOn ?? [] : index > 0 ? [steps[index - 1].id] : [];
+    for (const dep of deps) {
+      if (!byId.has(dep)) return { error: `step ${step.id} dependsOn missing unknown step ${dep}` };
+    }
+    dependencies.set(step.id, deps);
+  }
+  const cycle = findWorkflowCycle(steps, dependencies);
+  if (cycle) return { error: `workflow dependency cycle detected: ${cycle.join(' -> ')}` };
+  return { steps, byId, dependencies };
+}
+
+function findWorkflowCycle(
+  steps: AgentTeamWorkflowStep[],
+  dependencies: Map<string, string[]>,
+): string[] | null {
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const stack: string[] = [];
+  const visit = (id: string): string[] | null => {
+    if (visiting.has(id)) return [...stack.slice(stack.indexOf(id)), id];
+    if (visited.has(id)) return null;
+    visiting.add(id);
+    stack.push(id);
+    for (const dep of dependencies.get(id) ?? []) {
+      const cycle = visit(dep);
+      if (cycle) return cycle;
+    }
+    stack.pop();
+    visiting.delete(id);
+    visited.add(id);
+    return null;
+  };
+  for (const step of steps) {
+    const cycle = visit(step.id);
+    if (cycle) return cycle;
+  }
+  return null;
+}
+
+function hasPendingSteps(state: ExecutionState): boolean {
+  return Object.values(state.stepStatuses).some((step) => step.status === 'pending' || step.status === 'ready');
+}
+
+function getReadySteps(state: ExecutionState, graph: WorkflowGraph): AgentTeamWorkflowStep[] {
+  return graph.steps.filter((step) => {
+    const current = state.stepStatuses[step.id]?.status;
+    if (current !== 'pending' && current !== 'ready') return false;
+    return (graph.dependencies.get(step.id) ?? []).every((dep) => state.stepStatuses[dep]?.status === 'success');
+  });
+}
+
+function updateStepStatus(
+  state: ExecutionState,
+  stepId: string,
+  status: AgentTeamWorkflowStepStatus,
+  updates: Partial<AgentTeamRuntimeStepState> = {},
+): void {
+  const previous = state.stepStatuses[stepId] ?? { status: 'pending', attempt: 0 };
+  const now = new Date().toISOString();
+  const next: AgentTeamRuntimeStepState = {
+    ...previous,
+    ...updates,
+    status,
+    attempt: status === 'running' ? previous.attempt + 1 : previous.attempt,
+    startedAt: status === 'running' ? now : previous.startedAt,
+    completedAt: ['success', 'failed', 'skipped', 'waiting_approval'].includes(status) ? now : previous.completedAt,
+  };
+  state.stepStatuses[stepId] = next;
+  state.workflowNode = stepId;
+  if (next.error) state.lastError = next.error;
+  emitTrace(state, { actor: 'orchestrator', type: `workflow.step.${status}`, taskId: stepId, payload: { stepId, status, attempt: next.attempt, error: next.error } });
 }
 
 async function executeWorkflowStep(
@@ -168,7 +389,7 @@ async function executeWorkflowStep(
   roleResults: AgentTeamRoleResult[],
   events: AgentTeamExecutionEvent[],
   state: ExecutionState,
-): Promise<{ status: 'success' | 'error'; error?: string }> {
+): Promise<{ status: 'success' | 'error' | 'waiting_approval'; error?: string }> {
   emitBus(state, {
     stepId: step.id,
     from: 'orchestrator',
@@ -176,6 +397,8 @@ async function executeWorkflowStep(
     type: 'step.started',
     payload: step,
   });
+  const artifacts = selectArtifactsForStep(step, state);
+  if ('error' in artifacts) return { status: 'error', error: artifacts.error };
   if (step.type === 'role') {
     if (!step.roleId) return { status: 'error', error: `step ${step.id} missing roleId` };
     const role = team.roles.find((candidate) => candidate.id === step.roleId);
@@ -192,8 +415,9 @@ async function executeWorkflowStep(
         outputKey: step.outputKey,
       },
       step,
-      roleResults,
+      selectPreviousResultsForStep(step, roleResults),
       state,
+      artifacts.artifacts,
     );
     roleResults.push(result);
     events.push({ kind: 'role', roleId: role.id, phase: result.phase });
@@ -202,18 +426,51 @@ async function executeWorkflowStep(
   if (step.type === 'parallel') {
     const chains = step.parallel ?? [];
     const chainResults = await Promise.all(
-      chains.map((chain) => executeWorkflowActionChain(team, input, runner, step, chain, roleResults, state)),
+      chains.map((chain) => executeWorkflowActionChain(team, input, runner, step, chain, selectPreviousResultsForStep(step, roleResults), state, artifacts.artifacts)),
     );
     for (const results of chainResults) roleResults.push(...results);
     for (const chain of chains) {
       events.push({ kind: 'edge', toRoleId: chain[0]?.roleId, label: `workflow-step:${step.id}` });
     }
     const failed = chainResults.flat().find((result) => result.status === 'error');
-    if (!failed) return { status: 'success' };
+    if (!failed) {
+      if (step.outputKey) {
+        state.artifacts[step.outputKey] = chainResults.flat().map((result) => result.result).join('\n');
+      }
+      return { status: 'success' };
+    }
     return handleWorkflowFailure(team, input, runner, step, failed, roleResults, events, state);
   }
   const route = step.route;
   if (!route) return { status: 'error', error: `step ${step.id} missing route` };
+  if (input.approvalDecision?.approvalId === `${state.runId}:approval:${step.id}`) {
+    const candidates = team.roles.filter((role) => route.candidateRoleIds.includes(role.id));
+    const approvedTargetRoleId = input.approvalDecision.targetRoleId ?? route.fallbackRoleId ?? candidates[0]?.id;
+    const approved = candidates.find((role) => role.id === approvedTargetRoleId);
+    if (!approved) return { status: 'error', error: `approved target role ${approvedTargetRoleId} not found` };
+    emitBus(state, {
+      stepId: step.id,
+      from: 'orchestrator',
+      to: approved.id,
+      kind: 'control',
+      type: 'approval.granted',
+      payload: { approvalId: input.approvalDecision.approvalId, targetRoleId: approved.id },
+    });
+    const routed = await runWorkflowAction(
+      team,
+      input,
+      runner,
+      approved,
+      { roleId: approved.id, phase: 'route', instructions: input.approvalDecision.comment ?? 'Approved route approval', outputKey: step.outputKey ?? `${step.id}.${approved.id}` },
+      step,
+      selectPreviousResultsForStep(step, roleResults),
+      state,
+      artifacts.artifacts,
+    );
+    roleResults.push(routed);
+    events.push({ kind: 'role', roleId: approved.id, phase: routed.phase });
+    return handleWorkflowFailure(team, input, runner, step, routed, roleResults, events, state);
+  }
   const judge = team.roles.find((role) => role.id === route.judgeRoleId);
   if (!judge) return { status: 'error', error: `judge role ${route.judgeRoleId} not found` };
   const judgeResult = await runWorkflowAction(
@@ -223,8 +480,9 @@ async function executeWorkflowStep(
     judge,
     { roleId: judge.id, phase: 'judge', instructions: step.instructions, outputKey: `${step.id}.judge` },
     step,
-    roleResults,
+    selectPreviousResultsForStep(step, roleResults),
     state,
+    artifacts.artifacts,
   );
   roleResults.push(judgeResult);
   events.push({ kind: 'role', roleId: judge.id, phase: judgeResult.phase });
@@ -233,6 +491,52 @@ async function executeWorkflowStep(
   }
   const candidates = team.roles.filter((role) => route.candidateRoleIds.includes(role.id));
   const decision = parseRouteDecision(judgeResult.result, candidates);
+  if (decision?.action === 'request_approval') {
+    if (input.approvalDecision && input.approvalDecision.approvalId === `${state.runId}:approval:${step.id}`) {
+      const approvedTargetRoleId = input.approvalDecision.targetRoleId ?? decision.target ?? route.fallbackRoleId ?? candidates[0]?.id;
+      const approved = candidates.find((role) => role.id === approvedTargetRoleId);
+      if (!approved) return { status: 'error', error: `approved target role ${approvedTargetRoleId} not found` };
+      emitBus(state, {
+        stepId: step.id,
+        from: 'orchestrator',
+        to: approved.id,
+        kind: 'control',
+        type: 'approval.granted',
+        payload: { approvalId: input.approvalDecision.approvalId, targetRoleId: approved.id },
+      });
+      const routed = await runWorkflowAction(
+        team,
+        input,
+        runner,
+        approved,
+        { roleId: approved.id, phase: 'route', instructions: judgeResult.result, outputKey: step.outputKey ?? `${step.id}.${approved.id}` },
+        step,
+        selectPreviousResultsForStep(step, roleResults),
+        state,
+        artifacts.artifacts,
+      );
+      roleResults.push(routed);
+      events.push({ kind: 'role', roleId: approved.id, phase: routed.phase });
+      return handleWorkflowFailure(team, input, runner, step, routed, roleResults, events, state);
+    }
+    const targetRoleId = decision.target ?? route.fallbackRoleId ?? candidates[0]?.id;
+    const waitingApproval = createWaitingApproval({ team, state, step, route, judge, decision, targetRoleId });
+    state.waitingApproval = waitingApproval;
+    emitBus(state, {
+      stepId: step.id,
+      from: judge.id,
+      kind: 'control',
+      type: 'approval.requested',
+      payload: waitingApproval,
+    });
+    emitTrace(state, {
+      actor: judge.id,
+      type: 'approval.requested',
+      taskId: step.id,
+      payload: waitingApproval,
+    });
+    return { status: 'waiting_approval' };
+  }
   const selected =
     (decision?.action === 'run_role' ? candidates.find((role) => role.id === decision.target) : null) ??
     candidates.find((role) => role.id === route.fallbackRoleId) ??
@@ -252,10 +556,11 @@ async function executeWorkflowStep(
       input,
       runner,
       selected,
-      { roleId: selected.id, phase: 'route', instructions: judgeResult.result, outputKey: `${step.id}.${selected.id}` },
+      { roleId: selected.id, phase: 'route', instructions: judgeResult.result, outputKey: step.outputKey ?? `${step.id}.${selected.id}` },
       step,
-      roleResults,
+      selectPreviousResultsForStep(step, roleResults),
       state,
+      artifacts.artifacts,
     );
     roleResults.push(routed);
     events.push({ kind: 'role', roleId: selected.id, phase: routed.phase });
@@ -269,10 +574,11 @@ async function executeWorkflowStep(
       input,
       runner,
       finalRole,
-      { roleId: finalRole.id, phase: 'finalize', outputKey: `${step.id}.final` },
+      { roleId: finalRole.id, phase: 'finalize', outputKey: step.outputKey ?? `${step.id}.final` },
       step,
-      roleResults,
+      selectPreviousResultsForStep(step, roleResults),
       state,
+      artifacts.artifacts,
     );
     roleResults.push(final);
     events.push({ kind: 'role', roleId: finalRole.id, phase: final.phase });
@@ -289,6 +595,7 @@ async function executeWorkflowActionChain(
   chain: AgentTeamWorkflowAction[],
   baseResults: AgentTeamRoleResult[],
   state: ExecutionState,
+  artifacts?: Record<string, string>,
 ): Promise<AgentTeamRoleResult[]> {
   const results: AgentTeamRoleResult[] = [];
   for (const action of chain) {
@@ -297,7 +604,7 @@ async function executeWorkflowActionChain(
       results.push({ roleId: action.roleId, roleName: action.roleId, phase: action.phase ?? 'work', status: 'error', result: '', error: `role ${action.roleId} not found` });
       break;
     }
-    const result = await runWorkflowAction(team, input, runner, role, action, step, [...baseResults, ...results], state);
+    const result = await runWorkflowAction(team, input, runner, role, action, step, [...baseResults, ...results], state, artifacts);
     results.push(result);
     if (result.status === 'error') break;
   }
@@ -313,6 +620,7 @@ function runWorkflowAction(
   step: AgentTeamWorkflowStep,
   previousResults: AgentTeamRoleResult[],
   state: ExecutionState,
+  artifacts?: Record<string, string>,
 ): Promise<AgentTeamRoleResult> {
   return runRole(
     team,
@@ -324,7 +632,72 @@ function runWorkflowAction(
     undefined,
     state,
     { stepId: step.id, instructions: action.instructions ?? step.instructions, outputKey: action.outputKey ?? step.outputKey },
+    artifacts,
   );
+}
+
+function selectArtifactsForStep(
+  step: AgentTeamWorkflowStep,
+  state: ExecutionState,
+): { artifacts: Record<string, string> } | { error: string } {
+  if (!step.inputKeys?.length) return { artifacts: state.artifacts };
+  const selected: Record<string, string> = {};
+  for (const key of step.inputKeys) {
+    if (!(key in state.artifacts)) return { error: `step ${step.id} missing input artifact ${key}` };
+    selected[key] = state.artifacts[key];
+  }
+  return { artifacts: selected };
+}
+
+function selectPreviousResultsForStep(
+  step: AgentTeamWorkflowStep,
+  previousResults: AgentTeamRoleResult[],
+): AgentTeamRoleResult[] {
+  if (!step.inputKeys?.length) return previousResults;
+  const allowed = new Set(step.inputKeys);
+  return previousResults.filter((result) => result.outputKey && allowed.has(result.outputKey));
+}
+
+function createWaitingApproval(input: {
+  team: AgentTeam;
+  state: ExecutionState;
+  step: AgentTeamWorkflowStep;
+  route: NonNullable<AgentTeamWorkflowStep['route']>;
+  judge: AgentTeamRole;
+  decision: RouteDecision;
+  targetRoleId?: string;
+}): AgentTeamWaitingApproval {
+  const approvalId = `${input.state.runId}:approval:${input.step.id}`;
+  const payload = {
+    schemaVersion: 2,
+    action: 'agent_team.route_approval',
+    reason: input.decision.reason,
+    scope: {
+      teamId: input.team.id,
+      runId: input.state.runId,
+      stepId: input.step.id,
+      judgeRoleId: input.judge.id,
+      candidateRoleIds: input.route.candidateRoleIds,
+      targetRoleId: input.targetRoleId,
+    },
+    risk: 'high',
+    rollback: 'Reject approval to stop this run before executing the selected route role.',
+    artifactsPreview: Object.fromEntries(Object.entries(input.state.artifacts).map(([key, value]) => [key, value.slice(0, 1000)])),
+    traceId: input.state.traceId,
+  };
+  return {
+    approvalId,
+    runId: input.state.runId,
+    traceId: input.state.traceId,
+    stepId: input.step.id,
+    requestedBy: input.judge.id,
+    reason: input.decision.reason,
+    confidence: input.decision.confidence,
+    targetRoleId: input.targetRoleId,
+    candidateRoleIds: input.route.candidateRoleIds,
+    riskLevel: 'high',
+    payload,
+  };
 }
 
 async function handleWorkflowFailure(
@@ -865,6 +1238,7 @@ async function runRole(
   feedback?: string,
   state?: ExecutionState,
   options: { stepId?: string; instructions?: string; outputKey?: string } = {},
+  artifacts?: Record<string, string>,
 ): Promise<AgentTeamRoleResult> {
   const taskId = state ? `${state.runId}:${role.id}:${phase}` : undefined;
   if (state) {
@@ -892,7 +1266,7 @@ async function runRole(
     feedback,
     instructions: options.instructions,
     busMessages: state?.busMessages,
-    artifacts: state?.artifacts,
+    artifacts: artifacts ?? state?.artifacts,
   });
   if (state) {
     emitTrace(state, {
@@ -925,13 +1299,14 @@ async function runRole(
     phase,
     status: output.status === 'success' ? 'success' : 'error',
     result: output.result ?? '',
+    outputKey: options.outputKey || `${role.id}.${phase}.output`,
     error: output.error,
   };
 }
 
 function summarize(
   team: AgentTeam,
-  status: 'success' | 'error',
+  status: 'success' | 'error' | 'waiting_approval',
   roleResults: AgentTeamRoleResult[],
   events: AgentTeamExecutionEvent[],
   state: ExecutionState,
@@ -946,9 +1321,10 @@ function summarize(
   ].join('\n');
   emitTrace(state, {
     actor: 'orchestrator',
-    type: status === 'success' ? 'workflow.completed' : 'workflow.failed',
+    type: status === 'success' ? 'workflow.completed' : status === 'waiting_approval' ? 'workflow.waiting_approval' : 'workflow.failed',
     payload: { teamId: team.id, status, error },
   });
+  state.lastError = error ?? state.lastError;
   return {
     status,
     finalResult,
@@ -958,7 +1334,30 @@ function summarize(
     traceId: state.traceId,
     traceEvents: state.traceEvents,
     busMessages: state.busMessages,
+    waitingApproval: state.waitingApproval,
+    checkpoint: createRuntimeCheckpoint(state, status),
     error,
+  };
+}
+
+function createRuntimeCheckpoint(
+  state: ExecutionState,
+  status: AgentTeamWorkflowRuntimeStatus,
+): AgentTeamRuntimeCheckpoint {
+  return {
+    schemaVersion: 2,
+    runId: state.runId,
+    traceId: state.traceId,
+    workflowNode: state.workflowNode ?? 'workflow',
+    status,
+    stepStatuses: state.stepStatuses,
+    artifacts: state.artifacts,
+    waitingApproval: state.waitingApproval,
+    busMessageSeq: state.busMessages.length,
+    spanSeq: state.spanSeq,
+    messageSeq: state.messageSeq,
+    lastError: state.lastError ?? null,
+    updatedAt: new Date().toISOString(),
   };
 }
 
@@ -973,6 +1372,8 @@ function createExecutionState(input: AgentTeamExecutionInput): ExecutionState {
     traceEvents: [],
     busMessages: [],
     artifacts: {},
+    stepStatuses: {},
+    lastError: null,
     spanSeq: 0,
     messageSeq: 0,
   };

@@ -846,6 +846,8 @@ export function buildAgentTeamDraft(
     successCriteria: [
       '团队产出直接回应用户目标',
       '每个角色都有清晰输入、输出和交接边界',
+      'workflowSteps 能通过 dependsOn、inputKeys 和 outputKey 追踪产物流转与恢复点',
+      '验证或评审角色必须给出可执行的通过/失败标准',
       '最终交付包含结论、依据和下一步建议',
     ],
     createdByAgentId: input.generatorAgentId,
@@ -888,6 +890,11 @@ export function buildAgentTeamGenerationPrompt(
 - roles 每项必须包含 id、name、responsibility，可选 inputs、outputs、skills、guardrails。
 - 必须生成 workflowSteps；编排、测试、返工、路由、产物传递都由 workflowSteps 显式描述，不要依赖角色数量、角色名称或固定关键词。
 - workflowSteps 支持：role（单角色步骤）、parallel（多条并行链）、route（由 judgeRoleId 产出路由决策）。测试/验证失败后的返工请用 onFailure 指向目标 role，而不是要求 QA 输出固定中文短语。
+- 必须把 workflowSteps 设计成合法 DAG：id 唯一；dependsOn 只能引用已存在 step；不存在循环；下游 inputKeys 必须引用上游 outputKey。
+- 必须在 description 或 workflow 中写明为什么单 Agent + Tools 不够、为什么选择当前 shape、为什么没有选择更简单或相邻 shape。
+- 每个 review / verify / judge role 必须包含 rubric、失败输出格式和停止条件，避免单 Agent 自评。
+- route step 的 judge 输出必须支持 JSON：{"action":"run_role|finish|request_approval|abort","target":"roleId","reason":"...","confidence":0.0}；高风险或边界不清时输出 request_approval。
+- 每个角色输出应尽量结构化，至少包含 status、summary、evidence、confidence、next_actions；workflow step 的 outputKey 应与角色 outputs 对齐。
 - roles 控制在 3-6 个；workflow 控制在 1200 字以内；successCriteria 控制在 3-6 条。
 - 优先复用现有 agent.md：如果某个现有 agent.md 的简介能覆盖必要角色，请优先把该角色设计为匹配这个 agent.md 的能力边界。
 - 复用现有 agent.md 时，在角色的 skills 或 guardrails 中写明建议使用的 agent.md 名称；不要把 agent.md id 当成具体执行绑定写入 Team role。
@@ -1118,13 +1125,25 @@ function workflowStepsForShape(
 ): AgentTeamWorkflowStep[] | undefined {
   if (roles.length === 0) return undefined;
   if (shape === 'parallel') {
+    const synthesizer = roles.find((candidate) => candidate.id === 'synthesizer') ?? roles[roles.length - 1];
+    const workers = roles.filter((candidate) => candidate.id !== synthesizer.id);
     return [
       {
         id: 'parallel_work',
         type: 'parallel',
-        parallel: roles.map((candidate) => [
+        outputKey: 'parallel_outputs',
+        parallel: workers.map((candidate) => [
           { roleId: candidate.id, phase: 'work', outputKey: candidate.id },
         ]),
+      },
+      {
+        id: 'synthesize',
+        type: 'role',
+        roleId: synthesizer.id,
+        phase: 'finalize',
+        dependsOn: ['parallel_work'],
+        inputKeys: workers.map((worker) => worker.id),
+        outputKey: 'final',
       },
     ];
   }
@@ -1141,6 +1160,7 @@ function workflowStepsForShape(
       {
         id: 'worker_parallel',
         type: 'parallel',
+        dependsOn: ['lead_plan'],
         inputKeys: ['plan'],
         parallel: workers.map((worker) => [
           { roleId: worker.id, phase: 'work', outputKey: worker.id },
@@ -1151,6 +1171,7 @@ function workflowStepsForShape(
         type: 'role',
         roleId: lead.id,
         phase: 'finalize',
+        dependsOn: ['worker_parallel'],
         outputKey: 'final',
       },
     ];
@@ -1176,6 +1197,8 @@ function workflowStepsForShape(
     roleId: candidate.id,
     phase:
       index === 0 ? 'plan' : index === roles.length - 1 ? 'finalize' : 'work',
+    dependsOn: index > 0 ? [`step_${index}`] : undefined,
+    inputKeys: index > 0 ? [roles[index - 1].id] : undefined,
     outputKey: candidate.id,
   }));
 }

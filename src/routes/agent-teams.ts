@@ -39,6 +39,7 @@ import type {
   AgentTeamRoleResult,
   AgentTeamExecutionPhase,
   AgentTeamTraceEvent,
+  AgentTeamRuntimeCheckpoint,
 } from '../agent-team-engine.js';
 import type { RegisteredGroup } from '../types.js';
 import {
@@ -650,6 +651,11 @@ router.post(
     }
     const result = await executeExistingRun(c, run.id, {
       bypassApproval: true,
+      approvalDecision: {
+        approvalId: String(approval.id),
+        status: parsed.data.decision,
+        targetRoleId: getApprovalTargetRoleId(approval.payload),
+      },
     });
     if ('response' in result) return result.response;
     return c.json({
@@ -669,9 +675,12 @@ router.post('/:id/runs', authMiddleware, systemConfigMiddleware, async (c) => {
         result.execution.runId || '',
         (c.get('user') as AuthUser).id,
       ),
+      approval: result.execution.waitingApproval
+        ? getAgentTeamApproval(result.execution.waitingApproval.approvalId, result.execution.runId || '')
+        : undefined,
       execution: result.execution,
     },
-    result.execution.status === 'success' ? 201 : 502,
+    result.execution.status === 'success' ? 201 : result.execution.status === 'waiting_approval' ? 202 : 502,
   );
 });
 
@@ -684,7 +693,7 @@ router.post(
     if ('response' in result) return result.response;
     return c.json(
       { execution: result.execution },
-      result.execution.status === 'success' ? 200 : 502,
+      result.execution.status === 'success' ? 200 : result.execution.status === 'waiting_approval' ? 202 : 502,
     );
   },
 );
@@ -864,7 +873,7 @@ async function handleAgentTeamToolBody(
           run: getAgentTeamRun(result.execution.runId || '', user.id),
           execution: result.execution,
         },
-        result.execution.status === 'success' ? 201 : 502,
+        result.execution.status === 'success' ? 201 : result.execution.status === 'waiting_approval' ? 202 : 502,
       );
     }
     case 'get_run': {
@@ -931,6 +940,11 @@ async function handleAgentTeamToolBody(
       }
       const result = await executeExistingRun(toolContext, run.id, {
         bypassApproval: true,
+        approvalDecision: {
+          approvalId: String(approval.id),
+          status: parsed.data.decision,
+          targetRoleId: getApprovalTargetRoleId(approval.payload),
+        },
       });
       if ('response' in result) return result.response;
       return c.json({
@@ -986,7 +1000,7 @@ function createInternalToolContext(
 async function executeExistingRun(
   c: any,
   runId: string,
-  options: { bypassApproval?: boolean } = {},
+  options: { bypassApproval?: boolean; approvalDecision?: { approvalId: string; status: 'approved' | 'rejected'; targetRoleId?: string; comment?: string } } = {},
 ): Promise<
   | { execution: Awaited<ReturnType<typeof executeAgentTeam>> }
   | { response: Response }
@@ -999,7 +1013,8 @@ async function executeExistingRun(
     return { response: c.json({ error: 'agent team run is cancelled' }, 409) };
   const team = getAgentTeam(run.teamId, user.id);
   if (!team) return { response: c.json({ error: 'team not found' }, 404) };
-  const state = getLatestApprovalCheckpointState(run.id);
+  const approvalState = getLatestApprovalCheckpointState(run.id);
+  const runtimeCheckpoint = getLatestRuntimeCheckpoint(run.id);
   if (!options.bypassApproval && findApprovalRequiredRole(team)) {
     return {
       response: c.json(
@@ -1009,15 +1024,15 @@ async function executeExistingRun(
     };
   }
   const runnerAgentId =
-    typeof state.runnerAgentId === 'string'
-      ? state.runnerAgentId
+    typeof approvalState.runnerAgentId === 'string'
+      ? approvalState.runnerAgentId
       : team.createdByAgentId;
-  const roleAssignments = isRecord(state.roleAssignments)
-    ? (state.roleAssignments as ExecuteRequest['roleAssignments'])
+  const roleAssignments = isRecord(approvalState.roleAssignments)
+    ? (approvalState.roleAssignments as ExecuteRequest['roleAssignments'])
     : (run.roleAssignments as ExecuteRequest['roleAssignments']);
   const maxFeedbackIterations =
-    typeof state.maxFeedbackIterations === 'number'
-      ? state.maxFeedbackIterations
+    typeof approvalState.maxFeedbackIterations === 'number'
+      ? approvalState.maxFeedbackIterations
       : undefined;
   const settings = getSystemSettings();
   if (!settings.allowedBackends.includes(runnerAgentId)) {
@@ -1050,8 +1065,10 @@ async function executeExistingRun(
     runnerAgentId,
     roleAssignments: roleAssignments ?? {},
     maxFeedbackIterations,
-    runtimeContext: state.runtimeContext as ExecuteRequest['runtimeContext'],
+    runtimeContext: approvalState.runtimeContext as ExecuteRequest['runtimeContext'],
     defaultBackend: backend,
+    resumeFromCheckpoint: runtimeCheckpoint,
+    approvalDecision: options.approvalDecision,
   });
 }
 
@@ -1068,6 +1085,8 @@ async function executePreparedRun(
     maxFeedbackIterations?: number;
     runtimeContext?: ExecuteRequest['runtimeContext'];
     defaultBackend: NonNullable<ReturnType<typeof getBackend>>;
+    resumeFromCheckpoint?: AgentTeamRuntimeCheckpoint;
+    approvalDecision?: { approvalId: string; status: 'approved' | 'rejected'; targetRoleId?: string; comment?: string };
   },
 ): Promise<
   | { execution: Awaited<ReturnType<typeof executeAgentTeam>> }
@@ -1084,6 +1103,8 @@ async function executePreparedRun(
     maxFeedbackIterations,
     runtimeContext,
     defaultBackend,
+    resumeFromCheckpoint,
+    approvalDecision,
   } = config;
   const settings = getSystemSettings();
   recordAgentTeamRun({
@@ -1104,6 +1125,8 @@ async function executePreparedRun(
       runId,
       traceId,
       sessionId: `system:agent-team:${team.id}`,
+      resumeFromCheckpoint,
+      approvalDecision,
     },
     async ({
       role,
@@ -1239,6 +1262,27 @@ async function executePreparedRun(
   for (const event of execution.traceEvents ?? []) {
     recordAgentTeamTraceEvent(toTraceEventRecord(event));
   }
+  if (execution.checkpoint) {
+    recordAgentTeamCheckpoint({
+      id: `${runId}:runtime:${execution.checkpoint.workflowNode}:${execution.checkpoint.status}`,
+      runId,
+      nodeId: execution.checkpoint.workflowNode,
+      state: execution.checkpoint,
+    });
+  }
+  if (execution.waitingApproval) {
+    recordAgentTeamApproval({
+      id: execution.waitingApproval.approvalId,
+      runId,
+      taskId: execution.waitingApproval.stepId,
+      requestedBy: execution.waitingApproval.requestedBy,
+      status: 'pending',
+      riskLevel: execution.waitingApproval.riskLevel,
+      title: `Approve workflow step ${execution.waitingApproval.stepId}`,
+      description: execution.waitingApproval.reason,
+      payload: execution.waitingApproval.payload,
+    });
+  }
   recordAgentTeamRun({
     id: runId,
     teamId: team.id,
@@ -1250,7 +1294,7 @@ async function executePreparedRun(
     roleAssignments: roleAssignments ?? {},
     finalResult: execution.finalResult,
     error: execution.error,
-    completedAt: new Date().toISOString(),
+    completedAt: execution.status === 'waiting_approval' ? undefined : new Date().toISOString(),
   });
   return { execution };
 }
@@ -1356,6 +1400,28 @@ function getLatestApprovalCheckpointState(
     }
   }
   return {};
+}
+
+function getLatestRuntimeCheckpoint(
+  runId: string,
+): AgentTeamRuntimeCheckpoint | undefined {
+  const checkpoints = listAgentTeamCheckpoints(runId);
+  for (let index = checkpoints.length - 1; index >= 0; index -= 1) {
+    const state = checkpoints[index]?.state;
+    if (isRecord(state) && state.schemaVersion === 2 && isRecord(state.stepStatuses)) {
+      return state as unknown as AgentTeamRuntimeCheckpoint;
+    }
+  }
+  return undefined;
+}
+
+function getApprovalTargetRoleId(payload: unknown): string | undefined {
+  if (!isRecord(payload)) return undefined;
+  const direct = payload.targetRoleId;
+  if (typeof direct === 'string') return direct;
+  const scope = payload.scope;
+  if (isRecord(scope) && typeof scope.targetRoleId === 'string') return scope.targetRoleId;
+  return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

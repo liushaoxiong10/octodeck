@@ -169,4 +169,209 @@ describe('agent team execution engine', () => {
       expect(event.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     }
   });
+
+  test('executes workflowSteps as a DAG and only exposes declared input artifacts', async () => {
+    const team = makeTeam('pipeline', [
+      { id: 'planner', name: 'Planner', responsibility: '规划' },
+      { id: 'researcher', name: 'Researcher', responsibility: '调研' },
+      { id: 'builder', name: 'Builder', responsibility: '实现' },
+    ]);
+    team.workflowSteps = [
+      { id: 'plan', type: 'role', roleId: 'planner', phase: 'plan', outputKey: 'plan' },
+      { id: 'research', type: 'role', roleId: 'researcher', phase: 'research', outputKey: 'research' },
+      {
+        id: 'build',
+        type: 'role',
+        roleId: 'builder',
+        phase: 'build',
+        dependsOn: ['plan'],
+        inputKeys: ['plan'],
+        outputKey: 'build',
+      },
+    ];
+    const seen: Array<{ roleId: string; artifactKeys: string[] }> = [];
+    const runner: AgentTeamRoleRunner = vi.fn(async ({ role, artifacts, previousResults }) => {
+      seen.push({ roleId: role.id, artifactKeys: Object.keys(artifacts ?? {}).sort() });
+      if (role.id === 'builder') {
+        expect(previousResults.map((result) => result.roleId)).toEqual(['planner']);
+      }
+      return { status: 'success', result: `${role.id} output` };
+    });
+
+    const result = await executeAgentTeam(team, { prompt: '按 DAG 执行' }, runner);
+
+    expect(result.status).toBe('success');
+    expect(seen.find((entry) => entry.roleId === 'builder')?.artifactKeys).toEqual(['plan']);
+    expect(result.traceEvents?.some((event) => event.type === 'workflow.step.ready' && event.taskId === 'build')).toBe(true);
+    expect(result.checkpoint?.stepStatuses.build.status).toBe('success');
+    expect(result.checkpoint?.artifacts.build).toBe('builder output');
+  });
+
+  test('writes route step outputKey for downstream inputKeys after approval resumes', async () => {
+    const team = makeTeam('judge-route', [
+      { id: 'judge', name: 'Judge', responsibility: '判断' },
+      { id: 'executor', name: 'Executor', responsibility: '执行' },
+      { id: 'verifier', name: 'Verifier', responsibility: '验证' },
+    ]);
+    team.workflowSteps = [
+      {
+        id: 'route',
+        type: 'route',
+        route: { judgeRoleId: 'judge', candidateRoleIds: ['executor'], fallbackRoleId: 'executor' },
+        outputKey: 'route_output',
+      },
+      {
+        id: 'verify',
+        type: 'role',
+        roleId: 'verifier',
+        dependsOn: ['route'],
+        inputKeys: ['route_output'],
+        outputKey: 'verification',
+      },
+    ];
+    const runner: AgentTeamRoleRunner = vi.fn(async ({ role, artifacts }) => {
+      if (role.id === 'executor') return { status: 'success', result: 'executor output' };
+      if (role.id === 'verifier') {
+        expect(artifacts).toEqual({ route_output: 'executor output' });
+        return { status: 'success', result: 'verified' };
+      }
+      return { status: 'success', result: 'judge skipped by resume approval' };
+    });
+
+    const result = await executeAgentTeam(team, {
+      prompt: '审批后继续',
+      runId: 'run_route_output',
+      traceId: 'trace_route_output',
+      resumeFromCheckpoint: {
+        schemaVersion: 2,
+        runId: 'run_route_output',
+        traceId: 'trace_route_output',
+        workflowNode: 'route',
+        status: 'waiting_approval',
+        stepStatuses: {
+          route: { status: 'waiting_approval', attempt: 1, outputKey: 'route_output' },
+          verify: { status: 'pending', attempt: 0, outputKey: 'verification' },
+        },
+        artifacts: {},
+        waitingApproval: {
+          approvalId: 'run_route_output:approval:route',
+          runId: 'run_route_output',
+          traceId: 'trace_route_output',
+          stepId: 'route',
+          requestedBy: 'judge',
+          reason: 'approve route',
+          confidence: 0.9,
+          targetRoleId: 'executor',
+          candidateRoleIds: ['executor'],
+          riskLevel: 'high',
+          payload: {},
+        },
+        busMessageSeq: 0,
+        spanSeq: 0,
+        messageSeq: 0,
+        lastError: null,
+        updatedAt: new Date(0).toISOString(),
+      },
+      approvalDecision: { approvalId: 'run_route_output:approval:route', status: 'approved', targetRoleId: 'executor' },
+    }, runner);
+
+    expect(result.status).toBe('success');
+    expect(result.checkpoint?.artifacts.route_output).toBe('executor output');
+    expect(result.checkpoint?.artifacts.verification).toBe('verified');
+  });
+
+  test('fails workflowSteps when dependsOn references an unknown step', async () => {
+    const team = makeTeam('pipeline', [
+      { id: 'builder', name: 'Builder', responsibility: '实现' },
+    ]);
+    team.workflowSteps = [
+      { id: 'build', type: 'role', roleId: 'builder', dependsOn: ['missing'], outputKey: 'build' },
+    ];
+    const runner: AgentTeamRoleRunner = vi.fn(async () => ({ status: 'success', result: 'should not run' }));
+
+    const result = await executeAgentTeam(team, { prompt: '无效依赖' }, runner);
+
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('dependsOn missing unknown step missing');
+    expect(runner).not.toHaveBeenCalled();
+    expect(result.traceEvents?.some((event) => event.type === 'workflow.validation.failed')).toBe(true);
+  });
+
+  test('fails workflowSteps when dependency graph has a cycle', async () => {
+    const team = makeTeam('pipeline', [
+      { id: 'a', name: 'A', responsibility: 'A' },
+      { id: 'b', name: 'B', responsibility: 'B' },
+    ]);
+    team.workflowSteps = [
+      { id: 'a_step', type: 'role', roleId: 'a', dependsOn: ['b_step'], outputKey: 'a' },
+      { id: 'b_step', type: 'role', roleId: 'b', dependsOn: ['a_step'], outputKey: 'b' },
+    ];
+    const runner: AgentTeamRoleRunner = vi.fn(async () => ({ status: 'success', result: 'should not run' }));
+
+    const result = await executeAgentTeam(team, { prompt: '循环依赖' }, runner);
+
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('workflow dependency cycle detected');
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  test('fails a step when declared inputKeys are missing', async () => {
+    const team = makeTeam('pipeline', [
+      { id: 'builder', name: 'Builder', responsibility: '实现' },
+    ]);
+    team.workflowSteps = [
+      { id: 'build', type: 'role', roleId: 'builder', inputKeys: ['plan'], outputKey: 'build' },
+    ];
+    const runner: AgentTeamRoleRunner = vi.fn(async () => ({ status: 'success', result: 'should not run' }));
+
+    const result = await executeAgentTeam(team, { prompt: '缺少输入' }, runner);
+
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('step build missing input artifact plan');
+    expect(runner).not.toHaveBeenCalled();
+    expect(result.checkpoint?.stepStatuses.build.status).toBe('failed');
+  });
+
+  test('pauses a route step when judge requests approval', async () => {
+    const team = makeTeam('judge-route', [
+      { id: 'judge', name: 'Judge', responsibility: '判断' },
+      { id: 'executor', name: 'Executor', responsibility: '执行' },
+    ]);
+    team.workflowSteps = [
+      {
+        id: 'route',
+        type: 'route',
+        route: { judgeRoleId: 'judge', candidateRoleIds: ['executor'], fallbackRoleId: 'executor' },
+      },
+    ];
+    const runner: AgentTeamRoleRunner = vi.fn(async ({ role }) => {
+      if (role.id === 'judge') {
+        return {
+          status: 'success',
+          result: JSON.stringify({
+            action: 'request_approval',
+            target: 'executor',
+            reason: '执行前需要人工确认',
+            confidence: 0.88,
+          }),
+        };
+      }
+      return { status: 'success', result: 'executor should not run before approval' };
+    });
+
+    const result = await executeAgentTeam(team, { prompt: '高风险执行', runId: 'run_approval', traceId: 'trace_approval' }, runner);
+
+    expect(result.status).toBe('waiting_approval');
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(result.waitingApproval).toMatchObject({
+      runId: 'run_approval',
+      stepId: 'route',
+      requestedBy: 'judge',
+      targetRoleId: 'executor',
+      reason: '执行前需要人工确认',
+    });
+    expect(result.checkpoint?.status).toBe('waiting_approval');
+    expect(result.checkpoint?.stepStatuses.route.status).toBe('waiting_approval');
+    expect(result.traceEvents?.some((event) => event.type === 'approval.requested')).toBe(true);
+  });
 });

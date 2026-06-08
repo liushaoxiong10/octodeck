@@ -226,6 +226,45 @@ describe('agent team definitions', () => {
       '如果 Interaction shape 是 auto，team.shape 必须返回模型实际选择的具体形态',
     );
     expect(prompt).toContain('不要在生成结果的 team.shape 中继续返回 auto');
+    expect(prompt).toContain('合法 DAG');
+    expect(prompt).toContain('为什么单 Agent + Tools 不够');
+    expect(prompt).toContain('request_approval');
+  });
+
+  test('builds default workflow steps with explicit dependency and artifact edges', () => {
+    const draft = agentTeams.buildAgentTeamDraft({
+      generatorAgentId: 'planner-agent',
+      goal: '实现复杂交付',
+      shape: 'pipeline',
+    });
+
+    expect(draft.workflowSteps?.[1]).toMatchObject({
+      dependsOn: ['step_1'],
+      inputKeys: ['planner'],
+    });
+    expect(draft.successCriteria).toContain('workflowSteps 能通过 dependsOn、inputKeys 和 outputKey 追踪产物流转与恢复点');
+  });
+
+  test('builds parallel default workflow as fan-out followed by synthesis', () => {
+    const draft = agentTeams.buildAgentTeamDraft({
+      generatorAgentId: 'planner-agent',
+      goal: '并行调研后综合',
+      shape: 'parallel',
+    });
+
+    expect(draft.workflowSteps).toHaveLength(2);
+    expect(draft.workflowSteps?.[0]).toMatchObject({
+      id: 'parallel_work',
+      type: 'parallel',
+    });
+    expect(draft.workflowSteps?.[1]).toMatchObject({
+      id: 'synthesize',
+      type: 'role',
+      roleId: 'synthesizer',
+      dependsOn: ['parallel_work'],
+      inputKeys: ['researcher', 'designer'],
+      outputKey: 'final',
+    });
   });
 
   test('lists and imports reusable agent.md definitions from agency-agents store', async () => {
