@@ -35,7 +35,7 @@ export const claudeSdkBackend: AgentBackend = {
       if (group.created_by) sdkQueryOptions.userId = group.created_by;
       if (group.agentModel) sdkQueryOptions.model = group.agentModel;
       const result = await sdkQuery(input.prompt, sdkQueryOptions);
-      if (!result) {
+      if (result === null) {
         return {
           status: 'error',
           result: null,

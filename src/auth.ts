@@ -143,7 +143,7 @@ const GLOBAL_USERNAME_MULTIPLIER = 4;
 const GLOBAL_USERNAME_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 
 // Sliding window: clean old entries every 10 minutes
-setInterval(
+const loginAttemptCleanupTimer = setInterval(
   () => {
     const now = Date.now();
     for (const [key, record] of loginAttempts) {
@@ -155,6 +155,8 @@ setInterval(
   },
   10 * 60 * 1000,
 );
+// Don't prevent the process from exiting due to this timer alone.
+loginAttemptCleanupTimer.unref();
 
 function checkAttemptRecord(
   key: string,

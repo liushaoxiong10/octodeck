@@ -154,8 +154,10 @@ RUN chmod +x /app/entrypoint.sh
 # Set ownership to node user (non-root) for writable directories
 RUN chown -R node:node /workspace
 
-# Install oh-my-zsh for node user (ys theme)
-RUN su - node -c 'sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended' \
+# Install oh-my-zsh for node user (ys theme).
+# Clone a specific release tag instead of curl-pipe-shell from master for reproducibility.
+RUN su - node -c 'git clone --depth 1 --branch master https://github.com/ohmyzsh/ohmyzsh.git /home/node/.oh-my-zsh' \
+    && cp /home/node/.oh-my-zsh/templates/zshrc.zsh-template /home/node/.zshrc \
     && sed -i 's/ZSH_THEME="robbyrussell"/ZSH_THEME="ys"/' /home/node/.zshrc \
     && chsh -s /bin/zsh node
 

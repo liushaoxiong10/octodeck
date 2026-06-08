@@ -595,6 +595,15 @@ export class GroupQueue {
         JSON.stringify({ type: 'message', text, images, sourceJid }),
       );
       fs.renameSync(tempPath, filepath);
+      // Verify the process is still alive after writing the IPC file.
+      // Between resolveActiveState() and the write, the process could have exited.
+      if (!state.active || !state.process) {
+        logger.debug(
+          { groupJid },
+          'Process exited between resolveActiveState and IPC write, returning no_active',
+        );
+        return 'no_active';
+      }
       state.queryInFlight = true;
       onInjected?.();
       return 'sent';
@@ -1285,6 +1294,9 @@ export class GroupQueue {
     const state = this.getGroup(groupJid);
     const activeRunner = this.findActiveRunnerFor(groupJid);
     if (activeRunner && activeRunner !== groupJid) {
+      // Write _drain sentinel to the active runner so it processes this
+      // group's messages before exiting, instead of just waiting.
+      this.requestDrainForActiveRunner(groupJid, state);
       this.waitingGroups.add(groupJid);
       return;
     }
@@ -1296,6 +1308,15 @@ export class GroupQueue {
     // Tasks first (they won't be re-discovered from SQLite like messages)
     while (state.pendingTasks.length > 0) {
       const task = state.pendingTasks.shift()!;
+      // Check if there's already an active task runner for this serialization key.
+      // Between the shift and runTask, a concurrent drain could start a runner.
+      const existingRunner = this.findActiveRunnerFor(groupJid);
+      if (existingRunner) {
+        // Push task back to front and wait for the active runner to finish.
+        state.pendingTasks.unshift(task);
+        this.waitingGroups.add(groupJid);
+        return;
+      }
       // Check if scheduled task is still active before occupying a slot.
       // Only skip tasks that exist in the DB and are no longer active.
       // Dynamic tasks (agent conversations, etc.) don't have DB entries

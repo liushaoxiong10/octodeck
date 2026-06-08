@@ -1548,6 +1548,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (droppedTaskKeys.has(canonical)) delete nextSdkTaskAliases[alias];
         }
 
+        // Clean up module-level timers for affected workspaces to prevent
+        // stale timer callbacks from firing after the workspace is cleared.
+        for (const affectedJid of affectedJids) {
+          for (const [key, timer] of sdkTaskCleanupTimers) {
+            if (key.startsWith(affectedJid + ':') || key.includes(':' + affectedJid)) {
+              clearTimeout(timer);
+              sdkTaskCleanupTimers.delete(key);
+            }
+          }
+          for (const [key, timer] of sdkTaskStaleTimers) {
+            if (key.startsWith(affectedJid + ':') || key.includes(':' + affectedJid)) {
+              clearTimeout(timer);
+              sdkTaskStaleTimers.delete(key);
+            }
+          }
+          for (const [key, timer] of dbTaskAgentCleanupTimers) {
+            if (key.startsWith(affectedJid + ':') || key.includes(':' + affectedJid)) {
+              clearTimeout(timer);
+              dbTaskAgentCleanupTimers.delete(key);
+            }
+          }
+          // Cancel pending rAF callbacks for this workspace
+          for (const [key, entry] of pendingDeltas) {
+            if (key.startsWith('main:' + affectedJid) || key.startsWith('agent:')) {
+              cancelAnimationFrame(entry.raf);
+              pendingDeltas.delete(key);
+            }
+          }
+          // Clean completedSdkTaskIds for this workspace
+          for (const id of completedSdkTaskIds) {
+            if (id.includes(affectedJid)) completedSdkTaskIds.delete(id);
+          }
+        }
+
         return {
           messages: nextMessages,
           waiting: nextWaiting,
@@ -1763,6 +1797,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (nextCurrent === null) {
           const remainingJids = Object.keys(nextGroups);
           nextCurrent = remainingJids.length > 0 ? remainingJids[0] : null;
+        }
+
+        // Clean up module-level timers for deleted workspace.
+        for (const [key, timer] of sdkTaskCleanupTimers) {
+          if (key.startsWith(jid + ':') || key.includes(':' + jid)) {
+            clearTimeout(timer);
+            sdkTaskCleanupTimers.delete(key);
+          }
+        }
+        for (const [key, timer] of sdkTaskStaleTimers) {
+          if (key.startsWith(jid + ':') || key.includes(':' + jid)) {
+            clearTimeout(timer);
+            sdkTaskStaleTimers.delete(key);
+          }
+        }
+        for (const [key, timer] of dbTaskAgentCleanupTimers) {
+          if (key.startsWith(jid + ':') || key.includes(':' + jid)) {
+            clearTimeout(timer);
+            dbTaskAgentCleanupTimers.delete(key);
+          }
+        }
+        for (const [key, entry] of pendingDeltas) {
+          if (key.startsWith('main:' + jid)) {
+            cancelAnimationFrame(entry.raf);
+            pendingDeltas.delete(key);
+          }
+        }
+        for (const id of completedSdkTaskIds) {
+          if (id.includes(jid)) completedSdkTaskIds.delete(id);
         }
 
         return {
@@ -2580,6 +2643,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       void deleteAgentMessageSnapshot(jid, agentId);
       clearSdkTaskCleanupTimer(agentId);
       clearSdkTaskStaleTimer(agentId);
+      clearDbTaskAgentCleanupTimer(agentId);
       set((s) => {
         const updated = (s.agents[jid] || []).filter((a) => a.id !== agentId);
         const nextAgentMessages = { ...s.agentMessages };

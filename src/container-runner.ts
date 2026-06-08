@@ -151,12 +151,21 @@ function getContainerClaudeJsonPath(): string {
 /**
  * 确保 localPath 是指向 targetPath 的 symlink。
  * 如果 localPath 是普通文件或指向错误目标的 symlink，替换它。
+ * 使用 realpath 验证防止 TOCTOU 竞态：先检查 lstat，再验证 realpath 一致性。
  */
 function ensureSymlinkTo(localPath: string, targetPath: string): void {
   try {
     const st = fs.lstatSync(localPath);
-    if (st.isSymbolicLink() && fs.readlinkSync(localPath) === targetPath) {
-      return; // 已经是正确的 symlink
+    if (st.isSymbolicLink()) {
+      // Verify the symlink target via realpath to prevent TOCTOU:
+      // an attacker could swap the symlink between lstat and readlink.
+      const realTarget = fs.realpathSync(localPath);
+      const expectedReal = (() => {
+        try { return fs.realpathSync(targetPath); } catch { return targetPath; }
+      })();
+      if (realTarget === expectedReal) {
+        return; // 已经是正确的 symlink
+      }
     }
     fs.unlinkSync(localPath); // 普通文件或错误 symlink，删除
   } catch {
@@ -301,14 +310,15 @@ interface VolumeMount {
 }
 
 /**
- * Create directory with 0o777 permissions for container volume mounts.
+ * Create directory with 0o770 permissions for container volume mounts.
  * Fixes uid mismatch between host user and container node user (uid 1000),
  * especially in rootless podman where uid remapping causes permission denied.
+ * Uses 0o770 (owner+group rwx) instead of 0o777 to avoid world-writable exposure.
  */
 function mkdirForContainer(dirPath: string): void {
   fs.mkdirSync(dirPath, { recursive: true });
   try {
-    fs.chmodSync(dirPath, 0o777);
+    fs.chmodSync(dirPath, 0o770);
   } catch {
     // Ignore — may fail on read-only filesystem or special mounts
   }

@@ -4,7 +4,8 @@ set -e
 # Set permissive umask so files created by the container (node user, uid 1000)
 # are writable by the host backend (agent user, uid 1002).
 # Without this, the host cannot delete/modify files created by the container.
-umask 0000
+# 使用 0002 而非 0000：仅 owner+group 可写，不暴露给其他用户。
+umask 0002
 
 # Fix ownership on mounted volumes.
 # Host uid may differ from container node user (uid 1000), especially in
@@ -16,8 +17,15 @@ chown -R node:node /workspace/group /workspace/global /workspace/memory /workspa
 
 # Mark mounted directories as safe for git (CVE-2022-24765 ownership check).
 # Host uid may differ from container node user, causing git to refuse operations.
-# 使用通配符 '*' 因为挂载路径动态（extra mounts、customCwd），无法枚举具体目录。
-git config --global --add safe.directory '*' 2>/dev/null || true
+# 显式列出已知挂载路径，避免 '*' 通配符完全禁用 CVE-2022-24765 保护。
+git config --global --add safe.directory /workspace/group 2>/dev/null || true
+git config --global --add safe.directory /workspace/global 2>/dev/null || true
+git config --global --add safe.directory /workspace/extra 2>/dev/null || true
+git config --global --add safe.directory /workspace/memory 2>/dev/null || true
+# customCwd 路径通过环境变量传入时也标记为 safe
+if [ -n "${CUSTOM_CWD:-}" ] && [ -d "$CUSTOM_CWD" ]; then
+  git config --global --add safe.directory "$CUSTOM_CWD" 2>/dev/null || true
+fi
 
 # Source environment variables from mounted env file
 if [ -f /workspace/env-dir/env ]; then
@@ -85,7 +93,7 @@ done
 chown -R node:node /home/node/.claude/skills 2>/dev/null || true
 
 # Compile TypeScript (agent-runner source may be hot-mounted from host)
-cd /app && npx tsc --outDir /tmp/dist 2>&1 >&2
+cd /app && npx tsc --outDir /tmp/dist >&2
 ln -s /app/node_modules /tmp/dist/node_modules
 ln -s /app/prompts /tmp/prompts
 chmod -R a-w /tmp/dist
@@ -98,8 +106,8 @@ chmod 644 /tmp/input.json
 # (e.g. settings.json), which the host backend (agent user) cannot read.
 # The trap runs as root after the node process exits.
 cleanup() {
-  chmod -R a+rwX /home/node/.claude 2>/dev/null || true
-  chmod -R a+rwX /workspace/group 2>/dev/null || true
+  chmod -R u+rwX,g+rwX /home/node/.claude 2>/dev/null || true
+  chmod -R u+rwX,g+rwX /workspace/group 2>/dev/null || true
 }
 trap cleanup EXIT
 

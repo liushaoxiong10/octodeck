@@ -8,6 +8,7 @@ import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
 import { AGENT_RUNNER_SECRET, verifyAgentToolToken } from '../config.js';
 import { getBackend } from '../backends/registry.js';
 import { getSystemSettings } from '../runtime-config.js';
+import { getUserById } from '../db.js';
 import type { AuthUser } from '../types.js';
 import {
   buildAgentTeamGenerationPrompt,
@@ -981,7 +982,13 @@ export async function handleAgentTeamToolRequest(c: any): Promise<Response> {
   const tokenUser = token
     ? verifyAgentToolToken(token)?.userId ||
       (token === AGENT_RUNNER_SECRET && isRecord(body)
-        ? String(body.userId || '')
+        // Secret-based auth: only allow the system's own agent-runner user.
+        // The userId from the request body is validated against the DB.
+        ? (() => {
+            const bodyUserId = String(body.userId || '');
+            const dbUser = getUserById(bodyUserId);
+            return dbUser ? dbUser.id : null;
+          })()
         : null)
     : null;
   if (!tokenUser) return c.json({ error: 'unauthorized' }, 401);
@@ -1015,15 +1022,31 @@ async function handleAgentTeamToolBody(
       },
       400,
     );
-  const user: AuthUser = {
-    id: parsed.data.userId,
-    username: parsed.data.userId,
-    role: 'admin',
-    status: 'active',
-    display_name: parsed.data.userId,
-    permissions: ['manage_system_config'],
-    must_change_password: false,
-  };
+  const user: AuthUser = (() => {
+    const dbUser = getUserById(parsed.data.userId);
+    if (dbUser) {
+      return {
+        id: dbUser.id,
+        username: dbUser.username,
+        role: dbUser.role,
+        status: dbUser.status,
+        display_name: dbUser.display_name || dbUser.username,
+        permissions: dbUser.permissions || [],
+        must_change_password: false,
+      };
+    }
+    // Fallback: if user not found in DB (e.g., agent-link device user),
+    // create a minimal member user — never default to admin.
+    return {
+      id: parsed.data.userId,
+      username: parsed.data.userId,
+      role: 'member',
+      status: 'active',
+      display_name: parsed.data.userId,
+      permissions: [],
+      must_change_password: false,
+    };
+  })();
   const toolContext = createInternalToolContext(c, user, parsed.data);
 
   switch (parsed.data.operation) {

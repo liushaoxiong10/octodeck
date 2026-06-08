@@ -67,11 +67,15 @@ export function validateAndResolvePath(
   // 解析符号链接：沿路径向上找到最近的已存在祖先，确保其 realpath 仍在根目录内。
   // 这防止了"父级是 symlink、末级还不存在"的绕过场景。
   const realRoot = fs.existsSync(root) ? fs.realpathSync(root) : root;
+  // Normalize with trailing separator to prevent prefix-matching attacks
+  // (e.g., /var/data-attack would pass startsWith('/var/data') without the separator).
+  const realRootWithSep = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
   let checkPath = resolved;
   while (checkPath !== root && checkPath !== path.dirname(checkPath)) {
     if (fs.existsSync(checkPath)) {
       const realPath = fs.realpathSync(checkPath);
-      if (realPath !== realRoot && !realPath.startsWith(realRoot + path.sep)) {
+      const realPathWithSep = realPath.endsWith(path.sep) ? realPath : realPath + path.sep;
+      if (realPath !== realRoot && !realPathWithSep.startsWith(realRootWithSep)) {
         throw new Error('Symlink traversal detected');
       }
       break;

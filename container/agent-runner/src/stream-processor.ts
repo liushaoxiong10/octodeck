@@ -674,6 +674,7 @@ export class StreamEventProcessor {
       });
       if (this.activeTopLevelToolUseId === id) {
         this.activeTopLevelToolUseId = null;
+        this.activeSkillToolUseId = null;
       }
     }
   }
@@ -1354,6 +1355,13 @@ export class StreamEventProcessor {
       this.pendingSubAgentMessages.clear();
       this.taskSummariesByToolUseId.clear();
       this.sdkTaskIdToToolUseId.clear();
+      // Clear pending input accumulation maps to prevent memory leaks
+      // when processAssistantMessage is never called (e.g., interrupted queries).
+      this.pendingSkillInput.clear();
+      this.pendingTaskInput.clear();
+      this.pendingAskUserInput.clear();
+      this.pendingTodoInput.clear();
+      this.pendingGenericInput.clear();
     }
 
   /** Get the accumulated full text (for result comparison). */

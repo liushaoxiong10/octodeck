@@ -241,7 +241,7 @@ sync-types: ## 同步 shared/ 下的类型定义到各子项目
 update-sdk: ## 更新 agent-runner 的 Claude Agent SDK 到最新版本
 	cd container/agent-runner && $(PKG) update @anthropic-ai/claude-agent-sdk && $(PKG) run build
 	@# npm/bun update 会将 "*" 回写为具体版本，还原它
-	@sed -i '' 's/"@anthropic-ai\/claude-agent-sdk": "[^"]*"/"@anthropic-ai\/claude-agent-sdk": "*"/' container/agent-runner/package.json
+	@sed -i'' 's/"@anthropic-ai\/claude-agent-sdk": "[^"]*"/"@anthropic-ai\/claude-agent-sdk": "*"/' container/agent-runner/package.json
 	@echo "SDK updated. Run 'make typecheck' to verify."
 
 ensure-latest-sdk: ## 启动前自动检测并更新 SDK（有新版才更新）

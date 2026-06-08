@@ -1627,7 +1627,10 @@ async function runQuery(
       // After emitting an sdk_final result, rotate turnId so that if
       // another result is emitted within the same query (e.g. user sent
       // a follow-up via IPC mid-query), it won't overwrite this one (#214).
-      containerInput.turnId = generateTurnId();
+      // Note: the main loop also sets turnId on each new IPC message (lines 2070, 2229),
+      // so this rotation is only needed within a single query's lifetime.
+      const rotatedTurnId = generateTurnId();
+      containerInput.turnId = rotatedTurnId;
 
       // Emit usage stream event with token counts and cost
       const resultMsg = message as Record<string, unknown>;
@@ -1692,6 +1695,9 @@ async function runQuery(
   } catch (err) {
     ipcPolling = false;
     ipcQueryWatcher.close();
+    // Cleanup residual state on error path too — flush pending buffers,
+    // emit tool_use_end for active tools, clear sub-agent timers.
+    processor.cleanup();
     const errorMessage = err instanceof Error ? err.message : String(err);
 
     // 检测上下文溢出错误
@@ -2204,6 +2210,9 @@ async function main(): Promise<void> {
             log('WARN: Auto-continue query was interrupted by user');
             resumeAt = undefined;
             try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
+            // Rebuild MCP server to avoid "Already connected to a transport" error
+            // when the auto-continue query was aborted mid-stream (#421).
+            mcpServerConfig = buildMcpServerConfig();
           }
           // After auto-continue, fall through to wait for next IPC message.
         } else {

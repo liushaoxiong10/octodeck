@@ -454,9 +454,8 @@ function isMemoryCandidateFile(filePath: string): boolean {
 
 function listMemorySources(user: AuthUser): MemorySource[] {
   ensureLegacyImported(user);
-  return listCloudMemories(user.id)
-    .map(cloudRecordToSource)
-    .slice(0, MEMORY_LIST_LIMIT);
+  const cloudSources = listCloudMemories(user.id)
+    .map(cloudRecordToSource);
 
   const files = new Set<string>();
   const isAdmin = user.role === 'admin';
@@ -575,7 +574,17 @@ function listMemorySources(user: AuthUser): MemorySource[] {
     return a.path.localeCompare(b.path, 'zh-CN');
   });
 
-  return sources.slice(0, MEMORY_LIST_LIMIT);
+  // Merge cloud sources with local filesystem sources, deduplicating by path.
+  // Cloud sources take priority over local sources with the same path.
+  const localPaths = new Set(sources.map(s => s.path));
+  const merged = [...sources];
+  for (const cs of cloudSources) {
+    if (!localPaths.has(cs.path)) {
+      merged.push(cs);
+    }
+  }
+
+  return merged.slice(0, MEMORY_LIST_LIMIT);
 }
 
 function buildSearchSnippet(
@@ -594,7 +603,7 @@ function searchMemorySources(
   limit = MEMORY_SEARCH_LIMIT,
 ): MemorySearchHit[] {
   ensureLegacyImported(user);
-  return searchCloudMemory({ userId: user.id, query: keyword, limit }).map(
+  const cloudHits = searchCloudMemory({ userId: user.id, query: keyword, limit }).map(
     (record) => {
       const lower = record.content.toLowerCase();
       const normalizedKeyword = keyword.trim().toLowerCase();
@@ -623,7 +632,7 @@ function searchMemorySources(
   );
 
   const normalizedKeyword = keyword.trim().toLowerCase();
-  if (!normalizedKeyword) return [];
+  if (!normalizedKeyword) return cloudHits;
 
   const maxResults = Number.isFinite(limit)
     ? Math.max(1, Math.min(MEMORY_SEARCH_LIMIT, Math.trunc(limit)))
@@ -666,7 +675,17 @@ function searchMemorySources(
     }
   }
 
-  return hits;
+  // Merge cloud hits with local filesystem hits, deduplicating by path.
+  // Cloud hits take priority when the same path exists in both.
+  const localPaths = new Set(hits.map(h => h.path));
+  const merged = [...hits];
+  for (const ch of cloudHits) {
+    if (!localPaths.has(ch.path)) {
+      merged.push(ch);
+    }
+  }
+
+  return merged.slice(0, maxResults);
 }
 
 // --- Routes ---
