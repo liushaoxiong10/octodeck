@@ -374,4 +374,49 @@ describe('agent team execution engine', () => {
     expect(result.checkpoint?.stepStatuses.route.status).toBe('waiting_approval');
     expect(result.traceEvents?.some((event) => event.type === 'approval.requested')).toBe(true);
   });
+
+  test('verify step writes verifier_report artifact', async () => {
+    const team = makeTeam('pipeline', [
+      { id: 'verifier', name: 'Verifier', responsibility: '独立验证质量' },
+    ]);
+    team.workflowSteps = [
+      {
+        id: 'verify_quality',
+        type: 'verify',
+        verify: { verifierRoleId: 'verifier', subjectKeys: [], rubric: '质量评分' },
+        outputKey: 'verifier_report',
+      },
+    ];
+
+    const result = await executeAgentTeam(team, { prompt: '验证交付' }, async () => ({
+      status: 'success',
+      result: JSON.stringify({ passed: true, score: 0.92, findings: [] }),
+    }));
+
+    expect(result.status).toBe('success');
+    expect(result.checkpoint?.artifacts.verifier_report).toContain('0.92');
+  });
+
+  test('vote step aggregates candidate role outputs deterministically', async () => {
+    const team = makeTeam('parallel', [
+      { id: 'critic_a', name: 'Critic A', responsibility: '投票 A' },
+      { id: 'critic_b', name: 'Critic B', responsibility: '投票 B' },
+    ]);
+    team.workflowSteps = [
+      {
+        id: 'vote_quality',
+        type: 'vote',
+        vote: { voterRoleIds: ['critic_a', 'critic_b'], subjectKeys: [], threshold: 0.5 },
+        outputKey: 'vote_result',
+      },
+    ];
+
+    const result = await executeAgentTeam(team, { prompt: '投票决策' }, async (context) => ({
+      status: 'success',
+      result: context.role.id === 'critic_a' ? 'APPROVE score=0.8' : 'APPROVE score=0.7',
+    }));
+
+    expect(result.status).toBe('success');
+    expect(result.checkpoint?.artifacts.vote_result).toContain('approved');
+  });
 });

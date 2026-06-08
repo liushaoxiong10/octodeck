@@ -383,16 +383,25 @@ describe('frontend agents module', () => {
     expect(teamStore).toContain('URLSearchParams');
     expect(teamStore).toContain('AgentTeamApproval');
     expect(teamStore).toContain('AgentTeamCheckpoint');
+    expect(teamStore).toContain('AgentTeamArtifact');
     expect(teamStore).toContain('loadRunApprovals');
     expect(teamStore).toContain('loadRunCheckpoints');
+    expect(teamStore).toContain('loadRunArtifacts');
+    expect(teamStore).toContain('AgentTeamMetricsSummary');
+    expect(teamStore).toContain('loadMetrics');
+    expect(teamStore).toContain('/api/agent-teams/metrics');
     expect(teamStore).toContain('decideRunApproval');
     expect(teamStore).toContain('cancelRun');
+    expect(teamStore).toContain('/artifacts');
     expect(teamStore).toContain('/approvals/${encodeURIComponent(approvalId)}');
     expect(teamStore).toContain('/cancel');
     expect(teamRoutes).toContain('runnerAgentId');
     expect(teamRoutes).toContain('roleAssignments');
     expect(teamRoutes).toContain("router.post('/:id/runs'");
     expect(teamRoutes).toContain("router.get('/runs'");
+    expect(teamRoutes).toContain("router.get('/metrics'");
+    expect(teamRoutes).toContain('listAgentTeamRunsForMetrics');
+    expect(teamRoutes).toContain('summarizeAgentTeamMetrics');
     expect(teamRoutes).toContain('listAgentTeamRuns');
     expect(teamRoutes).toContain("router.get('/runs/:runId/events'");
     expect(teamRoutes).toContain("router.get('/runs/:runId/blackboard'");
@@ -422,12 +431,18 @@ describe('frontend agents module', () => {
     expect(agentsPage).toContain('当前 Run');
     expect(agentsPage).toContain('角色任务');
     expect(agentsPage).toContain('黑板产物');
+    expect(agentsPage).toContain('Artifacts / 版本化产物');
+    expect(agentsPage).toContain('runArtifacts');
     expect(agentsPage).toContain('refreshRunObservability');
     expect(agentsPage).toContain('runObservabilityUpdatedAt');
     expect(agentsPage).toContain('approvalCard');
     expect(agentsPage).toContain('runHistory');
     expect(agentsPage).toContain('Run 历史');
-    expect(agentsPage).toContain('listRuns({ teamId: selectedTeam.id })');
+    expect(agentsPage).toContain('Agent Team 指标');
+    expect(agentsPage).toContain('agentTeamMetrics');
+    expect(agentsPage).toContain('loadMetrics({ teamId })');
+    expect(agentsPage).toContain('approvalLatency');
+    expect(agentsPage).toContain('listRuns({ teamId })');
     expect(agentsPage).toContain('handleSelectRunHistory');
     expect(agentsPage).toContain('等待审批');
     expect(agentsPage).toContain('批准并继续');
@@ -440,6 +455,7 @@ describe('frontend agents module', () => {
     );
     expect(compact(agentsPage)).toContain('loadRunTasks(runId)');
     expect(compact(agentsPage)).toContain('loadRunBlackboard(runId)');
+    expect(compact(agentsPage)).toContain('loadRunArtifacts(runId)');
     expect(compact(agentsPage)).toContain('loadRunCheckpoints(run.id)');
     expect(teamStore).toContain(
       'AGENT_TEAM_GENERATION_SUBMIT_TIMEOUT_MS = 30_000',

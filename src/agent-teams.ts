@@ -47,7 +47,15 @@ export interface AgentTeamRole {
   budget?: AgentTeamRoleBudget;
 }
 
-export type AgentTeamWorkflowStepType = 'role' | 'parallel' | 'route';
+export type AgentTeamWorkflowStepType = 'role' | 'parallel' | 'route' | 'verify' | 'vote';
+
+export interface AgentTeamWorkflowApprovalPolicy {
+  mode: 'single' | 'any_of' | 'all_of' | 'quorum';
+  approverRoleIds: string[];
+  quorum?: number;
+  timeoutMs?: number;
+  onTimeout?: 'reject' | 'approve' | 'fallback';
+}
 
 export interface AgentTeamWorkflowAction {
   roleId: string;
@@ -71,6 +79,18 @@ export interface AgentTeamWorkflowRoute {
   finalRoleId?: string;
 }
 
+export interface AgentTeamWorkflowVerify {
+  verifierRoleId: string;
+  subjectKeys: string[];
+  rubric?: string;
+}
+
+export interface AgentTeamWorkflowVote {
+  voterRoleIds: string[];
+  subjectKeys: string[];
+  threshold?: number;
+}
+
 export interface AgentTeamWorkflowStep {
   id: string;
   type: AgentTeamWorkflowStepType;
@@ -82,6 +102,9 @@ export interface AgentTeamWorkflowStep {
   dependsOn?: string[];
   parallel?: AgentTeamWorkflowAction[][];
   route?: AgentTeamWorkflowRoute;
+  verify?: AgentTeamWorkflowVerify;
+  vote?: AgentTeamWorkflowVote;
+  approvalPolicy?: AgentTeamWorkflowApprovalPolicy;
   onFailure?: AgentTeamWorkflowFailurePolicy;
 }
 
@@ -300,7 +323,7 @@ function normalizeWorkflowSteps(
     .map((step, index): AgentTeamWorkflowStep | null => {
       if (!step || typeof step !== 'object') return null;
       const type = step.type;
-      if (!['role', 'parallel', 'route'].includes(String(type))) return null;
+      if (!['role', 'parallel', 'route', 'verify', 'vote'].includes(String(type))) return null;
       const id = step.id?.trim() || `step_${index + 1}`;
       const onFailure = step.onFailure
         ? {
@@ -356,6 +379,45 @@ function normalizeWorkflowSteps(
           inputKeys: sanitizeLines(step.inputKeys),
           dependsOn: sanitizeLines(step.dependsOn),
           parallel: parallel as AgentTeamWorkflowAction[][],
+          onFailure,
+        };
+      }
+      if (type === 'verify') {
+        const verifierRoleId = step.verify?.verifierRoleId?.trim();
+        if (!verifierRoleId) return null;
+        return {
+          id,
+          type,
+          instructions: step.instructions?.trim() || undefined,
+          inputKeys: sanitizeLines(step.inputKeys),
+          outputKey: step.outputKey?.trim() || undefined,
+          dependsOn: sanitizeLines(step.dependsOn),
+          verify: {
+            verifierRoleId,
+            subjectKeys: sanitizeLines(step.verify?.subjectKeys),
+            rubric: step.verify?.rubric?.trim() || undefined,
+          },
+          onFailure,
+        };
+      }
+      if (type === 'vote') {
+        const voterRoleIds = sanitizeLines(step.vote?.voterRoleIds);
+        if (voterRoleIds.length === 0) return null;
+        return {
+          id,
+          type,
+          instructions: step.instructions?.trim() || undefined,
+          inputKeys: sanitizeLines(step.inputKeys),
+          outputKey: step.outputKey?.trim() || undefined,
+          dependsOn: sanitizeLines(step.dependsOn),
+          vote: {
+            voterRoleIds,
+            subjectKeys: sanitizeLines(step.vote?.subjectKeys),
+            threshold:
+              Number.isFinite(step.vote?.threshold) && Number(step.vote?.threshold) > 0
+                ? Math.min(1, Number(step.vote?.threshold))
+                : undefined,
+          },
           onFailure,
         };
       }
@@ -889,8 +951,10 @@ export function buildAgentTeamGenerationPrompt(
 - 如果 Interaction shape 是 auto，team.shape 必须返回模型实际选择的具体形态：pipeline、parallel、leader-worker 或 judge-route；不要在生成结果的 team.shape 中继续返回 auto。
 - roles 每项必须包含 id、name、responsibility，可选 inputs、outputs、skills、guardrails。
 - 必须生成 workflowSteps；编排、测试、返工、路由、产物传递都由 workflowSteps 显式描述，不要依赖角色数量、角色名称或固定关键词。
-- workflowSteps 支持：role（单角色步骤）、parallel（多条并行链）、route（由 judgeRoleId 产出路由决策）。测试/验证失败后的返工请用 onFailure 指向目标 role，而不是要求 QA 输出固定中文短语。
+- workflowSteps 支持：role（单角色步骤）、parallel（多条并行链）、route（由 judgeRoleId 产出路由决策）、verify（独立质量门禁）、vote（多角色投票聚合）。测试/验证失败后的返工请用 onFailure 指向目标 role，而不是要求 QA 输出固定中文短语。
 - 必须把 workflowSteps 设计成合法 DAG：id 唯一；dependsOn 只能引用已存在 step；不存在循环；下游 inputKeys 必须引用上游 outputKey。
+- 当任务需要独立质量门禁时，优先使用 verify step，而不是让实现角色自评。
+- 当任务需要多候选方案汇总时，使用 vote step 表达投票聚合，vote step 必须声明 subjectKeys 与 outputKey。
 - 必须在 description 或 workflow 中写明为什么单 Agent + Tools 不够、为什么选择当前 shape、为什么没有选择更简单或相邻 shape。
 - 每个 review / verify / judge role 必须包含 rubric、失败输出格式和停止条件，避免单 Agent 自评。
 - route step 的 judge 输出必须支持 JSON：{"action":"run_role|finish|request_approval|abort","target":"roleId","reason":"...","confidence":0.0}；高风险或边界不清时输出 request_approval。

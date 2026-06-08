@@ -45,10 +45,12 @@ import {
   type AgentMdReference,
   type AgentTeam,
   type AgentTeamApproval,
+  type AgentTeamArtifact,
   type AgentTeamBlackboardEntry,
   type AgentTeamCheckpoint,
   type AgentTeamExecutionResult,
   type AgentTeamGenerationJob,
+  type AgentTeamMetricsSummary,
   type AgentTeamRole,
   type AgentTeamRoleAssignment,
   type AgentTeamRun,
@@ -1511,6 +1513,21 @@ function taskStatusTone(status: string): 'muted' | 'green' | 'red' | 'blue' {
   return 'muted';
 }
 
+const ARTIFACT_VALUE_PREVIEW_LIMIT = 2000;
+
+function previewArtifactValue(value: string): string {
+  if (value.length <= ARTIFACT_VALUE_PREVIEW_LIMIT) return value;
+  return `${value.slice(0, ARTIFACT_VALUE_PREVIEW_LIMIT)}\n…（已截断，仅展示前 ${ARTIFACT_VALUE_PREVIEW_LIMIT} 字符）`;
+}
+
+function executionResultTone(
+  status: AgentTeamExecutionResult['status'],
+): 'muted' | 'green' | 'red' | 'blue' {
+  if (status === 'success') return 'green';
+  if (status === 'waiting_approval') return 'blue';
+  return 'red';
+}
+
 function EmptyText({ children }: { children: React.ReactNode }) {
   return (
     <div className="rounded-2xl border border-dashed border-border bg-muted/20 px-4 py-6 text-center text-xs text-muted-foreground">
@@ -1553,6 +1570,8 @@ function AgentTeamWorkspace({
     loadRunBlackboard,
     loadRunApprovals,
     loadRunCheckpoints,
+    loadRunArtifacts,
+    loadMetrics,
     decideRunApproval,
     cancelRun,
   } = useAgentTeamsStore();
@@ -1577,6 +1596,7 @@ function AgentTeamWorkspace({
   const [runBlackboard, setRunBlackboard] = useState<
     AgentTeamBlackboardEntry[]
   >([]);
+  const [runArtifacts, setRunArtifacts] = useState<AgentTeamArtifact[]>([]);
   const [runTraceEvents, setRunTraceEvents] = useState<
     NonNullable<AgentTeamExecutionResult['traceEvents']>
   >([]);
@@ -1585,6 +1605,8 @@ function AgentTeamWorkspace({
     string | null
   >(null);
   const [runHistory, setRunHistory] = useState<AgentTeamRun[]>([]);
+  const [agentTeamMetrics, setAgentTeamMetrics] =
+    useState<AgentTeamMetricsSummary | null>(null);
   const [roleAssignments, setRoleAssignments] = useState<
     Record<string, AgentTeamRoleAssignment>
   >({});
@@ -1625,14 +1647,19 @@ function AgentTeamWorkspace({
     setRunCheckpoints([]);
     setRunTasks([]);
     setRunBlackboard([]);
+    setRunArtifacts([]);
     setRunTraceEvents([]);
     setRunObservabilityUpdatedAt(null);
   }, []);
 
   const refreshRunHistory = useCallback(async () => {
     if (!selectedTeam) return;
-    setRunHistory(await listRuns({ teamId: selectedTeam.id }));
-  }, [listRuns, selectedTeam]);
+    const teamId = selectedTeam.id;
+    setRunHistory(await listRuns({ teamId }));
+    setAgentTeamMetrics(
+      await loadMetrics({ teamId }).catch(() => null),
+    );
+  }, [listRuns, loadMetrics, selectedTeam?.id]);
 
   const refreshRunObservability = useCallback(
     async (runId: string, options: { silent?: boolean } = {}) => {
@@ -1645,6 +1672,7 @@ function AgentTeamWorkspace({
           traceEvents,
           tasks,
           blackboard,
+          artifacts,
         ] = await Promise.all([
           loadRun(runId),
           loadRunApprovals(runId),
@@ -1652,6 +1680,7 @@ function AgentTeamWorkspace({
           loadRunEvents(runId),
           loadRunTasks(runId),
           loadRunBlackboard(runId),
+          loadRunArtifacts(runId).catch(() => []),
         ]);
         setActiveRun(freshRun);
         setApprovalCard(
@@ -1661,11 +1690,26 @@ function AgentTeamWorkspace({
         setRunTraceEvents(traceEvents);
         setRunTasks(tasks);
         setRunBlackboard(blackboard);
+        setRunArtifacts(artifacts);
         setRunObservabilityUpdatedAt(new Date().toISOString());
-        if (freshRun.finalResult || freshRun.error || traceEvents.length) {
+        if (
+          freshRun.status === 'waiting_approval' ||
+          freshRun.finalResult ||
+          freshRun.error ||
+          traceEvents.length
+        ) {
+          const status: AgentTeamExecutionResult['status'] =
+            freshRun.status === 'success'
+              ? 'success'
+              : freshRun.status === 'waiting_approval'
+                ? 'waiting_approval'
+                : 'error';
           setExecutionResult({
-            status: freshRun.status === 'success' ? 'success' : 'error',
-            finalResult: freshRun.finalResult ?? freshRun.error ?? '',
+            status,
+            finalResult:
+              freshRun.finalResult ??
+              freshRun.error ??
+              (status === 'waiting_approval' ? '等待审批，批准后将继续执行。' : ''),
             runId: freshRun.id,
             traceId: freshRun.traceId,
             roleResults: [],
@@ -1684,6 +1728,7 @@ function AgentTeamWorkspace({
     [
       loadRun,
       loadRunApprovals,
+      loadRunArtifacts,
       loadRunBlackboard,
       loadRunCheckpoints,
       loadRunEvents,
@@ -1792,12 +1837,12 @@ function AgentTeamWorkspace({
   useEffect(() => {
     if (!selectedTeam) {
       setRunHistory([]);
+      setAgentTeamMetrics(null);
       setRoleAssignments({});
       resetRunObservability();
       return;
     }
-    void listRuns({ teamId: selectedTeam.id })
-      .then(setRunHistory)
+    void refreshRunHistory()
       .catch(() => setRunHistory([]));
     setRoleAssignments((current) => {
       const roleIds = new Set(selectedTeam.roles.map((role) => role.id));
@@ -1808,7 +1853,7 @@ function AgentTeamWorkspace({
         ? current
         : next;
     });
-  }, [listRuns, resetRunObservability, selectedTeam?.id]);
+  }, [refreshRunHistory, resetRunObservability, selectedTeam?.id]);
 
   useEffect(() => {
     if (!activeRun || !isActiveAgentTeamRunStatus(activeRun.status)) return;
@@ -2092,10 +2137,12 @@ function AgentTeamWorkspace({
           runCheckpoints={runCheckpoints}
           runTasks={runTasks}
           runBlackboard={runBlackboard}
+          runArtifacts={runArtifacts}
           runTraceEvents={runTraceEvents}
           runObservabilityLoading={runObservabilityLoading}
           runObservabilityUpdatedAt={runObservabilityUpdatedAt}
           runHistory={runHistory}
+          agentTeamMetrics={agentTeamMetrics}
           roleAssignments={roleAssignments}
           saving={saving}
           onEditingJsonChange={setEditingJson}
@@ -2136,10 +2183,12 @@ function AgentTeamPanel({
   runCheckpoints,
   runTasks,
   runBlackboard,
+  runArtifacts,
   runTraceEvents,
   runObservabilityLoading,
   runObservabilityUpdatedAt,
   runHistory,
+  agentTeamMetrics,
   roleAssignments,
   saving,
   onEditingJsonChange,
@@ -2166,10 +2215,12 @@ function AgentTeamPanel({
   runCheckpoints: AgentTeamCheckpoint[];
   runTasks: AgentTeamTaskView[];
   runBlackboard: AgentTeamBlackboardEntry[];
+  runArtifacts: AgentTeamArtifact[];
   runTraceEvents: NonNullable<AgentTeamExecutionResult['traceEvents']>;
   runObservabilityLoading: boolean;
   runObservabilityUpdatedAt: string | null;
   runHistory: AgentTeamRun[];
+  agentTeamMetrics: AgentTeamMetricsSummary | null;
   roleAssignments: Record<string, AgentTeamRoleAssignment>;
   saving: boolean;
   onEditingJsonChange: (value: string) => void;
@@ -2283,6 +2334,53 @@ function AgentTeamPanel({
               value={formatDateTime(selectedTeam.updatedAt)}
               hint={formatDateTime(selectedTeam.createdAt)}
             />
+          </div>
+
+          <div className="rounded-2xl border border-border bg-background/70 p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <h4 className="text-sm font-semibold text-foreground">
+                  Agent Team 指标
+                </h4>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  基于最近运行、任务和审批记录汇总。
+                </p>
+              </div>
+              <Pill tone="blue">metrics</Pill>
+            </div>
+            {agentTeamMetrics ? (
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                <AgentTeamPropertyCard
+                  label="Total Runs"
+                  value={String(agentTeamMetrics.totalRuns)}
+                  hint={`${agentTeamMetrics.activeRuns} active`}
+                />
+                <AgentTeamPropertyCard
+                  label="Success Rate"
+                  value={formatMetricPercent(agentTeamMetrics.successRate)}
+                  hint={`${agentTeamMetrics.successfulRuns} success / ${agentTeamMetrics.failedRuns} failed`}
+                />
+                <AgentTeamPropertyCard
+                  label="Avg Duration"
+                  value={formatMetricDuration(agentTeamMetrics.averageDurationMs)}
+                  hint={`${agentTeamMetrics.cancelledRuns} cancelled`}
+                />
+                <AgentTeamPropertyCard
+                  label="Approval Latency"
+                  value={formatMetricDuration(
+                    agentTeamMetrics.approvalLatency.averageMs,
+                  )}
+                  hint={`${agentTeamMetrics.approvalLatency.resolvedCount} resolved`}
+                />
+                <AgentTeamPropertyCard
+                  label="Failed Tasks"
+                  value={String(agentTeamMetrics.failedTaskCount)}
+                  hint="error / cancelled"
+                />
+              </div>
+            ) : (
+              <EmptyText>暂无 Agent Team 指标。</EmptyText>
+            )}
           </div>
 
           <div className="rounded-2xl border border-border bg-muted/20 p-4">
@@ -2709,6 +2807,55 @@ function AgentTeamPanel({
                 暂无黑板产物。角色完成后会在这里显示输出。
               </div>
             ) : null}
+            {runArtifacts.length ? (
+              <div className="mt-4 rounded-xl border border-border bg-background/70 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="text-xs font-semibold text-muted-foreground">
+                    Artifacts / 版本化产物
+                  </div>
+                  <Pill>{runArtifacts.length}</Pill>
+                </div>
+                <div className="max-h-72 space-y-2 overflow-auto">
+                  {runArtifacts.map((artifact) => (
+                    <div
+                      key={artifact.id}
+                      className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-xs"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-foreground">
+                          {artifact.key}
+                        </span>
+                        <Pill>v{artifact.version}</Pill>
+                        {artifact.sourceStepId ? (
+                          <span className="text-muted-foreground">
+                            step: {artifact.sourceStepId}
+                          </span>
+                        ) : null}
+                        {artifact.sourceRoleId ? (
+                          <span className="text-muted-foreground">
+                            role: {artifact.sourceRoleId}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+                        <span>{artifact.contentType}</span>
+                        <span>{formatDateTime(artifact.createdAt)}</span>
+                        {artifact.sourceTaskId ? (
+                          <span>task: {artifact.sourceTaskId}</span>
+                        ) : null}
+                      </div>
+                      <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-[11px] text-muted-foreground">
+                        {previewArtifactValue(artifact.value)}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : activeRun ? (
+              <div className="mt-4 rounded-xl border border-dashed border-border bg-muted/20 px-3 py-4 text-center text-xs text-muted-foreground">
+                暂无版本化产物。Artifact 写入后会在这里显示 key、版本和预览。
+              </div>
+            ) : null}
             {executionResult ? (
               <div className="mt-4 rounded-2xl border border-border bg-muted/20 p-4">
                 <div className="mb-2 flex items-center justify-between gap-2">
@@ -2731,9 +2878,7 @@ function AgentTeamPanel({
                     ) : null}
                   </div>
                   <Pill
-                    tone={
-                      executionResult.status === 'success' ? 'green' : 'red'
-                    }
+                    tone={executionResultTone(executionResult.status)}
                   >
                     {executionResult.status}
                   </Pill>
@@ -4079,6 +4224,17 @@ function formatDateTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString('zh-CN');
+}
+
+function formatMetricPercent(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatMetricDuration(value: number | null): string {
+  if (value === null) return '暂无';
+  if (value < 1000) return `${Math.round(value)} ms`;
+  if (value < 60_000) return `${(value / 1000).toFixed(1)} 秒`;
+  return `${(value / 60_000).toFixed(1)} 分钟`;
 }
 
 function RoleList({ title, values }: { title: string; values?: string[] }) {

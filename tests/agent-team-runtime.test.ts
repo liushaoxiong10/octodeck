@@ -38,12 +38,18 @@ vi.mock('../src/runtime-config.js', async (importOriginal) => {
 });
 
 const db = await import('../src/db.js');
+const runtimeControl = await import('../src/agent-team-runtime-control.js');
 const { registerBackend, unregisterBackend } = await import('../src/backends/registry.js');
 const agentTeams = await import('../src/agent-teams.js');
 const agentTeamRoutes = (await import('../src/routes/agent-teams.js')).default;
 const agentLinkRoutes = (await import('../src/routes/agent-link.js')).default;
 
-const calls: Array<{ backendId: string; prompt: string; folder: string }> = [];
+const calls: Array<{
+  backendId: string;
+  prompt: string;
+  folder: string;
+  remoteToolCwd?: string;
+}> = [];
 
 function registerTestBackend(id: string) {
   registerBackend({
@@ -52,7 +58,12 @@ function registerTestBackend(id: string) {
     usesProviderPool: false,
     supportsExecutionMode: (mode) => mode === 'host',
     run: vi.fn(async ({ input, group }) => {
-      calls.push({ backendId: id, prompt: input.prompt, folder: group.folder });
+      calls.push({
+        backendId: id,
+        prompt: input.prompt,
+        folder: group.folder,
+        remoteToolCwd: input.remoteToolCwd,
+      });
       const roleMatch = input.prompt.match(/Current role: .*\(([^)]+)\)/);
       if (input.prompt.includes('REQUEST_RUNTIME_APPROVAL') && roleMatch?.[1] === 'judge') {
         return {
@@ -64,6 +75,12 @@ function registerTestBackend(id: string) {
             confidence: 0.86,
           }),
         };
+      }
+      if (input.prompt.includes('RETURN_PLAN_BODY')) {
+        return { status: 'success', result: 'plan body' };
+      }
+      if (input.prompt.includes('RETURN_VERSIONED_ARTIFACTS')) {
+        return { status: 'success', result: `${roleMatch?.[1] ?? 'unknown'} body` };
       }
       return { status: 'success', result: `${id}:${roleMatch?.[1] ?? 'unknown'}` };
     }),
@@ -78,6 +95,7 @@ describe('agent team runtime persistence and role assignments', () => {
     await db.initDatabase();
     unregisterBackend('runner_a');
     unregisterBackend('runner_b');
+    runtimeControl.clearAgentTeamRuntimeControlsForTests();
     registerTestBackend('runner_a');
     registerTestBackend('runner_b');
   });
@@ -131,6 +149,89 @@ describe('agent team runtime persistence and role assignments', () => {
       { role_id: 'planner', actor_id: 'runner_a', status: 'success' },
     ]);
     expect(eventCount.count).toBe(body.execution.traceEvents.length);
+  });
+
+  test('rejects invalid per-role runner before any role executes', async () => {
+    const team = agentTeams.createAgentTeam({
+      name: 'Invalid Runtime Target Team',
+      goal: '提前拒绝错误路由',
+      shape: 'pipeline',
+      description: '测试 roleAssignments 预校验。',
+      roles: [{ id: 'worker', name: 'Worker', responsibility: '执行。' }],
+      workflow: 'Worker 单步执行。',
+      successCriteria: ['错误路由不会启动 role'],
+      createdByAgentId: 'runner_a',
+    }, 'alice');
+
+    const response = await agentTeamRoutes.request(`/${team.id}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: '不应执行',
+        runnerAgentId: 'runner_a',
+        roleAssignments: { worker: { runnerAgentId: 'blocked_runner' } },
+      }),
+    });
+    const body = await response.json() as { error: string; details?: string[] };
+
+    expect(response.status).toBe(403);
+    expect(body.error).toBe('invalid role runtime target');
+    expect(body.details).toEqual([
+      'role worker runner blocked_runner is not in allowedBackends',
+    ]);
+    expect(calls).toEqual([]);
+  });
+
+  test('revalidates per-role runners before resuming an approved run', async () => {
+    const team = agentTeams.createAgentTeam({
+      name: 'Approval Runtime Target Team',
+      goal: '审批恢复时校验 role runtime target',
+      shape: 'pipeline',
+      description: '测试审批 checkpoint 中的 roleAssignments 不会绕过校验。',
+      roles: [
+        {
+          id: 'deploy',
+          name: 'Deploy',
+          responsibility: '执行高风险发布。',
+          policy: { permissionLevel: 'L4', requiresApproval: true },
+        },
+      ],
+      workflow: '审批后执行 Deploy。',
+      successCriteria: ['恢复前拒绝失效 runner'],
+      createdByAgentId: 'runner_a',
+    }, 'alice');
+
+    const createRes = await agentTeamRoutes.request(`/${team.id}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: '发布到生产',
+        runnerAgentId: 'runner_a',
+        roleAssignments: { deploy: { runnerAgentId: 'runner_b' } },
+      }),
+    });
+    const created = await createRes.json() as {
+      run: { id: string; status: string };
+      approval: { id: string };
+    };
+
+    expect(createRes.status).toBe(202);
+    expect(created.run.status).toBe('waiting_approval');
+    unregisterBackend('runner_b');
+
+    const approveRes = await agentTeamRoutes.request(`/runs/${created.run.id}/approvals/${created.approval.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision: 'approved' }),
+    });
+    const approved = await approveRes.json() as { error: string; details?: string[] };
+
+    expect(approveRes.status).toBe(404);
+    expect(approved.error).toBe('invalid role runtime target');
+    expect(approved.details).toEqual([
+      'role deploy runner backend runner_b not found',
+    ]);
+    expect(calls).toEqual([]);
   });
 
   test('executes an agent team through the bearer-protected tool bridge', async () => {
@@ -407,6 +508,274 @@ describe('agent team runtime persistence and role assignments', () => {
 
     expect(cancelRes.status).toBe(200);
     expect(cancelled.run.status).toBe('cancelled');
+  });
+
+  test('cancel endpoint invokes registered runtime cancellation handlers', async () => {
+    const cancel = vi.fn();
+    runtimeControl.registerAgentTeamTaskCancellation({
+      runId: 'run_cancel_runtime',
+      taskId: 'run_cancel_runtime:role:work',
+      cancel,
+    });
+
+    db.recordAgentTeamRun({
+      id: 'run_cancel_runtime',
+      teamId: 'team_cancel_runtime',
+      userId: 'alice',
+      prompt: 'stop me',
+      status: 'running',
+      traceId: 'trace_cancel_runtime',
+      workflowShape: 'pipeline',
+      roleAssignments: {},
+    });
+
+    const response = await agentTeamRoutes.request('/runs/run_cancel_runtime/cancel', {
+      method: 'POST',
+    });
+    const body = await response.json() as {
+      run: { status: string };
+      cancelledTaskIds?: string[];
+      cancellationErrors?: unknown[];
+    };
+
+    expect(response.status).toBe(200);
+    expect(cancel).toHaveBeenCalledWith('cancelled by user');
+    expect(body.cancelledTaskIds).toEqual(['run_cancel_runtime:role:work']);
+    expect(body.cancellationErrors).toEqual([]);
+    expect(body.run.status).toBe('cancelled');
+  });
+
+  test('tool bridge cancel_run invokes registered runtime cancellation handlers', async () => {
+    const cancel = vi.fn();
+    runtimeControl.registerAgentTeamTaskCancellation({
+      runId: 'run_tool_cancel_runtime',
+      taskId: 'run_tool_cancel_runtime:role:work',
+      cancel,
+    });
+
+    db.recordAgentTeamRun({
+      id: 'run_tool_cancel_runtime',
+      teamId: 'team_tool_cancel_runtime',
+      userId: 'alice',
+      prompt: 'stop me from tool',
+      status: 'running',
+      traceId: 'trace_tool_cancel_runtime',
+      workflowShape: 'pipeline',
+      roleAssignments: {},
+    });
+
+    const response = await agentTeamRoutes.request('/tool', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.OCTODECK_AGENT_RUNNER_SECRET}`,
+      },
+      body: JSON.stringify({
+        userId: 'alice',
+        operation: 'cancel_run',
+        runId: 'run_tool_cancel_runtime',
+      }),
+    });
+    const body = await response.json() as {
+      run: { status: string };
+      cancelledTaskIds?: string[];
+      cancellationErrors?: unknown[];
+    };
+
+    expect(response.status).toBe(200);
+    expect(cancel).toHaveBeenCalledWith('cancelled by agent team MCP tool');
+    expect(body.cancelledTaskIds).toEqual(['run_tool_cancel_runtime:role:work']);
+    expect(body.cancellationErrors).toEqual([]);
+    expect(body.run.status).toBe('cancelled');
+  });
+
+  test('executes sandbox role in run-scoped workspace', async () => {
+    const team = agentTeams.createAgentTeam({
+      name: 'Sandbox Runtime Team',
+      goal: '验证 sandbox workspace',
+      shape: 'pipeline',
+      description: '测试 role workspacePolicy 对执行 workspace 的影响。',
+      roles: [
+        {
+          id: 'role_sandbox',
+          name: 'Sandbox Role',
+          responsibility: '在隔离 workspace 中执行。',
+          policy: { workspacePolicy: 'sandbox' },
+        },
+      ],
+      workflow: 'Sandbox Role 单步执行。',
+      successCriteria: ['workspace 已隔离'],
+      createdByAgentId: 'runner_a',
+    }, 'alice');
+
+    const response = await agentTeamRoutes.request(`/${team.id}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: '运行 sandbox role',
+        runnerAgentId: 'runner_a',
+        runtimeContext: {
+          groupFolder: 'custom-root',
+          remoteToolCwd: '/repo',
+        },
+      }),
+    });
+    const body = await response.json() as { run: { id: string; status: string } };
+
+    expect(response.status).toBe(201);
+    expect(body.run.status).toBe('success');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].folder).toBe(`custom-root/${body.run.id}/role_sandbox`);
+    expect(calls[0].remoteToolCwd).toBe(
+      `/repo/.octodeck/agent-team-runs/${body.run.id}/role_sandbox`,
+    );
+  });
+
+  test('persists workflow outputKey artifacts as versioned artifact records', async () => {
+    const team = agentTeams.createAgentTeam({
+      name: 'Artifact Runtime Team',
+      goal: '持久化 workflow outputKey',
+      shape: 'pipeline',
+      description: '测试 workflow 输出会写入 artifact 数据面。',
+      roles: [{ id: 'planner', name: 'Planner', responsibility: '产出计划。' }],
+      workflow: 'Planner 产出 plan。',
+      workflowSteps: [
+        {
+          id: 'plan',
+          type: 'role',
+          roleId: 'planner',
+          outputKey: 'plan',
+        },
+      ],
+      successCriteria: ['plan artifact 可查询'],
+      createdByAgentId: 'runner_a',
+    }, 'alice');
+
+    const response = await agentTeamRoutes.request(`/${team.id}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'RETURN_PLAN_BODY', runnerAgentId: 'runner_a' }),
+    });
+    const body = await response.json() as { run: { id: string; status: string } };
+
+    expect(response.status).toBe(201);
+    expect(body.run.status).toBe('success');
+
+    const artifactsResponse = await agentTeamRoutes.request(`/runs/${body.run.id}/artifacts`);
+    expect(artifactsResponse.status).toBe(200);
+    const artifactsBody = await artifactsResponse.json() as {
+      artifacts: Array<{ key: string; version: number; value: string; sourceStepId: string }>;
+    };
+
+    expect(artifactsBody.artifacts).toMatchObject([
+      { key: 'plan', version: 1, value: 'plan body', sourceStepId: 'plan' },
+    ]);
+  });
+
+  test('persists artifact version snapshots and parent lineage', async () => {
+    const team = agentTeams.createAgentTeam({
+      name: 'Artifact Lineage Team',
+      goal: '持久化 artifact 版本与派生关系',
+      shape: 'pipeline',
+      description: '测试同 key 多版本和 inputKeys lineage。',
+      roles: [
+        { id: 'planner_v1', name: 'Planner V1', responsibility: '产出第一版计划。' },
+        { id: 'planner_v2', name: 'Planner V2', responsibility: '产出第二版计划。' },
+        { id: 'builder', name: 'Builder', responsibility: '基于计划产出构建结果。' },
+      ],
+      workflow: 'Planner V1 后 Planner V2，再 Builder。',
+      workflowSteps: [
+        { id: 'plan_v1', type: 'role', roleId: 'planner_v1', outputKey: 'plan' },
+        { id: 'plan_v2', type: 'role', roleId: 'planner_v2', outputKey: 'plan', dependsOn: ['plan_v1'] },
+        { id: 'build', type: 'role', roleId: 'builder', outputKey: 'build', inputKeys: ['plan'], dependsOn: ['plan_v2'] },
+      ],
+      successCriteria: ['版本和 lineage 可查询'],
+      createdByAgentId: 'runner_a',
+    }, 'alice');
+
+    const response = await agentTeamRoutes.request(`/${team.id}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'RETURN_VERSIONED_ARTIFACTS', runnerAgentId: 'runner_a' }),
+    });
+    const body = await response.json() as { run: { id: string; status: string } };
+    expect(response.status).toBe(201);
+
+    const artifactsResponse = await agentTeamRoutes.request(`/runs/${body.run.id}/artifacts`);
+    expect(artifactsResponse.status).toBe(200);
+    const artifactsBody = await artifactsResponse.json() as {
+      artifacts: Array<{ id: string; key: string; version: number; value: string; parentArtifactIds: string[] }>;
+    };
+
+    const artifactSummaries = artifactsBody.artifacts
+      .map((artifact) => ({
+        key: artifact.key,
+        version: artifact.version,
+        value: artifact.value,
+      }))
+      .sort((a, b) => `${a.key}:${a.version}`.localeCompare(`${b.key}:${b.version}`));
+    expect(artifactSummaries).toEqual([
+      { key: 'build', version: 1, value: 'builder body' },
+      { key: 'plan', version: 1, value: 'planner_v1 body' },
+      { key: 'plan', version: 2, value: 'planner_v2 body' },
+    ]);
+    const latestPlan = artifactsBody.artifacts.find(
+      (artifact) => artifact.key === 'plan' && artifact.version === 2,
+    );
+    const build = artifactsBody.artifacts.find((artifact) => artifact.key === 'build');
+    expect(build?.parentArtifactIds).toEqual([latestPlan?.id]);
+  });
+
+  test('propagates cancel requests to the active role AbortSignal', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    let cancelBody: { run: { id: string; status: string }; cancelledTaskIds: string[] } | undefined;
+    registerBackend({
+      id: 'runner_a',
+      displayName: 'runner_a',
+      usesProviderPool: false,
+      supportsExecutionMode: (mode) => mode === 'host',
+      run: vi.fn(async (args) => {
+        capturedSignal = args.signal;
+        if (!capturedSignal) {
+          return { status: 'success', result: 'missing signal' };
+        }
+        const row = db.getDatabaseForInternalUse()
+          .prepare("SELECT id FROM agent_team_runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1")
+          .get() as { id: string };
+        const cancelResponse = await agentTeamRoutes.request(`/runs/${row.id}/cancel`, {
+          method: 'POST',
+        });
+        cancelBody = await cancelResponse.json() as typeof cancelBody;
+        if (!capturedSignal.aborted) {
+          await new Promise<void>((resolve) => {
+            capturedSignal?.addEventListener('abort', () => resolve(), { once: true });
+          });
+        }
+        return { status: 'error', result: '', error: 'aborted by test' };
+      }),
+    });
+    const team = agentTeams.createAgentTeam({
+      name: 'Abort Runtime Team',
+      goal: '验证运行中 cancel',
+      shape: 'pipeline',
+      description: '测试 cancel 贯穿正在运行的 role。',
+      roles: [{ id: 'worker', name: 'Worker', responsibility: '长任务。' }],
+      workflow: 'Worker 单步执行。',
+      successCriteria: ['cancel 可中断 role'],
+      createdByAgentId: 'runner_a',
+    }, 'alice');
+
+    await agentTeamRoutes.request(`/${team.id}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: '启动后取消', runnerAgentId: 'runner_a' }),
+    });
+
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(cancelBody?.run.status).toBe('cancelled');
+    expect(cancelBody?.cancelledTaskIds).toHaveLength(1);
+    expect(db.getAgentTeamRun(cancelBody?.run.id ?? '', 'alice')?.status).toBe('cancelled');
   });
 
   test('persists route approval requests and resumes approved workflow from checkpoint', async () => {

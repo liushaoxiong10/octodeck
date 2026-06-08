@@ -44,9 +44,29 @@ export interface AgentTeamWorkflowAction {
   outputKey?: string;
 }
 
+export interface AgentTeamWorkflowApprovalPolicy {
+  mode: 'single' | 'any_of' | 'all_of' | 'quorum';
+  approverRoleIds: string[];
+  quorum?: number;
+  timeoutMs?: number;
+  onTimeout?: 'reject' | 'approve' | 'fallback';
+}
+
+export interface AgentTeamWorkflowVerify {
+  verifierRoleId: string;
+  subjectKeys: string[];
+  rubric?: string;
+}
+
+export interface AgentTeamWorkflowVote {
+  voterRoleIds: string[];
+  subjectKeys: string[];
+  threshold?: number;
+}
+
 export interface AgentTeamWorkflowStep {
   id: string;
-  type: 'role' | 'parallel' | 'route';
+  type: 'role' | 'parallel' | 'route' | 'verify' | 'vote';
   roleId?: string;
   phase?: string;
   instructions?: string;
@@ -60,6 +80,9 @@ export interface AgentTeamWorkflowStep {
     fallbackRoleId?: string;
     finalRoleId?: string;
   };
+  verify?: AgentTeamWorkflowVerify;
+  vote?: AgentTeamWorkflowVote;
+  approvalPolicy?: AgentTeamWorkflowApprovalPolicy;
   onFailure?: {
     action: 'continue' | 'abort' | 'run_role' | 'retry';
     targetRoleId?: string;
@@ -283,7 +306,7 @@ function filterAgentMdStoreEntries(
 }
 
 export interface AgentTeamExecutionResult {
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'waiting_approval';
   finalResult: string;
   runId?: string;
   traceId?: string;
@@ -376,6 +399,37 @@ export interface AgentTeamCheckpoint {
   state: unknown;
   blackboardCursor?: number;
   createdAt?: string;
+}
+
+export interface AgentTeamArtifact {
+  id: string;
+  runId: string;
+  key: string;
+  version: number;
+  contentType: string;
+  value: string;
+  sourceStepId?: string;
+  sourceTaskId?: string;
+  sourceRoleId?: string;
+  confidence?: number;
+  visibility: 'run' | 'role' | 'system';
+  parentArtifactIds: string[];
+  createdAt: string;
+}
+
+export interface AgentTeamMetricsSummary {
+  totalRuns: number;
+  successfulRuns: number;
+  failedRuns: number;
+  cancelledRuns: number;
+  activeRuns: number;
+  successRate: number;
+  averageDurationMs: number | null;
+  failedTaskCount: number;
+  approvalLatency: {
+    resolvedCount: number;
+    averageMs: number | null;
+  };
 }
 
 export interface AgentTeamRunResponse {
@@ -477,6 +531,13 @@ interface AgentTeamsState {
   loadRunBlackboard: (runId: string) => Promise<AgentTeamBlackboardEntry[]>;
   loadRunApprovals: (runId: string) => Promise<AgentTeamApproval[]>;
   loadRunCheckpoints: (runId: string) => Promise<AgentTeamCheckpoint[]>;
+  loadRunArtifacts: (runId: string) => Promise<AgentTeamArtifact[]>;
+  loadMetrics: (params?: {
+    teamId?: string;
+    since?: string;
+    until?: string;
+    limit?: number;
+  }) => Promise<AgentTeamMetricsSummary>;
   decideRunApproval: (
     runId: string,
     approvalId: string,
@@ -653,6 +714,26 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
       `/api/agent-teams/runs/${encodeURIComponent(runId)}/checkpoints`,
     );
     return data.checkpoints ?? [];
+  },
+
+  loadRunArtifacts: async (runId) => {
+    const data = await api.get<{ artifacts: AgentTeamArtifact[] }>(
+      `/api/agent-teams/runs/${encodeURIComponent(runId)}/artifacts`,
+    );
+    return data.artifacts ?? [];
+  },
+
+  loadMetrics: async (params = {}) => {
+    const query = new URLSearchParams();
+    if (params.teamId) query.set('teamId', params.teamId);
+    if (params.since) query.set('since', params.since);
+    if (params.until) query.set('until', params.until);
+    if (params.limit) query.set('limit', String(params.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    const data = await api.get<{ metrics: AgentTeamMetricsSummary }>(
+      `/api/agent-teams/metrics${suffix}`,
+    );
+    return data.metrics;
   },
 
   decideRunApproval: async (runId, approvalId, decision) => {

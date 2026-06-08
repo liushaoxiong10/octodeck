@@ -704,6 +704,118 @@ describe('agent-link run context forwarding', () => {
     await promise;
   });
 
+  test('runViaAgentLink sends run.cancel when AbortSignal aborts legacy runs', async () => {
+    const sent: any[] = [];
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+    const abortController = new AbortController();
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Abort Legacy',
+          folder: 'abort-legacy',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'cl_1234567890abcdef',
+          created_by: 'u1',
+        } as any,
+        input: { prompt: 'hello' } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+        signal: abortController.signal,
+      },
+      {
+        backendId: 'coco',
+        resolveBinary: () => '/bin/echo',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'plain-text',
+      },
+      'cl_1234567890abcdef',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'run.request' });
+    abortController.abort('agent_team_cancel');
+    expect(sent[1]).toMatchObject({
+      type: 'run.cancel',
+      runId: sent[0].runId,
+      reason: 'user_abort',
+    });
+
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await promise;
+  });
+
+  test('runViaAgentLink sends agent.run.cancel when AbortSignal aborts agent runtime runs', async () => {
+    const sent: any[] = [];
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef'
+        ? { capabilities: ['agent.run'] }
+        : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+    const abortController = new AbortController();
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Abort Agent Runtime',
+          folder: 'abort-agent-runtime',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:claude-code',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: { prompt: 'hello', isHome: false } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+        signal: abortController.signal,
+      },
+      {
+        backendId: 'mac-claude-code',
+        resolveBinary: () => '/usr/local/bin/claude',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:claude-code',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'agent.run.request' });
+    abortController.abort('agent_team_cancel');
+    expect(sent[1]).toMatchObject({
+      type: 'agent.run.cancel',
+      runId: sent[0].runId,
+      reason: 'user_abort',
+    });
+
+    registerRunMock.mock.calls.at(-1)?.[0].finish({
+      ok: true,
+      result: 'ok',
+      error: null,
+      timedOut: false,
+      durationMs: 1,
+    });
+    await promise;
+  });
+
   test('runViaAgentLink forwards device agent.run thinking and tool events separately', async () => {
     const sent: any[] = [];
     const outputs: any[] = [];

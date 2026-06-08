@@ -31,6 +31,7 @@ export interface BackendRunArgs {
   onProcess: BackendOnProcess;
   onOutput?: BackendOnOutput;
   ownerHomeFolder?: string;
+  signal?: AbortSignal;
 }
 
 export interface AgentBackend {

@@ -511,6 +511,8 @@ function initializeSqliteDatabase(
       completed_at TEXT,
       updated_at TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS idx_agent_team_runs_user_team_created ON agent_team_runs(user_id, team_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_team_runs_user_status_created ON agent_team_runs(user_id, status, created_at);
     CREATE TABLE IF NOT EXISTS agent_team_tasks (
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
@@ -554,6 +556,28 @@ function initializeSqliteDatabase(
       created_at TEXT NOT NULL,
       FOREIGN KEY (run_id) REFERENCES agent_team_runs(id)
     );
+    CREATE TABLE IF NOT EXISTS agent_team_artifacts (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      content_type TEXT NOT NULL,
+      value TEXT NOT NULL,
+      source_step_id TEXT,
+      source_task_id TEXT,
+      source_role_id TEXT,
+      confidence REAL,
+      visibility TEXT NOT NULL DEFAULT 'run',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES agent_team_runs(id)
+    );
+    CREATE TABLE IF NOT EXISTS agent_team_artifact_edges (
+      parent_artifact_id TEXT NOT NULL,
+      child_artifact_id TEXT NOT NULL,
+      relationship TEXT NOT NULL DEFAULT 'derived_from',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(parent_artifact_id, child_artifact_id, relationship)
+    );
     CREATE TABLE IF NOT EXISTS agent_team_checkpoints (
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
@@ -583,6 +607,7 @@ function initializeSqliteDatabase(
     CREATE INDEX IF NOT EXISTS idx_agent_team_events_run ON agent_team_events(run_id, id);
     CREATE INDEX IF NOT EXISTS idx_agent_team_events_trace ON agent_team_events(trace_id, id);
     CREATE INDEX IF NOT EXISTS idx_agent_team_blackboard_run ON agent_team_blackboard(run_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_team_artifacts_run_key ON agent_team_artifacts(run_id, key, version);
     CREATE INDEX IF NOT EXISTS idx_agent_team_checkpoints_run ON agent_team_checkpoints(run_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_agent_team_approvals_run ON agent_team_approvals(run_id, created_at);
     CREATE TABLE IF NOT EXISTS sessions (
@@ -2107,6 +2132,22 @@ export interface AgentTeamBlackboardRecord {
   createdAt?: string;
 }
 
+export interface AgentTeamArtifactRecord {
+  id: string;
+  runId: string;
+  key: string;
+  version: number;
+  contentType: string;
+  value: string;
+  sourceStepId?: string;
+  sourceTaskId?: string;
+  sourceRoleId?: string;
+  confidence?: number;
+  visibility?: 'run' | 'role' | 'system';
+  parentArtifactIds?: string[];
+  createdAt?: string;
+}
+
 export interface AgentTeamRunView {
   id: string;
   teamId: string;
@@ -2264,6 +2305,52 @@ export function recordAgentTeamBlackboard(
   );
 }
 
+export function recordAgentTeamArtifact(record: AgentTeamArtifactRecord): void {
+  if (!db) return;
+  const createdAt = record.createdAt ?? new Date().toISOString();
+  db.prepare(
+    `INSERT INTO agent_team_artifacts (
+      id, run_id, key, version, content_type, value, source_step_id, source_task_id,
+      source_role_id, confidence, visibility, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      key = excluded.key,
+      version = excluded.version,
+      content_type = excluded.content_type,
+      value = excluded.value,
+      source_step_id = excluded.source_step_id,
+      source_task_id = excluded.source_task_id,
+      source_role_id = excluded.source_role_id,
+      confidence = excluded.confidence,
+      visibility = excluded.visibility,
+      created_at = excluded.created_at`,
+  ).run(
+    record.id,
+    record.runId,
+    record.key,
+    record.version,
+    record.contentType,
+    record.value,
+    record.sourceStepId ?? null,
+    record.sourceTaskId ?? null,
+    record.sourceRoleId ?? null,
+    record.confidence ?? null,
+    record.visibility ?? 'run',
+    createdAt,
+  );
+  db.prepare('DELETE FROM agent_team_artifact_edges WHERE child_artifact_id = ?').run(
+    record.id,
+  );
+  const insertEdge = db.prepare(
+    `INSERT OR REPLACE INTO agent_team_artifact_edges (
+      parent_artifact_id, child_artifact_id, relationship, created_at
+    ) VALUES (?, ?, ?, ?)`,
+  );
+  for (const parentArtifactId of record.parentArtifactIds ?? []) {
+    insertEdge.run(parentArtifactId, record.id, 'derived_from', createdAt);
+  }
+}
+
 export function recordAgentTeamCheckpoint(
   record: AgentTeamCheckpointRecord,
 ): void {
@@ -2365,7 +2452,7 @@ export function listAgentTeamRuns(options: {
       final_result, error, created_at, started_at, completed_at, updated_at
      FROM agent_team_runs
      WHERE ${clauses.join(' AND ')}
-     ORDER BY datetime(created_at) DESC, rowid DESC
+     ORDER BY created_at DESC, rowid DESC
      LIMIT ?`,
     )
     .all(...params) as any[];
@@ -2385,6 +2472,87 @@ export function listAgentTeamRuns(options: {
     completedAt: row.completed_at ?? undefined,
     updatedAt: row.updated_at,
   }));
+}
+
+export function listAgentTeamRunsForMetrics(options: {
+  userId: string;
+  teamId?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+}): {
+  runs: AgentTeamRunView[];
+  tasks: Array<Record<string, unknown>>;
+  approvals: Array<Record<string, unknown>>;
+} {
+  const clauses = ['user_id = ?'];
+  const params: unknown[] = [options.userId];
+  if (options.teamId) {
+    clauses.push('team_id = ?');
+    params.push(options.teamId);
+  }
+  if (options.since) {
+    clauses.push('created_at >= ?');
+    params.push(options.since);
+  }
+  if (options.until) {
+    clauses.push('created_at <= ?');
+    params.push(options.until);
+  }
+  const limit = Math.max(1, Math.min(500, Math.trunc(options.limit ?? 100)));
+  params.push(limit);
+
+  const rows = db
+    .prepare(
+      `SELECT id, team_id, user_id, prompt, status, trace_id, workflow_shape, role_assignments,
+      final_result, error, created_at, started_at, completed_at, updated_at
+     FROM agent_team_runs
+     WHERE ${clauses.join(' AND ')}
+     ORDER BY created_at DESC, rowid DESC
+     LIMIT ?`,
+    )
+    .all(...params) as any[];
+  const runs = rows.map((row) => ({
+    id: row.id,
+    teamId: row.team_id,
+    userId: row.user_id,
+    prompt: row.prompt,
+    status: row.status,
+    traceId: row.trace_id,
+    workflowShape: row.workflow_shape,
+    roleAssignments: JSON.parse(row.role_assignments || '{}'),
+    finalResult: row.final_result ?? undefined,
+    error: row.error ?? undefined,
+    createdAt: row.created_at,
+    startedAt: row.started_at ?? undefined,
+    completedAt: row.completed_at ?? undefined,
+    updatedAt: row.updated_at,
+  }));
+  if (runs.length === 0) return { runs, tasks: [], approvals: [] };
+
+  const placeholders = runs.map(() => '?').join(',');
+  const runIds = runs.map((run) => run.id);
+  const tasks = db
+    .prepare(
+      `SELECT id, run_id AS runId, role_id AS roleId, phase, actor_id AS actorId, status, attempt, input, output, error,
+      started_at AS startedAt, completed_at AS completedAt, updated_at AS updatedAt
+     FROM agent_team_tasks WHERE run_id IN (${placeholders}) ORDER BY started_at, id`,
+    )
+    .all(...runIds) as Array<Record<string, unknown>>;
+  const approvals = (
+    db
+      .prepare(
+        `SELECT id, run_id AS runId, task_id AS taskId, requested_by AS requestedBy, status, risk_level AS riskLevel,
+      title, description, payload, resolved_by AS resolvedBy, resolved_at AS resolvedAt, created_at AS createdAt
+     FROM agent_team_approvals WHERE run_id IN (${placeholders}) ORDER BY created_at, id`,
+      )
+      .all(...runIds) as Array<Record<string, unknown>>
+  ).map((row) => ({
+    ...row,
+    payload: JSON.parse(String(row.payload ?? 'null')),
+  }));
+
+  return { runs, tasks, approvals };
 }
 
 export function listAgentTeamTasks(
@@ -2429,6 +2597,71 @@ export function listAgentTeamBlackboard(
      FROM agent_team_blackboard WHERE run_id = ? ORDER BY created_at, id`,
     )
     .all(runId) as Array<Record<string, unknown>>;
+}
+
+function artifactFromRow(row: Record<string, unknown>): AgentTeamArtifactRecord {
+  const parentRows = db
+    ?.prepare(
+      `SELECT parent_artifact_id AS parentArtifactId
+       FROM agent_team_artifact_edges
+       WHERE child_artifact_id = ?
+       ORDER BY created_at, parent_artifact_id`,
+    )
+    .all(row.id) as Array<{ parentArtifactId: string }> | undefined;
+  return {
+    id: String(row.id),
+    runId: String(row.runId),
+    key: String(row.key),
+    version: Number(row.version),
+    contentType: String(row.contentType),
+    value: String(row.value),
+    sourceStepId:
+      typeof row.sourceStepId === 'string' ? row.sourceStepId : undefined,
+    sourceTaskId:
+      typeof row.sourceTaskId === 'string' ? row.sourceTaskId : undefined,
+    sourceRoleId:
+      typeof row.sourceRoleId === 'string' ? row.sourceRoleId : undefined,
+    confidence:
+      typeof row.confidence === 'number' ? row.confidence : undefined,
+    visibility:
+      row.visibility === 'role' || row.visibility === 'system'
+        ? row.visibility
+        : 'run',
+    parentArtifactIds:
+      parentRows?.map((parent) => parent.parentArtifactId) ?? [],
+    createdAt: String(row.createdAt),
+  };
+}
+
+export function listAgentTeamArtifacts(
+  runId: string,
+): AgentTeamArtifactRecord[] {
+  if (!db) return [];
+  const rows = db
+    .prepare(
+      `SELECT id, run_id AS runId, key, version, content_type AS contentType,
+      value, source_step_id AS sourceStepId, source_task_id AS sourceTaskId,
+      source_role_id AS sourceRoleId, confidence, visibility, created_at AS createdAt
+     FROM agent_team_artifacts WHERE run_id = ? ORDER BY created_at, id`,
+    )
+    .all(runId) as Array<Record<string, unknown>>;
+  return rows.map(artifactFromRow);
+}
+
+export function getAgentTeamArtifact(
+  id: string,
+  runId: string,
+): AgentTeamArtifactRecord | null {
+  if (!db) return null;
+  const row = db
+    .prepare(
+      `SELECT id, run_id AS runId, key, version, content_type AS contentType,
+      value, source_step_id AS sourceStepId, source_task_id AS sourceTaskId,
+      source_role_id AS sourceRoleId, confidence, visibility, created_at AS createdAt
+     FROM agent_team_artifacts WHERE id = ? AND run_id = ?`,
+    )
+    .get(id, runId) as Record<string, unknown> | undefined;
+  return row ? artifactFromRow(row) : null;
 }
 
 export function getAgentTeamApproval(

@@ -31,7 +31,19 @@ import {
   type AgentTeamShape,
 } from '../agent-teams.js';
 import type { AgentMdDefinitionInput, AgentTeamInput } from '../agent-teams.js';
+import {
+  createAgentTeamInputFromTemplate,
+  getAgentTeamTemplate,
+  listAgentTeamTemplates,
+} from '../agent-team-templates.js';
 import { executeAgentTeam } from '../agent-team-engine.js';
+import { summarizeAgentTeamMetrics } from '../agent-team-metrics.js';
+import {
+  cancelAgentTeamRun,
+  registerAgentTeamTaskCancellation,
+  resolveAgentTeamRoleWorkspace,
+  validateAgentTeamRoleRuntimeTargets,
+} from '../agent-team-runtime-control.js';
 import { listCustomBackends } from '../backends/custom-loader.js';
 import { parseAgentLinkTarget } from '../backends/agent-link-driver.js';
 import { requestWorkspaceCleanup } from '../agent-link/registry.js';
@@ -44,7 +56,10 @@ import type {
 import type { RegisteredGroup } from '../types.js';
 import {
   getAgentTeamApproval,
+  getAgentTeamArtifact,
   getAgentTeamRun,
+  listAgentTeamArtifacts,
+  listAgentTeamRunsForMetrics,
   listAgentTeamRuns,
   listAgentTeamApprovals,
   listAgentTeamBlackboard,
@@ -52,6 +67,7 @@ import {
   listAgentTeamTasks,
   listAgentTeamTraceEvents,
   recordAgentTeamApproval,
+  recordAgentTeamArtifact,
   recordAgentTeamBlackboard,
   recordAgentTeamCheckpoint,
   recordAgentTeamRun,
@@ -147,9 +163,17 @@ const WorkflowFailurePolicySchema = z.object({
   instructions: z.string().max(2000).optional(),
 });
 
+const WorkflowApprovalPolicySchema = z.object({
+  mode: z.enum(['single', 'any_of', 'all_of', 'quorum']),
+  approverRoleIds: z.array(z.string().min(1).max(64)).min(1).max(12),
+  quorum: z.number().int().min(1).max(12).optional(),
+  timeoutMs: z.number().int().positive().optional(),
+  onTimeout: z.enum(['reject', 'approve', 'fallback']).optional(),
+});
+
 const WorkflowStepSchema = z.object({
   id: z.string().min(1).max(128),
-  type: z.enum(['role', 'parallel', 'route']),
+  type: z.enum(['role', 'parallel', 'route', 'verify', 'vote']),
   roleId: z.string().min(1).max(64).optional(),
   phase: z.string().min(1).max(64).optional(),
   instructions: z.string().max(2000).optional(),
@@ -168,6 +192,21 @@ const WorkflowStepSchema = z.object({
       finalRoleId: z.string().min(1).max(64).optional(),
     })
     .optional(),
+  verify: z
+    .object({
+      verifierRoleId: z.string().min(1).max(64),
+      subjectKeys: z.array(z.string().min(1).max(128)).min(1).max(12),
+      rubric: z.string().max(2000).optional(),
+    })
+    .optional(),
+  vote: z
+    .object({
+      voterRoleIds: z.array(z.string().min(1).max(64)).min(1).max(12),
+      subjectKeys: z.array(z.string().min(1).max(128)).min(1).max(12),
+      threshold: z.number().min(0).max(1).optional(),
+    })
+    .optional(),
+  approvalPolicy: WorkflowApprovalPolicySchema.optional(),
   onFailure: WorkflowFailurePolicySchema.optional(),
 });
 
@@ -392,6 +431,40 @@ router.get('/generation-jobs/:jobId', authMiddleware, (c) => {
   return c.json({ job: toPublicGenerationJob(job) });
 });
 
+router.get('/templates', authMiddleware, (c) => {
+  return c.json({ templates: listAgentTeamTemplates() });
+});
+
+router.get('/templates/:templateId', authMiddleware, (c) => {
+  const template = getAgentTeamTemplate(c.req.param('templateId'));
+  if (!template) return c.json({ error: 'agent team template not found' }, 404);
+  return c.json({ template });
+});
+
+router.post(
+  '/templates/:templateId/teams',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    const body = await c.req.json().catch(() => ({}));
+    const goal = typeof body.goal === 'string' ? body.goal.trim() : '';
+    if (!goal) return c.json({ error: 'goal is required' }, 400);
+    try {
+      const teamInput = createAgentTeamInputFromTemplate(
+        c.req.param('templateId'),
+        {
+          goal,
+          createdByAgentId: String(body.createdByAgentId ?? 'system'),
+        },
+      );
+      return c.json({ team: createAgentTeam(teamInput, user.id) }, 201);
+    } catch {
+      return c.json({ error: 'agent team template not found' }, 404);
+    }
+  },
+);
+
 router.get('/agent-md', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   return c.json({ definitions: listAgentMdDefinitions(user.id) });
@@ -528,6 +601,51 @@ router.get('/runs', authMiddleware, (c) => {
   });
 });
 
+function normalizeMetricsDateParam(
+  value: string | undefined,
+  boundary: 'start' | 'end',
+): string | undefined | null {
+  if (!value) return undefined;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return boundary === 'start'
+      ? `${value}T00:00:00.000Z`
+      : `${value}T23:59:59.999Z`;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+router.get('/metrics', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const since = normalizeMetricsDateParam(
+    c.req.query('since')?.trim() || undefined,
+    'start',
+  );
+  const until = normalizeMetricsDateParam(
+    c.req.query('until')?.trim() || undefined,
+    'end',
+  );
+  if (since === null) {
+    return c.json({ error: 'invalid since' }, 400);
+  }
+  if (until === null) {
+    return c.json({ error: 'invalid until' }, 400);
+  }
+  if (since && until && new Date(since).getTime() > new Date(until).getTime()) {
+    return c.json({ error: 'since must be before until' }, 400);
+  }
+  const limitValue = Number(c.req.query('limit') ?? 100);
+  const records = listAgentTeamRunsForMetrics({
+    userId: user.id,
+    teamId: c.req.query('teamId')?.trim() || undefined,
+    since,
+    until,
+    limit: Number.isFinite(limitValue) ? limitValue : 100,
+  });
+  return c.json({ metrics: summarizeAgentTeamMetrics(records) });
+});
+
 router.get('/:id', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const team = getAgentTeam(c.req.param('id'), user.id);
@@ -563,6 +681,22 @@ router.get('/runs/:runId/blackboard', authMiddleware, (c) => {
   return c.json({ entries: listAgentTeamBlackboard(run.id) });
 });
 
+router.get('/runs/:runId/artifacts', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const run = getAgentTeamRun(c.req.param('runId'), user.id);
+  if (!run) return c.json({ error: 'agent team run not found' }, 404);
+  return c.json({ artifacts: listAgentTeamArtifacts(run.id) });
+});
+
+router.get('/runs/:runId/artifacts/:artifactId', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const run = getAgentTeamRun(c.req.param('runId'), user.id);
+  if (!run) return c.json({ error: 'agent team run not found' }, 404);
+  const artifact = getAgentTeamArtifact(c.req.param('artifactId'), run.id);
+  if (!artifact) return c.json({ error: 'artifact not found' }, 404);
+  return c.json({ artifact });
+});
+
 router.get('/runs/:runId/approvals', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const run = getAgentTeamRun(c.req.param('runId'), user.id);
@@ -577,10 +711,11 @@ router.get('/runs/:runId/checkpoints', authMiddleware, (c) => {
   return c.json({ checkpoints: listAgentTeamCheckpoints(run.id) });
 });
 
-router.post('/runs/:runId/cancel', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
-  const run = getAgentTeamRun(c.req.param('runId'), user.id);
-  if (!run) return c.json({ error: 'agent team run not found' }, 404);
+function cancelAgentTeamRunAndRecord(
+  run: NonNullable<ReturnType<typeof getAgentTeamRun>>,
+  reason: string,
+): ReturnType<typeof cancelAgentTeamRun> {
+  const cancellation = cancelAgentTeamRun(run.id, reason);
   recordAgentTeamRun({
     id: run.id,
     teamId: run.teamId,
@@ -591,10 +726,24 @@ router.post('/runs/:runId/cancel', authMiddleware, (c) => {
     workflowShape: run.workflowShape,
     roleAssignments: run.roleAssignments,
     finalResult: run.finalResult,
-    error: 'cancelled by user',
+    error: cancellation.errors.length
+      ? `${reason}; cancellation errors: ${JSON.stringify(cancellation.errors)}`
+      : reason,
     completedAt: new Date().toISOString(),
   });
-  return c.json({ run: getAgentTeamRun(run.id, user.id) });
+  return cancellation;
+}
+
+router.post('/runs/:runId/cancel', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const run = getAgentTeamRun(c.req.param('runId'), user.id);
+  if (!run) return c.json({ error: 'agent team run not found' }, 404);
+  const cancellation = cancelAgentTeamRunAndRecord(run, 'cancelled by user');
+  return c.json({
+    run: getAgentTeamRun(run.id, user.id),
+    cancelledTaskIds: cancellation.cancelledTaskIds,
+    cancellationErrors: cancellation.errors,
+  });
 });
 
 router.post(
@@ -740,6 +889,30 @@ async function executeTeamRequest(
       response: c.json(
         { error: 'team runner agent does not support host execution mode' },
         400,
+      ),
+    };
+  }
+  const runtimeTargetValidation = validateAgentTeamRoleRuntimeTargets({
+    roles: team.roles,
+    roleAssignments: parsed.data.roleAssignments,
+    defaultRunnerAgentId: runnerAgentId,
+    allowedBackends: settings.allowedBackends,
+    resolveBackend: getBackend,
+    resolveDeviceLink: (roleRunnerAgentId, assignment) =>
+      resolveAgentTeamDeviceLink({
+        runnerAgentId: roleRunnerAgentId,
+        assignment,
+        userId: user.id,
+      }),
+  });
+  if (!runtimeTargetValidation.ok) {
+    return {
+      response: c.json(
+        {
+          error: 'invalid role runtime target',
+          details: runtimeTargetValidation.errors,
+        },
+        runtimeTargetValidation.status ?? 400,
       ),
     };
   }
@@ -958,20 +1131,15 @@ async function handleAgentTeamToolBody(
         return c.json({ error: 'runId is required' }, 400);
       const run = getAgentTeamRun(parsed.data.runId, user.id);
       if (!run) return c.json({ error: 'agent team run not found' }, 404);
-      recordAgentTeamRun({
-        id: run.id,
-        teamId: run.teamId,
-        userId: run.userId,
-        prompt: run.prompt,
-        status: 'cancelled',
-        traceId: run.traceId,
-        workflowShape: run.workflowShape,
-        roleAssignments: run.roleAssignments,
-        finalResult: run.finalResult,
-        error: 'cancelled by agent team MCP tool',
-        completedAt: new Date().toISOString(),
+      const cancellation = cancelAgentTeamRunAndRecord(
+        run,
+        'cancelled by agent team MCP tool',
+      );
+      return c.json({
+        run: getAgentTeamRun(run.id, user.id),
+        cancelledTaskIds: cancellation.cancelledTaskIds,
+        cancellationErrors: cancellation.errors,
       });
-      return c.json({ run: getAgentTeamRun(run.id, user.id) });
     }
   }
 }
@@ -1053,6 +1221,30 @@ async function executeExistingRun(
       response: c.json(
         { error: 'team runner agent does not support host execution mode' },
         400,
+      ),
+    };
+  }
+  const runtimeTargetValidation = validateAgentTeamRoleRuntimeTargets({
+    roles: team.roles,
+    roleAssignments,
+    defaultRunnerAgentId: runnerAgentId,
+    allowedBackends: settings.allowedBackends,
+    resolveBackend: getBackend,
+    resolveDeviceLink: (roleRunnerAgentId, assignment) =>
+      resolveAgentTeamDeviceLink({
+        runnerAgentId: roleRunnerAgentId,
+        assignment,
+        userId: user.id,
+      }),
+  });
+  if (!runtimeTargetValidation.ok) {
+    return {
+      response: c.json(
+        {
+          error: 'invalid role runtime target',
+          details: runtimeTargetValidation.errors,
+        },
+        runtimeTargetValidation.status ?? 400,
       ),
     };
   }
@@ -1188,9 +1380,23 @@ async function executePreparedRun(
         status: 'running',
         input: rolePrompt,
       });
-      const roleGroupFolder =
-        runtimeContext?.groupFolder ?? `agent-team-${team.id}-${role.id}`;
+      const roleWorkspace = resolveAgentTeamRoleWorkspace({
+        teamId: team.id,
+        runId,
+        roleId: role.id,
+        roleName: role.name,
+        workspacePolicy: role.policy?.workspacePolicy,
+        runtimeGroupFolder: runtimeContext?.groupFolder,
+        runtimeRemoteToolCwd: runtimeContext?.remoteToolCwd,
+      });
+      const roleGroupFolder = roleWorkspace.groupFolder;
       const roleTurnId = `${taskId}:turn`;
+      const abortController = new AbortController();
+      const unregisterCancellation = registerAgentTeamTaskCancellation({
+        runId,
+        taskId,
+        cancel: (reason) => abortController.abort(reason),
+      });
       const cleanupDeviceLinkId = resolveAgentTeamDeviceLink({
         runnerAgentId: roleRunnerAgentId,
         assignment,
@@ -1209,6 +1415,7 @@ async function executePreparedRun(
               created_by: user.id,
             },
             executionMode: 'host',
+            signal: abortController.signal,
             input: {
               prompt: rolePrompt,
               groupFolder: roleGroupFolder,
@@ -1217,17 +1424,21 @@ async function executePreparedRun(
               isHome: false,
               isAdminHome: false,
               turnId: roleTurnId,
-              remoteToolCwd: runtimeContext?.remoteToolCwd,
+              remoteToolCwd: roleWorkspace.remoteToolCwd,
               executionProfile: 'single-turn-json',
             },
             onProcess: () => undefined,
           });
         } finally {
+          unregisterCancellation();
           if (cleanupDeviceLinkId) {
             requestWorkspaceCleanup({
               linkId: cleanupDeviceLinkId,
               workspace: roleGroupFolder,
-              scope: 'session',
+              scope:
+                roleWorkspace.cleanupScope === 'run'
+                  ? 'workspace'
+                  : roleWorkspace.cleanupScope,
               sessionId: roleTurnId,
             });
           }
@@ -1239,9 +1450,15 @@ async function executePreparedRun(
         roleId: role.id,
         phase,
         actorId: roleRunnerAgentId,
-        status: output.status === 'success' ? 'success' : 'error',
+        status: abortController.signal.aborted
+          ? 'cancelled'
+          : output.status === 'success'
+            ? 'success'
+            : 'error',
         output: output.result ?? undefined,
-        error: output.error ?? undefined,
+        error: abortController.signal.aborted
+          ? String(abortController.signal.reason ?? 'cancelled')
+          : output.error ?? undefined,
         completedAt: new Date().toISOString(),
       });
       if (output.status === 'success') {
@@ -1262,6 +1479,7 @@ async function executePreparedRun(
   for (const event of execution.traceEvents ?? []) {
     recordAgentTeamTraceEvent(toTraceEventRecord(event));
   }
+  persistArtifactWrites(runId, execution.traceEvents ?? [], execution.checkpoint);
   if (execution.checkpoint) {
     recordAgentTeamCheckpoint({
       id: `${runId}:runtime:${execution.checkpoint.workflowNode}:${execution.checkpoint.status}`,
@@ -1283,20 +1501,80 @@ async function executePreparedRun(
       payload: execution.waitingApproval.payload,
     });
   }
+  const latestRun = getAgentTeamRun(runId, user.id);
+  const finalRunStatus =
+    latestRun?.status === 'cancelled' ? 'cancelled' : execution.status;
   recordAgentTeamRun({
     id: runId,
     teamId: team.id,
     userId: user.id,
     prompt,
-    status: execution.status,
+    status: finalRunStatus,
     traceId,
     workflowShape: team.shape,
     roleAssignments: roleAssignments ?? {},
     finalResult: execution.finalResult,
-    error: execution.error,
-    completedAt: execution.status === 'waiting_approval' ? undefined : new Date().toISOString(),
+    error: latestRun?.status === 'cancelled' ? latestRun.error : execution.error,
+    completedAt:
+      finalRunStatus === 'waiting_approval' ? undefined : new Date().toISOString(),
   });
   return { execution };
+}
+
+function persistArtifactWrites(
+  runId: string,
+  traceEvents: AgentTeamTraceEvent[],
+  checkpoint?: AgentTeamRuntimeCheckpoint,
+): void {
+  const artifactValues = checkpoint?.artifacts ?? {};
+  const existingArtifacts = listAgentTeamArtifacts(runId);
+  const nextVersionByKey = new Map<string, number>();
+  const latestArtifactIdByKey = new Map<string, string>();
+  for (const artifact of existingArtifacts) {
+    const currentVersion = nextVersionByKey.get(artifact.key) ?? 0;
+    if (artifact.version >= currentVersion) {
+      nextVersionByKey.set(artifact.key, artifact.version);
+      latestArtifactIdByKey.set(artifact.key, artifact.id);
+    }
+  }
+  for (const event of traceEvents) {
+    if (event.type !== 'artifact.written' || !isRecord(event.payload)) continue;
+    const key = event.payload.key;
+    if (typeof key !== 'string') continue;
+    const value =
+      typeof event.payload.value === 'string'
+        ? event.payload.value
+        : artifactValues[key];
+    if (typeof value !== 'string') continue;
+    const version = (nextVersionByKey.get(key) ?? 0) + 1;
+    nextVersionByKey.set(key, version);
+    const artifactId = `${runId}:artifact:${key}:${version}`;
+    const sourceStepId = event.payload.sourceStepId;
+    const sourceTaskId = event.payload.sourceTaskId;
+    const sourceRoleId = event.payload.sourceRoleId;
+    const contentType = event.payload.contentType;
+    const inputKeys = Array.isArray(event.payload.inputKeys)
+      ? event.payload.inputKeys.filter((inputKey): inputKey is string => typeof inputKey === 'string')
+      : [];
+    const parentArtifactIds = inputKeys
+      .map((inputKey) => latestArtifactIdByKey.get(inputKey))
+      .filter((id): id is string => Boolean(id));
+    recordAgentTeamArtifact({
+      id: artifactId,
+      runId,
+      key,
+      version,
+      contentType: typeof contentType === 'string' ? contentType : 'text/markdown',
+      value,
+      sourceStepId: typeof sourceStepId === 'string' ? sourceStepId : undefined,
+      sourceTaskId: typeof sourceTaskId === 'string' ? sourceTaskId : undefined,
+      sourceRoleId: typeof sourceRoleId === 'string' ? sourceRoleId : undefined,
+      parentArtifactIds,
+      visibility: 'run',
+      createdAt: event.timestamp,
+    });
+    latestArtifactIdByKey.set(key, artifactId);
+  }
 }
 
 const PERMISSION_LEVEL_RANK: Record<string, number> = {

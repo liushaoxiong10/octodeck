@@ -229,6 +229,8 @@ describe('agent team definitions', () => {
     expect(prompt).toContain('合法 DAG');
     expect(prompt).toContain('为什么单 Agent + Tools 不够');
     expect(prompt).toContain('request_approval');
+    expect(prompt).toContain('优先使用 verify step');
+    expect(prompt).toContain('使用 vote step 表达投票聚合');
   });
 
   test('builds default workflow steps with explicit dependency and artifact edges', () => {

@@ -3,12 +3,51 @@ import type {
   AgentTeam,
   AgentTeamRole,
   AgentTeamShape,
+  AgentTeamWorkflowApprovalPolicy,
   AgentTeamWorkflowAction,
   AgentTeamWorkflowFailurePolicy,
   AgentTeamWorkflowStep,
 } from './agent-teams.js';
 
 export type AgentTeamExecutionPhase = string;
+
+export interface AgentTeamApprovalDecisionInput {
+  approverRoleId: string;
+  decision: 'approved' | 'rejected';
+}
+
+export function evaluateAgentTeamApprovalPolicy(
+  policy: AgentTeamWorkflowApprovalPolicy,
+  decisions: AgentTeamApprovalDecisionInput[],
+): { status: 'pending' | 'approved' | 'rejected'; reason: string } {
+  const rejected = decisions.find((decision) => decision.decision === 'rejected');
+  if (rejected) {
+    return { status: 'rejected', reason: `${rejected.approverRoleId} rejected` };
+  }
+  const approved = new Set(
+    decisions
+      .filter((decision) => decision.decision === 'approved')
+      .map((decision) => decision.approverRoleId),
+  );
+  if (policy.mode === 'single') {
+    return approved.size >= 1
+      ? { status: 'approved', reason: 'single approver approved' }
+      : { status: 'pending', reason: 'waiting for one approval' };
+  }
+  if (policy.mode === 'any_of') {
+    return policy.approverRoleIds.some((id) => approved.has(id))
+      ? { status: 'approved', reason: 'one allowed approver approved' }
+      : { status: 'pending', reason: 'waiting for any approver' };
+  }
+  if (policy.mode === 'quorum') {
+    return approved.size >= (policy.quorum ?? policy.approverRoleIds.length)
+      ? { status: 'approved', reason: 'quorum reached' }
+      : { status: 'pending', reason: 'waiting for quorum' };
+  }
+  return policy.approverRoleIds.every((id) => approved.has(id))
+    ? { status: 'approved', reason: 'all approvers approved' }
+    : { status: 'pending', reason: 'waiting for all approvers' };
+}
 
 export interface AgentTeamBusMessage {
   id: string;
@@ -436,10 +475,28 @@ async function executeWorkflowStep(
     if (!failed) {
       if (step.outputKey) {
         state.artifacts[step.outputKey] = chainResults.flat().map((result) => result.result).join('\n');
+        emitTrace(state, {
+          actor: step.id,
+          type: 'artifact.written',
+          taskId: step.id,
+          payload: {
+            key: step.outputKey,
+            value: state.artifacts[step.outputKey],
+            sourceStepId: step.id,
+            contentType: 'text/markdown',
+            inputKeys: step.inputKeys ?? [],
+          },
+        });
       }
       return { status: 'success' };
     }
     return handleWorkflowFailure(team, input, runner, step, failed, roleResults, events, state);
+  }
+  if (step.type === 'verify') {
+    return executeVerifyStep(team, input, runner, state, step, roleResults, events, artifacts.artifacts);
+  }
+  if (step.type === 'vote') {
+    return executeVoteStep(team, input, runner, state, step, roleResults, events, artifacts.artifacts);
   }
   const route = step.route;
   if (!route) return { status: 'error', error: `step ${step.id} missing route` };
@@ -611,6 +668,103 @@ async function executeWorkflowActionChain(
   return results;
 }
 
+async function executeVerifyStep(
+  team: AgentTeam,
+  input: AgentTeamExecutionInput,
+  runner: AgentTeamRoleRunner,
+  state: ExecutionState,
+  step: AgentTeamWorkflowStep,
+  roleResults: AgentTeamRoleResult[],
+  events: AgentTeamExecutionEvent[],
+  artifacts: Record<string, string>,
+): Promise<{ status: 'success' | 'error'; error?: string }> {
+  const verify = step.verify;
+  if (!verify) return { status: 'error', error: `step ${step.id} missing verify config` };
+  const role = team.roles.find((candidate) => candidate.id === verify.verifierRoleId);
+  if (!role) return { status: 'error', error: `verifier role ${verify.verifierRoleId} not found` };
+  const outputKey = step.outputKey ?? 'verifier_report';
+  const result = await runWorkflowAction(
+    team,
+    input,
+    runner,
+    role,
+    {
+      roleId: role.id,
+      phase: step.phase ?? 'verify',
+      instructions: step.instructions ?? verify.rubric,
+      outputKey,
+    },
+    { ...step, outputKey, inputKeys: verify.subjectKeys },
+    selectPreviousResultsForStep(step, roleResults),
+    state,
+    artifacts,
+  );
+  roleResults.push(result);
+  events.push({ kind: 'role', roleId: role.id, phase: result.phase });
+  return handleWorkflowFailure(team, input, runner, step, result, roleResults, events, state) as Promise<{ status: 'success' | 'error'; error?: string }>;
+}
+
+async function executeVoteStep(
+  team: AgentTeam,
+  input: AgentTeamExecutionInput,
+  runner: AgentTeamRoleRunner,
+  state: ExecutionState,
+  step: AgentTeamWorkflowStep,
+  roleResults: AgentTeamRoleResult[],
+  events: AgentTeamExecutionEvent[],
+  artifacts: Record<string, string>,
+): Promise<{ status: 'success' | 'error'; error?: string }> {
+  const vote = step.vote;
+  if (!vote) return { status: 'error', error: `step ${step.id} missing vote config` };
+  const voters = vote.voterRoleIds.map((roleId) => team.roles.find((role) => role.id === roleId));
+  const missing = voters.findIndex((role) => !role);
+  if (missing >= 0) return { status: 'error', error: `voter role ${vote.voterRoleIds[missing]} not found` };
+  const results = await Promise.all(
+    (voters as AgentTeamRole[]).map((role) =>
+      runWorkflowAction(
+        team,
+        input,
+        runner,
+        role,
+        {
+          roleId: role.id,
+          phase: step.phase ?? 'vote',
+          instructions: step.instructions,
+        },
+        { ...step, inputKeys: vote.subjectKeys },
+        selectPreviousResultsForStep(step, roleResults),
+        state,
+        artifacts,
+      ),
+    ),
+  );
+  roleResults.push(...results);
+  for (const result of results) {
+    events.push({ kind: 'role', roleId: result.roleId, phase: result.phase });
+  }
+  const failed = results.find((result) => result.status === 'error');
+  if (failed) return handleWorkflowFailure(team, input, runner, step, failed, roleResults, events, state) as Promise<{ status: 'success' | 'error'; error?: string }>;
+  const approveCount = results.filter((result) => /\bAPPROVE\b/i.test(result.result)).length;
+  const rejectCount = results.filter((result) => /\bREJECT\b/i.test(result.result)).length;
+  const threshold = vote.threshold ?? 0.5;
+  const approved = results.length > 0 && approveCount / results.length >= threshold && rejectCount === 0;
+  const outputKey = step.outputKey ?? 'vote_result';
+  state.artifacts[outputKey] = JSON.stringify({ approved, approveCount, rejectCount, threshold });
+  emitTrace(state, {
+    actor: step.id,
+    type: 'artifact.written',
+    taskId: step.id,
+    payload: {
+      key: outputKey,
+      value: state.artifacts[outputKey],
+      sourceStepId: step.id,
+      contentType: 'application/json',
+      inputKeys: vote.subjectKeys,
+    },
+  });
+  return { status: 'success' };
+}
+
 function runWorkflowAction(
   team: AgentTeam,
   input: AgentTeamExecutionInput,
@@ -631,7 +785,12 @@ function runWorkflowAction(
     runner,
     undefined,
     state,
-    { stepId: step.id, instructions: action.instructions ?? step.instructions, outputKey: action.outputKey ?? step.outputKey },
+    {
+      stepId: step.id,
+      instructions: action.instructions ?? step.instructions,
+      outputKey: action.outputKey ?? step.outputKey,
+      inputKeys: step.inputKeys ?? [],
+    },
     artifacts,
   );
 }
@@ -1237,7 +1396,7 @@ async function runRole(
   runner: AgentTeamRoleRunner,
   feedback?: string,
   state?: ExecutionState,
-  options: { stepId?: string; instructions?: string; outputKey?: string } = {},
+  options: { stepId?: string; instructions?: string; outputKey?: string; inputKeys?: string[] } = {},
   artifacts?: Record<string, string>,
 ): Promise<AgentTeamRoleResult> {
   const taskId = state ? `${state.runId}:${role.id}:${phase}` : undefined;
@@ -1285,6 +1444,22 @@ async function runRole(
   if (state) {
     const outputKey = options.outputKey || `${role.id}.${phase}.output`;
     state.artifacts[outputKey] = output.result ?? '';
+    if (options.outputKey) {
+      emitTrace(state, {
+        actor: role.id,
+        type: 'artifact.written',
+        taskId: options.stepId ?? taskId,
+        payload: {
+          key: outputKey,
+          value: output.result ?? '',
+          sourceStepId: options.stepId,
+          sourceTaskId: taskId,
+          sourceRoleId: role.id,
+          contentType: 'text/markdown',
+          inputKeys: options.inputKeys ?? [],
+        },
+      });
+    }
     emitBus(state, {
       stepId: options.stepId,
       from: role.id,

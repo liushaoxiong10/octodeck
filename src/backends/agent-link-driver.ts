@@ -419,7 +419,6 @@ interface ParseState {
 
 const REMOTE_CWD_PLACEHOLDER = '__OCTODECK_REMOTE_CWD__';
 const DEVICE_WORKSPACE_URI_PREFIX = 'octodeck-workspace://';
-const MAIN_CONVERSATION_SCOPE_ID = 'main';
 
 const PROMPTS_DIR = path.join(
   process.cwd(),
@@ -769,6 +768,52 @@ function deriveRepoNameFromGitUrl(gitUrl: string): string {
   return m?.[1] || 'repo';
 }
 
+function safeWorkspaceScopeSegment(
+  value: string | undefined,
+  fallback: string,
+): string {
+  const cleaned = (value || '')
+    .replace(/[^a-zA-Z0-9._-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 96);
+  return cleaned || fallback;
+}
+
+function buildStableWorkspaceScopeId(
+  args: BackendRunArgs,
+  cfg: HostCliDriverConfig,
+  agentId: string,
+): string | undefined {
+  const { input, group } = args;
+  if (input.isScheduledTask) return input.taskRunId;
+
+  const conversationKey = input.chatJid || group.folder;
+  const readableConversation = safeWorkspaceScopeSegment(
+    conversationKey,
+    group.folder || 'main',
+  );
+  const readableAgent = safeWorkspaceScopeSegment(agentId, cfg.backendId);
+  const digest = crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify({
+        userId: group.created_by,
+        groupFolder: group.folder,
+        chatJid: input.chatJid,
+        agentId,
+        backendId: cfg.backendId,
+        repoId: group.repoId,
+        repoGitUrl: group.repoGitUrl,
+        repoDevicePath: group.repoDevicePath,
+      }),
+    )
+    .digest('hex')
+    .slice(0, 12);
+
+  return `octodeck-${readableConversation}-${readableAgent}-${digest}`;
+}
+
 function buildRemoteWorkspaceMeta(
   args: BackendRunArgs,
   cfg: HostCliDriverConfig,
@@ -780,9 +825,7 @@ function buildRemoteWorkspaceMeta(
     : group.is_home && !input.agentId
       ? 'direct_session'
       : 'session';
-  const scopeId = input.isScheduledTask
-    ? input.taskRunId
-    : input.agentId || MAIN_CONVERSATION_SCOPE_ID;
+  const scopeId = buildStableWorkspaceScopeId(args, cfg, agentId);
   return {
     agentId,
     agentRoot: cfg.workdirMode === 'custom' ? cfg.workdir : undefined,
@@ -814,6 +857,12 @@ function buildRemoteEnv(
     }
   }
   return Object.keys(env).length > 0 ? env : undefined;
+}
+
+function cancelReasonFromSignal(
+  signal: AbortSignal | undefined,
+): 'user_abort' | 'server_shutdown' | 'link_replaced' | 'timeout' | 'group_deleted' {
+  return signal?.reason === 'timeout' ? 'timeout' : 'user_abort';
 }
 
 async function runViaAgentRuntime(opts: {
@@ -855,9 +904,11 @@ async function runViaAgentRuntime(opts: {
     let logAccum = '';
     let lastStatusMessage = '';
     let lastSessionId: string | undefined = input.sessionId;
+    let onAbort: (() => void) | undefined;
     const resolveOnce = (out: ContainerOutput): void => {
       if (settled) return;
       settled = true;
+      if (onAbort) args.signal?.removeEventListener('abort', onAbort);
       unregisterAgentRun(runId);
       resolve(out);
     };
@@ -889,6 +940,18 @@ async function runViaAgentRuntime(opts: {
         return true;
       },
     });
+    onAbort = () => {
+      const s = getSession(linkId);
+      if (s && s.state === 'open') {
+        s.send({
+          type: 'agent.run.cancel',
+          runId,
+          reason: cancelReasonFromSignal(args.signal),
+        });
+      }
+    };
+    args.signal?.addEventListener('abort', onAbort, { once: true });
+    if (args.signal?.aborted) onAbort();
     onProcess(fakeProc, processId, null);
 
     const finalize = async (
@@ -1170,7 +1233,7 @@ export async function runViaAgentLink(
   const runContext = buildRunContext(args, cfg, contextCwd);
   const workspaceOnlySpec: WorkspaceRepo = {
     kind: 'workspace',
-    groupFolder: remoteWorkspaceFolder,
+    groupFolder: group.folder,
     agentId: workspaceMeta.agentId,
     agentRoot: workspaceMeta.agentRoot,
     workdirMode: workspaceMeta.workdirMode,
@@ -1257,9 +1320,11 @@ export async function runViaAgentLink(
 
   return new Promise<ContainerOutput>((resolve) => {
     let settled = false;
+    let onAbort: (() => void) | undefined;
     const resolveOnce = (out: ContainerOutput): void => {
       if (settled) return;
       settled = true;
+      if (onAbort) args.signal?.removeEventListener('abort', onAbort);
       unregisterRun(runId);
       resolve(out);
     };
@@ -1303,6 +1368,19 @@ export async function runViaAgentLink(
         return true;
       },
     });
+
+    onAbort = () => {
+      const s = getSession(linkId);
+      if (s && s.state === 'open') {
+        s.send({
+          type: 'run.cancel',
+          runId,
+          reason: cancelReasonFromSignal(args.signal),
+        });
+      }
+    };
+    args.signal?.addEventListener('abort', onAbort, { once: true });
+    if (args.signal?.aborted) onAbort();
 
     onProcess(fakeProc, processId, null);
 
