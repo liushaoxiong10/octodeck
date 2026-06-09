@@ -1,9 +1,9 @@
 import { Hono } from 'hono';
 import * as crypto from 'node:crypto';
 
-import { IssueAttachmentCreateSchema, IssueCreateSchema, IssuePatchSchema, IssueRunSchema } from '../schemas.js';
+import { IssueAttachmentCreateSchema, IssueCommentCreateSchema, IssueCommentUpdateSchema, IssueCreateSchema, IssuePatchSchema, IssueRunSchema } from '../schemas.js';
 import { authMiddleware } from '../middleware/auth.js';
-import type { AuthUser, IssueAgentRun, IssuePriority, IssueStatus, WorkspaceIssue } from '../types.js';
+import type { AuthUser, IssueAgentRun, IssueEventType, IssuePriority, IssueStatus, WorkspaceIssue } from '../types.js';
 import type { Variables } from '../web-context.js';
 import {
   canAccessGroup,
@@ -16,11 +16,14 @@ import {
   createIssueAttachment,
   createIssueAgentRun,
   createIssueAgentRunEvent,
+  createIssueComment,
+  createIssueEvent,
   deleteIssueAttachment,
   deleteIssue,
   getAgentLinkById,
   getIssueAttachmentById,
   getIssueById,
+  getIssueCommentById,
   getAllRegisteredGroups,
   getManagedRepoById,
   getRegisteredGroup,
@@ -28,12 +31,17 @@ import {
   listIssueAgentRuns,
   listIssueAgentRunEvents,
   listIssueAttachments,
+  listIssueComments,
+  listIssueEvents,
   listIssues,
+  softDeleteIssueComment,
   updateIssue,
   updateIssueAgentRun,
+  updateIssueComment,
   updateIssueLastRun,
 } from '../db.js';
 import { runIssueAgent } from '../issue-runner.js';
+import { afterIssueEventCreated } from '../issue-notifier.js';
 
 const issueRoutes = new Hono<{ Variables: Variables }>();
 
@@ -277,6 +285,18 @@ issueRoutes.post('/', authMiddleware, async (c) => {
     updated_at: now,
   });
 
+  const evCreated = createIssueEvent({
+    issue_id: issue.id,
+    event_type: 'created',
+    actor_id: authUser.id,
+    actor_type: 'user',
+    title: 'Issue created',
+    summary: `${issue.status} · ${issue.priority}`,
+    detail: { status: issue.status, priority: issue.priority, assignee: issue.assignee_user_id ?? null, due_date: issue.due_date ?? null },
+    created_at: now,
+  });
+  afterIssueEventCreated(evCreated, issue);
+
   let run: IssueAgentRun | null = null;
   if (validation.data.start_agent) {
     try {
@@ -297,6 +317,17 @@ issueRoutes.post('/', authMiddleware, async (c) => {
         issueId: issue.id,
       });
       enqueueIssueRun(issue.id, run.id);
+      const evRun = createIssueEvent({
+        issue_id: issue.id,
+        run_id: run.id,
+        event_type: 'run_created',
+        actor_id: authUser.id,
+        actor_type: 'user',
+        title: 'Run enqueued',
+        summary: 'Created from issue creation',
+        detail: { run_id: run.id, status: run.status, trigger: 'issue_create' },
+      });
+      afterIssueEventCreated(evRun, issue);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
@@ -337,7 +368,29 @@ issueRoutes.patch('/:id', authMiddleware, async (c) => {
     }
   }
   updateIssue(issue.id, patch);
-  return c.json({ issue: getIssueById(issue.id) });
+  const updated = getIssueById(issue.id)!;
+  const patchEvents: Array<{ type: IssueEventType; title: string; summary?: string; detail?: Record<string, unknown> }> = [];
+  if (issue.title !== updated.title) patchEvents.push({ type: 'title_changed', title: 'Title changed', summary: `${issue.title.slice(0, 80)} → ${updated.title.slice(0, 80)}`, detail: { from: issue.title, to: updated.title } });
+  if (issue.description !== updated.description) patchEvents.push({ type: 'description_changed', title: 'Description changed', detail: { from_length: issue.description.length, to_length: updated.description.length } });
+  if (issue.status !== updated.status) patchEvents.push({ type: 'status_changed', title: 'Status changed', summary: `${issue.status} → ${updated.status}`, detail: { from: issue.status, to: updated.status } });
+  if (issue.priority !== updated.priority) patchEvents.push({ type: 'priority_changed', title: 'Priority changed', summary: `${issue.priority} → ${updated.priority}`, detail: { from: issue.priority, to: updated.priority } });
+  if (issue.assignee_user_id !== updated.assignee_user_id) patchEvents.push({ type: 'assignee_changed', title: 'Assignee changed', summary: `${issue.assignee_user_id ?? 'none'} → ${updated.assignee_user_id ?? 'none'}`, detail: { from: issue.assignee_user_id ?? null, to: updated.assignee_user_id ?? null } });
+  if (issue.due_date !== updated.due_date) patchEvents.push({ type: 'due_date_changed', title: 'Due date changed', summary: `${issue.due_date ?? 'none'} → ${updated.due_date ?? 'none'}`, detail: { from: issue.due_date ?? null, to: updated.due_date ?? null } });
+  if (issue.project_repo_id !== updated.project_repo_id) patchEvents.push({ type: 'project_changed', title: 'Project changed', detail: { from: issue.project_repo_id ?? null, to: updated.project_repo_id ?? null } });
+  if (patchEvents.length === 0) patchEvents.push({ type: 'updated', title: 'Issue updated' });
+  for (const ev of patchEvents) {
+    const event = createIssueEvent({
+      issue_id: issue.id,
+      event_type: ev.type,
+      actor_id: authUser.id,
+      actor_type: 'user',
+      title: ev.title,
+      summary: ev.summary ?? null,
+      detail: ev.detail ?? null,
+    });
+    afterIssueEventCreated(event, updated);
+  }
+  return c.json({ issue: updated });
 });
 
 issueRoutes.delete('/:id', authMiddleware, async (c) => {
@@ -362,6 +415,17 @@ issueRoutes.get('/:id/runs/:runId/events', authMiddleware, async (c) => {
   const run = listIssueAgentRuns(issue.id).find((item) => item.id === c.req.param('runId'));
   if (!run) return c.json({ error: 'Run not found' }, 404);
   return c.json({ events: listIssueAgentRunEvents(run.id) });
+});
+
+issueRoutes.get('/:id/events', authMiddleware, async (c) => {
+  const issue = getIssueById(c.req.param('id'));
+  const authUser = c.get('user') as AuthUser;
+  if (!issue || !ensureIssueAccess(issue, authUser)) return c.json({ error: 'Issue not found' }, 404);
+  const sinceId = c.req.query('since_id') || undefined;
+  const sinceAt = c.req.query('since_at') || undefined;
+  const runId = c.req.query('run_id') || undefined;
+  const events = listIssueEvents(issue.id, { sinceId, sinceAt, runId });
+  return c.json({ events });
 });
 
 issueRoutes.get('/:id/attachments', authMiddleware, async (c) => {
@@ -389,6 +453,17 @@ issueRoutes.post('/:id/attachments', authMiddleware, async (c) => {
     data_url: validation.data.data_url,
     created_by: authUser.id,
   });
+  const evAttach = createIssueEvent({
+    issue_id: issue.id,
+    event_type: 'attachment_added',
+    actor_id: authUser.id,
+    actor_type: 'user',
+    title: 'Attachment added',
+    summary: attachment.filename,
+    detail: { attachment_id: attachment.id, filename: attachment.filename, size_bytes: attachment.size_bytes },
+    reference_id: attachment.id,
+  });
+  afterIssueEventCreated(evAttach, issue);
   return c.json({ attachment });
 });
 
@@ -399,6 +474,17 @@ issueRoutes.delete('/:id/attachments/:attachmentId', authMiddleware, async (c) =
   const attachment = getIssueAttachmentById(c.req.param('attachmentId'));
   if (!attachment || attachment.issue_id !== issue.id) return c.json({ error: 'Attachment not found' }, 404);
   deleteIssueAttachment(attachment.id);
+  const evDetach = createIssueEvent({
+    issue_id: issue.id,
+    event_type: 'attachment_removed',
+    actor_id: authUser.id,
+    actor_type: 'user',
+    title: 'Attachment removed',
+    summary: attachment.filename,
+    detail: { attachment_id: attachment.id, filename: attachment.filename },
+    reference_id: attachment.id,
+  });
+  afterIssueEventCreated(evDetach, issue);
   return c.json({ success: true });
 });
 
@@ -429,6 +515,17 @@ issueRoutes.post('/:id/run', authMiddleware, async (c) => {
       issueId: issue.id,
     });
     enqueueIssueRun(issue.id, run.id);
+    const evRun = createIssueEvent({
+      issue_id: issue.id,
+      run_id: run.id,
+      event_type: 'run_created',
+      actor_id: authUser.id,
+      actor_type: 'user',
+      title: 'Run enqueued',
+      summary: 'Run created manually',
+      detail: { run_id: run.id, status: run.status },
+    });
+    afterIssueEventCreated(evRun, issue);
     return c.json({ run });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -465,8 +562,116 @@ issueRoutes.post('/:id/runs/:runId/cancel', authMiddleware, async (c) => {
   recordIssueRunEvent(issue.id, run.id, 'run_canceled', 'Run canceled', 'Canceled by user', null, {
     userId: authUser.id,
   });
+  const evCancel = createIssueEvent({
+    issue_id: issue.id,
+    run_id: run.id,
+    event_type: 'run_status_changed',
+    actor_id: authUser.id,
+    actor_type: 'user',
+    title: 'Run canceled',
+    summary: `${run.status} → canceled`,
+    detail: { from: run.status, to: 'canceled', run_id: run.id, reason: 'user_cancel' },
+  });
+  afterIssueEventCreated(evCancel, issue);
   const updatedRun = listIssueAgentRuns(issue.id).find((item) => item.id === run.id) ?? run;
   return c.json({ run: updatedRun });
+});
+
+// --- Comments ---
+
+issueRoutes.get('/:id/comments', authMiddleware, async (c) => {
+  const issue = getIssueById(c.req.param('id'));
+  const authUser = c.get('user') as AuthUser;
+  if (!issue || !ensureIssueAccess(issue, authUser)) return c.json({ error: 'Issue not found' }, 404);
+  const sinceAt = c.req.query('since_at') || undefined;
+  const includeDeleted = c.req.query('include_deleted') === 'true';
+  const comments = listIssueComments(issue.id, { sinceAt, includeDeleted: !!includeDeleted });
+  return c.json({ comments });
+});
+
+issueRoutes.post('/:id/comments', authMiddleware, async (c) => {
+  const issue = getIssueById(c.req.param('id'));
+  const authUser = c.get('user') as AuthUser;
+  if (!issue || !ensureIssueAccess(issue, authUser)) return c.json({ error: 'Issue not found' }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const validation = IssueCommentCreateSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json({ error: 'Invalid request body', details: validation.error.format() }, 400);
+  }
+  const comment = createIssueComment({
+    issue_id: issue.id,
+    workspace_jid: issue.workspace_jid,
+    body: validation.data.body,
+    created_by: authUser.id,
+    source_type: 'user',
+  });
+  const evComment = createIssueEvent({
+    issue_id: issue.id,
+    event_type: 'comment_created',
+    actor_id: authUser.id,
+    actor_type: 'user',
+    title: 'Comment added',
+    summary: comment.body.length > 160 ? comment.body.slice(0, 160) + '...' : comment.body,
+    detail: { comment_id: comment.id, body_length: comment.body.length },
+    reference_id: comment.id,
+  });
+  afterIssueEventCreated(evComment, issue);
+  return c.json({ comment }, 201);
+});
+
+issueRoutes.patch('/:id/comments/:commentId', authMiddleware, async (c) => {
+  const issue = getIssueById(c.req.param('id'));
+  const authUser = c.get('user') as AuthUser;
+  if (!issue || !ensureIssueAccess(issue, authUser)) return c.json({ error: 'Issue not found' }, 404);
+  const comment = getIssueCommentById(c.req.param('commentId'));
+  if (!comment || comment.issue_id !== issue.id) return c.json({ error: 'Comment not found' }, 404);
+  if (comment.created_by && comment.created_by !== authUser.id && authUser.role !== 'admin') {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+  if (comment.source_type !== 'user') return c.json({ error: 'Cannot edit non-user comments' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const validation = IssueCommentUpdateSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json({ error: 'Invalid request body', details: validation.error.format() }, 400);
+  }
+  const updated = updateIssueComment(comment.id, validation.data.body);
+  if (updated) {
+    const evUpd = createIssueEvent({
+      issue_id: issue.id,
+      event_type: 'comment_updated',
+      actor_id: authUser.id,
+      actor_type: 'user',
+      title: 'Comment edited',
+      detail: { comment_id: updated.id, body_length: updated.body.length },
+      reference_id: updated.id,
+    });
+    afterIssueEventCreated(evUpd, issue);
+  }
+  return c.json({ comment: updated });
+});
+
+issueRoutes.delete('/:id/comments/:commentId', authMiddleware, async (c) => {
+  const issue = getIssueById(c.req.param('id'));
+  const authUser = c.get('user') as AuthUser;
+  if (!issue || !ensureIssueAccess(issue, authUser)) return c.json({ error: 'Issue not found' }, 404);
+  const comment = getIssueCommentById(c.req.param('commentId'));
+  if (!comment || comment.issue_id !== issue.id) return c.json({ error: 'Comment not found' }, 404);
+  if (comment.created_by && comment.created_by !== authUser.id && authUser.role !== 'admin') {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+  if (comment.source_type !== 'user') return c.json({ error: 'Cannot delete non-user comments' }, 400);
+  softDeleteIssueComment(comment.id);
+  const evDel = createIssueEvent({
+    issue_id: issue.id,
+    event_type: 'comment_deleted',
+    actor_id: authUser.id,
+    actor_type: 'user',
+    title: 'Comment deleted',
+    detail: { comment_id: comment.id },
+    reference_id: comment.id,
+  });
+  afterIssueEventCreated(evDel, issue);
+  return c.json({ success: true });
 });
 
 export default issueRoutes;

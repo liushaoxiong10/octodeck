@@ -5,10 +5,13 @@ import type { StreamEvent } from './stream-event.types.js';
 import {
   ensureChatExists,
   createIssueAgentRunEvent,
+  createIssueEvent,
   getIssueAgentRunById,
   getIssueById,
+  getLastCompletedIssueRunAt,
   getRegisteredGroup,
   getUserHomeGroup,
+  listIssueComments,
   storeMessageDirect,
   updateIssue,
   updateIssueAgentRun,
@@ -16,12 +19,13 @@ import {
   updateChatName,
 } from './db.js';
 import { logger } from './logger.js';
+import { afterIssueEventCreated } from './issue-notifier.js';
 import { resolveBackend } from './backends/registry.js';
-import type { IssueAgentRun, RegisteredGroup, WorkspaceIssue } from './types.js';
+import type { IssueAgentRun, IssueComment, RegisteredGroup, WorkspaceIssue } from './types.js';
 import type { WebDeps } from './web-context.js';
 
-export function buildIssuePrompt(issue: WorkspaceIssue, run: IssueAgentRun): string {
-  return [
+export function buildIssuePrompt(issue: WorkspaceIssue, run: IssueAgentRun, comments: IssueComment[] | null = null): string {
+  const parts = [
     '<issue_context>',
     `Issue ID: ${issue.id}`,
     `Issue Run ID: ${run.id}`,
@@ -36,15 +40,25 @@ export function buildIssuePrompt(issue: WorkspaceIssue, run: IssueAgentRun): str
     '',
     'Description:',
     issue.description || '(empty)',
-    '',
-    'Instructions:',
-    '- Start from this issue context.',
-    '- If code changes are needed, briefly explain your plan first.',
-    '- When finished, summarize changes, risks, and verification steps.',
-    '</issue_context>',
-  ]
-    .filter((line): line is string => line !== null)
-    .join('\n');
+  ];
+  if (comments && comments.length) {
+    parts.push('');
+    parts.push('Discussion (newest first, use as context update since initial issue):');
+    for (let i = comments.length - 1; i >= 0; i--) {
+      const c = comments[i];
+      const by = c.source_type === 'agent' ? '[Agent]' : c.source_type === 'system' ? '[System]' : `[User ${c.created_by ?? 'unknown'}]`;
+      const time = new Date(c.created_at).toLocaleString();
+      parts.push(`--- Comment #${i + 1} @ ${time} ${by} ---`);
+      parts.push(c.body || '(empty)');
+    }
+  }
+  parts.push('');
+  parts.push('Instructions:');
+  parts.push('- Start from this issue context.');
+  parts.push('- If code changes are needed, briefly explain your plan first.');
+  parts.push('- When finished, summarize changes, risks, and verification steps.');
+  parts.push('</issue_context>');
+  return parts.filter((line): line is string => line !== null).join('\n');
 }
 
 function buildIssueGroup(baseGroup: RegisteredGroup, issue: WorkspaceIssue, run: IssueAgentRun): RegisteredGroup {
@@ -161,6 +175,16 @@ export async function runIssueAgent(
       priority: issue.priority,
     },
   });
+  const evRunStarted = createIssueEvent({
+    issue_id: issueId,
+    run_id: runId,
+    event_type: 'run_started',
+    actor_type: 'system',
+    title: 'Run started',
+    summary: issue.title,
+    detail: { workspace_jid: issue.workspace_jid, workspace_folder: issue.workspace_folder, issue_status_before: issue.status },
+  });
+  afterIssueEventCreated(evRunStarted, issue);
   if (issue.status === 'todo') {
     updateIssue(issueId, { status: 'in_progress' });
     auditIssueRunEvent(issueId, runId, 'issue_status_changed', {
@@ -168,6 +192,16 @@ export async function runIssueAgent(
       summary: 'todo → in_progress',
       payload: { from: 'todo', to: 'in_progress' },
     });
+    const evStatus = createIssueEvent({
+      issue_id: issueId,
+      event_type: 'status_changed',
+      run_id: runId,
+      actor_type: 'system',
+      title: 'Status changed by agent',
+      summary: 'todo → in_progress',
+      detail: { from: 'todo', to: 'in_progress', cause: 'run_start' },
+    });
+    afterIssueEventCreated(evStatus, issue);
   }
 
   try {
@@ -180,7 +214,17 @@ export async function runIssueAgent(
     const ownerHomeFolder = issueGroup.created_by
       ? getUserHomeGroup(issueGroup.created_by)?.folder || issue.workspace_folder
       : issue.workspace_folder;
-    const prompt = buildIssuePrompt(issue, run);
+
+    // --- comment context injection ---
+    let injectedComments: IssueComment[] | null = null;
+    try {
+      const lastCompletedAt = getLastCompletedIssueRunAt(issue.id, run.id);
+      injectedComments = listIssueComments(issue.id, { sinceAt: lastCompletedAt ?? undefined });
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id, runId: run.id }, 'Failed to load issue comments for prompt injection; continuing without comments');
+      injectedComments = null;
+    }
+    const prompt = buildIssuePrompt(issue, run, injectedComments);
     const runChatJid = issueRunChatJid(issue, run);
     persistIssuePrompt(issue, run, issue.created_by, prompt);
     auditIssueRunEvent(issueId, runId, 'input_prepared', {
@@ -207,6 +251,16 @@ export async function runIssueAgent(
         summary: `Backend ${backend.displayName} does not support ${executionMode}`,
         payload: { backend: backend.id, executionMode },
       });
+      const evBackend = createIssueEvent({
+        issue_id: issueId,
+        run_id: runId,
+        event_type: 'run_status_changed',
+        actor_type: 'system',
+        title: 'Backend rejected execution mode',
+        summary: `Backend ${backend.displayName} does not support ${executionMode}`,
+        detail: { backend: backend.id, execution_mode: executionMode },
+      });
+      afterIssueEventCreated(evBackend, issue);
       output = {
         status: 'error',
         result: null,
@@ -286,6 +340,16 @@ export async function runIssueAgent(
       detail: status === 'success' ? latestResult || output.result || null : latestError || output.error || null,
       payload: { status, sessionId: output.newSessionId ?? run.session_id ?? null },
     });
+    const evRunEnd = createIssueEvent({
+      issue_id: issueId,
+      run_id: runId,
+      event_type: status === 'success' ? 'run_succeeded' : 'run_failed',
+      actor_type: 'system',
+      title: status === 'success' ? 'Run succeeded' : 'Run failed',
+      summary: (status === 'success' ? latestResult : latestError || output.error || 'Unknown error')?.slice(0, 240) || null,
+      detail: { status, session_id: output.newSessionId ?? run.session_id ?? null },
+    });
+    afterIssueEventCreated(evRunEnd, issue);
     updateIssueAgentRun(runId, {
       status,
       result: latestResult || output.result || null,
@@ -301,6 +365,16 @@ export async function runIssueAgent(
         summary: `${issue.status} → review`,
         payload: { from: issue.status, to: 'review' },
       });
+      const evReview = createIssueEvent({
+        issue_id: issueId,
+        run_id: runId,
+        event_type: 'status_changed',
+        actor_type: 'system',
+        title: 'Status changed by agent',
+        summary: `${issue.status} → review`,
+        detail: { from: issue.status, to: 'review', cause: 'run_succeeded' },
+      });
+      afterIssueEventCreated(evReview, issue);
     }
   } catch (err) {
     if (getIssueAgentRunById(runId)?.status === 'canceled') {
@@ -313,6 +387,16 @@ export async function runIssueAgent(
       summary: message,
       detail: err instanceof Error ? err.stack || err.message : String(err),
     });
+    const evException = createIssueEvent({
+      issue_id: issueId,
+      run_id: runId,
+      event_type: 'run_failed',
+      actor_type: 'system',
+      title: 'Run failed with exception',
+      summary: message.length > 240 ? message.slice(0, 240) + '...' : message,
+      detail: { error: message, cause: 'exception' },
+    });
+    afterIssueEventCreated(evException, issue);
     updateIssueAgentRun(runId, {
       status: 'error',
       error: message,

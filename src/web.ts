@@ -2366,6 +2366,23 @@ export function broadcastStreamEvent(
   updateStreamingSnapshot(snapshotJid, event);
 }
 
+export function broadcastIssueWsEvent(
+  workspaceJid: string,
+  issueId: string,
+  event: import('./types.js').IssueEvent,
+  runId: string | null = null,
+): void {
+  const allowedUserIds = getGroupAllowedUserIds(workspaceJid);
+  const msg: WsMessageOut = {
+    type: 'issue_event',
+    workspaceJid,
+    issueId,
+    runId,
+    event,
+  };
+  safeBroadcast(msg, isHostGroupJid(workspaceJid), allowedUserIds);
+}
+
 export function broadcastGroupCreated(
   jid: string,
   folder: string,
@@ -2552,6 +2569,7 @@ let issueAutoDriver: IssueAutoDriver | null = null;
 
 export function startWebServer(webDeps: WebDeps): void {
   webDeps.broadcastStreamEvent = broadcastStreamEvent;
+  webDeps.broadcastIssueEvent = broadcastIssueWsEvent;
   deps = webDeps;
   setWebDeps(webDeps);
   injectConfigDeps(webDeps);

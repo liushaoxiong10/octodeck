@@ -50,6 +50,8 @@ import {
   IssueAgentRun,
   IssueAgentRunEvent,
   IssueAttachment,
+  IssueComment,
+  IssueEvent,
   IssuePriority,
   IssueStatus,
   RedeemCode,
@@ -93,6 +95,10 @@ let _stmts: {
 } | null = null;
 
 const _newMsgStmtCache = new Map<number, any>();
+
+function crypto_random_16(): string {
+  return crypto.randomBytes(8).toString('hex');
+}
 
 function stmts() {
   if (!_stmts) {
@@ -468,6 +474,52 @@ function initializeSqliteDatabase(
       FOREIGN KEY (issue_id) REFERENCES issues(id)
     );
     CREATE INDEX IF NOT EXISTS idx_issue_attachments_issue ON issue_attachments(issue_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS issue_events (
+      id TEXT PRIMARY KEY,
+      issue_id TEXT NOT NULL,
+      run_id TEXT,
+      event_type TEXT NOT NULL,
+      actor_id TEXT,
+      actor_type TEXT NOT NULL DEFAULT 'system',
+      title TEXT,
+      summary TEXT,
+      detail TEXT,
+      payload TEXT,
+      reference_id TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (issue_id) REFERENCES issues(id),
+      FOREIGN KEY (run_id) REFERENCES issue_agent_runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_issue_events_issue ON issue_events(issue_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_issue_events_run ON issue_events(run_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_issue_events_type ON issue_events(event_type, created_at);
+
+    CREATE TABLE IF NOT EXISTS issue_comments (
+      id TEXT PRIMARY KEY,
+      issue_id TEXT NOT NULL,
+      workspace_jid TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created_by TEXT,
+      source_type TEXT NOT NULL DEFAULT 'user',
+      source_meta TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT,
+      deleted_at TEXT,
+      FOREIGN KEY (issue_id) REFERENCES issues(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_issue_comments_workspace ON issue_comments(workspace_jid, created_at);
+
+    CREATE TABLE IF NOT EXISTS issue_event_notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      target TEXT NOT NULL,
+      sent_at TEXT NOT NULL,
+      FOREIGN KEY (event_id) REFERENCES issue_events(id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_event_notifications_unique ON issue_event_notifications(event_id, channel, target);
   `);
 
   // State tables (replacing JSON files)
@@ -1819,7 +1871,97 @@ function initializeSqliteDatabase(
   // its position before assertSchema('users', …) matters because the
   // schema check would otherwise reject pre-v38 databases on startup.
 
-  const SCHEMA_VERSION = '38';
+  // v38 → v39: Add issue_events (generalized timeline), issue_comments, and
+  // issue_event_notifications tables. Migrate legacy issue_agent_run_events
+  // rows into the new issue_events table.
+  {
+    const hasIssueEvents = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_events'")
+      .get();
+    if (!hasIssueEvents) {
+      db.exec(`
+        CREATE TABLE issue_events (
+          id TEXT PRIMARY KEY,
+          issue_id TEXT NOT NULL,
+          run_id TEXT,
+          event_type TEXT NOT NULL,
+          actor_id TEXT,
+          actor_type TEXT NOT NULL DEFAULT 'system',
+          title TEXT,
+          summary TEXT,
+          detail TEXT,
+          payload TEXT,
+          reference_id TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_issue_events_issue ON issue_events(issue_id, created_at);
+        CREATE INDEX idx_issue_events_run ON issue_events(run_id, created_at);
+        CREATE INDEX idx_issue_events_type ON issue_events(event_type, created_at);
+      `);
+    }
+    const hasIssueComments = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_comments'")
+      .get();
+    if (!hasIssueComments) {
+      db.exec(`
+        CREATE TABLE issue_comments (
+          id TEXT PRIMARY KEY,
+          issue_id TEXT NOT NULL,
+          workspace_jid TEXT NOT NULL,
+          body TEXT NOT NULL,
+          created_by TEXT,
+          source_type TEXT NOT NULL DEFAULT 'user',
+          source_meta TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT,
+          deleted_at TEXT
+        );
+        CREATE INDEX idx_issue_comments_issue ON issue_comments(issue_id, created_at);
+        CREATE INDEX idx_issue_comments_workspace ON issue_comments(workspace_jid, created_at);
+      `);
+    }
+    const hasIssueEventNotifications = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_event_notifications'")
+      .get();
+    if (!hasIssueEventNotifications) {
+      db.exec(`
+        CREATE TABLE issue_event_notifications (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          event_id TEXT NOT NULL,
+          channel TEXT NOT NULL,
+          target TEXT NOT NULL,
+          sent_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX idx_issue_event_notifications_unique
+          ON issue_event_notifications(event_id, channel, target);
+      `);
+    }
+
+    // Migrate legacy issue_agent_run_events into issue_events if any rows
+    // exist and issue_events is empty for those run ids.
+    const legacyCount = (db.prepare("SELECT COUNT(*) as c FROM issue_agent_run_events").get() as { c: number }).c;
+    const migratedCount = (db.prepare("SELECT COUNT(*) as c FROM issue_events WHERE run_id IS NOT NULL").get() as { c: number }).c;
+    if (legacyCount > 0 && migratedCount === 0) {
+      const insert = db.prepare(`
+        INSERT INTO issue_events
+          (id, issue_id, run_id, event_type, actor_id, actor_type, title, summary, detail, payload, reference_id, created_at)
+        VALUES
+          (@id, @issue_id, @run_id, @event_type, NULL, 'agent', @title, @summary, @detail, @payload, NULL, @created_at)
+      `);
+      const select = db.prepare("SELECT id, issue_id, run_id, event_type, title, summary, detail, payload, created_at FROM issue_agent_run_events");
+      const tx = db.transaction((rows: unknown[]) => {
+        for (const row of rows) insert.run(row as any);
+      });
+      const allRows = select.all();
+      if (allRows.length <= 500) {
+        tx(allRows);
+      } else {
+        for (let i = 0; i < allRows.length; i += 500) tx(allRows.slice(i, i + 500));
+      }
+    }
+  }
+
+  const SCHEMA_VERSION = '39';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -4205,6 +4347,12 @@ export function updateIssueLastRun(
 
 export function deleteIssue(id: string): void {
   db.prepare('DELETE FROM issue_attachments WHERE issue_id = ?').run(id);
+  db.prepare('DELETE FROM issue_comments WHERE issue_id = ?').run(id);
+  // notifications reference events, events reference runs — delete in order
+  db.prepare(
+    `DELETE FROM issue_event_notifications WHERE event_id IN (SELECT id FROM issue_events WHERE issue_id = ?)`,
+  ).run(id);
+  db.prepare('DELETE FROM issue_events WHERE issue_id = ?').run(id);
   db.prepare('DELETE FROM issue_agent_runs WHERE issue_id = ?').run(id);
   db.prepare('DELETE FROM issues WHERE id = ?').run(id);
 }
@@ -4313,6 +4461,23 @@ export function listIssueAgentRunEvents(runId: string): IssueAgentRunEvent[] {
     .map(mapIssueRunEventRow);
 }
 
+export function getLastCompletedIssueRunAt(issueId: string, excludeRunId?: string): string | null {
+  const args: unknown[] = [issueId];
+  let excludeSql = '';
+  if (excludeRunId) {
+    excludeSql = 'AND id != ?';
+    args.push(excludeRunId);
+  }
+  const row = db
+    .prepare(
+      `SELECT run_completed_at FROM issue_agent_runs
+       WHERE issue_id = ? AND status IN ('success','error','canceled') ${excludeSql}
+       ORDER BY run_completed_at DESC LIMIT 1`,
+    )
+    .get(...args) as { run_completed_at?: string | null } | undefined;
+  return row?.run_completed_at ?? null;
+}
+
 export function createIssueAttachment(input: Omit<IssueAttachment, 'created_at'> & { created_at?: string }): IssueAttachment {
   const createdAt = input.created_at ?? new Date().toISOString();
   db.prepare(
@@ -4349,6 +4514,234 @@ export function deleteIssueAttachment(id: string): boolean {
   const result = db.prepare('DELETE FROM issue_attachments WHERE id = ?').run(id);
   return result.changes > 0;
 }
+
+// --- Issue events (generalized timeline) ---
+
+type IssueEventRow = Omit<IssueEvent, 'detail' | 'payload' | 'source_meta'> & {
+  detail?: string | null;
+  payload?: string | null;
+};
+
+function parseNullableJson<T = Record<string, unknown>>(value: string | null | undefined): T | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function mapIssueEventRow(row: unknown): IssueEvent {
+  const r = row as IssueEventRow;
+  return {
+    ...r,
+    run_id: r.run_id ?? null,
+    actor_id: r.actor_id ?? null,
+    event_type: r.event_type as IssueEvent['event_type'],
+    title: r.title ? toUtf8StringOrNull(r.title) : null,
+    summary: r.summary ? toUtf8StringOrNull(r.summary) : null,
+    detail: parseNullableJson(r.detail),
+    payload: parseNullableJson(r.payload),
+    reference_id: r.reference_id ?? null,
+  };
+}
+
+export interface CreateIssueEventInput {
+  id?: string;
+  issue_id: string;
+  run_id?: string | null;
+  event_type: IssueEvent['event_type'];
+  actor_id?: string | null;
+  actor_type?: IssueEvent['actor_type'];
+  title?: string | null;
+  summary?: string | null;
+  detail?: Record<string, unknown> | null;
+  payload?: Record<string, unknown> | null;
+  reference_id?: string | null;
+  created_at?: string;
+}
+
+export function createIssueEvent(input: CreateIssueEventInput): IssueEvent {
+  const now = new Date().toISOString();
+  const id = input.id ?? `iev_${crypto_random_16()}`;
+  db.prepare(
+    `
+    INSERT INTO issue_events
+      (id, issue_id, run_id, event_type, actor_id, actor_type, title, summary, detail, payload, reference_id, created_at)
+    VALUES
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    id,
+    input.issue_id,
+    input.run_id ?? null,
+    input.event_type,
+    input.actor_id ?? null,
+    input.actor_type ?? 'system',
+    input.title ? toUtf8String(input.title, 'issue_events.title') : null,
+    input.summary ? toUtf8String(input.summary, 'issue_events.summary') : null,
+    input.detail == null ? null : JSON.stringify(input.detail),
+    input.payload == null ? null : JSON.stringify(input.payload),
+    input.reference_id ?? null,
+    input.created_at ?? now,
+  );
+  const created = db.prepare('SELECT * FROM issue_events WHERE id = ?').get(id);
+  if (!created) throw new Error('Failed to create issue event');
+  return mapIssueEventRow(created);
+}
+
+export interface ListIssueEventsFilters {
+  sinceId?: string;
+  sinceAt?: string;
+  eventTypes?: IssueEvent['event_type'][];
+  runId?: string;
+  limit?: number;
+}
+
+export function listIssueEvents(issueId: string, filters: ListIssueEventsFilters = {}): IssueEvent[] {
+  const where: string[] = ['issue_id = ?'];
+  const values: unknown[] = [issueId];
+  if (filters.runId) {
+    where.push('run_id = ?');
+    values.push(filters.runId);
+  }
+  if (filters.sinceId) {
+    where.push('id > ?');
+    values.push(filters.sinceId);
+  }
+  if (filters.sinceAt) {
+    where.push('created_at > ?');
+    values.push(filters.sinceAt);
+  }
+  if (filters.eventTypes?.length) {
+    where.push(`event_type IN (${filters.eventTypes.map(() => '?').join(',')})`);
+    values.push(...filters.eventTypes);
+  }
+  const limit = Math.max(1, Math.min(1000, filters.limit ?? 500));
+  const whereSql = `WHERE ${where.join(' AND ')}`;
+  const rows = db
+    .prepare(`SELECT * FROM issue_events ${whereSql} ORDER BY created_at ASC, id ASC LIMIT ?`)
+    .all(...values, limit);
+  return rows.map(mapIssueEventRow);
+}
+
+export function markIssueEventNotified(eventId: string, channel: string, target: string): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO issue_event_notifications (event_id, channel, target, sent_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(eventId, channel, target, new Date().toISOString());
+}
+
+export function isIssueEventNotified(eventId: string, channel: string, target: string): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 FROM issue_event_notifications WHERE event_id = ? AND channel = ? AND target = ?`,
+    )
+    .get(eventId, channel, target);
+  return !!row;
+}
+
+// --- Issue comments ---
+
+type IssueCommentRow = Omit<IssueComment, 'source_meta'> & { source_meta?: string | null };
+
+function mapIssueCommentRow(row: unknown): IssueComment {
+  const r = row as IssueCommentRow;
+  return {
+    ...r,
+    body: toUtf8String(r.body),
+    created_by: r.created_by ?? null,
+    source_type: r.source_type as IssueComment['source_type'],
+    source_meta: parseNullableJson(r.source_meta),
+    updated_at: r.updated_at ?? null,
+    deleted_at: r.deleted_at ?? null,
+  };
+}
+
+export interface CreateIssueCommentInput {
+  id?: string;
+  issue_id: string;
+  workspace_jid: string;
+  body: string;
+  created_by?: string | null;
+  source_type?: IssueComment['source_type'];
+  source_meta?: Record<string, unknown> | null;
+  created_at?: string;
+}
+
+export function createIssueComment(input: CreateIssueCommentInput): IssueComment {
+  const id = input.id ?? `icm_${crypto_random_16()}`;
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO issue_comments
+      (id, issue_id, workspace_jid, body, created_by, source_type, source_meta, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    input.issue_id,
+    input.workspace_jid,
+    toUtf8String(input.body, 'issue_comments.body'),
+    input.created_by ?? null,
+    input.source_type ?? 'user',
+    input.source_meta == null ? null : JSON.stringify(input.source_meta),
+    input.created_at ?? now,
+  );
+  const created = db.prepare('SELECT * FROM issue_comments WHERE id = ?').get(id);
+  if (!created) throw new Error('Failed to create issue comment');
+  return mapIssueCommentRow(created);
+}
+
+export function getIssueCommentById(id: string): IssueComment | undefined {
+  const row = db.prepare("SELECT * FROM issue_comments WHERE id = ? AND deleted_at IS NULL").get(id);
+  return row ? mapIssueCommentRow(row) : undefined;
+}
+
+export interface ListIssueCommentsFilters {
+  cursor?: string;        // last seen id for pagination (not strictly needed, since we expect O(100) per issue)
+  sinceAt?: string;       // comments created after timestamp (used for run context injection)
+  limit?: number;
+  includeDeleted?: boolean;
+}
+
+export function listIssueComments(issueId: string, filters: ListIssueCommentsFilters = {}): IssueComment[] {
+  const where: string[] = ['issue_id = ?'];
+  const values: unknown[] = [issueId];
+  if (!filters.includeDeleted) where.push('deleted_at IS NULL');
+  if (filters.sinceAt) {
+    where.push('(created_at > ? OR (updated_at IS NOT NULL AND updated_at > ?))');
+    values.push(filters.sinceAt, filters.sinceAt);
+  }
+  if (filters.cursor) {
+    where.push('id > ?');
+    values.push(filters.cursor);
+  }
+  const limit = Math.max(1, Math.min(500, filters.limit ?? 200));
+  const whereSql = `WHERE ${where.join(' AND ')}`;
+  const rows = db
+    .prepare(`SELECT * FROM issue_comments ${whereSql} ORDER BY created_at ASC, id ASC LIMIT ?`)
+    .all(...values, limit);
+  return rows.map(mapIssueCommentRow);
+}
+
+export function updateIssueComment(id: string, body: string): IssueComment | undefined {
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE issue_comments SET body = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+  ).run(toUtf8String(body, 'issue_comments.body'), now, id);
+  return getIssueCommentById(id);
+}
+
+export function softDeleteIssueComment(id: string): boolean {
+  const now = new Date().toISOString();
+  const result = db
+    .prepare(`UPDATE issue_comments SET deleted_at = ?, body = '' WHERE id = ? AND deleted_at IS NULL`)
+    .run(now, id);
+  return result.changes > 0;
+}
+
+// Issue delete helper cascade: update deleteIssue to also wipe comments + events + notifications
+// (existing deleteIssue at ~line 4206 handles attachments and runs — add comments, events, notifications)
 
 export function cleanupOldDailyUsage(retentionDays = 90): number {
   const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000)

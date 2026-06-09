@@ -292,6 +292,33 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
   const hasCrossGroupAccess = ctx.isAdminHome;
   const toRelativePath = createToRelativePath(ctx);
 
+  /**
+   * Generic IPC call helper: writes a request with requestId to TASKS_DIR,
+   * polls for `${type}_result_${requestId}.json`, returns the parsed result.
+   */
+  function ipcCall<T extends Record<string, unknown>>(
+    type: string,
+    input: Record<string, unknown>,
+    timeoutMs: number = 30_000,
+  ): Promise<T> {
+    const resultPrefix = `${type}_result`;
+    const requestId = newRequestId();
+    return pollIpcResult(
+      TASKS_DIR,
+      {
+        type,
+        requestId,
+        groupFolder: ctx.groupFolder,
+        chatJid: ctx.chatJid,
+        isAdminHome: hasCrossGroupAccess,
+        timestamp: new Date().toISOString(),
+        ...input,
+      },
+      resultPrefix,
+      timeoutMs,
+    ) as Promise<T>;
+  }
+
   const tools: SdkMcpToolDefinition<any>[] = [
     tool(
       'repo_knowledge_list',
@@ -1579,6 +1606,133 @@ Returns null if the current chat is a DM (DMs do not belong to a server). Only w
             ],
             isError: true,
           };
+        }
+      },
+    ),
+
+    // --- Issue management tools (5 tools via main-process IPC) ---
+    tool(
+      'list_issues',
+      'List issues in the current or specified workspace. Use this to find open work, find an issue by title, or track statuses.',
+      {
+        workspace_jid: z.string().optional().describe('Optional workspace JID. Defaults to the workspace the agent is running in.'),
+        status: z.enum(['todo', 'in_progress', 'review', 'done', 'canceled']).optional().describe('Filter by status'),
+        priority: z.enum(['low', 'medium', 'high', 'urgent']).optional().describe('Filter by priority'),
+        assignee: z.string().optional().describe('Filter by assignee user id'),
+        query: z.string().optional().describe('Full-text search across title and description'),
+        limit: z.number().int().min(1).max(100).optional().default(20).describe('Max number of results'),
+      },
+      async (input) => {
+        try {
+          const result = await ipcCall<{
+            issues: Array<{ id: string; title: string; status: string; priority: string; assignee_user_id?: string; created_at: string; updated_at: string }>;
+            total: number;
+            error?: string;
+          }>('issue_list', input);
+          if (result.error) throw new Error(result.error);
+          return toolJson(result);
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+
+    tool(
+      'get_issue',
+      'Fetch the full details of a single issue including description, status, priority, runs, and metadata.',
+      {
+        id: z.string().describe('Issue ID'),
+      },
+      async (input) => {
+        try {
+          const result = await ipcCall<{
+            issue?: {
+              id: string; title: string; description: string; status: string; priority: string;
+              assignee_user_id?: string; due_date?: string; workspace_jid: string;
+              created_at: string; updated_at: string; closed_at?: string;
+              last_run_status?: string;
+            };
+            error?: string;
+          }>('issue_get', input);
+          if (result.error || !result.issue) throw new Error(result.error ?? 'Issue not found');
+          return toolJson(result.issue);
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+
+    tool(
+      'create_issue',
+      'Create a new issue in the current or specified workspace. This registers work to be tracked without starting execution immediately (unless start_agent is true).',
+      {
+        title: z.string().min(1).max(200).describe('Short title summarizing the issue'),
+        description: z.string().max(20000).optional().default('').describe('Full description of the issue, context, and requirements'),
+        status: z.enum(['todo', 'in_progress', 'review', 'done', 'canceled']).optional().default('todo'),
+        priority: z.enum(['low', 'medium', 'high', 'urgent']).optional().default('medium'),
+        assignee_user_id: z.string().optional().describe('User id of the person responsible'),
+        due_date: z.string().optional().describe('Due date as ISO date string (YYYY-MM-DD)'),
+        workspace_jid: z.string().optional().describe('Optional workspace JID. Defaults to the workspace the agent is running in.'),
+        start_agent: z.boolean().optional().default(false).describe('If true, also enqueue an agent run for the new issue immediately'),
+      },
+      async (input) => {
+        try {
+          const result = await ipcCall<{
+            issue?: { id: string; title: string; status: string };
+            run?: { id: string; status: string };
+            error?: string;
+          }>('issue_create', input);
+          if (result.error || !result.issue) throw new Error(result.error ?? 'Failed to create issue');
+          return toolJson(result);
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+
+    tool(
+      'update_issue',
+      'Update one or more fields on an existing issue. Provide only the fields you want to change.',
+      {
+        id: z.string().describe('Issue ID'),
+        title: z.string().min(1).max(200).optional(),
+        description: z.string().max(20000).optional(),
+        status: z.enum(['todo', 'in_progress', 'review', 'done', 'canceled']).optional(),
+        priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
+        assignee_user_id: z.string().nullable().optional(),
+        due_date: z.string().nullable().optional(),
+      },
+      async (input) => {
+        try {
+          const result = await ipcCall<{
+            issue?: { id: string; title: string; status: string };
+            error?: string;
+          }>('issue_update', input);
+          if (result.error || !result.issue) throw new Error(result.error ?? 'Failed to update issue');
+          return toolJson(result.issue);
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
+
+    tool(
+      'comment_issue',
+      'Add a comment to an existing issue. Use this to record progress notes, partial results, or request clarifications from team members. Comments are visible in the issue timeline and are included as context for future agent runs.',
+      {
+        id: z.string().describe('Issue ID'),
+        body: z.string().min(1).max(20000).describe('Markdown comment body'),
+      },
+      async (input) => {
+        try {
+          const result = await ipcCall<{
+            comment?: { id: string; created_at: string };
+            error?: string;
+          }>('issue_comment', input);
+          if (result.error || !result.comment) throw new Error(result.error ?? 'Failed to add comment');
+          return toolJson(result.comment);
+        } catch (err) {
+          return toolError(err);
         }
       },
     ),

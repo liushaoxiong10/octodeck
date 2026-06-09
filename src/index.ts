@@ -96,7 +96,20 @@ import {
   touchImContextBindingActivity,
   updateAgentContextInfo,
   backfillEmptyAllowlistsForUser,
+  createIssue,
+  createIssueAgentRun,
+  createIssueComment,
+  createIssueEvent,
+  getAgentLinkById,
+  getIssueById,
+  getManagedRepoById,
+  listIssues,
+  updateIssue,
+  updateIssueAgentRun,
+  updateIssueLastRun,
 } from './db.js';
+import { runIssueAgent } from './issue-runner.js';
+import { afterIssueEventCreated } from './issue-notifier.js';
 // feishu.js deprecated exports are no longer needed; imManager handles all connections
 import { imManager } from './im-manager.js';
 import {
@@ -5156,6 +5169,11 @@ function startIpcWatcher(): void {
           'discord_get_history_result_',
           'discord_get_channel_info_result_',
           'discord_get_server_info_result_',
+          'issue_list_result_',
+          'issue_get_result_',
+          'issue_create_result_',
+          'issue_update_result_',
+          'issue_comment_result_',
         ];
         const isResultFile = (name: string) =>
           RESULT_FILE_PREFIXES.some((p) => name.startsWith(p));
@@ -5307,6 +5325,28 @@ async function processTaskIpc(
     // For discord_get_history
     limit?: number;
     before?: string;
+    // --- Issue management (MCP tool round-trips) ---
+    // issue_list
+    workspace_jid?: string;
+    query?: string;
+    status?: string;
+    priority?: string;
+    assignee?: string;
+    // issue_get / issue_update / issue_comment (shared)
+    id?: string;
+    // issue_create
+    title?: string;
+    description?: string;
+    assignee_user_id?: string | null;
+    due_date?: string | null;
+    project_repo_id?: string | null;
+    agent_link_id?: string | null;
+    agent_client_id?: string | null;
+    execution_node?: string | null;
+    backend?: string | null;
+    start_agent?: boolean;
+    // issue_comment
+    body?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isAdminHome: boolean, // Whether source is admin home container
@@ -5314,6 +5354,39 @@ async function processTaskIpc(
   sourceGroupEntry: RegisteredGroup | undefined, // Source group's registered entry
   ipcAgentId: string | null = null, // Non-null when IPC comes from a conversation agent
 ): Promise<void> {
+  // --- Shared helper: boilerplate for round-trip IPC result writes: validates requestId,
+  // resolves safe result path, runs the handler, and atomically writes JSON result.
+  const handleIpcResultReply = async <T extends Record<string, unknown>>(
+    data: { requestId?: string },
+    group: string,
+    type: string,
+    handler: (tasksDir: string, tasksDirResolved: string) => Promise<T>,
+  ): Promise<void> => {
+    const requestId = data.requestId;
+    if (!requestId || !SAFE_REQUEST_ID_RE.test(requestId)) {
+      logger.warn({ sourceGroup: group, requestId }, `Rejected ${type} request with invalid requestId`);
+      return;
+    }
+    const tasksDir = path.join(DATA_DIR, 'ipc', group, 'tasks');
+    const tasksDirResolved = path.resolve(tasksDir);
+    const resultFileName = `${type}_result_${requestId}.json`;
+    const resultFilePath = path.resolve(tasksDir, resultFileName);
+    if (!resultFilePath.startsWith(tasksDirResolved + path.sep)) {
+      logger.warn({ sourceGroup: group, requestId, resultFilePath }, `Rejected ${type} request with unsafe result path`);
+      return;
+    }
+    fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
+    let resultData: T;
+    try {
+      resultData = await handler(tasksDir, tasksDirResolved);
+    } catch (err: any) {
+      resultData = { error: err?.message ?? String(err) } as unknown as T;
+    }
+    const tmpPath = `${resultFilePath}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(resultData));
+    fs.renameSync(tmpPath, resultFilePath);
+  };
+
   switch (data.type) {
     case 'schedule_task':
       if (data.schedule_type && data.schedule_value && data.targetJid) {
@@ -5779,6 +5852,260 @@ async function processTaskIpc(
           'Invalid uninstall_skill request - missing required fields',
         );
       }
+      break;
+
+    // --- Issue management IPC handlers (MCP tool round-trips) ---
+
+    case 'issue_list':
+      await handleIpcResultReply(data, sourceGroup, 'issue_list', async (taskDir, taskDirResolved) => {
+        void taskDir; void taskDirResolved;
+        // Resolve the effective owner user for this IPC caller.
+        const callerUserId = sourceGroupEntry?.created_by;
+        const isAdmin = !!isAdminHome;
+        const accessibleJids: string[] | undefined = (() => {
+          if (isAdmin) return undefined;
+          if (!callerUserId) return [];
+          return Object.entries(getAllRegisteredGroups())
+            .filter(([jid, g]) => {
+              if (g.created_by === callerUserId) return true;
+              // Non-admins only see workspaces they created.
+              return false;
+            })
+            .map(([jid]) => jid);
+        })();
+        const { issues, total } = listIssues({
+          workspaceJid: data.workspace_jid as string | undefined,
+          workspaceJids: accessibleJids,
+          query: data.query as string | undefined,
+          statuses: data.status ? [data.status as any] : undefined,
+          priorities: data.priority ? [data.priority as any] : undefined,
+          assigneeUserId: data.assignee as string | undefined,
+          limit: Math.min(Number(data.limit ?? 20), 100),
+          offset: 0,
+        });
+        return {
+          issues: issues.map((i) => ({
+            id: i.id, title: i.title, status: i.status, priority: i.priority,
+            assignee_user_id: i.assignee_user_id,
+            created_at: i.created_at, updated_at: i.updated_at,
+          })),
+          total,
+        };
+      });
+      break;
+
+    case 'issue_get':
+      await handleIpcResultReply(data, sourceGroup, 'issue_get', async () => {
+        const id = data.id as string;
+        if (!id) return { error: 'Missing issue id' };
+        const issue = getIssueById(id);
+        if (!issue) return { error: 'Issue not found' };
+        // RBAC: admin can see all; others only own workspaces.
+        const callerUserId = sourceGroupEntry?.created_by;
+        const group = getRegisteredGroup(issue.workspace_jid);
+        if (!isAdminHome && group?.created_by !== callerUserId) {
+          return { error: 'Issue not found' };
+        }
+        return {
+          issue: {
+            id: issue.id, title: issue.title, description: issue.description,
+            status: issue.status, priority: issue.priority,
+            assignee_user_id: issue.assignee_user_id,
+            due_date: issue.due_date,
+            workspace_jid: issue.workspace_jid,
+            created_at: issue.created_at, updated_at: issue.updated_at,
+            closed_at: issue.closed_at,
+            last_run_status: issue.last_run_status,
+          },
+        };
+      });
+      break;
+
+    case 'issue_create':
+      await handleIpcResultReply(data, sourceGroup, 'issue_create', async () => {
+        const callerUserId = sourceGroupEntry?.created_by;
+        if (!callerUserId) return { error: 'Cannot determine caller identity' };
+        // Resolve target workspace: explicit workspace_jid, else caller's home group.
+        let workspaceJid = data.workspace_jid as string | undefined;
+        let workspaceFolder: string | undefined;
+        if (workspaceJid) {
+          const rg = getRegisteredGroup(workspaceJid);
+          if (!rg) return { error: 'Workspace not found' };
+          // RBAC: non-admin can only create issues in own workspaces.
+          if (!isAdminHome && rg.created_by !== callerUserId) return { error: 'Workspace not found' };
+          workspaceFolder = rg.folder;
+        } else {
+          const home = getUserHomeGroup(callerUserId);
+          if (!home) return { error: 'User has no home workspace' };
+          workspaceJid = home.jid;
+          workspaceFolder = home.folder;
+        }
+
+        // Resolve optional project repo
+        let repoFields: Record<string, unknown> = {};
+        const projectRepoId = data.project_repo_id as string | undefined;
+        if (projectRepoId) {
+          const repo = getManagedRepoById(projectRepoId);
+          if (repo && repo.createdBy === callerUserId) {
+            repoFields = {
+              project_repo_id: repo.id,
+              project_git_url: repo.gitUrl ?? null,
+              project_device_path: repo.devicePath ?? null,
+              project_device_link_id: repo.deviceLinkId ?? null,
+            };
+          }
+        }
+
+        const now = new Date().toISOString();
+        const issue = createIssue({
+          id: `iss_${crypto.randomBytes(8).toString('hex')}`,
+          workspace_jid: workspaceJid,
+          workspace_folder: workspaceFolder,
+          title: (data.title as string) || '(untitled)',
+          description: (data.description as string) || '',
+          status: (data.status as any) ?? 'todo',
+          priority: (data.priority as any) ?? 'medium',
+          assignee_user_id: (data.assignee_user_id as string) ?? null,
+          due_date: (data.due_date as string) ?? null,
+          ...repoFields,
+          agent_link_id: (data.agent_link_id as string) ?? null,
+          agent_client_id: (data.agent_client_id as string) ?? null,
+          execution_node: (data.execution_node as string) ?? null,
+          backend: (data.backend as string) ?? null,
+          selected_skills: undefined,
+          created_by: callerUserId,
+          created_at: now,
+          updated_at: now,
+        });
+
+        const evCreated = createIssueEvent({
+          issue_id: issue.id, event_type: 'created',
+          actor_id: callerUserId, actor_type: 'agent',
+          title: 'Issue created by agent',
+          summary: `${issue.status} · ${issue.priority}`,
+          detail: { status: issue.status, priority: issue.priority },
+          created_at: now,
+        });
+        afterIssueEventCreated(evCreated, issue);
+
+        // Optional: immediately enqueue an agent run
+        let run: any = null;
+        if (data.start_agent === true) {
+          run = createIssueAgentRun({
+            id: `irun_${crypto.randomBytes(8).toString('hex')}`,
+            issue_id: issue.id,
+            workspace_jid: issue.workspace_jid,
+            workspace_folder: issue.workspace_folder,
+            status: 'queued',
+            created_by: callerUserId,
+            created_at: new Date().toISOString(),
+          });
+          updateIssueLastRun(issue.id, run.id, 'queued');
+          const evRun = createIssueEvent({
+            issue_id: issue.id, run_id: run.id, event_type: 'run_created',
+            actor_id: callerUserId, actor_type: 'agent',
+            title: 'Run enqueued', summary: 'Created from agent tool call',
+            detail: { run_id: run.id, status: run.status, trigger: 'issue_create' },
+          });
+          afterIssueEventCreated(evRun, issue);
+          // Enqueue via queue. The queue.runIssueAgent pattern mirrors routes.
+          const deps = getWebDeps();
+          if (deps?.queue) {
+            const runChatJid = `${issue.workspace_jid}#issue:${run.id}`;
+            deps.queue.enqueueTask(runChatJid, `issue:${run.id}`, async () => {
+              await runIssueAgent(issue.id, run.id, {
+                queue: deps.queue,
+                broadcastStreamEvent: deps.broadcastStreamEvent,
+              });
+            });
+          }
+        }
+
+        return {
+          issue: { id: issue.id, title: issue.title, status: issue.status },
+          run: run ? { id: run.id, status: run.status } : undefined,
+        };
+      });
+      break;
+
+    case 'issue_update':
+      await handleIpcResultReply(data, sourceGroup, 'issue_update', async () => {
+        const id = data.id as string;
+        if (!id) return { error: 'Missing issue id' };
+        const issue = getIssueById(id);
+        if (!issue) return { error: 'Issue not found' };
+        const callerUserId = sourceGroupEntry?.created_by;
+        const group = getRegisteredGroup(issue.workspace_jid);
+        if (!isAdminHome && group?.created_by !== callerUserId) return { error: 'Issue not found' };
+
+        // Build patch from provided fields only (explicit undefineds are respected for nullable fields)
+        const patch: Record<string, unknown> = {};
+        if ('title' in data && data.title !== undefined) patch.title = data.title;
+        if ('description' in data && data.description !== undefined) patch.description = data.description;
+        if ('status' in data && data.status !== undefined) patch.status = data.status;
+        if ('priority' in data && data.priority !== undefined) patch.priority = data.priority;
+        if ('assignee_user_id' in data) patch.assignee_user_id = data.assignee_user_id;
+        if ('due_date' in data) patch.due_date = data.due_date;
+
+        if (Object.keys(patch).length === 0) {
+          return { issue: { id: issue.id, title: issue.title, status: issue.status } };
+        }
+
+        updateIssue(issue.id, patch);
+        const updated = getIssueById(issue.id)!;
+
+        const patchEvents: Array<{ type: any; title: string; summary?: string; detail?: Record<string, unknown> }> = [];
+        if (issue.status !== updated.status) patchEvents.push({ type: 'status_changed', title: 'Status changed by agent', summary: `${issue.status} → ${updated.status}`, detail: { from: issue.status, to: updated.status, cause: 'agent_tool' } });
+        if (issue.priority !== updated.priority) patchEvents.push({ type: 'priority_changed', title: 'Priority changed by agent', summary: `${issue.priority} → ${updated.priority}`, detail: { from: issue.priority, to: updated.priority } });
+        if (issue.assignee_user_id !== updated.assignee_user_id) patchEvents.push({ type: 'assignee_changed', title: 'Assignee changed', summary: `${issue.assignee_user_id ?? 'none'} → ${updated.assignee_user_id ?? 'none'}`, detail: { from: issue.assignee_user_id ?? null, to: updated.assignee_user_id ?? null } });
+        if (issue.due_date !== updated.due_date) patchEvents.push({ type: 'due_date_changed', title: 'Due date changed', detail: { from: issue.due_date ?? null, to: updated.due_date ?? null } });
+        if (issue.title !== updated.title) patchEvents.push({ type: 'title_changed', title: 'Title changed', summary: `${issue.title.slice(0, 80)} → ${updated.title.slice(0, 80)}`, detail: { from: issue.title, to: updated.title } });
+        if (issue.description !== updated.description) patchEvents.push({ type: 'description_changed', title: 'Description changed', detail: { from_length: issue.description.length, to_length: updated.description.length } });
+        if (patchEvents.length === 0) patchEvents.push({ type: 'updated', title: 'Issue updated' });
+
+        for (const ev of patchEvents) {
+          const event = createIssueEvent({
+            issue_id: issue.id, event_type: ev.type,
+            actor_id: callerUserId ?? null, actor_type: 'agent',
+            title: ev.title, summary: ev.summary ?? null, detail: ev.detail ?? null,
+          });
+          afterIssueEventCreated(event, updated);
+        }
+
+        return { issue: { id: updated.id, title: updated.title, status: updated.status } };
+      });
+      break;
+
+    case 'issue_comment':
+      await handleIpcResultReply(data, sourceGroup, 'issue_comment', async () => {
+        const id = data.id as string;
+        const body = data.body as string;
+        if (!id || !body) return { error: 'Missing issue id or body' };
+        const issue = getIssueById(id);
+        if (!issue) return { error: 'Issue not found' };
+        const callerUserId = sourceGroupEntry?.created_by;
+        const group = getRegisteredGroup(issue.workspace_jid);
+        if (!isAdminHome && group?.created_by !== callerUserId) return { error: 'Issue not found' };
+
+        const comment = createIssueComment({
+          issue_id: issue.id,
+          workspace_jid: issue.workspace_jid,
+          body,
+          created_by: callerUserId ?? null,
+          source_type: 'agent',
+        });
+        const ev = createIssueEvent({
+          issue_id: issue.id, event_type: 'comment_created',
+          actor_id: callerUserId ?? null, actor_type: 'agent',
+          title: 'Agent commented',
+          summary: comment.body.length > 160 ? comment.body.slice(0, 160) + '...' : comment.body,
+          detail: { comment_id: comment.id, body_length: comment.body.length },
+          reference_id: comment.id,
+        });
+        afterIssueEventCreated(ev, issue);
+
+        return { comment: { id: comment.id, created_at: comment.created_at } };
+      });
       break;
 
     case 'send_file':

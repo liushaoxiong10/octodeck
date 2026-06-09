@@ -436,6 +436,81 @@ export interface IssueAttachment {
   created_at: string;
 }
 
+// --- Issue event (generalized timeline) ---
+
+export type IssueEventType =
+  // Issue lifecycle
+  | 'created'
+  | 'updated'
+  | 'title_changed'
+  | 'description_changed'
+  | 'status_changed'
+  | 'priority_changed'
+  | 'assignee_changed'
+  | 'due_date_changed'
+  | 'project_changed'
+  | 'agent_changed'
+  | 'skills_changed'
+  // Comments
+  | 'comment_created'
+  | 'comment_updated'
+  | 'comment_deleted'
+  // Attachments
+  | 'attachment_added'
+  | 'attachment_removed'
+  // Agent runs (generalized timeline from issue_agent_run_events)
+  | 'run_created'
+  | 'run_status_changed'
+  | 'run_started'
+  | 'run_succeeded'
+  | 'run_failed'
+  | 'run_canceled'
+  | 'run_event'
+  | 'run_delta'
+  | 'run_result';
+
+export interface IssueEvent {
+  id: string;
+  issue_id: string;
+  run_id?: string | null;
+  event_type: IssueEventType;
+  actor_id?: string | null;
+  actor_type: 'user' | 'agent' | 'system';
+  title?: string | null;
+  summary?: string | null;
+  detail?: Record<string, unknown> | null;
+  payload?: Record<string, unknown> | null;
+  reference_id?: string | null;
+  created_at: string;
+}
+
+// --- Issue comments ---
+
+export type IssueCommentSourceType = 'user' | 'agent' | 'system';
+
+export interface IssueComment {
+  id: string;
+  issue_id: string;
+  workspace_jid: string;
+  body: string;
+  created_by: string | null;
+  source_type: IssueCommentSourceType;
+  source_meta?: Record<string, unknown> | null;
+  created_at: string;
+  updated_at?: string | null;
+  deleted_at?: string | null;
+}
+
+// --- Issue event notifications (dedup table) ---
+
+export interface IssueEventNotification {
+  id: number;
+  event_id: string;
+  channel: 'web' | 'feishu' | 'telegram' | 'qq' | 'dingtalk' | 'whatsapp';
+  target: string;
+  sent_at: string;
+}
+
 // --- Auth types ---
 
 export type UserRole = 'admin' | 'member';
@@ -760,6 +835,13 @@ export type WsMessageOut =
         systemStatus: string | null;
         turnId?: string;
       };
+    }
+  | {
+      type: 'issue_event';
+      workspaceJid: string;
+      issueId: string;
+      runId: string | null;
+      event: IssueEvent;
     };
 
 export type WsMessageIn =

@@ -9,6 +9,7 @@ import type {
   MessageCursor,
   StreamEvent,
   UserSessionWithUser,
+  IssueEvent,
 } from './types.js';
 import type { RuntimeOwnerCandidateUser } from './runtime-owner.js';
 import {
@@ -139,6 +140,8 @@ export interface WebDeps {
   updateReplyRoute?: (folder: string, sourceJid: string | null) => void;
   triggerTaskRun?: (taskId: string) => { success: boolean; error?: string };
   broadcastStreamEvent?: (chatJid: string, event: StreamEvent) => void;
+  /** Broadcast an issue timeline event to users who can access the workspace. */
+  broadcastIssueEvent?: (workspaceJid: string, issueId: string, event: IssueEvent, runId?: string | null) => void;
   handleSpawnCommand?: (
     chatJid: string,
     message: string,

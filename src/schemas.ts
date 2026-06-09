@@ -154,6 +154,8 @@ export const IssueRunSchema = z.object({
   execution_node: z.string().nullable().optional(),
   backend: z.string().nullable().optional(),
   selected_skills: z.array(z.string()).nullable().optional(),
+  comment_ids: z.array(z.string().min(1)).max(50).optional().nullable(),
+  include_new_comments: z.boolean().optional().default(true),
 });
 
 export const IssueAttachmentCreateSchema = z.object({
@@ -161,6 +163,16 @@ export const IssueAttachmentCreateSchema = z.object({
   mime_type: z.string().min(1).max(120),
   size_bytes: z.number().int().min(0).max(10 * 1024 * 1024),
   data_url: z.string().min(1).max(14 * 1024 * 1024),
+});
+
+// --- Issue comment ---
+
+export const IssueCommentCreateSchema = z.object({
+  body: z.string().min(1).max(20000),
+});
+
+export const IssueCommentUpdateSchema = z.object({
+  body: z.string().min(1).max(20000),
 });
 
 // 单张图片附件上限 5MB（base64 编码后约 6.67MB）

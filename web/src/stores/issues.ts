@@ -68,6 +68,47 @@ export interface IssueAttachment {
   created_at: string;
 }
 
+// --- Comment system ---
+export type IssueCommentSourceType = 'user' | 'agent' | 'system';
+
+export interface IssueComment {
+  id: string;
+  issue_id: string;
+  workspace_jid: string;
+  body: string;
+  created_by: string | null;
+  source_type: IssueCommentSourceType;
+  source_meta?: Record<string, unknown> | null;
+  created_at: string;
+  updated_at?: string | null;
+  deleted_at?: string | null;
+}
+
+// --- Generalized event timeline ---
+export type IssueEventType =
+  | 'created' | 'updated' | 'title_changed' | 'description_changed'
+  | 'status_changed' | 'priority_changed' | 'assignee_changed' | 'due_date_changed'
+  | 'project_changed' | 'agent_changed' | 'skills_changed'
+  | 'comment_created' | 'comment_updated' | 'comment_deleted'
+  | 'attachment_added' | 'attachment_removed'
+  | 'run_created' | 'run_status_changed' | 'run_started' | 'run_succeeded'
+  | 'run_failed' | 'run_canceled' | 'run_event' | 'run_delta' | 'run_result';
+
+export interface IssueEvent {
+  id: string;
+  issue_id: string;
+  run_id?: string | null;
+  event_type: IssueEventType;
+  actor_id?: string | null;
+  actor_type: 'user' | 'agent' | 'system';
+  title?: string | null;
+  summary?: string | null;
+  detail?: Record<string, unknown> | null;
+  payload?: Record<string, unknown> | null;
+  reference_id?: string | null;
+  created_at: string;
+}
+
 export interface IssueFilters {
   statuses: IssueStatus[];
   priorities: IssuePriority[];
@@ -114,6 +155,12 @@ interface IssuesState {
   runsByIssue: Record<string, IssueAgentRun[]>;
   runEventsByRun: Record<string, IssueAgentRunEvent[]>;
   attachmentsByIssue: Record<string, IssueAttachment[]>;
+  // Single-issue detail cache
+  issueById: Record<string, WorkspaceIssue>;
+  // Timeline events by issue id
+  eventsByIssue: Record<string, IssueEvent[]>;
+  // Comments by issue id
+  commentsByIssue: Record<string, IssueComment[]>;
   setQuery: (query: string) => void;
   setView: (view: IssueViewMode) => void;
   setFilters: (filters: Partial<IssueFilters>) => void;
@@ -130,6 +177,13 @@ interface IssuesState {
   loadIssueAttachments: (id: string) => Promise<IssueAttachment[]>;
   uploadIssueAttachment: (id: string, input: Omit<IssueAttachment, 'id' | 'issue_id' | 'created_by' | 'created_at'>) => Promise<IssueAttachment | null>;
   deleteIssueAttachment: (issueId: string, attachmentId: string) => Promise<void>;
+  loadIssueById: (id: string) => Promise<WorkspaceIssue | null>;
+  loadIssueEvents: (id: string, filters?: { sinceId?: string; sinceAt?: string; runId?: string }) => Promise<IssueEvent[]>;
+  prependIssueEvent: (id: string, event: IssueEvent) => void;
+  loadIssueComments: (id: string, filters?: { sinceAt?: string; includeDeleted?: boolean }) => Promise<IssueComment[]>;
+  createIssueComment: (id: string, body: string) => Promise<IssueComment | null>;
+  updateIssueComment: (issueId: string, commentId: string, body: string) => Promise<IssueComment | null>;
+  deleteIssueComment: (issueId: string, commentId: string) => Promise<void>;
 }
 
 const defaultFilters: IssueFilters = {
@@ -171,6 +225,9 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
   runsByIssue: {},
   runEventsByRun: {},
   attachmentsByIssue: {},
+  issueById: {},
+  eventsByIssue: {},
+  commentsByIssue: {},
 
   setQuery: (query) => set({ query }),
   setView: (view) => {
@@ -200,7 +257,9 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
       params.set('sort', order.field);
       params.set('direction', order.direction);
       const data = await api.get<{ issues: WorkspaceIssue[]; total: number }>(`/api/issues?${params.toString()}`);
-      set({ issues: data.issues, total: data.total, loading: false });
+      const cache: Record<string, WorkspaceIssue> = {};
+      for (const issue of data.issues) cache[issue.id] = issue;
+      set({ issues: data.issues, total: data.total, loading: false, issueById: { ...get().issueById, ...cache } });
     } catch (err) {
       set({ loading: false, error: err instanceof Error ? err.message : String(err) });
     }
@@ -222,6 +281,7 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
       const data = await api.patch<{ issue: WorkspaceIssue }>(`/api/issues/${encodeURIComponent(id)}`, patch);
       set((state) => ({
         issues: state.issues.map((issue) => (issue.id === id ? data.issue : issue)),
+        issueById: { ...state.issueById, [id]: data.issue },
         error: null,
       }));
       return data.issue;
@@ -241,6 +301,7 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
       const data = await api.post<{ run: IssueAgentRun }>(`/api/issues/${encodeURIComponent(id)}/run`, {});
       await get().loadIssues();
       await get().loadIssueRuns(id);
+      await get().loadIssueEvents(id);
       return data.run;
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
@@ -317,5 +378,138 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
         [issueId]: (state.attachmentsByIssue[issueId] ?? []).filter((item) => item.id !== attachmentId),
       },
     }));
+  },
+
+  loadIssueById: async (id) => {
+    try {
+      const data = await api.get<{ issue: WorkspaceIssue }>(`/api/issues/${encodeURIComponent(id)}`);
+      set((state) => {
+        const issueExists = state.issues.some((i) => i.id === id);
+        return {
+          issueById: { ...state.issueById, [id]: data.issue },
+          issues: issueExists
+            ? state.issues.map((issue) => (issue.id === id ? data.issue : issue))
+            : state.issues,
+        };
+      });
+      return data.issue;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  },
+
+  loadIssueEvents: async (id, filters) => {
+    try {
+      const params = new URLSearchParams();
+      if (filters?.sinceId) params.set('since_id', filters.sinceId);
+      if (filters?.sinceAt) params.set('since_at', filters.sinceAt);
+      if (filters?.runId) params.set('run_id', filters.runId);
+      const qs = params.toString();
+      const data = await api.get<{ events: IssueEvent[] }>(
+        `/api/issues/${encodeURIComponent(id)}/events${qs ? `?${qs}` : ''}`,
+      );
+      set((state) => {
+        const existing = state.eventsByIssue[id] ?? [];
+        const map = new Map<string, IssueEvent>();
+        for (const ev of existing) map.set(ev.id, ev);
+        for (const ev of data.events) map.set(ev.id, ev);
+        const merged = Array.from(map.values()).sort(
+          (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+        );
+        return { eventsByIssue: { ...state.eventsByIssue, [id]: merged } };
+      });
+      return data.events;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return [];
+    }
+  },
+
+  prependIssueEvent: (id, event) => {
+    set((state) => {
+      const existing = state.eventsByIssue[id] ?? [];
+      if (existing.some((ev) => ev.id === event.id)) return state;
+      return {
+        eventsByIssue: {
+          ...state.eventsByIssue,
+          [id]: [event, ...existing],
+        },
+      };
+    });
+  },
+
+  loadIssueComments: async (id, filters) => {
+    try {
+      const params = new URLSearchParams();
+      if (filters?.sinceAt) params.set('since_at', filters.sinceAt);
+      if (filters?.includeDeleted) params.set('include_deleted', 'true');
+      const qs = params.toString();
+      const data = await api.get<{ comments: IssueComment[] }>(
+        `/api/issues/${encodeURIComponent(id)}/comments${qs ? `?${qs}` : ''}`,
+      );
+      set((state) => ({
+        commentsByIssue: { ...state.commentsByIssue, [id]: data.comments },
+      }));
+      return data.comments;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return [];
+    }
+  },
+
+  createIssueComment: async (id, body) => {
+    try {
+      const data = await api.post<{ comment: IssueComment }>(
+        `/api/issues/${encodeURIComponent(id)}/comments`,
+        { body },
+      );
+      set((state) => ({
+        commentsByIssue: {
+          ...state.commentsByIssue,
+          [id]: [...(state.commentsByIssue[id] ?? []), data.comment],
+        },
+      }));
+      await get().loadIssueEvents(id);
+      return data.comment;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  },
+
+  updateIssueComment: async (issueId, commentId, body) => {
+    try {
+      const data = await api.patch<{ comment: IssueComment }>(
+        `/api/issues/${encodeURIComponent(issueId)}/comments/${encodeURIComponent(commentId)}`,
+        { body },
+      );
+      set((state) => ({
+        commentsByIssue: {
+          ...state.commentsByIssue,
+          [issueId]: (state.commentsByIssue[issueId] ?? []).map((c) =>
+            c.id === commentId ? data.comment : c,
+          ),
+        },
+      }));
+      await get().loadIssueEvents(issueId);
+      return data.comment;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  },
+
+  deleteIssueComment: async (issueId, commentId) => {
+    await api.delete(
+      `/api/issues/${encodeURIComponent(issueId)}/comments/${encodeURIComponent(commentId)}`,
+    );
+    set((state) => ({
+      commentsByIssue: {
+        ...state.commentsByIssue,
+        [issueId]: (state.commentsByIssue[issueId] ?? []).filter((c) => c.id !== commentId),
+      },
+    }));
+    await get().loadIssueEvents(issueId);
   },
 }));
