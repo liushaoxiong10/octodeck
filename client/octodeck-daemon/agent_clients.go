@@ -34,13 +34,12 @@ type agentClientCandidate struct {
 }
 
 var supportedAgentClients = []agentClientCandidate{
-	{id: "claude-code", displayName: "Claude Code", command: "claude"},
 	{id: "claude-acp", displayName: "Claude Code (ACP)", command: "claude", provider: "claude-code", transport: "acp", args: []string{"acp"}, probeArgs: [][]string{{"acp", "--help"}, {"--help"}}},
-	{id: "codex", displayName: "Codex CLI", command: "codex"},
+	{id: "claude-code", displayName: "Claude Code", command: "claude"},
 	{id: "codex-acp", displayName: "Codex CLI (ACP)", command: "codex", provider: "codex", transport: "acp", args: []string{"acp"}, probeArgs: [][]string{{"acp", "--help"}, {"--help"}}},
-	{id: "traecli", displayName: "TraeCLI", command: "traecli"},
+	{id: "codex", displayName: "Codex CLI", command: "codex"},
 	{id: "traecli-acp", displayName: "TraeCLI (ACP)", command: "traecli", provider: "traecli", transport: "acp", args: []string{"acp"}, probeArgs: [][]string{{"acp", "--help"}, {"--help"}}},
-	{id: "seed", displayName: "Seed CLI", command: "seed", transport: "a2a"},
+	{id: "traecli", displayName: "TraeCLI", command: "traecli"},
 }
 
 var agentClientVersionArgs = map[string][]string{
@@ -50,7 +49,6 @@ var agentClientVersionArgs = map[string][]string{
 	"codex-acp":   {"--version"},
 	"traecli":     {"--version"},
 	"traecli-acp": {"--version"},
-	"seed":        {"--version"},
 }
 
 var agentClientPermissionModes = map[string][]string{
@@ -60,7 +58,6 @@ var agentClientPermissionModes = map[string][]string{
 	"codex-acp":   {"default", "read-only", "workspace-write", "full-access"},
 	"traecli":     {"default", "acceptEdits", "bypassPermissions"},
 	"traecli-acp": {"default", "acceptEdits", "bypassPermissions"},
-	"seed":        {"default", "ask", "auto"},
 }
 
 var agentClientCapabilities = map[string][]string{
@@ -70,7 +67,6 @@ var agentClientCapabilities = map[string][]string{
 	"codex-acp":   {"acp", "jsonrpc", "mcp", "tools", "sandbox", "approval-policy", "session"},
 	"traecli":     {"print", "plain-text", "permissions", "tools"},
 	"traecli-acp": {"acp", "jsonrpc", "mcp", "permissions", "tools", "session"},
-	"seed":        {"a2a", "jsonrpc", "events", "permissions", "tools", "session"},
 }
 
 func agentClientSearchDirs() []string {
@@ -196,7 +192,7 @@ func discoverAgentClientsForConfig(cfg *Config) []AgentClientInfo {
 			ID:              c.id,
 			DisplayName:     c.displayName,
 			Binary:          bin,
-			Version:         detectAgentClientVersion(c.id, bin),
+			Version:         "",
 			Provider:        provider,
 			Transport:       transport,
 			Args:            append([]string(nil), c.args...),
@@ -221,19 +217,11 @@ func registryAgentClients(cfg *Config) []AgentClientInfo {
 		if provider == "" {
 			provider = entry.ID
 		}
-		version := ""
-		if entry.Binary != "" && (transport == "stdio" || transport == "acp") {
-			args := entry.VersionCommand
-			if len(args) == 0 {
-				args = []string{"--version"}
-			}
-			version = detectAgentClientVersionWithArgs(entry.Binary, args)
-		}
 		out = append(out, AgentClientInfo{
 			ID:              entry.ID,
 			DisplayName:     ifEmpty(entry.DisplayName, entry.ID),
 			Binary:          entry.Binary,
-			Version:         version,
+			Version:         "",
 			Provider:        provider,
 			Transport:       transport,
 			Args:            append([]string(nil), entry.Args...),
@@ -246,6 +234,9 @@ func registryAgentClients(cfg *Config) []AgentClientInfo {
 
 func supportsAgentClientCandidate(c agentClientCandidate, binary string) bool {
 	if c.transport != "acp" {
+		return true
+	}
+	if os.Getenv("OCTODECK_DAEMON_PROBE_AGENT_CLIENTS") != "1" {
 		return true
 	}
 	probes := c.probeArgs

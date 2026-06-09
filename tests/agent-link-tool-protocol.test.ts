@@ -90,14 +90,14 @@ describe('agent-link tool protocol', () => {
     const encoded = encodeFrame({
       type: 'daemon.update.request',
       id: 8,
-      latestVersion: 'octodeck-daemon/1.0.8',
+      latestVersion: 'octodeck-daemon/1.0.13',
       currentVersion: 'octodeck-daemon/1.0.3',
       reason: 'client_version_outdated',
     });
 
     expect(JSON.parse(encoded)).toMatchObject({
       type: 'daemon.update.request',
-      latestVersion: 'octodeck-daemon/1.0.8',
+      latestVersion: 'octodeck-daemon/1.0.13',
       currentVersion: 'octodeck-daemon/1.0.3',
     });
   });

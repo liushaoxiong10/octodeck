@@ -46,7 +46,7 @@ import {
 } from './agent-runtime-rpc.js';
 import { AgentLinkSession } from './session.js';
 
-const LATEST_DAEMON_VERSION = 'octodeck-daemon/1.0.8';
+export const LATEST_DAEMON_VERSION = 'octodeck-daemon/1.0.18';
 
 export interface OnlineLinkInfo {
   linkId: string;
@@ -404,6 +404,8 @@ function buildRuntimeStatuses(
       deviceLinkId: linkId,
       agentClientId: client.id,
       displayName: client.displayName,
+      provider: client.provider,
+      transport: client.transport,
       status: clientRuns.length > 0 ? 'busy' : 'idle',
       runningRuns: clientRuns,
       maxConcurrentRuns: cap?.maxConcurrentRuns ?? maxConcurrentRuns,

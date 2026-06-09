@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,7 +27,7 @@ import (
 func goos() string   { return runtime.GOOS }
 func goarch() string { return runtime.GOARCH }
 
-const daemonVersion = "octodeck-daemon/1.0.8"
+const daemonVersion = "octodeck-daemon/1.0.18"
 
 var daemonUpdateMu sync.Mutex
 
@@ -63,9 +64,18 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "debug" {
+		if err := runDebugCommand(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			log.Fatalf("octodeck-daemon debug: %v", err)
+		}
+		return
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-version") {
 		fmt.Println(daemonVersion)
 		return
+	}
+	if unknown := unknownDaemonSubcommand(os.Args[1:]); unknown != "" {
+		log.Fatalf("octodeck-daemon: unknown command %q (try: version, update, uninstall, debug)", unknown)
 	}
 
 	var configPath string
@@ -99,6 +109,18 @@ func main() {
 	}
 }
 
+func unknownDaemonSubcommand(args []string) string {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return ""
+	}
+	switch args[0] {
+	case "mcp-agent-team", "agent-runtime", "update", "uninstall", "debug", "version":
+		return ""
+	default:
+		return args[0]
+	}
+}
+
 func runUpdateCommand(args []string) error {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	var configPath string
@@ -115,6 +137,267 @@ func runUpdateCommand(args []string) error {
 		return err
 	}
 	return updateDaemonBinary(cfg, targetPath, restart)
+}
+
+type daemonDebugSnapshot struct {
+	Version            string                `json:"version"`
+	ConfigPath         string                `json:"configPath,omitempty"`
+	Server             string                `json:"server"`
+	LinkID             string                `json:"linkId"`
+	Hostname           string                `json:"hostname,omitempty"`
+	OS                 string                `json:"os"`
+	Arch               string                `json:"arch"`
+	WorkspaceDir       string                `json:"workspaceDir"`
+	SessionDir         string                `json:"sessionDir"`
+	StateDir           string                `json:"stateDir"`
+	AgentClients       []AgentClientInfo     `json:"agentClients"`
+	Sessions           []AgentSessionInfo    `json:"sessions"`
+	ACPSessionMappings []acpSessionMapRecord `json:"acpSessionMappings"`
+	LiveACPProcesses   []map[string]string   `json:"liveAcpProcesses"`
+	CollectedAt        string                `json:"collectedAt"`
+}
+
+func runDebugCommand(args []string, in io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("debug", flag.ContinueOnError)
+	var configPath string
+	var jsonOutput bool
+	fs.StringVar(&configPath, "config", "", "path to config.json")
+	fs.BoolVar(&jsonOutput, "json", false, "print JSON for one command")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	cfg.AgentClients = discoverAgentClientsForConfig(cfg)
+	command := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if command == "" && !jsonOutput {
+		return runDebugREPL(cfg, in, out)
+	}
+	if command == "" {
+		command = "status"
+	}
+	return printDebugCommand(context.Background(), cfg, command, jsonOutput, out)
+}
+
+func runDebugREPL(cfg *Config, in io.Reader, out io.Writer) error {
+	fmt.Fprintf(out, "OctoDeck daemon debug shell (%s)\n", daemonVersion)
+	fmt.Fprintln(out, "输入 help 查看命令，quit/exit 退出。")
+	scanner := bufio.NewScanner(in)
+	for {
+		fmt.Fprint(out, "octodeck-daemon> ")
+		if !scanner.Scan() {
+			fmt.Fprintln(out)
+			return scanner.Err()
+		}
+		cmd := strings.TrimSpace(scanner.Text())
+		if cmd == "" {
+			continue
+		}
+		switch strings.ToLower(cmd) {
+		case "quit", "exit", "q":
+			fmt.Fprintln(out, "bye")
+			return nil
+		}
+		if err := printDebugCommand(context.Background(), cfg, cmd, false, out); err != nil {
+			fmt.Fprintf(out, "error: %v\n", err)
+		}
+	}
+}
+
+func printDebugCommand(ctx context.Context, cfg *Config, command string, jsonOutput bool, out io.Writer) error {
+	snapshot, err := collectDebugSnapshot(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	cmd := strings.ToLower(strings.TrimSpace(command))
+	if cmd == "?" {
+		cmd = "help"
+	}
+	if jsonOutput || cmd == "json" {
+		data, err := json.MarshalIndent(snapshot, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(out, string(data))
+		return err
+	}
+	switch cmd {
+	case "help":
+		printDebugHelp(out)
+	case "status", "state":
+		printDebugStatus(out, snapshot)
+	case "clients", "agents":
+		printDebugClients(out, snapshot)
+	case "sessions":
+		printDebugSessions(out, snapshot)
+	case "acp", "mappings", "session-map":
+		printDebugACPMappings(out, snapshot)
+	case "paths", "dirs":
+		printDebugPaths(out, snapshot)
+	case "all":
+		printDebugStatus(out, snapshot)
+		printDebugPaths(out, snapshot)
+		printDebugClients(out, snapshot)
+		printDebugSessions(out, snapshot)
+		printDebugACPMappings(out, snapshot)
+	default:
+		return fmt.Errorf("unknown debug command %q", command)
+	}
+	return nil
+}
+
+func collectDebugSnapshot(ctx context.Context, cfg *Config) (daemonDebugSnapshot, error) {
+	if cfg.AgentClients == nil {
+		cfg.AgentClients = discoverAgentClientsForConfig(cfg)
+	}
+	sessions := make([]AgentSessionInfo, 0)
+	for _, adapter := range buildAgentAdapters(cfg) {
+		items, err := adapter.ListSessions(ctx, cfg, "")
+		if err != nil {
+			continue
+		}
+		sessions = append(sessions, items...)
+	}
+	sortAgentSessions(sessions)
+	return daemonDebugSnapshot{
+		Version:            daemonVersion,
+		ConfigPath:         cfg.Path,
+		Server:             cfg.Server,
+		LinkID:             cfg.LinkID,
+		Hostname:           hostname(),
+		OS:                 goos(),
+		Arch:               goarch(),
+		WorkspaceDir:       cfg.WorkspaceDir,
+		SessionDir:         cfg.SessionDir,
+		StateDir:           cfg.StateDir,
+		AgentClients:       cfg.AgentClients,
+		Sessions:           sessions,
+		ACPSessionMappings: listACPSessionMappings(cfg),
+		LiveACPProcesses:   listLiveACPProcesses(),
+		CollectedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+	}, nil
+}
+
+func sortAgentSessions(items []AgentSessionInfo) {
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Workspace != items[j].Workspace {
+			return items[i].Workspace < items[j].Workspace
+		}
+		if items[i].AgentID != items[j].AgentID {
+			return items[i].AgentID < items[j].AgentID
+		}
+		return items[i].ID < items[j].ID
+	})
+}
+
+func listACPSessionMappings(cfg *Config) []acpSessionMapRecord {
+	acpSessionMapMu.Lock()
+	data := readACPSessionMapLocked(cfg)
+	acpSessionMapMu.Unlock()
+	out := make([]acpSessionMapRecord, 0, len(data.Records))
+	for _, rec := range data.Records {
+		out = append(out, rec)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ConversationID != out[j].ConversationID {
+			return out[i].ConversationID < out[j].ConversationID
+		}
+		if out[i].AgentID != out[j].AgentID {
+			return out[i].AgentID < out[j].AgentID
+		}
+		return out[i].SessionID < out[j].SessionID
+	})
+	return out
+}
+
+func listLiveACPProcesses() []map[string]string {
+	acpProcessesMu.Lock()
+	defer acpProcessesMu.Unlock()
+	out := make([]map[string]string, 0, len(acpProcesses))
+	for key, proc := range acpProcesses {
+		status := "exited"
+		if proc.alive() {
+			status = "running"
+		}
+		out = append(out, map[string]string{"key": key, "agentId": proc.agentID, "cwd": proc.cwd, "sessionId": proc.sessionID, "status": status})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i]["key"] < out[j]["key"] })
+	return out
+}
+
+func printDebugHelp(out io.Writer) {
+	fmt.Fprintln(out, "commands:")
+	fmt.Fprintln(out, "  status      当前配置、已发现 agent、session 数量")
+	fmt.Fprintln(out, "  sessions    列出 provider 原生会话元数据")
+	fmt.Fprintln(out, "  acp         列出 OctoDeck 对话 -> ACP session 映射和本进程 live ACP 进程")
+	fmt.Fprintln(out, "  clients     列出当前可用 agent clients")
+	fmt.Fprintln(out, "  paths       显示 workspace/session/state 目录")
+	fmt.Fprintln(out, "  all         输出全部调试信息")
+	fmt.Fprintln(out, "  json        以 JSON 输出全部快照")
+	fmt.Fprintln(out, "  quit        退出交互模式")
+}
+
+func printDebugStatus(out io.Writer, s daemonDebugSnapshot) {
+	fmt.Fprintf(out, "version: %s\n", s.Version)
+	fmt.Fprintf(out, "linkId: %s\n", s.LinkID)
+	fmt.Fprintf(out, "server: %s\n", s.Server)
+	fmt.Fprintf(out, "host: %s %s/%s\n", s.Hostname, s.OS, s.Arch)
+	fmt.Fprintf(out, "agentClients: %d\n", len(s.AgentClients))
+	fmt.Fprintf(out, "sessions: %d\n", len(s.Sessions))
+	fmt.Fprintf(out, "acpSessionMappings: %d\n", len(s.ACPSessionMappings))
+	fmt.Fprintf(out, "liveAcpProcessesInThisCommand: %d\n", len(s.LiveACPProcesses))
+}
+
+func printDebugPaths(out io.Writer, s daemonDebugSnapshot) {
+	fmt.Fprintf(out, "config: %s\n", s.ConfigPath)
+	fmt.Fprintf(out, "workspaceDir: %s\n", s.WorkspaceDir)
+	fmt.Fprintf(out, "sessionDir: %s\n", s.SessionDir)
+	fmt.Fprintf(out, "stateDir: %s\n", s.StateDir)
+}
+
+func printDebugClients(out io.Writer, s daemonDebugSnapshot) {
+	if len(s.AgentClients) == 0 {
+		fmt.Fprintln(out, "no agent clients discovered")
+		return
+	}
+	for _, c := range s.AgentClients {
+		fmt.Fprintf(out, "- %s (%s) transport=%s provider=%s binary=%s version=%s\n", c.ID, c.DisplayName, ifEmpty(c.Transport, "stdio"), c.Provider, c.Binary, c.Version)
+	}
+}
+
+func printDebugSessions(out io.Writer, s daemonDebugSnapshot) {
+	if len(s.Sessions) == 0 {
+		fmt.Fprintln(out, "no provider sessions found")
+		return
+	}
+	for _, item := range s.Sessions {
+		fmt.Fprintf(out, "- workspace=%s agent=%s session=%s updated=%s size=%d path=%s", item.Workspace, item.AgentID, item.ID, item.UpdatedAt, item.SizeBytes, item.Path)
+		if item.Title != "" {
+			fmt.Fprintf(out, " title=%q", item.Title)
+		}
+		fmt.Fprintln(out)
+	}
+}
+
+func printDebugACPMappings(out io.Writer, s daemonDebugSnapshot) {
+	if len(s.ACPSessionMappings) == 0 {
+		fmt.Fprintln(out, "no acp session mappings found")
+	} else {
+		fmt.Fprintln(out, "acp session mappings:")
+		for _, rec := range s.ACPSessionMappings {
+			fmt.Fprintf(out, "- conversation=%s agent=%s session=%s updated=%s cwd=%s key=%s\n", rec.ConversationID, rec.AgentID, rec.SessionID, rec.UpdatedAt, rec.Cwd, rec.Key)
+		}
+	}
+	if len(s.LiveACPProcesses) == 0 {
+		fmt.Fprintln(out, "no live acp processes in this debug command process")
+		return
+	}
+	fmt.Fprintln(out, "live acp processes in this command process:")
+	for _, proc := range s.LiveACPProcesses {
+		fmt.Fprintf(out, "- key=%s agent=%s session=%s status=%s cwd=%s\n", proc["key"], proc["agentId"], proc["sessionId"], proc["status"], proc["cwd"])
+	}
 }
 
 func updateDaemonBinary(cfg *Config, targetPath string, restart bool) error {

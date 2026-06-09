@@ -230,7 +230,7 @@ describe('agent-link run context forwarding', () => {
       agentId: 'conversation-1',
       scope: 'session',
       scopeId: expect.stringMatching(
-        /^octodeck-web-repo-conv-conversation-1-[a-f0-9]{12}$/,
+        /^octodeck-repo-conv-conversation-1-[a-f0-9]{12}$/,
       ),
     });
 
@@ -311,7 +311,7 @@ describe('agent-link run context forwarding', () => {
       agentId: 'mac-traecli',
       scope: 'session',
       scopeId: expect.stringMatching(
-        /^octodeck-web-session-a-mac-traecli-[a-f0-9]{12}$/,
+        /^octodeck-flow-mq3z0g6r-d007b379-mac-traecli-[a-f0-9]{12}$/,
       ),
     });
     expect(sent[1].workspaceRepo).toMatchObject({
@@ -346,12 +346,10 @@ describe('agent-link run context forwarding', () => {
       agentId: 'mac-traecli',
       scope: 'session',
       scopeId: expect.stringMatching(
-        /^octodeck-web-session-b-mac-traecli-[a-f0-9]{12}$/,
+        /^octodeck-flow-mq3z0g6r-d007b379-mac-traecli-[a-f0-9]{12}$/,
       ),
     });
-    expect(sent[2].workspaceRepo.scopeId).not.toBe(
-      sent[0].workspaceRepo.scopeId,
-    );
+    expect(sent[2].workspaceRepo.scopeId).toBe(sent[0].workspaceRepo.scopeId);
   });
 
   test('runViaAgentLink strips Agent Team MCP config from nested team role runs', async () => {
@@ -684,6 +682,21 @@ describe('agent-link run context forwarding', () => {
     expect(sent[0]).toMatchObject({
       type: 'agent.run.request',
       agentId: 'claude-code',
+      workspace: {
+        folder: 'device-claude',
+        scope: 'session',
+        scopeId: 'web:device-claude',
+      },
+      input: {
+        metadata: {
+          groupFolder: 'device-claude',
+          chatId: 'web:device-claude',
+          conversationId: 'web:device-claude',
+          sessionKey: 'web:device-claude',
+          chatJid: 'web:device-claude',
+          workspaceId: 'device-claude',
+        },
+      },
       policy: { model: 'sonnet' },
     });
     expect(sent[0].policy.systemPrompt).toContain('<behavior>');

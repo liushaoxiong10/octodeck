@@ -788,9 +788,12 @@ function buildStableWorkspaceScopeId(
   const { input, group } = args;
   if (input.isScheduledTask) return input.taskRunId;
 
-  const conversationKey = input.chatJid || group.folder;
-  const readableConversation = safeWorkspaceScopeSegment(
-    conversationKey,
+  // Workspace scope must be rooted in the OctoDeck workspace/group, not the
+  // transient chat channel. A single workspace may be driven from web/IM/etc.;
+  // changing chatJid must not move the daemon cwd or split the ACP process key.
+  const workspaceKey = group.folder;
+  const readableWorkspace = safeWorkspaceScopeSegment(
+    workspaceKey,
     group.folder || 'main',
   );
   const readableAgent = safeWorkspaceScopeSegment(agentId, cfg.backendId);
@@ -800,7 +803,6 @@ function buildStableWorkspaceScopeId(
       JSON.stringify({
         userId: group.created_by,
         groupFolder: group.folder,
-        chatJid: input.chatJid,
         agentId,
         backendId: cfg.backendId,
         repoId: group.repoId,
@@ -811,7 +813,22 @@ function buildStableWorkspaceScopeId(
     .digest('hex')
     .slice(0, 12);
 
-  return `octodeck-${readableConversation}-${readableAgent}-${digest}`;
+  return `octodeck-${readableWorkspace}-${readableAgent}-${digest}`;
+}
+
+function buildStableChatId(args: BackendRunArgs): string | undefined {
+  const { input, group } = args;
+  return input.chatJid || input.taskRunId || input.messageTaskId || group.folder;
+}
+
+function buildRemoteSessionScopeId(
+  args: BackendRunArgs,
+  workspaceId: string | undefined,
+): string | undefined {
+  const { input } = args;
+  if (input.isScheduledTask) return input.taskRunId;
+  const chatId = buildStableChatId(args);
+  return chatId || workspaceId;
 }
 
 function buildRemoteWorkspaceMeta(
@@ -840,7 +857,13 @@ function buildRemoteWorkspaceMeta(
 function supportsAgentRun(linkId: string, agentClientId?: string): boolean {
   if (!agentClientId) return false;
   const meta = getOnlineMeta(linkId);
-  return !!meta?.capabilities?.includes('agent.run');
+  if (!meta?.capabilities?.includes('agent.run')) return false;
+  const runtimes = meta.runtimes ?? [];
+  if (runtimes.length === 0) return true;
+  return runtimes.some(
+    (runtime) =>
+      runtime.agentClientId === agentClientId && runtime.status !== 'offline',
+  );
 }
 
 function buildRemoteEnv(
@@ -897,6 +920,7 @@ async function runViaAgentRuntime(opts: {
   const startTime = Date.now();
   const runId = newRunId();
   const processId = `${cfg.backendId}-${group.folder}-${linkId}-${agentClientId}-${startTime}`;
+  const chatId = buildStableChatId(args);
 
   return new Promise<ContainerOutput>((resolve) => {
     let settled = false;
@@ -1126,11 +1150,17 @@ async function runViaAgentRuntime(opts: {
       input.isScheduledTask && !input.scheduledTaskHasWorkspace
         ? ''
         : group.folder;
+    const workspaceId = remoteWorkspaceFolder || group.folder;
+    const sessionScopeId = buildRemoteSessionScopeId(args, workspaceId);
     const workspacePayload: Record<string, unknown> = {
       kind: 'workspace',
       cwd: groupDir,
       folder: remoteWorkspaceFolder,
       ...workspaceMeta,
+      scopeId:
+        workspaceMeta.scope === 'session' || workspaceMeta.scope === 'direct_session'
+          ? sessionScopeId
+          : workspaceMeta.scopeId,
     };
     if (workspaceRepos.length > 0) {
       workspacePayload.repos = workspaceRepos;
@@ -1144,7 +1174,15 @@ async function runViaAgentRuntime(opts: {
       input: {
         prompt: input.prompt,
         sessionId: input.sessionId,
-        metadata: { scheduledTask: !!input.isScheduledTask },
+        metadata: {
+          scheduledTask: !!input.isScheduledTask,
+          workspaceId,
+          groupFolder: group.folder,
+          chatId,
+          conversationId: chatId,
+          sessionKey: chatId,
+          chatJid: input.chatJid,
+        },
       },
       cwd: groupDir,
       env: remoteEnv,

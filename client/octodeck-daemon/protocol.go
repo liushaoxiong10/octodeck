@@ -103,6 +103,8 @@ type RuntimeStatus struct {
 	DeviceLinkID      string           `json:"deviceLinkId"`
 	AgentClientID     string           `json:"agentClientId"`
 	DisplayName       string           `json:"displayName,omitempty"`
+	Provider          string           `json:"provider,omitempty"`
+	Transport         string           `json:"transport,omitempty"`
 	Status            string           `json:"status"`
 	MaxConcurrentRuns int              `json:"maxConcurrentRuns,omitempty"`
 	RunningRuns       []RunningRunInfo `json:"runningRuns,omitempty"`

@@ -327,6 +327,8 @@ func buildRuntimeStatuses(linkID string, clients []AgentClientInfo, running []Ru
 			DeviceLinkID:      linkID,
 			AgentClientID:     client.ID,
 			DisplayName:       client.DisplayName,
+			Provider:          ifEmpty(client.Provider, client.ID),
+			Transport:         ifEmpty(client.Transport, "stdio"),
 			Status:            status,
 			MaxConcurrentRuns: maxRuns,
 			RunningRuns:       running,

@@ -38,20 +38,25 @@ func TestDiscoverAgentClientsFindsSupportedClientsOnPath(t *testing.T) {
 	}
 }
 
-func TestDiscoverAgentClientsCollectsVersion(t *testing.T) {
+func TestDiscoverAgentClientsDoesNotStartCLIForVersion(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "codex")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\necho 'codex-cli 1.2.3'\n"), 0o755); err != nil {
+	if err := os.WriteFile(p, []byte("#!/bin/sh\necho started >> \"$CLI_STARTED_LOG\"\necho 'codex-cli 1.2.3'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	logPath := filepath.Join(dir, "started.log")
 	t.Setenv("PATH", dir)
 	t.Setenv("OCTODECK_DAEMON_EXTRA_PATH", "")
+	t.Setenv("CLI_STARTED_LOG", logPath)
 
 	clients := discoverAgentClients()
 	for _, c := range clients {
 		if c.ID == "codex" {
-			if c.Version != "codex-cli 1.2.3" {
-				t.Fatalf("unexpected codex version %q in %#v", c.Version, clients)
+			if c.Version != "" {
+				t.Fatalf("expected no startup-time version probe, got %q in %#v", c.Version, clients)
+			}
+			if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+				t.Fatalf("discover should not execute CLI; stat err=%v", err)
 			}
 			return
 		}
@@ -129,6 +134,7 @@ echo 'claude help'
 	}
 	t.Setenv("PATH", dir)
 	t.Setenv("OCTODECK_DAEMON_EXTRA_PATH", "")
+	t.Setenv("OCTODECK_DAEMON_PROBE_AGENT_CLIENTS", "1")
 
 	clients := discoverAgentClients()
 	ids := map[string]AgentClientInfo{}
@@ -276,6 +282,278 @@ func TestNormalizeAgentJSONLineFramesPreservesToolResultBlock(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentJSONLineFramesSuppressesUserAndSystemText(t *testing.T) {
+	userLine := `{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"who are u"},{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}}`
+	frames := normalizeAgentJSONLineFrames(userLine)
+	if len(frames) != 1 {
+		t.Fatalf("expected only tool_result frame for user turn, got %d: %#v", len(frames), frames)
+	}
+	if frames[0].EventType != "tool_result" {
+		t.Fatalf("expected tool_result, got %s text=%q", frames[0].EventType, frames[0].Text)
+	}
+	systemLine := `{"type":"system","message":{"content":"Treat yourself as an autonomous senior pair-programmer"}}`
+	sframes := normalizeAgentJSONLineFrames(systemLine)
+	for _, f := range sframes {
+		if f.EventType == "text_delta" || f.EventType == "thinking_delta" {
+			t.Fatalf("system prompt leaked into stream as %s: %q", f.EventType, f.Text)
+		}
+	}
+	userStrLine := `{"type":"user","message":{"role":"user","content":"hello world"}}`
+	strframes := normalizeAgentJSONLineFrames(userStrLine)
+	for _, f := range strframes {
+		if f.EventType == "text_delta" && f.Text != "" {
+			t.Fatalf("user text leaked into stream as text_delta: %q", f.Text)
+		}
+	}
+}
+
+func TestNormalizeAgentJSONLineFramesRoutesContentBlockDeltaByType(t *testing.T) {
+	textLine := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"assistant says hi"}}`
+	frames := normalizeAgentJSONLineFrames(textLine)
+	if len(frames) != 1 || frames[0].EventType != "text_delta" || frames[0].Text != "assistant says hi" {
+		t.Fatalf("content_block_delta text_delta misrouted: %#v", frames)
+	}
+	thinkingLine := `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me think"}}`
+	tframes := normalizeAgentJSONLineFrames(thinkingLine)
+	if len(tframes) != 1 || tframes[0].EventType != "thinking_delta" || tframes[0].Text != "let me think" {
+		t.Fatalf("content_block_delta thinking_delta misrouted: %#v", tframes)
+	}
+	toolLine := `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"pwd"}}}`
+	toolf := normalizeAgentJSONLineFrames(toolLine)
+	if len(toolf) != 1 || toolf[0].EventType != "tool_call" {
+		t.Fatalf("content_block_start tool_use misrouted: %#v", toolf)
+	}
+	if toolf[0].Payload["name"] != "Bash" || toolf[0].Payload["id"] != "toolu_1" {
+		t.Fatalf("content_block_start tool_use payload missing fields: %#v", toolf[0].Payload)
+	}
+}
+
+func TestNormalizeAgentJSONLineFramesDropsStreamingWrappersWithoutSessionSpam(t *testing.T) {
+	// Streaming wrapper frames (content_block_stop, message_delta, message_stop) are
+	// produced by every streaming-json CLI turn. They carry no event content. When the
+	// CLI tags every line with a session_id, the old promotion logic turned each of
+	// them into a spurious "session" trace event, flooding the UI.
+	wrappers := []struct {
+		name string
+		line string
+	}{
+		{"content_block_stop", `{"type":"content_block_stop","index":0,"session_id":"sess-wrapping"}`},
+		{"message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":null,"session_id":"sess-wrapping"}`},
+		{"message_stop", `{"type":"message_stop","session_id":"sess-wrapping"}`},
+		{"message_start_empty", `{"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[]},"session_id":"sess-wrapping"}`},
+	}
+	for _, tc := range wrappers {
+		t.Run(tc.name, func(t *testing.T) {
+			frames := normalizeAgentJSONLineFrames(tc.line)
+			for _, f := range frames {
+				if f.EventType == "session" {
+					t.Fatalf("%s frame leaked as eventType=session: %#v", tc.name, f)
+				}
+				if f.EventType == "text_delta" || f.EventType == "thinking_delta" {
+					t.Fatalf("%s frame leaked as text/thinking delta: %#v", tc.name, f)
+				}
+			}
+		})
+	}
+}
+
+func TestLooksLikeSessionNotificationClassifiesCorrectly(t *testing.T) {
+	shouldMatch := []map[string]any{
+		{"type": "session_created", "sessionId": "s1"},
+		{"type": "session_resumed", "sessionId": "s1"},
+		{"type": "session", "sessionId": "s1"},
+		{"event": "new_session", "id": "s1"},
+		{"action": "create_session", "id": "s1"},
+	}
+	for _, p := range shouldMatch {
+		if !looksLikeSessionNotification(p) {
+			t.Fatalf("expected payload to look like session notification: %#v", p)
+		}
+	}
+	shouldNotMatch := []map[string]any{
+		{"type": "message_start", "session_id": "s1"},
+		{"type": "content_block_stop", "session_id": "s1"},
+		{"type": "message_delta", "session_id": "s1", "stop_reason": "end_turn"},
+		{"type": "tool_use_start", "session_id": "s1", "name": "Bash"},
+		{"type": "text_delta", "session_id": "s1", "text": "hi"},
+		{},
+	}
+	for _, p := range shouldNotMatch {
+		if looksLikeSessionNotification(p) {
+			t.Fatalf("expected payload NOT to look like session notification: %#v", p)
+		}
+	}
+}
+
+// aggregateTextFromFrames runs all provided lines through
+// normalizeAgentJSONLineFrames and returns the concatenated text_delta payloads
+// plus the count of text_delta frames. This mirrors how pumpAgentStdout in
+// agent_runtime.go assembles finalText.
+func aggregateTextFromFrames(lines []string) (string, int) {
+	var sb strings.Builder
+	count := 0
+	for _, line := range lines {
+		frames := normalizeAgentJSONLineFrames(line)
+		for _, f := range frames {
+			if f.EventType == "text_delta" && f.Text != "" {
+				sb.WriteString(f.Text)
+				count++
+			}
+		}
+	}
+	return sb.String(), count
+}
+
+func TestTraecliStreamJsonWithoutPartialMessagesProducesExactlyOneCopy(t *testing.T) {
+	// Simulates a minimal traecli stream-json reply for "你好，世界" using
+	// three content_block_delta chunks, followed by message_stop.
+	// With --include-partial-messages removed from the traecli argv, the CLI
+	// should no longer emit intermediate {"type":"assistant"} snapshots, so
+	// the aggregated text must equal exactly the concatenated chunks.
+	lines := []string{
+		`{"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[]},"session_id":"s1"}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""},"session_id":"s1"}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你好，"},"session_id":"s1"}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"世"},"session_id":"s1"}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"界"},"session_id":"s1"}`,
+		`{"type":"content_block_stop","index":0,"session_id":"s1"}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":null,"session_id":"s1"}`,
+		`{"type":"message_stop","usage":{"input_tokens":10,"output_tokens":3},"session_id":"s1"}`,
+	}
+	got, count := aggregateTextFromFrames(lines)
+	want := "你好，世界"
+	if got != want {
+		t.Fatalf("expected aggregated text to be %q (1 copy), got %q (chunks=%d)", want, got, count)
+	}
+	if count != 3 {
+		t.Fatalf("expected exactly 3 text_delta frames (one per chunk), got %d: %q", count, got)
+	}
+}
+
+func TestTraecliStreamJsonPlusFinalResultDoesNotDoubleText(t *testing.T) {
+	// Full streaming-json turn simulating what traecli emits without
+	// --include-partial-messages: incremental chunks + a trailing result
+	// payload. Only the chunks should count towards the streamed text; the
+	// trailing result is marked final_result so it only fills in when zero
+	// chunks were seen.
+	lines := []string{
+		`{"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[]},"session_id":"s-full"}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""},"session_id":"s-full"}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Alpha"},"session_id":"s-full"}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" beta"},"session_id":"s-full"}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" gamma"},"session_id":"s-full"}`,
+		`{"type":"content_block_stop","index":0,"session_id":"s-full"}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"session_id":"s-full"}`,
+		`{"type":"message_stop","usage":{},"session_id":"s-full"}`,
+		`{"type":"result","result":"Alpha beta gamma"}`,
+	}
+	var streamedText strings.Builder
+	var fallbackText string
+	streamedCount := 0
+	for _, line := range lines {
+		for _, f := range normalizeAgentJSONLineFrames(line) {
+			if f.EventType == "text_delta" && f.Text != "" {
+				streamedText.WriteString(f.Text)
+				streamedCount++
+			}
+			if f.EventType == "final_result" && f.Text != "" {
+				fallbackText = f.Text
+			}
+		}
+	}
+	if streamedText.String() != "Alpha beta gamma" {
+		t.Fatalf("streamed text delta concatenation wrong: got %q count=%d", streamedText.String(), streamedCount)
+	}
+	if fallbackText != "Alpha beta gamma" {
+		t.Fatalf("final_result fallback should carry the complete answer, got %q", fallbackText)
+	}
+	if streamedCount != 3 {
+		t.Fatalf("expected exactly 3 streamed text_delta frames, got %d", streamedCount)
+	}
+	// Simulate the pumpAgentStdout caller: only use fallback when streamed
+	// text is empty. Here streamed text is present so fallback must NOT be
+	// concatenated on top.
+	effective := streamedText.String()
+	if effective == "" {
+		effective = fallbackText
+	}
+	if effective != "Alpha beta gamma" {
+		t.Fatalf("effective final text should be a single copy, got %q", effective)
+	}
+}
+
+func TestSingleShotResultOnlyUsesFinalResultFallback(t *testing.T) {
+	// Non-streaming CLI emits only one {"type":"result","result":"done"}
+	// frame (no content_block_delta, no assistant snapshot). Since there are
+	// zero text_delta frames, final_result must be promoted to the effective
+	// answer by the caller.
+	lines := []string{
+		`{"type":"result","result":"42"}`,
+	}
+	var streamedText strings.Builder
+	var fallbackText string
+	for _, line := range lines {
+		for _, f := range normalizeAgentJSONLineFrames(line) {
+			if f.EventType == "text_delta" && f.Text != "" {
+				streamedText.WriteString(f.Text)
+			}
+			if f.EventType == "final_result" && f.Text != "" {
+				fallbackText = f.Text
+			}
+		}
+	}
+	if streamedText.Len() != 0 {
+		t.Fatalf("single-shot result should NOT emit text_delta, got %q", streamedText.String())
+	}
+	if fallbackText != "42" {
+		t.Fatalf("single-shot result should produce final_result fallback, got %q", fallbackText)
+	}
+	effective := streamedText.String()
+	if effective == "" {
+		effective = fallbackText
+	}
+	if effective != "42" {
+		t.Fatalf("effective final text missing for single-shot CLI: got %q", effective)
+	}
+}
+
+func TestStandaloneAssistantSnapshotStillProducesTextDelta(t *testing.T) {
+	// Non-streaming CLIs (and older flow formats) that only emit a single
+	// {"type":"assistant", ...} frame with the full reply must still produce
+	// exactly one text_delta event.
+	lines := []string{
+		`{"type":"assistant","session_id":"s2","message":{"content":"独立快照的回复"}}`,
+	}
+	got, count := aggregateTextFromFrames(lines)
+	if got != "独立快照的回复" || count != 1 {
+		t.Fatalf("standalone assistant frame should produce exactly 1 text_delta, got count=%d text=%q", count, got)
+	}
+}
+
+func TestACPConversationIDPrefersChatIDOverWorkspaceScope(t *testing.T) {
+	req := &AgentRunRequestFrame{
+		RunID:   "run-1",
+		AgentID: "custom-acp",
+		Cwd:     t.TempDir(),
+		Input: AgentRunInput{
+			Prompt:   "hello",
+			Metadata: map[string]any{"chatId": "chat-alpha", "workspaceId": "workspace-1"},
+		},
+		Workspace: &AgentRunWorkspace{Folder: "workspace-1", AgentID: "custom-acp", Scope: "session", ScopeID: "workspace-scope"},
+	}
+	if got := acpConversationID(req); got != "chat-alpha" {
+		t.Fatalf("expected chat id to drive ACP conversation mapping, got %q", got)
+	}
+
+	otherChat := *req
+	otherInput := req.Input
+	otherInput.Metadata = map[string]any{"chatId": "chat-beta", "workspaceId": "workspace-1"}
+	otherChat.Input = otherInput
+	if acpSessionProcessKey(req) == acpSessionProcessKey(&otherChat) {
+		t.Fatalf("expected different chats in the same workspace to use different ACP process keys")
+	}
+}
+
 func TestACPAdapterRunDirectUsesDiscoveredClientArgs(t *testing.T) {
 	cfg := &Config{SessionDir: t.TempDir()}
 	client := AgentClientInfo{
@@ -313,7 +591,7 @@ func TestACPAdapterPrefersLoadSessionForExistingSession(t *testing.T) {
 		Env: map[string]string{
 			"GO_WANT_ACP_HELPER_PROCESS":   "1",
 			"ACP_HELPER_METHOD_LOG":        methodLog,
-			"ACP_HELPER_INITIALIZE_RESULT": `{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":true}}}`,
+			"ACP_HELPER_INITIALIZE_RESULT": `{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}`,
 			"ACP_HELPER_ALLOW_LOAD":        "1",
 		},
 	}
@@ -345,6 +623,139 @@ func TestACPAdapterPrefersLoadSessionForExistingSession(t *testing.T) {
 	want := []string{"initialize", "session/load", "session/prompt"}
 	if strings.Join(methods, ",") != strings.Join(want, ",") {
 		t.Fatalf("expected ACP methods %v, got %v", want, methods)
+	}
+}
+
+func TestACPAdapterReusesLiveSessionProcessForConversation(t *testing.T) {
+	methodLog := filepath.Join(t.TempDir(), "methods.log")
+	entry := AgentRegistryEntry{
+		ID:        "custom-acp-live",
+		Transport: "acp",
+		Binary:    os.Args[0],
+		Args:      []string{"-test.run=TestACPHelperProcess"},
+		Env: map[string]string{
+			"GO_WANT_ACP_HELPER_PROCESS": "1",
+			"ACP_HELPER_METHOD_LOG":      methodLog,
+			"ACP_HELPER_KEEP_RUNNING":    "1",
+			"ACP_HELPER_NEW_SESSION_ID":  "sess-live",
+		},
+	}
+	cfg := &Config{AgentRegistry: []AgentRegistryEntry{entry}, SessionDir: t.TempDir(), StateDir: t.TempDir()}
+	adapter := &acpAdapter{baseAgentAdapter: baseAgentAdapter{client: AgentClientInfo{ID: entry.ID, Binary: entry.Binary, Transport: entry.Transport}}, entry: &entry}
+	cwd := t.TempDir()
+	baseReq := func(runID, prompt string) *AgentRunRequestFrame {
+		return &AgentRunRequestFrame{
+			RunID:          runID,
+			AgentID:        entry.ID,
+			Cwd:            cwd,
+			MaxOutputBytes: 1024,
+			Input:          AgentRunInput{Prompt: prompt},
+			Workspace:      &AgentRunWorkspace{Folder: "demo", AgentID: entry.ID, Scope: "session", ScopeID: "aaa"},
+			Context:        map[string]any{"group": map[string]any{"folder": "demo"}},
+		}
+	}
+	defer func() {
+		key := acpSessionProcessKey(baseReq("cleanup", ""))
+		acpProcessesMu.Lock()
+		proc := acpProcesses[key]
+		delete(acpProcesses, key)
+		acpProcessesMu.Unlock()
+		if proc != nil {
+			proc.stop()
+		}
+	}()
+	first, err := adapter.RunDirect(context.Background(), cfg, baseReq("run-live-1", "hello"), func(AgentRunEventFrame) {})
+	if err != nil || !first.OK || first.SessionID != "sess-live" {
+		t.Fatalf("unexpected first result: %#v err=%v", first, err)
+	}
+	second, err := adapter.RunDirect(context.Background(), cfg, baseReq("run-live-2", "again"), func(AgentRunEventFrame) {})
+	if err != nil || !second.OK || second.SessionID != "sess-live" {
+		t.Fatalf("unexpected second result: %#v err=%v", second, err)
+	}
+	data, err := os.ReadFile(methodLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	methods := strings.Split(strings.TrimSpace(string(data)), "\n")
+	want := []string{"initialize", "session/new", "session/prompt", "session/prompt"}
+	if strings.Join(methods, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected ACP methods %v, got %v", want, methods)
+	}
+}
+
+func TestACPAdapterResumesMappedSessionAfterProcessExit(t *testing.T) {
+	methodLog := filepath.Join(t.TempDir(), "methods.log")
+	entry := AgentRegistryEntry{
+		ID:        "custom-acp-resume",
+		Transport: "acp",
+		Binary:    os.Args[0],
+		Args:      []string{"-test.run=TestACPHelperProcess"},
+		Env: map[string]string{
+			"GO_WANT_ACP_HELPER_PROCESS":   "1",
+			"ACP_HELPER_METHOD_LOG":        methodLog,
+			"ACP_HELPER_INITIALIZE_RESULT": `{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}`,
+			"ACP_HELPER_ALLOW_LOAD":        "1",
+			"ACP_HELPER_NEW_SESSION_ID":    "sess-persisted",
+		},
+	}
+	cfg := &Config{AgentRegistry: []AgentRegistryEntry{entry}, SessionDir: t.TempDir(), StateDir: t.TempDir()}
+	adapter := &acpAdapter{baseAgentAdapter: baseAgentAdapter{client: AgentClientInfo{ID: entry.ID, Binary: entry.Binary, Transport: entry.Transport}}, entry: &entry}
+	cwd := t.TempDir()
+	baseReq := func(runID, prompt string) *AgentRunRequestFrame {
+		return &AgentRunRequestFrame{
+			RunID:          runID,
+			AgentID:        entry.ID,
+			Cwd:            cwd,
+			MaxOutputBytes: 1024,
+			Input:          AgentRunInput{Prompt: prompt},
+			Workspace:      &AgentRunWorkspace{Folder: "demo", AgentID: entry.ID, Scope: "session", ScopeID: "aaa"},
+			Context:        map[string]any{"group": map[string]any{"folder": "demo"}},
+		}
+	}
+	first, err := adapter.RunDirect(context.Background(), cfg, baseReq("run-resume-1", "hello"), func(AgentRunEventFrame) {})
+	if err != nil || !first.OK || first.SessionID != "sess-persisted" {
+		t.Fatalf("unexpected first result: %#v err=%v", first, err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	second, err := adapter.RunDirect(context.Background(), cfg, baseReq("run-resume-2", "again"), func(AgentRunEventFrame) {})
+	if err != nil || !second.OK || second.SessionID != "sess-persisted" {
+		t.Fatalf("unexpected second result: %#v err=%v", second, err)
+	}
+	data, err := os.ReadFile(methodLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	methods := strings.Split(strings.TrimSpace(string(data)), "\n")
+	want := []string{"initialize", "session/new", "session/prompt", "initialize", "session/load", "session/prompt"}
+	if strings.Join(methods, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected ACP methods %v, got %v", want, methods)
+	}
+}
+
+func TestDeleteACPSessionRecordsRemovesLocalMapping(t *testing.T) {
+	cfg := &Config{StateDir: t.TempDir()}
+	rec := acpSessionMapRecord{
+		Key:            "custom-acp:abc",
+		ConversationID: "chat-1",
+		AgentID:        "custom-acp",
+		CLIName:        "Custom ACP",
+		Provider:       "claude-code",
+		Transport:      "acp",
+		Model:          "sonnet",
+		Cwd:            t.TempDir(),
+		SessionID:      "sess-delete",
+	}
+	if err := writeACPSessionRecord(cfg, rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := lookupACPSessionRecord(cfg, rec.Key); !ok {
+		t.Fatalf("expected session mapping to be persisted")
+	}
+	if deleted := deleteACPSessionRecords(cfg, rec.AgentID, rec.SessionID); deleted != 1 {
+		t.Fatalf("expected one deleted mapping, got %d", deleted)
+	}
+	if _, ok := lookupACPSessionRecord(cfg, rec.Key); ok {
+		t.Fatalf("expected local session mapping to be removed")
 	}
 }
 
@@ -382,17 +793,23 @@ func TestACPHelperProcess(t *testing.T) {
 		case "session/resume":
 			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(`{}`)})
 		case "session/new":
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(`{"sessionId":"sess-jsonrpc"}`)})
+			sessionID := os.Getenv("ACP_HELPER_NEW_SESSION_ID")
+			if sessionID == "" {
+				sessionID = "sess-jsonrpc"
+			}
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(`{"sessionId":"` + sessionID + `"}`)})
 		case "session/prompt":
 			sessionID := acpHelperSessionIDFromParams(msg.Params)
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","reasoning":"thinking about it"}`)})
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","type":"tool_call","id":"tool-1","name":"Read","input":{"file":"README.md"}}`)})
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","type":"tool_result","tool_use_id":"tool-1","content":"ok"}`)})
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","usage":{"input_tokens":12,"output_tokens":3}}`)})
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","text":"assistant reply"}`)})
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"thinking about it"}}}`)})
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","update":{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"Read","status":"pending","rawInput":{"file":"README.md"}}}`)})
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"completed","rawOutput":"ok"}}`)})
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","update":{"sessionUpdate":"usage_update","size":15,"used":15}}`)})
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"assistant reply"}}}`)})
 			time.Sleep(20 * time.Millisecond)
-			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(`{"content":"assistant reply","usage":{"input_tokens":12,"output_tokens":3}}`)})
-			os.Exit(0)
+			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(`{"stopReason":"end_turn","usage":{"inputTokens":12,"outputTokens":3,"totalTokens":15}}`)})
+			if os.Getenv("ACP_HELPER_KEEP_RUNNING") != "1" {
+				os.Exit(0)
+			}
 		default:
 			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Error: &runtimeRPCError{Code: -32601, Message: "method not found"}})
 		}

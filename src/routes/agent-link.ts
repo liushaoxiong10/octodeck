@@ -45,6 +45,7 @@ import {
   handleFrame,
   handleHello,
   isOnline,
+  LATEST_DAEMON_VERSION,
   onIncomingSession,
   unregisterSession,
 } from '../agent-link/registry.js';
@@ -60,7 +61,6 @@ import type { AuthUser } from '../types.js';
 import { listCustomBackends } from '../backends/custom-loader.js';
 import { handleAgentTeamLinkToolRequest } from './agent-teams.js';
 
-const LATEST_DAEMON_VERSION = 'octodeck-daemon/1.0.8';
 const DAEMON_UPDATE_COMMAND =
   '~/.octodeck/daemon/bin/octodeck-daemon update -config ~/.octodeck/daemon/config.json';
 const DAEMON_UNINSTALL_COMMAND =

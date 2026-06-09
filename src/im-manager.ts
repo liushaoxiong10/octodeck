@@ -42,7 +42,9 @@ import {
 import { rm } from 'fs/promises';
 import { DATA_DIR } from './config.js';
 import type { StreamingSession } from './im-channel.js';
-import { getRegisteredGroup, getJidsByFolder } from './db.js';
+import {
+  getRegisteredGroup, getJidsByFolder, getUserHomeGroup,
+} from './db.js';
 import { getUserDingTalkConfig } from './runtime-config.js';
 import { logger } from './logger.js';
 import type { FeishuMessageMeta } from './types.js';
@@ -1126,6 +1128,31 @@ class IMConnectionManager {
     await Promise.allSettled(promises);
     this.connections.delete(userId);
     logger.info({ userId }, 'All IM channels for user disconnected');
+  }
+
+  /**
+   * Deliver a generic notification to a user by looking up their home workspace
+   * JID and dispatching through sendMessage. The notification is silently
+   * skipped if no IM channel is available for that user.
+   *
+   * Used by issue/task notifications when an event must reach the user via IM.
+   */
+  async notifyUser(userId: string, note: {
+    title: string;
+    body: string;
+    link?: string;
+    source?: string;
+    referenceId?: string;
+  }): Promise<void> {
+    const home = getUserHomeGroup(userId);
+    if (!home?.jid) return;
+    const { title, body, link } = note;
+    const text = link ? `${title}\n${body}\n${link}` : `${title}\n${body}`;
+    try {
+      await this.sendMessage(home.jid, text);
+    } catch (err) {
+      logger.warn({ err, userId, jid: home.jid }, 'notifyUser failed');
+    }
   }
 
   /**

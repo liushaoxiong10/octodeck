@@ -71,7 +71,7 @@ describe('agent-link registry replacement handling', () => {
 
   test('sends daemon update request after hello when client version is outdated', async () => {
     vi.clearAllMocks();
-    const { handleHello } = await import('../src/agent-link/registry.js');
+    const { handleHello, LATEST_DAEMON_VERSION } = await import('../src/agent-link/registry.js');
 
     const session = fakeSession('cl_outdated');
     session.send.mockReturnValue(true);
@@ -93,7 +93,7 @@ describe('agent-link registry replacement handling', () => {
     expect(session.send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'daemon.update.request',
-        latestVersion: 'octodeck-daemon/1.0.8',
+        latestVersion: LATEST_DAEMON_VERSION,
         currentVersion: 'octodeck-daemon/1.0.3',
       }),
     );

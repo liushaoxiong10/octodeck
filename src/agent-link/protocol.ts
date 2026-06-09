@@ -49,6 +49,8 @@ export const RuntimeStatusSchema = z.object({
   deviceLinkId: z.string().min(1).max(128),
   agentClientId: z.string().min(1).max(128),
   displayName: z.string().max(128).optional(),
+  provider: z.string().max(128).optional(),
+  transport: z.enum(['stdio', 'acp', 'a2a', 'http']).optional(),
   status: z.enum(['idle', 'busy', 'draining', 'offline']),
   maxConcurrentRuns: z.number().int().nonnegative().optional(),
   runningRuns: z.array(RunningRunSchema).max(128).optional(),

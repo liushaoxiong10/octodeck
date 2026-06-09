@@ -1,6 +1,6 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Download, RefreshCw, Copy, Check } from 'lucide-react';
+import { X, Download, RefreshCw, Copy, Check, Palette, Sun, Moon } from 'lucide-react';
 import { toCanvas } from 'html-to-image';
 import { Message } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
@@ -12,6 +12,11 @@ import {
   SHARE_CARD_DEFAULT_WIDTH,
   SHARE_CARD_MAX_WIDTH,
   SHARE_CARD_PADDING,
+  SHARE_CARD_COLOR_SCHEMES,
+  SHARE_CARD_MODES,
+  type ShareCardColorScheme,
+  type ShareCardMode,
+  type ShareCardSkin,
 } from './ShareCardRenderer';
 
 interface ShareImageDialogProps {
@@ -316,6 +321,33 @@ export function ShareImageDialog({ onClose, message }: ShareImageDialogProps) {
   const currentUser = useAuthStore((s) => s.user);
   const appearance = useAuthStore((s) => s.appearance);
 
+  // Defaults: follow the user's current theme at dialog-open time.
+  const initialSkin = useMemo<ShareCardSkin>(() => {
+    let colorScheme: ShareCardColorScheme = 'orange';
+    if (typeof document !== 'undefined') {
+      if (document.documentElement.classList.contains('theme-dracula')) colorScheme = 'dracula';
+      else if (document.documentElement.classList.contains('theme-neutral')) colorScheme = 'neutral';
+      else if (!document.documentElement.classList.contains('theme-orange')) colorScheme = 'default';
+    }
+    let mode: ShareCardMode = 'light';
+    if (colorScheme === 'dracula') {
+      mode = 'dark';
+    } else if (typeof document !== 'undefined') {
+      mode = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+    }
+    return { colorScheme, mode };
+  }, []);
+
+  const [colorScheme, setColorScheme] = useState<ShareCardColorScheme>(initialSkin.colorScheme);
+  const [mode, setMode] = useState<ShareCardMode>(initialSkin.mode);
+
+  // Dracula has no light mode — force dark whenever the user selects it.
+  useEffect(() => {
+    if (colorScheme === 'dracula' && mode !== 'dark') setMode('dark');
+  }, [colorScheme, mode]);
+
+  const skin: ShareCardSkin = { colorScheme, mode };
+
   const senderName = currentUser?.ai_name || appearance?.aiName || message.sender_name || 'AI';
   const aiEmoji = currentUser?.ai_avatar_emoji || appearance?.aiAvatarEmoji;
   const aiColor = currentUser?.ai_avatar_color || appearance?.aiAvatarColor;
@@ -378,7 +410,9 @@ export function ShareImageDialog({ onClose, message }: ShareImageDialogProps) {
         cacheBust: true,
         includeQueryParams: true,
         fetchRequestInit: { credentials: 'include' },
-        backgroundColor: '#ffffff',
+        backgroundColor: skin.mode === 'dark'
+          ? (colorScheme === 'orange' ? '#1a1613' : colorScheme === 'neutral' ? '#09090b' : colorScheme === 'dracula' ? '#282a36' : '#0f172a')
+          : (colorScheme === 'orange' ? '#FAF9F5' : '#ffffff'),
       });
       await paintImageOverlays(canvas, el, imageOverlays);
       const url = canvas.toDataURL('image/png');
@@ -388,7 +422,7 @@ export function ShareImageDialog({ onClose, message }: ShareImageDialogProps) {
       setState('error');
       setErrorMsg(err instanceof Error ? err.message : '生成图片失败');
     }
-  }, []);
+  }, [skin.mode, colorScheme]);
 
   useEffect(() => {
     generate();
@@ -442,7 +476,91 @@ export function ShareImageDialog({ onClose, message }: ShareImageDialogProps) {
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-auto p-5">
+        <div className="flex-1 overflow-auto p-5 space-y-4">
+          {/* Skin selector */}
+          <div className="space-y-3 pb-3 border-b border-border">
+            <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+              <Palette className="w-4 h-4" />
+              卡片皮肤
+            </div>
+
+            {/* Color scheme */}
+            <div>
+              <p className="text-xs text-muted-foreground mb-2">配色方案</p>
+              <div className="grid grid-cols-4 gap-2">
+                {SHARE_CARD_COLOR_SCHEMES.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setColorScheme(opt.value)}
+                    className={`flex flex-col gap-2 p-2 rounded-xl border transition-all cursor-pointer ${
+                      colorScheme === opt.value
+                        ? 'border-primary bg-primary/10 ring-1 ring-primary'
+                        : 'border-border hover:border-foreground/20 hover:bg-accent/40'
+                    }`}
+                  >
+                    <div
+                      className="w-full h-10 rounded-lg border border-black/5 flex items-end p-1.5 gap-1"
+                      style={{ background: opt.preview.bg }}
+                    >
+                      <div
+                        className="w-4 h-4 rounded-full shrink-0"
+                        style={{ background: opt.preview.accent }}
+                      />
+                      <div className="flex-1 space-y-0.5 min-w-0">
+                        <div
+                          className="h-1 rounded-full w-3/4"
+                          style={{ background: opt.preview.text, opacity: 0.6 }}
+                        />
+                        <div
+                          className="h-1 rounded-full w-1/2"
+                          style={{ background: opt.preview.text, opacity: 0.25 }}
+                        />
+                      </div>
+                    </div>
+                    <span
+                      className={`text-xs font-medium truncate ${
+                        colorScheme === opt.value ? 'text-primary' : 'text-foreground'
+                      }`}
+                    >
+                      {opt.label}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Light / Dark mode */}
+            <div>
+              <p className="text-xs text-muted-foreground mb-2">明暗模式</p>
+              <div className="grid grid-cols-2 gap-2">
+                {SHARE_CARD_MODES.map((opt) => {
+                  const Icon = opt.value === 'light' ? Sun : Moon;
+                  const disabled = colorScheme === 'dracula' && opt.value === 'light';
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      disabled={disabled}
+                      onClick={() => setMode(opt.value)}
+                      className={`flex items-center justify-center gap-2 py-2.5 rounded-xl border text-xs font-medium transition-all cursor-pointer ${
+                        mode === opt.value && !disabled
+                          ? 'border-primary bg-primary/10 text-primary ring-1 ring-primary'
+                          : disabled
+                            ? 'border-border/50 text-muted-foreground/40 cursor-not-allowed opacity-60 bg-muted/30'
+                            : 'border-border text-foreground hover:border-foreground/20 hover:bg-accent/40'
+                      }`}
+                    >
+                      <Icon className="w-4 h-4" />
+                      {opt.label}
+                      {disabled && <span className="text-[10px] opacity-70">（Dracula 专属）</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
           {state === 'generating' && (
             <div className="flex flex-col items-center justify-center py-16 gap-3">
               <RefreshCw className="w-6 h-6 text-primary animate-spin" />
@@ -503,6 +621,7 @@ export function ShareImageDialog({ onClose, message }: ShareImageDialogProps) {
           aiEmoji={aiEmoji}
           aiColor={aiColor}
           aiImageUrl={aiImageUrl}
+          skin={skin}
         />
       </div>
     </div>,

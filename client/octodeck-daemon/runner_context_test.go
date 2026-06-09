@@ -538,6 +538,39 @@ func TestAgentRuntimeResolveCwdDecouplesWorkspaceScopeFromNativeSession(t *testi
 	}
 }
 
+func TestAgentRuntimeResolveCwdUsesWorkspaceIDAndChatID(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	rt := &agentRuntimeProcess{cfg: cfg}
+	req := &AgentRunRequestFrame{
+		AgentID: "traecli-acp",
+		Workspace: &AgentRunWorkspace{
+			Kind:    "workspace",
+			Folder:  "legacy-group-folder",
+			AgentID: "traecli-acp",
+			Scope:   "session",
+			ScopeID: "workspace-scope-from-server",
+		},
+		Input: AgentRunInput{Metadata: map[string]any{
+			"workspaceId": "workspace-alpha",
+			"chatId":      "chat-beta",
+		}},
+		Context: map[string]any{"group": map[string]any{"folder": "legacy-group-folder"}},
+	}
+
+	cwd, err := rt.resolveCwd(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(cfg.WorkspaceDir, "legacy-group-folder", "sessions", "chat-beta")
+	if cwd != expected {
+		t.Fatalf("expected workspace/chat scoped cwd %q, got %q", expected, cwd)
+	}
+	if req.Workspace.Folder != "legacy-group-folder" || req.Workspace.ScopeID != "chat-beta" {
+		t.Fatalf("expected workspace folder to stay stable and session scope to use chat-id, got folder=%q scopeId=%q", req.Workspace.Folder, req.Workspace.ScopeID)
+	}
+}
+
 func TestRunRequestWorkspaceScopeDecouplesFromNativeSession(t *testing.T) {
 	root := t.TempDir()
 	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}

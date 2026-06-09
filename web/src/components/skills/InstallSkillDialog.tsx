@@ -245,10 +245,24 @@ export function InstallSkillDialog({
   const onlineDevices = devices.filter((device) => device.online);
   const onlineDeviceIds = new Set(onlineDevices.map((device) => device.id));
   const workspaceAgents = agents.filter((agent) => agent.deviceLinkId && onlineDeviceIds.has(agent.deviceLinkId));
+
+  const getWorkspaceDisplayName = (agent: CustomBackendDef): string => {
+    if (agent.workdirMode === 'custom' && agent.workdir) {
+      return agent.workdir;
+    }
+    return `${agent.displayName} Workspace`;
+  };
+  const getWorkspaceShortName = (agent: CustomBackendDef): string => {
+    if (agent.workdirMode === 'custom' && agent.workdir) {
+      const parts = agent.workdir.split('/');
+      return parts[parts.length - 1] || agent.workdir;
+    }
+    return agent.displayName;
+  };
   const buildInstallOptions = (): InstallSkillOptions => {
     if (target === 'cloud') return { target: 'cloud' };
     if (target === 'device-agent-workspace') {
-      if (!agentId) throw new Error('请选择安装目标 Agent Workspace');
+      if (!agentId) throw new Error('请选择安装目标 Workspace');
       return { target: 'device-agent-workspace', agentId };
     }
     if (!deviceLinkId) throw new Error('请选择安装目标 Device');
@@ -279,7 +293,7 @@ export function InstallSkillDialog({
             </label>
             <label className="flex items-center gap-2 rounded-md border p-2 text-sm">
               <input type="radio" name="skill-target" checked={target === 'device-agent-workspace'} onChange={() => setTarget('device-agent-workspace')} disabled={isInstalling || workspaceAgents.length === 0} />
-              Agent Workspace
+              Workspace
             </label>
           </div>
           {target === 'device' && (
@@ -300,19 +314,48 @@ export function InstallSkillDialog({
               value={agentId}
               onChange={(e) => setAgentId(e.target.value)}
               disabled={isInstalling}
-              className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+              className="h-auto min-h-[2.25rem] w-full px-3 py-2 text-sm border border-border rounded-md bg-transparent"
             >
-              <option value="" disabled>请选择绑定在线 Device 的 Agent</option>
-              {workspaceAgents.map((agent) => {
-                const device = devices.find((item) => item.id === agent.deviceLinkId);
+              <option value="" disabled>请选择安装到哪个 Workspace</option>
+              {Array.from(
+                workspaceAgents.reduce((map, agent) => {
+                  const key = agent.deviceLinkId!;
+                  if (!map.has(key)) map.set(key, []);
+                  map.get(key)!.push(agent);
+                  return map;
+                }, new Map<string, CustomBackendDef[]>()),
+              ).map(([devId, agentList]) => {
+                const device = devices.find((item) => item.id === devId);
+                const groupLabel = device ? `${device.displayName} (${devId.slice(0, 8)}…)` : devId;
                 return (
-                  <option key={agent.id} value={agent.id}>
-                    {agent.displayName} ({agent.id}) · {device?.displayName || agent.deviceLinkId}
-                  </option>
+                  <optgroup key={devId} label={`📱 ${groupLabel}`}>
+                    {agentList.map((agent) => {
+                      const wsName = getWorkspaceDisplayName(agent);
+                      const wsShort = getWorkspaceShortName(agent);
+                      const mode = agent.workdirMode === 'custom' && agent.workdir ? '自定义路径' : '自动管理';
+                      return (
+                        <option key={agent.id} value={agent.id}>
+                          {wsShort} · {mode} — {wsName}
+                        </option>
+                      );
+                    })}
+                  </optgroup>
                 );
               })}
             </select>
           )}
+          {target === 'device-agent-workspace' && agentId && (() => {
+            const agent = workspaceAgents.find((a) => a.id === agentId);
+            if (!agent) return null;
+            const cwd = agent.workdirMode === 'custom' && agent.workdir
+              ? agent.workdir
+              : `octodeck-workspace://${agent.id}/`;
+            return (
+              <p className="mt-2 rounded-md bg-muted/40 px-3 py-2 text-xs leading-5 text-muted-foreground break-all">
+                技能将安装到：<span className="font-mono text-foreground">{cwd}{cwd.endsWith('/') ? '' : '/'}skills/</span>
+              </p>
+            );
+          })()}
           {target === 'cloud' && (
             <p className="rounded-md bg-muted/40 px-3 py-2 text-xs leading-5 text-muted-foreground">
               云端 Skill 会安装为 Claude SDK / Claude Code 可用的格式，并保存到 OctoDeck Cloud Skills。

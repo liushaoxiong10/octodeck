@@ -3,8 +3,9 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { Variables } from '../web-context.js';
+import { LATEST_DAEMON_VERSION } from '../agent-link/registry.js';
 
-const DAEMON_VERSION = 'octodeck-daemon/1.0.8';
+const DAEMON_VERSION = LATEST_DAEMON_VERSION;
 const DAEMON_UPDATE_COMMAND =
   '~/.octodeck/daemon/bin/octodeck-daemon update -config ~/.octodeck/daemon/config.json';
 const DAEMON_UNINSTALL_COMMAND =

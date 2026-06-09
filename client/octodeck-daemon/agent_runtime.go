@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,11 +14,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	acpsdk "github.com/coder/acp-go-sdk"
 )
+
+const acpSessionMapFile = "agent-session-map.json"
 
 type agentRuntimeSupervisor struct {
 	cfg         *Config
@@ -575,6 +581,9 @@ func (rt *agentRuntimeProcess) deleteSession(ctx context.Context, out io.Writer,
 		err = fmt.Errorf("agent adapter not found: %s", req.AgentID)
 	} else {
 		deleted, err = adapter.DeleteSession(ctx, rt.cfg, req.Workspace, req.SessionID)
+		if err == nil && deleteACPSessionRecords(rt.cfg, req.AgentID, req.SessionID) > 0 {
+			deleted = true
+		}
 		if err == nil && req.Workspace != "" && req.SessionID != "" {
 			localScopeID := stableAgentWorkspaceScopeID(req.AgentID)
 			if localScopeID == "" {
@@ -661,6 +670,11 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 		rt.finishErr(out, req, started, fmt.Errorf("agent client not found: %s", req.AgentID), false)
 		return
 	}
+	processKey := acpSessionProcessKey(req)
+	conversationID := acpConversationID(req)
+	if rec, ok := lookupACPSessionRecord(rt.cfg, processKey); ok && rec.SessionID != "" {
+		req.Input.SessionID = rec.SessionID
+	}
 	adapter := rt.adapters[req.AgentID]
 	if adapter == nil {
 		rt.finishErr(out, req, started, fmt.Errorf("agent adapter not found: %s", req.AgentID), false)
@@ -693,6 +707,7 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 		rt.notify(out, "agent.run.status", AgentRunStatusFrame{Type: tAgentRunStatus, RunID: req.RunID, AgentID: req.AgentID, Status: status, Cwd: cwd})
 		if result.SessionID != "" {
 			_ = writeSessionMetadata(rt.cfg, req, result.SessionID, result.Result)
+			_ = writeACPSessionRecord(rt.cfg, agentSessionMapRecord(processKey, conversationID, *client, req, result.SessionID))
 		}
 		rt.notify(out, "agent.run.result", result)
 		return
@@ -723,12 +738,24 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 	var sent atomic.Int64
 	var textMu sync.Mutex
 	var finalText string
+	var finalResultFallback string
 	var sessionID string
 	pumpStdoutDone := make(chan struct{})
 	pumpStderrDone := make(chan struct{})
 	go func() {
 		defer close(pumpStdoutDone)
 		pumpAgentStdout(ctx, stdout, req, outputJSON, &sent, func(frame AgentRunEventFrame) {
+			if frame.EventType == "final_result" && frame.Text != "" {
+				// Fallback result for single-shot CLIs that only emit a
+				// complete answer (no streaming chunks). Accumulated lazily
+				// only when no streaming text was seen so streaming CLIs
+				// that append the full answer as a trailing result frame
+				// don't get their output doubled.
+				textMu.Lock()
+				finalResultFallback = frame.Text
+				textMu.Unlock()
+				return
+			}
 			if frame.EventType == "text_delta" && frame.Text != "" {
 				textMu.Lock()
 				finalText += frame.Text
@@ -763,6 +790,16 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 	waitErr := cmd.Wait()
 	<-pumpStdoutDone
 	<-pumpStderrDone
+	// Fallback to the trailing result-event payload for single-shot CLIs that
+	// don't emit streaming text_delta chunks. When both streaming chunks and
+	// a trailing result event exist (streaming CLIs like traecli), the
+	// streaming text already represents the complete answer so we keep only
+	// the streaming copy to avoid duplication.
+	textMu.Lock()
+	if finalText == "" && finalResultFallback != "" {
+		finalText = finalResultFallback
+	}
+	textMu.Unlock()
 	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
 	if waitErr != nil && finalText == "" {
 		rt.finishErr(out, req, started, waitErr, timedOut)
@@ -771,6 +808,7 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 	rt.notify(out, "agent.run.status", AgentRunStatusFrame{Type: tAgentRunStatus, RunID: req.RunID, AgentID: req.AgentID, Status: "completed", Cwd: cwd})
 	if sessionID != "" {
 		_ = writeSessionMetadata(rt.cfg, req, sessionID, finalText)
+		_ = writeACPSessionRecord(rt.cfg, agentSessionMapRecord(processKey, conversationID, *client, req, sessionID))
 	}
 	errPtr := (*string)(nil)
 	rt.notify(out, "agent.run.result", AgentRunResultFrame{Type: tAgentRunResult, RunID: req.RunID, AgentID: req.AgentID, OK: true, Result: finalText, Error: errPtr, SessionID: sessionID, TimedOut: timedOut, DurationMs: time.Since(started).Milliseconds()})
@@ -778,6 +816,7 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 
 func (rt *agentRuntimeProcess) resolveCwd(ctx context.Context, req *AgentRunRequestFrame) (string, error) {
 	normalizeAgentRunWorkspaceScope(req)
+	applyAgentRunChatSessionScope(req)
 
 	// Normalize to a unified list of repos: prefer Workspace.Repos, fall back to
 	// Workspace.Repo (single), then to the legacy WorkspaceRepo.
@@ -856,6 +895,37 @@ func (rt *agentRuntimeProcess) resolveCwd(ctx context.Context, req *AgentRunRequ
 		return "", fmt.Errorf("cwd outside runtime allowedWorkspaces: %s", req.Cwd)
 	}
 	return req.Cwd, nil
+}
+
+func applyAgentRunChatSessionScope(req *AgentRunRequestFrame) {
+	if req == nil || req.Workspace == nil || !isAgentSessionScope(req.Workspace.Scope, req.Workspace.ScopeID) {
+		return
+	}
+	chatID := metadataString(req.Input.Metadata, "chatId")
+	if chatID == "" {
+		chatID = firstNonEmpty(
+			metadataString(req.Input.Metadata, "conversationId"),
+			metadataString(req.Input.Metadata, "conversationID"),
+			metadataString(req.Input.Metadata, "sessionKey"),
+			metadataString(req.Input.Metadata, "chatJid"),
+		)
+	}
+	// Keep Workspace.Folder as the workspace/group root. Only the per-conversation
+	// session directory is driven by chat-id:
+	//   workspace/<workspace-folder>/sessions/<chat-id>
+	if chatID != "" {
+		req.Workspace.ScopeID = chatID
+	}
+}
+
+func metadataString(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	if v, ok := meta[key].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return ""
 }
 
 func normalizeAgentRunWorkspaceScope(req *AgentRunRequestFrame) {
@@ -1117,7 +1187,18 @@ func (a *claudeCodeAdapter) BuildRunCommand(cfg *Config, req *AgentRunRequestFra
 }
 
 func (a *codexAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
-	argv := []string{"exec", "--json"}
+	if req.Input.SessionID != "" {
+		argv := []string{"exec", "resume", "--json", "--skip-git-repo-check"}
+		if req.Policy.Model != "" {
+			argv = append(argv, "-m", req.Policy.Model)
+		}
+		if req.Policy.PermissionMode != "" {
+			argv = append(argv, "--sandbox", req.Policy.PermissionMode)
+		}
+		argv = append(argv, req.Input.SessionID, req.Input.Prompt)
+		return argv, true, nil
+	}
+	argv := []string{"exec", "--json", "--skip-git-repo-check"}
 	if req.Policy.Model != "" {
 		argv = append(argv, "-m", req.Policy.Model)
 	}
@@ -1129,7 +1210,20 @@ func (a *codexAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]
 }
 
 func (a *traecliAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
-	return []string{"-p", req.Input.Prompt}, false, nil
+	// NOTE: --include-partial-messages is intentionally omitted.
+	// stream-json already emits incremental content_block_delta events; the
+	// partial-message snapshots would carry the fully accumulated text in
+	// evt["message"]["content"] and be extracted a second time by section 6
+	// of normalizeAgentJSONLineFrames, causing duplicated output. The daemon
+	// internally assembles finalText from the streamed deltas anyway.
+	argv := []string{"-p", req.Input.Prompt, "--output-format=stream-json", "-y"}
+	if req.Input.SessionID != "" {
+		argv = append(argv, "--resume="+req.Input.SessionID)
+	}
+	if req.Policy.Model != "" {
+		argv = append(argv, "-c", "model.name="+req.Policy.Model)
+	}
+	return argv, true, nil
 }
 
 func (a *acpAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
@@ -1138,6 +1232,255 @@ func (a *acpAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]st
 
 func (a *acpAdapter) RunDirect(ctx context.Context, cfg *Config, req *AgentRunRequestFrame, emit func(AgentRunEventFrame)) (AgentRunResultFrame, error) {
 	return a.runACPAgent(ctx, cfg, req, emit)
+}
+
+func acpConversationID(req *AgentRunRequestFrame) string {
+	if req == nil {
+		return ""
+	}
+	if req.Input.Metadata != nil {
+		for _, key := range []string{"chatId", "conversationId", "conversationID", "sessionKey", "chatJid"} {
+			if v, ok := req.Input.Metadata[key].(string); ok && strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
+	if req.Workspace != nil && req.Workspace.ScopeID != "" && isAgentSessionScope(req.Workspace.Scope, req.Workspace.ScopeID) {
+		return req.Workspace.ScopeID
+	}
+	if req.Input.SessionID != "" {
+		return req.Input.SessionID
+	}
+	if req.Workspace != nil && req.Workspace.Folder != "" {
+		return req.Workspace.Folder
+	}
+	return req.RunID
+}
+
+func acpSessionProcessKey(req *AgentRunRequestFrame) string {
+	conversationID := acpConversationID(req)
+	digest := sha256.Sum256([]byte(req.AgentID + "\x00" + req.Cwd + "\x00" + conversationID))
+	return fmt.Sprintf("%s:%x", safePathSegment(req.AgentID), digest[:12])
+}
+
+func acpSessionMapPath(cfg *Config) string {
+	return filepath.Join(stateDir(cfg), acpSessionMapFile)
+}
+
+func agentSessionMapRecord(key, conversationID string, client AgentClientInfo, req *AgentRunRequestFrame, sessionID string) acpSessionMapRecord {
+	transport := client.Transport
+	if transport == "" {
+		transport = "stdio"
+	}
+	return acpSessionMapRecord{
+		Key:            key,
+		ConversationID: conversationID,
+		AgentID:        req.AgentID,
+		CLIName:        client.DisplayName,
+		Provider:       ifEmpty(client.Provider, req.AgentID),
+		Transport:      transport,
+		Model:          req.Policy.Model,
+		Cwd:            req.Cwd,
+		SessionID:      sessionID,
+	}
+}
+
+func readACPSessionMapLocked(cfg *Config) acpSessionMapFileData {
+	data := acpSessionMapFileData{Version: 1, Records: map[string]acpSessionMapRecord{}}
+	raw, err := os.ReadFile(acpSessionMapPath(cfg))
+	if err != nil || len(strings.TrimSpace(string(raw))) == 0 {
+		return data
+	}
+	if err := json.Unmarshal(raw, &data); err != nil || data.Records == nil {
+		data.Version = 1
+		data.Records = map[string]acpSessionMapRecord{}
+	}
+	return data
+}
+
+func lookupACPSessionRecord(cfg *Config, key string) (acpSessionMapRecord, bool) {
+	acpSessionMapMu.Lock()
+	defer acpSessionMapMu.Unlock()
+	data := readACPSessionMapLocked(cfg)
+	rec, ok := data.Records[key]
+	return rec, ok
+}
+
+func writeACPSessionRecord(cfg *Config, rec acpSessionMapRecord) error {
+	if rec.Key == "" || rec.SessionID == "" {
+		return nil
+	}
+	acpSessionMapMu.Lock()
+	defer acpSessionMapMu.Unlock()
+	data := readACPSessionMapLocked(cfg)
+	rec.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	data.Records[rec.Key] = rec
+	path := acpSessionMapPath(cfg)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, raw, 0o600)
+}
+
+func deleteACPSessionRecords(cfg *Config, agentID, sessionID string) int {
+	if agentID == "" || sessionID == "" {
+		return 0
+	}
+	acpSessionMapMu.Lock()
+	defer acpSessionMapMu.Unlock()
+	data := readACPSessionMapLocked(cfg)
+	deleted := 0
+	for key, rec := range data.Records {
+		if rec.AgentID == agentID && rec.SessionID == sessionID {
+			delete(data.Records, key)
+			deleted++
+			stopLiveACPProcess(key)
+		}
+	}
+	if deleted == 0 {
+		return 0
+	}
+	path := acpSessionMapPath(cfg)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return deleted
+	}
+	if raw, err := json.MarshalIndent(data, "", "  "); err == nil {
+		_ = os.WriteFile(path, raw, 0o600)
+	}
+	return deleted
+}
+
+func stopLiveACPProcess(key string) {
+	acpProcessesMu.Lock()
+	proc := acpProcesses[key]
+	delete(acpProcesses, key)
+	acpProcessesMu.Unlock()
+	if proc != nil {
+		proc.stop()
+	}
+}
+
+func (p *acpSessionProcess) alive() bool {
+	if p == nil || p.cmd == nil || p.client == nil {
+		return false
+	}
+	select {
+	case <-p.done:
+		return false
+	default:
+		return true
+	}
+}
+
+func (p *acpSessionProcess) setHandler(handler func(*AgentRunEventFrame)) {
+	p.mu.Lock()
+	p.handler = handler
+	p.mu.Unlock()
+}
+
+func (p *acpSessionProcess) dispatch(frame *AgentRunEventFrame) {
+	p.mu.Lock()
+	handler := p.handler
+	p.mu.Unlock()
+	if handler != nil && frame != nil {
+		handler(frame)
+	}
+}
+
+func (p *acpSessionProcess) stop() {
+	if p == nil {
+		return
+	}
+	if p.stdin != nil {
+		_ = p.stdin.Close()
+	}
+	if p.cmd != nil && p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
+	}
+}
+
+func acpRemoveProcess(key string, p *acpSessionProcess) {
+	acpProcessesMu.Lock()
+	if acpProcesses[key] == p {
+		delete(acpProcesses, key)
+	}
+	acpProcessesMu.Unlock()
+}
+
+func (a *acpAdapter) getOrStartACPProcess(ctx context.Context, cfg *Config, req *AgentRunRequestFrame, initSessionID string, emit func(AgentRunEventFrame)) (*acpSessionProcess, *acpsdk.InitializeResponse, error) {
+	key := acpSessionProcessKey(req)
+	acpProcessesMu.Lock()
+	if p := acpProcesses[key]; p != nil && p.alive() {
+		acpProcessesMu.Unlock()
+		return p, nil, nil
+	} else if p != nil {
+		delete(acpProcesses, key)
+	}
+	acpProcessesMu.Unlock()
+
+	args := append([]string(nil), a.client.Args...)
+	env := req.Env
+	if a.entry != nil {
+		if len(a.entry.Args) > 0 {
+			args = append([]string(nil), a.entry.Args...)
+		}
+		env = mergeStringMaps(a.entry.Env, req.Env)
+	}
+	cmd := exec.Command(a.client.Binary, args...)
+	cmd.Dir = req.Cwd
+	cmd.Env = buildAgentEnv(cfg, req.AgentID, env, req.Context)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	bridge := &acpSDKClientBridge{req: req}
+	client := acpsdk.NewClientSideConnection(bridge, stdin, stdout)
+	proc := &acpSessionProcess{key: key, agentID: req.AgentID, cwd: req.Cwd, cmd: cmd, stdin: stdin, client: client, done: make(chan error, 1), sessionID: initSessionID}
+	bridge.dispatch = proc.dispatch
+	var logSent atomic.Int64
+	if err := cmd.Start(); err != nil {
+		return nil, nil, err
+	}
+	go pumpAgentLog(stderr, req, &logSent, emit)
+	go func() {
+		err := cmd.Wait()
+		proc.done <- err
+		close(proc.done)
+		acpRemoveProcess(key, proc)
+	}()
+
+	initResult, err := client.Initialize(ctx, acpsdk.InitializeRequest{
+		ProtocolVersion: acpsdk.ProtocolVersionNumber,
+		ClientInfo:      &acpsdk.Implementation{Name: "octodeck-daemon", Version: daemonVersion},
+		ClientCapabilities: acpsdk.ClientCapabilities{
+			Fs: acpsdk.FileSystemCapabilities{ReadTextFile: false, WriteTextFile: false},
+		},
+	})
+	if err != nil {
+		proc.stop()
+		return nil, nil, err
+	}
+	acpProcessesMu.Lock()
+	if existing := acpProcesses[key]; existing != nil && existing.alive() {
+		acpProcessesMu.Unlock()
+		proc.stop()
+		return existing, nil, nil
+	}
+	acpProcesses[key] = proc
+	acpProcessesMu.Unlock()
+	return proc, &initResult, nil
 }
 
 func prepareAgentRuntimeMCPConfig(cfg *Config, req *AgentRunRequestFrame, cwd string) error {
@@ -1437,39 +1780,331 @@ type acpClient struct {
 	onEvent func(runtimeRPCMessage)
 }
 
+type acpSessionMapRecord struct {
+	Key            string `json:"key"`
+	ConversationID string `json:"conversationId"`
+	AgentID        string `json:"agentId"`
+	CLIName        string `json:"cliName,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	Transport      string `json:"transport,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Cwd            string `json:"cwd"`
+	SessionID      string `json:"sessionId"`
+	UpdatedAt      string `json:"updatedAt"`
+}
+
+type acpSessionMapFileData struct {
+	Version int                            `json:"version"`
+	Records map[string]acpSessionMapRecord `json:"records"`
+}
+
+type acpSessionProcess struct {
+	key       string
+	agentID   string
+	cwd       string
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	client    *acpsdk.ClientSideConnection
+	done      chan error
+	sessionID string
+
+	runMu   sync.Mutex
+	mu      sync.Mutex
+	handler func(*AgentRunEventFrame)
+}
+
+var (
+	acpProcessesMu  sync.Mutex
+	acpProcesses    = map[string]*acpSessionProcess{}
+	acpSessionMapMu sync.Mutex
+)
+
+type acpSDKClientBridge struct {
+	req      *AgentRunRequestFrame
+	dispatch func(*AgentRunEventFrame)
+}
+
+func (b *acpSDKClientBridge) emit(frame AgentRunEventFrame) {
+	if b.dispatch != nil {
+		b.dispatch(&frame)
+	}
+}
+
+func (b *acpSDKClientBridge) SessionUpdate(_ context.Context, params acpsdk.SessionNotification) error {
+	if b == nil || b.req == nil {
+		return nil
+	}
+	sessionID := string(params.SessionId)
+	base := AgentRunEventFrame{Type: tAgentRunEvent, RunID: b.req.RunID, AgentID: b.req.AgentID, SessionID: sessionID, At: formatTime(time.Now())}
+	u := params.Update
+	switch {
+	case u.AgentMessageChunk != nil:
+		base.EventType = "text_delta"
+		base.Text = acpSDKContentBlockText(u.AgentMessageChunk.Content, false)
+		base.Payload = acpSDKPayloadVariant(u.AgentMessageChunk)
+	case u.AgentThoughtChunk != nil:
+		base.EventType = "thinking_delta"
+		base.Text = acpSDKContentBlockText(u.AgentThoughtChunk.Content, true)
+		base.Payload = acpSDKPayloadVariant(u.AgentThoughtChunk)
+	case u.ToolCall != nil:
+		base.EventType = "tool_use_start"
+		tc := u.ToolCall
+		payload := acpSDKPayloadVariant(tc)
+		payload["toolUseId"] = string(tc.ToolCallId)
+		payload["id"] = string(tc.ToolCallId)
+		payload["toolName"] = tc.Title
+		payload["name"] = tc.Title
+		payload["title"] = tc.Title
+		if tc.RawInput != nil {
+			payload["input"] = tc.RawInput
+			payload["rawInput"] = tc.RawInput
+		}
+		if tc.Status != "" {
+			payload["status"] = string(tc.Status)
+		}
+		payload["content"] = tc.Content
+		base.Payload = payload
+	case u.ToolCallUpdate != nil:
+		tcu := u.ToolCallUpdate
+		base.EventType = "tool_use_end"
+		if tcu.Status != nil && (*tcu.Status == acpsdk.ToolCallStatusPending || *tcu.Status == acpsdk.ToolCallStatusInProgress) {
+			base.EventType = "tool_use_start"
+		}
+		payload := acpSDKPayloadVariant(tcu)
+		payload["toolUseId"] = string(tcu.ToolCallId)
+		payload["id"] = string(tcu.ToolCallId)
+		if tcu.Title != nil {
+			payload["toolName"] = *tcu.Title
+			payload["name"] = *tcu.Title
+			payload["title"] = *tcu.Title
+		}
+		if tcu.RawInput != nil {
+			payload["input"] = tcu.RawInput
+			payload["rawInput"] = tcu.RawInput
+		}
+		if tcu.RawOutput != nil {
+			payload["result"] = tcu.RawOutput
+			payload["content"] = tcu.RawOutput
+		}
+		if tcu.Status != nil {
+			payload["status"] = string(*tcu.Status)
+		}
+		payload["toolCallContent"] = tcu.Content
+		base.Payload = payload
+	case u.UsageUpdate != nil:
+		base.EventType = "usage"
+		base.Payload = acpSDKPayloadVariant(u.UsageUpdate)
+	case u.SessionInfoUpdate != nil:
+		base.EventType = "session"
+		base.Payload = acpSDKPayloadVariant(u.SessionInfoUpdate)
+	default:
+		base.EventType = "log"
+		base.Payload = acpSDKPayload(params)
+	}
+	b.emit(base)
+	return nil
+}
+
+func (b *acpSDKClientBridge) RequestPermission(_ context.Context, params acpsdk.RequestPermissionRequest) (acpsdk.RequestPermissionResponse, error) {
+	payload := acpSDKPayload(params)
+	requestID := permissionRequestID(payload)
+	if requestID == "" {
+		requestID = fmt.Sprintf("%s-%d", b.req.RunID, time.Now().UnixNano())
+		payload["requestId"] = requestID
+	}
+	b.emit(AgentRunEventFrame{Type: tAgentRunEvent, RunID: b.req.RunID, AgentID: b.req.AgentID, EventType: "permission_request", Payload: payload, At: formatTime(time.Now())})
+	return acpsdk.RequestPermissionResponse{Outcome: acpsdk.NewRequestPermissionOutcomeCancelled()}, nil
+}
+
+func (b *acpSDKClientBridge) ReadTextFile(context.Context, acpsdk.ReadTextFileRequest) (acpsdk.ReadTextFileResponse, error) {
+	return acpsdk.ReadTextFileResponse{}, errors.New("octodeck ACP bridge does not expose client fs.readTextFile")
+}
+
+func (b *acpSDKClientBridge) WriteTextFile(context.Context, acpsdk.WriteTextFileRequest) (acpsdk.WriteTextFileResponse, error) {
+	return acpsdk.WriteTextFileResponse{}, errors.New("octodeck ACP bridge does not expose client fs.writeTextFile")
+}
+
+func (b *acpSDKClientBridge) CreateTerminal(context.Context, acpsdk.CreateTerminalRequest) (acpsdk.CreateTerminalResponse, error) {
+	return acpsdk.CreateTerminalResponse{}, errors.New("octodeck ACP bridge does not expose client terminal/create")
+}
+
+func (b *acpSDKClientBridge) KillTerminal(context.Context, acpsdk.KillTerminalRequest) (acpsdk.KillTerminalResponse, error) {
+	return acpsdk.KillTerminalResponse{}, nil
+}
+
+func (b *acpSDKClientBridge) TerminalOutput(context.Context, acpsdk.TerminalOutputRequest) (acpsdk.TerminalOutputResponse, error) {
+	return acpsdk.TerminalOutputResponse{}, nil
+}
+
+func (b *acpSDKClientBridge) ReleaseTerminal(context.Context, acpsdk.ReleaseTerminalRequest) (acpsdk.ReleaseTerminalResponse, error) {
+	return acpsdk.ReleaseTerminalResponse{}, nil
+}
+
+func (b *acpSDKClientBridge) WaitForTerminalExit(context.Context, acpsdk.WaitForTerminalExitRequest) (acpsdk.WaitForTerminalExitResponse, error) {
+	return acpsdk.WaitForTerminalExitResponse{}, nil
+}
+
+func acpSDKPayload(value any) map[string]any {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return map[string]any{}
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil || payload == nil {
+		return map[string]any{}
+	}
+	enrichACPToolPayload(payload)
+	return payload
+}
+
+// acpSDKPayloadVariant serializes an ACP variant type (one of the SessionUpdate discriminated
+// union members) to a map. These types declare their variant fields with `json:"-"` and rely on
+// custom UnmarshalJSON, so a plain json.Marshal would drop most data. This helper marshals the
+// value through reflection so we surface every exported field to the caller.
+func acpSDKPayloadVariant(value any) map[string]any {
+	payload := make(map[string]any)
+	v := reflect.ValueOf(value)
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return payload
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		data, err := json.Marshal(value)
+		if err != nil {
+			return payload
+		}
+		_ = json.Unmarshal(data, &payload)
+		enrichACPToolPayload(payload)
+		return payload
+	}
+	t := v.Type()
+	for i := 0; i < v.NumField(); i++ {
+		fv := v.Field(i)
+		ft := t.Field(i)
+		if !ft.IsExported() {
+			continue
+		}
+		name := ft.Name
+		if tag, ok := ft.Tag.Lookup("json"); ok {
+			parts := strings.Split(tag, ",")
+			if parts[0] == "-" {
+				// Fields tagged json:"-" are still important for ACP variant types (they
+				// carry the actual data under a different JSON key in the wire format, but
+				// after the SDK's custom UnmarshalJSON they live here). Keep the Go name.
+			} else if parts[0] != "" {
+				name = parts[0]
+			}
+		}
+		if fv.Kind() == reflect.Ptr {
+			if fv.IsNil() {
+				continue
+			}
+			payload[name] = fv.Elem().Interface()
+			continue
+		}
+		if fv.Kind() == reflect.Interface {
+			if fv.IsNil() {
+				continue
+			}
+		}
+		if fv.Kind() == reflect.Slice || fv.Kind() == reflect.Map {
+			if fv.IsNil() {
+				continue
+			}
+		}
+		payload[name] = fv.Interface()
+	}
+	enrichACPToolPayload(payload)
+	return payload
+}
+
+func acpSDKContentBlockText(block acpsdk.ContentBlock, includeThinking bool) string {
+	if block.Text != nil {
+		return block.Text.Text
+	}
+	data, err := json.Marshal(block)
+	if err != nil {
+		return ""
+	}
+	var payload any
+	if json.Unmarshal(data, &payload) != nil {
+		return ""
+	}
+	return acpContentText(payload, includeThinking)
+}
+
+func acpUsageToMap(usage *acpsdk.Usage) map[string]any {
+	if usage == nil {
+		return nil
+	}
+	out := acpSDKPayload(usage)
+	out["input_tokens"] = usage.InputTokens
+	out["output_tokens"] = usage.OutputTokens
+	out["total_tokens"] = usage.TotalTokens
+	if usage.CachedReadTokens != nil {
+		out["cache_read_input_tokens"] = *usage.CachedReadTokens
+	}
+	if usage.CachedWriteTokens != nil {
+		out["cache_creation_input_tokens"] = *usage.CachedWriteTokens
+	}
+	return out
+}
+
+func acpSDKMCPServers(cfg *Config, env ...map[string]string) []acpsdk.McpServer {
+	server, err := buildAgentTeamMCPServerConfig(cfg, env...)
+	if err != nil {
+		return []acpsdk.McpServer{}
+	}
+	command, _ := server["command"].(string)
+	if strings.TrimSpace(command) == "" {
+		return []acpsdk.McpServer{}
+	}
+	args := make([]string, 0)
+	switch raw := server["args"].(type) {
+	case []string:
+		args = append(args, raw...)
+	case []any:
+		for _, item := range raw {
+			if s, ok := item.(string); ok {
+				args = append(args, s)
+			}
+		}
+	}
+	envVars := make([]acpsdk.EnvVariable, 0)
+	if rawEnv, ok := server["env"].(map[string]string); ok {
+		for name, value := range rawEnv {
+			envVars = append(envVars, acpsdk.EnvVariable{Name: name, Value: value})
+		}
+	} else if rawEnv, ok := server["env"].(map[string]any); ok {
+		for name, value := range rawEnv {
+			if s, ok := value.(string); ok {
+				envVars = append(envVars, acpsdk.EnvVariable{Name: name, Value: s})
+			}
+		}
+	}
+	return []acpsdk.McpServer{{Stdio: &acpsdk.McpServerStdio{Name: "octodeck_agent_team", Command: command, Args: args, Env: envVars}}}
+}
+
 func (a *acpAdapter) runACPAgent(ctx context.Context, cfg *Config, req *AgentRunRequestFrame, emit func(AgentRunEventFrame)) (AgentRunResultFrame, error) {
 	started := time.Now()
-	args := append([]string(nil), a.client.Args...)
-	env := req.Env
-	if a.entry != nil {
-		if len(a.entry.Args) > 0 {
-			args = append([]string(nil), a.entry.Args...)
-		}
-		env = mergeStringMaps(a.entry.Env, req.Env)
-	}
-	cmd := exec.CommandContext(ctx, a.client.Binary, args...)
-	cmd.Dir = req.Cwd
-	cmd.Env = buildAgentEnv(cfg, req.AgentID, env, req.Context)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return AgentRunResultFrame{}, err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return AgentRunResultFrame{}, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return AgentRunResultFrame{}, err
-	}
-	client := &acpClient{enc: json.NewEncoder(stdin), pending: map[int64]chan runtimeRPCMessage{}, closed: make(chan struct{})}
+	conversationID := acpConversationID(req)
+	processKey := acpSessionProcessKey(req)
 	var sent atomic.Int64
 	var finalMu sync.Mutex
 	var finalText string
-	var sessionID string
+	sessionID := ""
 	var finalUsage map[string]any
-	client.onEvent = func(msg runtimeRPCMessage) {
-		frame := acpNotificationToFrame(req, msg)
+	proc, initResult, err := a.getOrStartACPProcess(ctx, cfg, req, "", emit)
+	if err != nil {
+		return AgentRunResultFrame{}, err
+	}
+	proc.runMu.Lock()
+	defer proc.runMu.Unlock()
+	defer proc.setHandler(nil)
+
+	proc.setHandler(func(frame *AgentRunEventFrame) {
 		if frame == nil {
 			return
 		}
@@ -1492,86 +2127,61 @@ func (a *acpAdapter) runACPAgent(ctx context.Context, cfg *Config, req *AgentRun
 			}
 		}
 		emit(*frame)
-	}
-	if err := cmd.Start(); err != nil {
-		return AgentRunResultFrame{}, err
-	}
-	readDone := make(chan struct{})
-	logDone := make(chan struct{})
-	go func() {
-		defer close(readDone)
-		client.readLoop(stdout)
-	}()
-	go func() {
-		defer close(logDone)
-		pumpAgentLog(stderr, req, &sent, emit)
-	}()
+	})
 
-	initResult, err := client.call(ctx, "initialize", map[string]any{"protocolVersion": 1, "clientInfo": map[string]any{"name": "octodeck-daemon", "version": daemonVersion}})
-	if err != nil {
-		_ = stdin.Close()
-		_ = cmd.Wait()
-		<-readDone
-		<-logDone
-		return AgentRunResultFrame{}, err
+	mcpServers := acpSDKMCPServers(cfg, req.Env)
+	desiredSessionID := ""
+	if rec, ok := lookupACPSessionRecord(cfg, processKey); ok && rec.SessionID != "" {
+		// The daemon owns the chat-id -> native ACP session mapping. Prefer the
+		// persisted local mapping over any server-provided sessionId so a workspace-
+		// level/stale id cannot override the chat-specific session once established.
+		desiredSessionID = rec.SessionID
 	}
-	mcpServers := acpMCPServers(cfg, req.Env)
-	if req.Input.SessionID != "" {
+	if desiredSessionID == "" {
+		desiredSessionID = req.Input.SessionID
+	}
+	if proc.sessionID != "" {
+		sessionID = proc.sessionID
+	} else if desiredSessionID != "" {
 		// The daemon starts a fresh ACP process for each OctoDeck turn. For
 		// continuity across processes we must load the persisted ACP session first;
 		// session/resume is only a fallback for agents that support reconnecting to
 		// an already-live session.
-		if acpSupportsLoadSession(initResult) {
-			if _, err := callACPSessionMethod(ctx, client, "session/load", req.Cwd, req.Input.SessionID, mcpServers, map[string]any{"runId": req.RunID}); err == nil {
-				sessionID = req.Input.SessionID
+		if initResult != nil && initResult.AgentCapabilities.LoadSession {
+			if _, err := proc.client.LoadSession(ctx, acpsdk.LoadSessionRequest{Cwd: req.Cwd, SessionId: acpsdk.SessionId(desiredSessionID), McpServers: mcpServers, Meta: map[string]any{"runId": req.RunID, "octodeckConversationId": conversationID}}); err == nil {
+				sessionID = desiredSessionID
 			}
 		}
-		if sessionID == "" && acpSupportsSessionResume(initResult) {
-			if _, err := callACPSessionMethod(ctx, client, "session/resume", req.Cwd, req.Input.SessionID, mcpServers, map[string]any{"runId": req.RunID}); err == nil {
-				sessionID = req.Input.SessionID
+		if sessionID == "" && initResult != nil && initResult.AgentCapabilities.SessionCapabilities.Resume != nil {
+			if _, err := proc.client.ResumeSession(ctx, acpsdk.ResumeSessionRequest{Cwd: req.Cwd, SessionId: acpsdk.SessionId(desiredSessionID), McpServers: mcpServers, Meta: map[string]any{"runId": req.RunID, "octodeckConversationId": conversationID}}); err == nil {
+				sessionID = desiredSessionID
 			}
 		}
 	}
 	if sessionID == "" {
-		created, err := callACPSessionMethod(ctx, client, "session/new", req.Cwd, "", mcpServers, map[string]any{"octodeckSessionId": req.Input.SessionID, "runId": req.RunID})
+		created, err := proc.client.NewSession(ctx, acpsdk.NewSessionRequest{Cwd: req.Cwd, McpServers: mcpServers, Meta: map[string]any{"octodeckSessionId": req.Input.SessionID, "octodeckConversationId": conversationID, "runId": req.RunID}})
 		if err != nil {
-			_ = stdin.Close()
-			_ = cmd.Wait()
-			<-readDone
-			<-logDone
 			return AgentRunResultFrame{}, err
 		}
-		sessionID = acpSessionIDFromResult(created, "")
+		sessionID = string(created.SessionId)
 	}
 	if sessionID == "" {
 		sessionID = req.RunID
 	}
-	promptResult, promptErr := client.call(ctx, "session/prompt", map[string]any{"sessionId": sessionID, "prompt": req.Input.Prompt, "content": []map[string]any{{"type": "text", "text": req.Input.Prompt}}, "_meta": map[string]any{"policy": req.Policy, "context": req.Context}})
+	proc.sessionID = sessionID
+	_ = writeACPSessionRecord(cfg, agentSessionMapRecord(processKey, conversationID, a.client, req, sessionID))
+	promptResult, promptErr := proc.client.Prompt(ctx, acpsdk.PromptRequest{SessionId: acpsdk.SessionId(sessionID), Prompt: []acpsdk.ContentBlock{acpsdk.TextBlock(req.Input.Prompt)}, Meta: map[string]any{"policy": req.Policy, "context": req.Context, "octodeckConversationId": conversationID, "runId": req.RunID}})
 	if promptErr == nil {
-		if text := acpTextFromResult(promptResult); text != "" {
+		if promptResult.Usage != nil {
 			finalMu.Lock()
-			if finalText == "" {
-				finalText = text
-			}
-			finalMu.Unlock()
-		}
-		if usage := acpUsageFromResult(promptResult); usage != nil {
-			finalMu.Lock()
-			finalUsage = usage
+			finalUsage = acpUsageToMap(promptResult.Usage)
 			finalMu.Unlock()
 		}
 	}
-	_ = stdin.Close()
-	waitErr := cmd.Wait()
-	<-readDone
-	<-logDone
 	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
 	var errPtr *string
 	if promptErr != nil {
 		msg := promptErr.Error()
-		errPtr = &msg
-	} else if waitErr != nil {
-		msg := waitErr.Error()
 		errPtr = &msg
 	}
 	return AgentRunResultFrame{OK: errPtr == nil, Result: finalText, Error: errPtr, SessionID: sessionID, Usage: finalUsage, TimedOut: timedOut, DurationMs: time.Since(started).Milliseconds()}, nil
@@ -2195,7 +2805,7 @@ func pumpAgentStdout(ctx context.Context, r io.Reader, req *AgentRunRequestFrame
 			if !allowAgentBytes(sent, int64(len(frame.Text)), req.MaxOutputBytes) {
 				continue
 			}
-			if frame.Text == "" && frame.SessionID != "" && frame.EventType == "log" {
+			if frame.Text == "" && frame.SessionID != "" && frame.EventType == "log" && looksLikeSessionNotification(frame.Payload) {
 				frame.EventType = "session"
 			}
 			frame.Type = tAgentRunEvent
@@ -2262,6 +2872,8 @@ func normalizeAgentJSONLineFrames(line string) []AgentRunEventFrame {
 	}
 	sessionID, _ := evt["session_id"].(string)
 	rawType, _ := evt["type"].(string)
+
+	// --- 1. Typed frame types (exact match on evt["type"]) ---
 	if rawType == "thinking" || rawType == "reasoning" || rawType == "reasoning_delta" {
 		if text := firstString(evt, "thinking", "reasoning", "reason", "text", "content"); text != "" {
 			return []AgentRunEventFrame{{EventType: "thinking_delta", Text: text, SessionID: sessionID, Payload: evt}}
@@ -2279,25 +2891,112 @@ func normalizeAgentJSONLineFrames(line string) []AgentRunEventFrame {
 	if rawType == "permission_request" || rawType == "approval_request" {
 		return []AgentRunEventFrame{{EventType: "permission_request", SessionID: sessionID, Payload: evt}}
 	}
-	if result, ok := evt["result"].(string); ok && result != "" {
-		return []AgentRunEventFrame{{EventType: "text_delta", Text: result, SessionID: sessionID, Payload: evt}}
+
+	// --- 2. Anthropic stream-json: content_block_delta / content_block_start / message_delta ---
+	if rawType == "content_block_delta" {
+		if delta, ok := evt["delta"].(map[string]any); ok {
+			deltaType, _ := delta["type"].(string)
+			if deltaType == "thinking_delta" || deltaType == "reasoning_delta" {
+				if text := firstString(delta, "thinking", "reasoning", "reason", "text"); text != "" {
+					return []AgentRunEventFrame{{EventType: "thinking_delta", Text: text, SessionID: sessionID, Payload: evt}}
+				}
+			}
+			if deltaType == "text_delta" {
+				if text, _ := delta["text"].(string); text != "" {
+					return []AgentRunEventFrame{{EventType: "text_delta", Text: text, SessionID: sessionID, Payload: evt}}
+				}
+			}
+			if deltaType == "input_json_delta" {
+				if partial, _ := delta["partial_json"].(string); partial != "" {
+					return []AgentRunEventFrame{{EventType: "tool_call", SessionID: sessionID, Payload: evt}}
+				}
+			}
+		}
+		return nil
 	}
+	if rawType == "content_block_start" {
+		if block, ok := evt["content_block"].(map[string]any); ok {
+			blockType, _ := block["type"].(string)
+			if blockType == "tool_use" {
+				payload := agentBlockPayload(evt, block)
+				return []AgentRunEventFrame{{EventType: "tool_call", SessionID: sessionID, Payload: payload}}
+			}
+		}
+		return nil
+	}
+	if rawType == "content_block_stop" {
+		return nil
+	}
+	if rawType == "message_stop" {
+		// Final turn frame; may carry aggregate usage.
+		if usage, ok := evt["usage"].(map[string]any); ok && len(usage) > 0 {
+			return []AgentRunEventFrame{{EventType: "usage", SessionID: sessionID, Payload: evt}}
+		}
+		return nil
+	}
+	if rawType == "message_delta" {
+		// message_delta may carry aggregate usage on turn completion.
+		if usage, ok := evt["usage"].(map[string]any); ok && len(usage) > 0 {
+			return []AgentRunEventFrame{{EventType: "usage", SessionID: sessionID, Payload: evt}}
+		}
+		// Don't early-return; section 6 may still extract stop_reason or other useful
+		// metadata for tool events. Fall through without emitting text.
+	}
+
+	// --- 3. result field (generic single-shot completion output) ---
+	//
+	// NOTE: Some streaming CLIs (e.g. traecli --output-format=stream-json)
+	// emit both incremental content_block_delta chunks AND a trailing
+	// {"type":"result","result":"<complete answer>"} frame. If we treated
+	// both as text_delta, the daemon-side finalText accumulator would double
+	// up (chunks + full result). Use a separate event type so the accumulator
+	// can only pick this up as a fallback when no streaming text was seen.
+	if result, ok := evt["result"].(string); ok && result != "" {
+		return []AgentRunEventFrame{{EventType: "final_result", Text: result, SessionID: sessionID, Payload: evt}}
+	}
+
+	// --- 4. standalone thinking fields at top level ---
 	if text := firstString(evt, "thinking", "reasoning", "reason"); text != "" {
 		return []AgentRunEventFrame{{EventType: "thinking_delta", Text: text, SessionID: sessionID, Payload: evt}}
 	}
+
+	// --- 5. delta (generic; stream_event wrapper or message_delta) ---
 	if delta, ok := evt["delta"].(map[string]any); ok {
-		if thinking := firstString(delta, "thinking", "reasoning", "reason", "text"); thinking != "" {
-			return []AgentRunEventFrame{{EventType: "thinking_delta", Text: thinking, SessionID: sessionID, Payload: evt}}
+		deltaType, _ := delta["type"].(string)
+		if deltaType == "thinking_delta" || deltaType == "reasoning_delta" {
+			if text := firstString(delta, "thinking", "reasoning", "reason"); text != "" {
+				return []AgentRunEventFrame{{EventType: "thinking_delta", Text: text, SessionID: sessionID, Payload: evt}}
+			}
 		}
+		if deltaType == "text_delta" {
+			if text, _ := delta["text"].(string); text != "" {
+				return []AgentRunEventFrame{{EventType: "text_delta", Text: text, SessionID: sessionID, Payload: evt}}
+			}
+		}
+		// message_delta may carry role=assistant + content
 		if role, _ := delta["role"].(string); role == "assistant" {
 			if content, _ := delta["content"].(string); content != "" {
 				return []AgentRunEventFrame{{EventType: "text_delta", Text: content, SessionID: sessionID, Payload: evt}}
 			}
 		}
 	}
+
+	// --- 6. evt["message"] (assistant message / user tool-result echo / message_start) ---
 	if msg, ok := evt["message"].(map[string]any); ok {
+		role, _ := msg["role"].(string)
+		isNonAssistantTextTurn := role == "user" || role == "system" || rawType == "user" || rawType == "system"
+		// Streaming wrapper types (message_start, message_stop, message_delta, content_block_stop)
+		// typically carry the fully assembled content after the incremental deltas have already
+		// been streamed. Extracting text/thinking from these frames would duplicate the output.
+		// Tool_use and tool_result blocks are still routed because some CLIs only include full
+		// tool metadata in the assembled message.
+		isStreamingWrapper := rawType == "message_start" || rawType == "message_stop" ||
+			rawType == "message_delta" || rawType == "content_block_stop"
 		if content, ok := msg["content"].(string); ok && content != "" {
-			return []AgentRunEventFrame{{EventType: "text_delta", Text: content, SessionID: sessionID, Payload: evt}}
+			// Never emit text_delta for user/system turns; they contain the prompt, not the model response.
+			if !isNonAssistantTextTurn && !isStreamingWrapper {
+				return []AgentRunEventFrame{{EventType: "text_delta", Text: content, SessionID: sessionID, Payload: evt}}
+			}
 		}
 		if blocks, ok := msg["content"].([]any); ok {
 			frames := make([]AgentRunEventFrame, 0, len(blocks))
@@ -2311,6 +3010,11 @@ func normalizeAgentJSONLineFrames(line string) []AgentRunEventFrame {
 				}
 				if typ == "tool_result" || typ == "tool_use_end" {
 					frames = append(frames, AgentRunEventFrame{EventType: "tool_result", SessionID: sessionID, Payload: payload})
+					continue
+				}
+				// thinking and assistant text are gated on non-user/system message role;
+				// user turns sometimes contain tool_result content blocks (handled above) but never valid thinking/text output.
+				if isNonAssistantTextTurn || isStreamingWrapper {
 					continue
 				}
 				if typ == "thinking" || typ == "reasoning" {
@@ -2330,6 +3034,8 @@ func normalizeAgentJSONLineFrames(line string) []AgentRunEventFrame {
 			}
 		}
 	}
+
+	// --- 7. standalone usage block at top level ---
 	if usage, ok := evt["usage"].(map[string]any); ok {
 		evt["usage"] = usage
 		return []AgentRunEventFrame{{EventType: "usage", SessionID: sessionID, Payload: evt}}
@@ -2362,6 +3068,33 @@ func firstString(m map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// looksLikeSessionNotification returns true when an otherwise-unclassified event
+// payload appears to announce a session lifecycle event (created, resumed, etc.)
+// rather than a generic streaming wrapper. We use this to gate the log→session
+// promotion in pumpAgentStdout so that routine frame types such as message_start
+// (which CLIs often tag with a session_id) do not flood the UI trace with
+// spurious "状态: session" entries.
+func looksLikeSessionNotification(payload map[string]any) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	rawType := strings.ToLower(firstString(payload, "type", "event", "eventType", "kind", "status", "phase"))
+	switch rawType {
+	case "session", "session_created", "session_resumed", "session_loaded", "session_new", "new_session", "resume_session", "create_session":
+		return true
+	}
+	// Some CLIs emit `{"event":"session","sessionId":"..."}` style notices.
+	for _, key := range []string{"event", "action", "notification", "notice"} {
+		if v, _ := payload[key].(string); v != "" {
+			lower := strings.ToLower(v)
+			if strings.Contains(lower, "session") && (strings.Contains(lower, "creat") || strings.Contains(lower, "resum") || strings.Contains(lower, "load") || strings.Contains(lower, "new") || strings.Contains(lower, "start")) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func validateAgentRunRequest(cfg *Config, req *AgentRunRequestFrame) error {

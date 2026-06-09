@@ -1296,7 +1296,10 @@ export class GroupQueue {
     if (activeRunner && activeRunner !== groupJid) {
       // Write _drain sentinel to the active runner so it processes this
       // group's messages before exiting, instead of just waiting.
-      this.requestDrainForActiveRunner(groupJid, state);
+      this.requestDrainForActiveRunner(
+        groupJid,
+        'Drain sentinel written during drainGroup to unblock pending work',
+      );
       this.waitingGroups.add(groupJid);
       return;
     }

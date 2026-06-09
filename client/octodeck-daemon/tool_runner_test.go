@@ -45,6 +45,80 @@ func TestToolRunnerReadAndWrite(t *testing.T) {
 	}
 }
 
+func TestDebugCommandPrintsSessionsAndACPMappings(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		Server:       "https://octodeck.example",
+		Token:        "tok",
+		LinkID:       "cl_1234567890abcdef",
+		WorkspaceDir: filepath.Join(dir, "workspace"),
+		SessionDir:   filepath.Join(dir, "session"),
+		StateDir:     filepath.Join(dir, "state"),
+		AgentRegistry: []AgentRegistryEntry{{
+			ID:        "custom-acp",
+			Transport: "acp",
+			Binary:    "/bin/echo",
+		}},
+	}
+	if err := writeSessionMetadata(cfg, &AgentRunRequestFrame{
+		RunID:   "run-1",
+		AgentID: "custom-acp",
+		Cwd:     filepath.Join(dir, "workspace", "demo"),
+		Context: map[string]any{"group": map[string]any{"folder": "demo"}},
+	}, "sess-debug", "debug title"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeACPSessionRecord(cfg, acpSessionMapRecord{Key: "custom-acp:key", ConversationID: "aaa", AgentID: "custom-acp", Cwd: filepath.Join(dir, "workspace", "demo"), SessionID: "sess-debug"}); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.json")
+	data := fmt.Sprintf(`{"server":"%s","token":"%s","linkId":"%s","workspaceDir":"%s","sessionDir":"%s","stateDir":"%s","agentRegistry":[{"id":"custom-acp","transport":"acp","binary":"/bin/echo"}]}`,
+		cfg.Server, cfg.Token, cfg.LinkID, cfg.WorkspaceDir, cfg.SessionDir, cfg.StateDir)
+	if err := os.WriteFile(configPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if err := runDebugCommand([]string{"-config", configPath, "all"}, strings.NewReader(""), &out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{"version: octodeck-daemon/", "agentClients:", "session=sess-debug", "conversation=aaa", "custom-acp"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("debug output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestDebugCommandInteractiveHelpAndQuit(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	data := fmt.Sprintf(`{"server":"https://octodeck.example","token":"tok","linkId":"cl_1234567890abcdef","workspaceDir":"%s","sessionDir":"%s","stateDir":"%s"}`,
+		filepath.Join(dir, "workspace"), filepath.Join(dir, "session"), filepath.Join(dir, "state"))
+	if err := os.WriteFile(configPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if err := runDebugCommand([]string{"-config", configPath}, strings.NewReader("help\nquit\n"), &out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "OctoDeck daemon debug shell") || !strings.Contains(text, "commands:") || !strings.Contains(text, "bye") {
+		t.Fatalf("unexpected interactive debug output:\n%s", text)
+	}
+}
+
+func TestUnknownDaemonSubcommandDoesNotFallThroughToRunForever(t *testing.T) {
+	if got := unknownDaemonSubcommand([]string{"debug"}); got != "" {
+		t.Fatalf("debug should be a known subcommand, got %q", got)
+	}
+	if got := unknownDaemonSubcommand([]string{"-config", "config.json"}); got != "" {
+		t.Fatalf("flags should not be treated as subcommands, got %q", got)
+	}
+	if got := unknownDaemonSubcommand([]string{"bogus", "-config", "config.json"}); got != "bogus" {
+		t.Fatalf("expected unknown subcommand to be reported, got %q", got)
+	}
+}
+
 func TestToolRunnerRejectsPathOutsideAllowedRoot(t *testing.T) {
 	dir := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "secret.txt")

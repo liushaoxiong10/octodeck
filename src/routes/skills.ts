@@ -749,12 +749,34 @@ async function installSkillOnDevice(
     return { success: false, error: 'device offline' };
   }
   try {
+    // Use a temp HOME so `--global` install is isolated from concurrent
+    // installs; then atomically move discovered skill directories into the
+    // real `~/.claude/skills/` so the device's CLI discovery picks them up.
+    const command = [
+      'set -eu',
+      'tmp_home="$(mktemp -d)"',
+      'cleanup() { rm -rf "$tmp_home"; }',
+      'trap cleanup EXIT',
+      'mkdir -p "$tmp_home/.claude/skills" ~/.claude/skills',
+      `HOME="$tmp_home" npx -y skills add ${shellQuote(pkg)} --global --yes -a claude-code`,
+      'installed=""',
+      'count=0',
+      'for entry in "$tmp_home/.claude/skills"/*; do',
+      '  [ -e "$entry" ] || continue',
+      '  name="$(basename "$entry")"',
+      '  target="$HOME/.claude/skills/$name"',
+      '  rm -rf "$target"',
+      '  cp -RL "$entry" "$target"',
+      '  installed="$installed $name"',
+      '  count=$((count + 1))',
+      'done',
+      'if [ "$count" -eq 0 ]; then echo "No skills were installed — package may be invalid" >&2; exit 1; fi',
+      'printf "%s\\n" "$installed"',
+    ].join('\n');
     const result = await invokeRemoteTool(session, {
       linkId: deviceLinkId,
       toolName: 'Bash',
-      input: {
-        command: `npx -y skills add ${shellQuote(pkg)} --global --yes -a claude-code`,
-      },
+      input: { command },
       cwd: 'octodeck-tmp://skills-install',
       timeoutMs: 120_000,
       maxOutputBytes: 1_048_576,
@@ -762,7 +784,15 @@ async function installSkillOnDevice(
     if (!result.ok) {
       return { success: false, error: result.error || 'device install failed' };
     }
-    return { success: true, installed: [] };
+    const stdout =
+      result.result &&
+      typeof result.result === 'object' &&
+      'stdout' in result.result &&
+      typeof (result.result as { stdout?: unknown }).stdout === 'string'
+        ? (result.result as { stdout: string }).stdout
+        : '';
+    const installed = stdout.trim().split(/\s+/).filter(Boolean);
+    return { success: true, installed };
   } catch (error) {
     return {
       success: false,
@@ -894,9 +924,22 @@ skillsRoutes.post('/install', authMiddleware, async (c) => {
         });
 
   if (!result.success) {
+    const err = result.error;
+    let status: 400 | 404 | 409 | 500 = 500;
+    if (err === 'Invalid package name format') {
+      status = 400;
+    } else if (
+      err === 'device not found' ||
+      err === 'agent not found' ||
+      err === 'No skills were installed — package may be invalid'
+    ) {
+      status = 404;
+    } else if (err === 'device offline' || err === 'agent has no bound device') {
+      status = 409;
+    }
     return c.json(
       { error: 'Failed to install skill', details: result.error },
-      result.error === 'Invalid package name format' ? 400 : 500,
+      status,
     );
   }
 
