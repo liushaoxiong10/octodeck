@@ -5888,6 +5888,7 @@ export function ensureUserHomeGroup(
 export function deleteChatHistory(chatJid: string): void {
   const tx = db.transaction((jid: string) => {
     archiveChatRecord(jid, 'chat_history_deleted');
+    db.prepare('DELETE FROM messages WHERE chat_jid = ?').run(jid);
   });
   tx(chatJid);
 }
@@ -5906,6 +5907,7 @@ export function deleteImGroupRecord(jid: string): void {
   const tx = db.transaction(() => {
     db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
     archiveChatRecord(jid, 'im_group_deleted');
+    db.prepare('DELETE FROM messages WHERE chat_jid = ?').run(jid);
     db.prepare('DELETE FROM user_pinned_groups WHERE jid = ?').run(jid);
     // Feishu thread agents (source_kind='feishu_thread') and other chat-scoped
     // agents reference this jid via agents.chat_jid — without this, deleting
@@ -5933,8 +5935,9 @@ export function deleteGroupData(jid: string, folder: string): void {
     db.prepare('DELETE FROM registered_groups WHERE jid = ?').run(jid);
     // 4. 删除会话
     db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(folder);
-    // 5. 删除聊天记录
+    // 5. 删除聊天记录（归档 + 真删消息行）
     archiveChatRecord(jid, 'group_deleted');
+    db.prepare('DELETE FROM messages WHERE chat_jid = ?').run(jid);
     // 6. 删除 pin 记录
     db.prepare('DELETE FROM user_pinned_groups WHERE jid = ?').run(jid);
     // 7. 清除定时任务的工作区关联（任务本身不删，只断开绑定）
@@ -8192,6 +8195,7 @@ function mapAgentRow(row: Record<string, unknown>): SubAgent {
 
 export function deleteMessagesForChatJid(chatJid: string): void {
   archiveChatRecord(chatJid, 'chat_messages_deleted');
+  db.prepare('DELETE FROM messages WHERE chat_jid = ?').run(chatJid);
 }
 
 export function getMessage(
