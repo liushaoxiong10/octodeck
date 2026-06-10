@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export type RepoKnowledgePluginId = 'builtin' | 'graphify' | 'codegraph';
+export type RepoKnowledgePluginId = 'builtin' | 'graphify' | 'codegraph' | 'agent';
 
 export interface RepoKnowledgePluginStatus {
   id: RepoKnowledgePluginId;
@@ -58,6 +58,16 @@ export function listRepoKnowledgePlugins(selectedProvider?: string): RepoKnowled
       capabilities: ['symbols', 'imports', 'dependencies', 'docs', 'graph', 'search-index'],
     },
     {
+      id: 'agent',
+      displayName: 'AI Agent Graph Generator (Skill-driven)',
+      version: '1',
+      bundled: true,
+      available: true,
+      selected: selected === 'agent',
+      capabilities: ['llm-semantic', 'skills', 'external-graph', 'symbols', 'imports', 'dependencies', 'docs'],
+      reason: '通过运行一次 Agent 任务，结合外挂 Skill 生成语义化知识图谱；基础层仍复用 builtin 保证完整性。',
+    },
+    {
       id: 'graphify',
       displayName: 'Hosted Graphify Adapter',
       bundled: graphifyAvailable,
@@ -86,6 +96,9 @@ export function selectRepoKnowledgePlugin(input?: {
   const requestedProvider = (input?.provider || process.env.REPO_KNOWLEDGE_GRAPH_PROVIDER || 'builtin').trim().toLowerCase();
   const fallbackBuiltin = input?.fallbackBuiltin ?? true;
   const statuses = listRepoKnowledgePlugins(requestedProvider);
+  if (requestedProvider === 'agent') {
+    return { provider: 'agent', requestedProvider, fallbackBuiltin, statuses };
+  }
   if (requestedProvider === 'graphify' || requestedProvider === 'codegraph') {
     const status = statuses.find((item) => item.id === requestedProvider);
     return {

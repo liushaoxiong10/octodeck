@@ -1,28 +1,52 @@
 import { Hono } from 'hono';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 
 import {
+  appendRepoKnowledgeRunTimeline,
   createManagedRepo,
   deleteManagedRepo,
   getAgentLinkById,
   getManagedRepoById,
   getRepoKnowledgeContext,
   getRepoKnowledgeIndex,
+  getRepoKnowledgeRun,
+  getRepoKnowledgeRunByUploadTokenHash,
   listRepoKnowledgeGraphEdges,
   listRepoKnowledgeRuns,
   listRelatedRepoKnowledge,
   listRepoKnowledgeChunks,
   listManagedReposByUser,
+  replaceRepoKnowledgeChunks,
   searchRepoKnowledge,
+  updateRepoKnowledgeRun,
+  upsertRepoKnowledgeIndex,
 } from '../db.js';
 import { getSession } from '../agent-link/registry.js';
 import { invokeRemoteTool } from '../agent-link/tool-rpc.js';
+import { DATA_DIR, PROJECT_ROOT } from '../config.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { RepoCreateSchema, RepoKnowledgeGenerateSchema, RepoKnowledgeSearchSchema } from '../schemas.js';
-import { startRepoKnowledgeGenerationTask } from '../repo-knowledge.js';
+import {
+  RepoCreateSchema,
+  RepoKnowledgeGenerateSchema,
+  RepoKnowledgeSearchSchema,
+  RepoKnowledgeUploadSchema,
+} from '../schemas.js';
+import {
+  ingestRepoKnowledgeUpload,
+  startRepoKnowledgeGenerationTask,
+  stableChunkId,
+  stableEdgeId,
+} from '../repo-knowledge.js';
 import { listRepoKnowledgePlugins } from '../repo-knowledge-plugins.js';
 import { listRepoKnowledgeSearchBackends } from '../repo-knowledge-search.js';
-import type { RepoKnowledgeChunkKind, RepoKnowledgeGraphEdgeKind } from '../types.js';
+import type {
+  RepoKnowledgeChunkKind,
+  RepoKnowledgeGraphEdge,
+  RepoKnowledgeGraphEdgeKind,
+  RepoKnowledgeRunMilestone,
+} from '../types.js';
 import type { AuthUser, ManagedRepo } from '../types.js';
 import type { Variables } from '../web-context.js';
 
@@ -263,6 +287,12 @@ repoRoutes.post('/:id/knowledge/generate', authMiddleware, async (c) => {
   if (!validation.success)
     return c.json({ error: 'Invalid request body' }, 400);
   const executionDeviceLinkId = validation.data.execution_device_link_id;
+  if (validation.data.provider === 'agent') {
+    const effectiveSourceKind = validation.data.source_kind ?? repo.kind;
+    if (effectiveSourceKind === 'git' && !executionDeviceLinkId) {
+      return c.json({ error: 'provider=agent 的 Git 源必须指定 execution_device_link_id' }, 400);
+    }
+  }
   if (executionDeviceLinkId) {
     const link = getAgentLinkById(executionDeviceLinkId);
     if (!link || link.userId !== user.id || link.revokedAt) {
@@ -291,6 +321,9 @@ repoRoutes.post('/:id/knowledge/generate', authMiddleware, async (c) => {
     sourceDevicePath: validation.data.source_device_path,
     sourceDeviceLinkId: validation.data.source_device_link_id,
     executionDeviceLinkId,
+    enabledSkills: validation.data.enabled_skills,
+    agentPrompt: validation.data.agent_prompt,
+    agentTimeoutMs: validation.data.agent_timeout_ms,
   });
   return c.json({
     index: task.index,
@@ -299,6 +332,224 @@ repoRoutes.post('/:id/knowledge/generate', authMiddleware, async (c) => {
       status: task.alreadyRunning ? 'running' : 'queued',
     },
   }, 202);
+});
+
+// ────────── builtin-graph-scan Python 脚本（device 端 agent 可直接 curl 拉取）───
+// 无鉴权：脚本本身就是 repo 开源内容，device 端 agent 可能没有 session cookie。
+// 带强 ETag + Cache-Control 避免每次下载 80KB 都重传。
+//
+// device 端 agent 使用模板（来自 buildDeviceAgentPrompt）：
+//   curl -fsSL "$OCTODECK_PUBLIC_BASE_URL/api/repos/knowledge/builtin-script" \
+//        -o /tmp/builtin_graph_scan.py
+//   python3 /tmp/builtin_graph_scan.py --repo . --output-dir .octodeck/knowledge ...
+const BUILTIN_SCRIPT_PATH = path.join(
+  PROJECT_ROOT,
+  'container',
+  'skills',
+  'builtin-graph-scan',
+  'scripts',
+  'builtin_graph_scan.py',
+);
+let _builtinScriptCache: { mtimeMs: number; etag: string; body: Uint8Array } | null = null;
+repoRoutes.get('/knowledge/builtin-script', (c) => {
+  try {
+    const st = fs.statSync(BUILTIN_SCRIPT_PATH);
+    const fresh =
+      _builtinScriptCache &&
+      Math.abs(_builtinScriptCache.mtimeMs - st.mtimeMs) < 0.001;
+    if (!fresh) {
+      const body = fs.readFileSync(BUILTIN_SCRIPT_PATH);
+      const etag = '"' + crypto.createHash('sha1').update(body).digest('hex').slice(0, 16) + '"';
+      _builtinScriptCache = { mtimeMs: st.mtimeMs, etag, body };
+    }
+    const cache = _builtinScriptCache!;
+    const ifNoneMatch = c.req.header('If-None-Match');
+    if (ifNoneMatch && ifNoneMatch.split(',').map((s) => s.trim()).includes(cache.etag)) {
+      return c.body(null, 304);
+    }
+    c.header('ETag', cache.etag);
+    c.header('Cache-Control', 'public, max-age=300');
+    c.header('Content-Type', 'text/x-python; charset=utf-8');
+    c.header('Content-Length', String(cache.body.length));
+    return c.body(cache.body as never, 200);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ error: 'builtin script not available', detail: msg }, 500);
+  }
+});
+
+// ────────── 单个 run 查询（给前端观测面板用 ────────────────────────────────
+repoRoutes.get('/knowledge/runs/:runId', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const run = getRepoKnowledgeRun(c.req.param('runId'), user.id);
+  if (!run) return c.json({ error: 'Run not found' }, 404);
+  // 不回传 token hash
+  const { uploadTokenHash: _uploadTokenHash, ...safe } = run;
+  return c.json({ run: safe });
+});
+
+// ────────── 产物上传端点（agent 主动上传，Bearer: <upload token>）───────────
+// 支持两种 Content-Type：
+//   1. application/json          — 符合 RepoKnowledgeUploadSchema 的 JSON
+//   2. multipart/form-data       — 文件字段：chunks.json / edges.json / summary.md / stats.json / run.log
+const UPLOAD_MAX_BYTES = 128 * 1024 * 1024; // 128MB 总上限
+repoRoutes.post('/knowledge/runs/:runId/upload', async (c) => {
+  const authz = c.req.header('Authorization') ?? '';
+  const token = /^Bearer\s+(.+)$/i.exec(authz)?.[1]?.trim();
+  if (!token) return c.json({ error: 'missing upload token' }, 401);
+  const runId = c.req.param('runId');
+  const expectedHash = crypto.createHash('sha256').update(token).digest('hex');
+  const run = getRepoKnowledgeRunByUploadTokenHash(expectedHash);
+  if (!run) return c.json({ error: 'run not found or token invalid' }, 401);
+  if (run.id !== runId) return c.json({ error: 'run id mismatch' }, 400);
+
+  // token 一次性使用：立即清空，防止重放
+  updateRepoKnowledgeRun(run.id, run.userId, {
+    status: 'uploading',
+    uploadTokenHash: null,
+  });
+
+  const timelinePush = (kind: RepoKnowledgeRunMilestone['kind'], label: string, detail?: Record<string, unknown>) =>
+    appendRepoKnowledgeRunTimeline(run.id, run.userId, { kind, label, detail });
+  timelinePush('upload', 'agent 开始上传产物');
+
+  let payload: {
+    chunks?: unknown;
+    edges?: unknown;
+    summary?: unknown;
+    stats?: unknown;
+    runLog?: unknown;
+  } = {};
+  try {
+    const ctype = c.req.header('content-type') ?? '';
+    if (ctype.startsWith('application/json')) {
+      const raw = (await c.req.raw.text()) ?? '';
+      if (new Blob([raw]).size > UPLOAD_MAX_BYTES) {
+        return c.json({ error: 'payload too large' }, 413);
+      }
+      payload = JSON.parse(raw) as typeof payload;
+    } else if (ctype.startsWith('multipart/form-data')) {
+      const form = await c.req.formData();
+      const pickText = async (name: string): Promise<string | undefined> => {
+        const entry = form.get(name);
+        if (!entry) return undefined;
+        if (typeof entry === 'string') return entry;
+        if (entry instanceof Blob) {
+          if (entry.size > UPLOAD_MAX_BYTES) throw new Error(`field too large: ${name}`);
+          return await (entry as File).text();
+        }
+        return undefined;
+      };
+      const resolved: { chunks?: unknown; edges?: unknown; summary?: unknown; stats?: unknown; runLog?: unknown } = {};
+      const pickJson = async (name: string) => {
+        const entry = form.get(name);
+        if (!entry) return undefined;
+        const text = typeof entry === 'string' ? entry : entry instanceof Blob ? await (entry as File).text() : undefined;
+        if (text === undefined) return undefined;
+        if (text.length > UPLOAD_MAX_BYTES) throw new Error(`field too large: ${name}`);
+        return JSON.parse(text);
+      };
+      resolved.chunks = await pickJson('chunks.json');
+      resolved.edges = await pickJson('edges.json');
+      resolved.summary = await pickText('summary.md');
+      resolved.stats = await pickJson('stats.json');
+      resolved.runLog = await pickText('run.log');
+      payload = resolved;
+    } else {
+      return c.json({ error: 'unsupported content-type' }, 415);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    timelinePush('error', '上传解析失败', { error: msg });
+    updateRepoKnowledgeRun(run.id, run.userId, { error: msg, status: 'error' });
+    return c.json({ error: msg }, 400);
+  }
+
+  // zod 校验
+  const validated = RepoKnowledgeUploadSchema.safeParse({
+    chunks: payload.chunks,
+    edges: payload.edges,
+    summary: typeof payload.summary === 'string' ? payload.summary : undefined,
+    stats: typeof payload.stats === 'object' && payload.stats !== null && !Array.isArray(payload.stats)
+      ? payload.stats as Record<string, unknown>
+      : undefined,
+    runLog: typeof payload.runLog === 'string' ? payload.runLog : undefined,
+  });
+  if (!validated.success) {
+    const msg = validated.error.issues[0]?.message ?? 'schema validation failed';
+    timelinePush('error', '产物 schema 校验失败', { error: msg, zod: validated.error.flatten() });
+    updateRepoKnowledgeRun(run.id, run.userId, { error: msg, status: 'error' });
+    return c.json({ error: msg, details: validated.error.flatten() }, 400);
+  }
+
+  // 持久化原始产物（data/repo-knowledge/runs/<runId>/），供排查
+  try {
+    const runDir = path.join(DATA_DIR, 'repo-knowledge', 'runs', run.id);
+    fs.mkdirSync(runDir, { recursive: true });
+    if (validated.data.chunks) fs.writeFileSync(path.join(runDir, 'chunks.json'), JSON.stringify(validated.data.chunks));
+    if (validated.data.edges) fs.writeFileSync(path.join(runDir, 'edges.json'), JSON.stringify(validated.data.edges));
+    if (validated.data.summary) fs.writeFileSync(path.join(runDir, 'summary.md'), validated.data.summary);
+    if (validated.data.stats) fs.writeFileSync(path.join(runDir, 'stats.json'), JSON.stringify(validated.data.stats));
+    if (validated.data.runLog) fs.writeFileSync(path.join(runDir, 'run.log'), validated.data.runLog);
+  } catch (err) {
+    // 原始产物落盘失败不中断主流程，只记 timeline
+    const msg = err instanceof Error ? err.message : String(err);
+    timelinePush('warn', '原始产物落盘失败', { error: msg });
+  }
+
+  // 入库
+  try {
+    const repo = getManagedRepoById(run.repoId);
+    if (!repo || repo.createdBy !== run.userId) throw new Error('repo owner mismatch');
+    const result = ingestRepoKnowledgeUpload(repo, run.userId, {
+      chunks: validated.data.chunks ?? [],
+      edges: validated.data.edges ?? [],
+      summary: validated.data.summary,
+      stats: validated.data.stats,
+    });
+    updateRepoKnowledgeRun(run.id, run.userId, {
+      status: 'ready',
+      filesUploadedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      error: null,
+      stats: {
+        ...(run.stats ?? {}),
+        uploaded: {
+          chunks: validated.data.chunks?.length ?? 0,
+          edges: validated.data.edges?.length ?? 0,
+          merged: result.merged,
+          skipped: result.skipped,
+          from: 'agent-upload',
+        },
+      },
+    });
+    timelinePush('upload', '产物已上传并入知识图谱索引', {
+      chunks: validated.data.chunks?.length ?? 0,
+      edges: validated.data.edges?.length ?? 0,
+      merged: result.merged,
+      skipped: result.skipped,
+    });
+    upsertRepoKnowledgeIndex({
+      repoId: repo.id,
+      userId: run.userId,
+      status: 'ready',
+      summary: validated.data.summary ?? undefined,
+      stats: result.stats,
+      generatedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    return c.json({
+      ok: true,
+      merged: result.merged,
+      skipped: result.skipped,
+      stats: result.stats,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    timelinePush('error', '产物入库失败', { error: msg });
+    updateRepoKnowledgeRun(run.id, run.userId, { error: msg, status: 'error' });
+    return c.json({ error: msg }, 500);
+  }
 });
 
 repoRoutes.get('/:id/knowledge/chunks', authMiddleware, (c) => {

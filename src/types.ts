@@ -155,7 +155,14 @@ export interface RepoKnowledgeIndex {
   updatedAt: string;
 }
 
-export type RepoKnowledgeRunStatus = 'queued' | 'running' | 'ready' | 'error';
+export type RepoKnowledgeRunStatus = 'queued' | 'running' | 'uploading' | 'ready' | 'error';
+
+export interface RepoKnowledgeRunMilestone {
+  t: string;            // ISO timestamp
+  kind: 'milestone' | 'tool_start' | 'tool_end' | 'thinking' | 'agent_event' | 'upload' | 'warn' | 'error';
+  label: string;
+  detail?: Record<string, unknown>;
+}
 
 export interface RepoKnowledgeRun {
   id: string;
@@ -164,7 +171,17 @@ export interface RepoKnowledgeRun {
   status: RepoKnowledgeRunStatus;
   sourceKind?: string;
   executionDeviceLinkId?: string;
+  /** agent.run.request 所使用的 client id（claude-code/traecli 等） */
+  agentClientId?: string;
+  /** 一次性上传 token（仅对 creator 展示一次，服务端内部存 hash） */
+  uploadTokenHash?: string;
+  /** 产物上传完成时间 */
+  filesUploadedAt?: string;
+  /** 本轮知识图谱生成启用的 skills 清单 */
+  enabledSkills?: string[];
   stats: Record<string, unknown>;
+  /** 流式时间线（agent 工具调用、思考、上传进度等），前端直接渲染 */
+  timeline?: RepoKnowledgeRunMilestone[];
   error?: string;
   queuedAt: string;
   startedAt?: string;

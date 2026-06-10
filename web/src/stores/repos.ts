@@ -27,14 +27,27 @@ export interface RepoKnowledgeIndex {
   updatedAt: string;
 }
 
+export type RepoKnowledgeRunStatus = 'queued' | 'running' | 'uploading' | 'ready' | 'error';
+
+export interface RepoKnowledgeRunMilestone {
+  t: string;
+  kind: 'milestone' | 'tool_start' | 'tool_end' | 'thinking' | 'agent_event' | 'upload' | 'warn' | 'error';
+  label: string;
+  detail?: Record<string, unknown>;
+}
+
 export interface RepoKnowledgeRun {
   id: string;
   repoId: string;
   userId: string;
-  status: 'queued' | 'running' | 'ready' | 'error';
+  status: RepoKnowledgeRunStatus;
   sourceKind?: string;
   executionDeviceLinkId?: string;
+  agentClientId?: string;
+  filesUploadedAt?: string;
+  enabledSkills?: string[];
   stats: Record<string, unknown>;
+  timeline?: RepoKnowledgeRunMilestone[];
   error?: string;
   queuedAt: string;
   startedAt?: string;
@@ -80,7 +93,7 @@ export interface RepoKnowledgeContextPackage {
 }
 
 export interface RepoKnowledgePluginStatus {
-  id: 'builtin' | 'graphify' | 'codegraph';
+  id: 'builtin' | 'graphify' | 'codegraph' | 'agent';
   displayName: string;
   available: boolean;
   bundled: boolean;
@@ -117,6 +130,7 @@ interface ReposState {
   loadSearchBackends: () => Promise<void>;
   generateKnowledge: (id: string, options?: Record<string, unknown>) => Promise<RepoKnowledgeIndex | null>;
   loadKnowledgeRuns: (id: string, limit?: number) => Promise<RepoKnowledgeRun[]>;
+  loadKnowledgeRun: (runId: string) => Promise<RepoKnowledgeRun | null>;
   searchKnowledge: (input: { repo_id?: string; query: string; limit?: number; kind?: string; language?: string; path_prefix?: string; include_related?: boolean }) => Promise<RepoKnowledgeHit[]>;
   loadKnowledgeGraph: (repoId: string, input?: { path?: string; edge_kind?: string; limit?: number }) => Promise<RepoKnowledgeGraphEdge[]>;
   loadKnowledgeContext: (repoId: string, input?: { chunk_id?: string; path?: string; query?: string; limit?: number }) => Promise<RepoKnowledgeContextPackage | null>;
@@ -185,6 +199,16 @@ export const useReposStore = create<ReposState>((set, get) => ({
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
       return [];
+    }
+  },
+  loadKnowledgeRun: async (runId) => {
+    try {
+      const data = await api.get<{ run: RepoKnowledgeRun }>(`/api/repos/knowledge/runs/${encodeURIComponent(runId)}`);
+      set({ error: null });
+      return data.run ?? null;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return null;
     }
   },
   searchKnowledge: async (input) => {

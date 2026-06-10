@@ -9,7 +9,7 @@ export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts
-const PROJECT_ROOT = process.cwd();
+export const PROJECT_ROOT = process.cwd();
 
 // Mount security: allowlist in project config/ directory
 export const MOUNT_ALLOWLIST_PATH = path.resolve(
@@ -33,6 +33,15 @@ export const TIMEZONE =
 
 // Web server configuration
 export const WEB_PORT = parseInt(process.env.WEB_PORT || '3000', 10);
+// OctoDeck 服务对 device / 外部访问可见的绝对 URL 基址（无尾斜杠），
+// 例如 "https://octodeck.example.com" / "http://localhost:3000"。
+// device 侧（daemon/agent）走 HTTP 回调时会以此作为前缀。
+export const OCTODECK_PUBLIC_BASE_URL: string = (() => {
+  const v = process.env.OCTODECK_PUBLIC_BASE_URL || process.env.OCTODECK_EXTERNAL_URL || '';
+  const trimmed = v.trim().replace(/\/+$/, '');
+  if (trimmed) return trimmed;
+  return `http://127.0.0.1:${WEB_PORT}`;
+})();
 
 // Cookie configuration
 // When accessed over HTTPS: use __Host- prefix (requires Secure; Path=/; no Domain)

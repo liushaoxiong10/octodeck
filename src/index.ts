@@ -65,6 +65,7 @@ import {
   setRegisteredGroup,
   setRouterState,
   setSession,
+  ensureSessionWorkspaceSessionId,
   deleteSession,
   storeMessageDirect,
   updateLatestMessageTokenUsage,
@@ -4185,6 +4186,7 @@ async function runAgent(
   // For the agent-runner: isMain means this is an admin home container (full privileges)
   const isAdminHome = isHome && group.executionMode === 'host';
   const sessionId = sessions[group.folder];
+  const workspaceSessionId = ensureSessionWorkspaceSessionId(group.folder);
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -4282,6 +4284,7 @@ async function runAgent(
         input: {
           prompt,
           sessionId,
+          workspaceSessionId,
           turnId,
           groupFolder: group.folder,
           chatJid,
@@ -6527,6 +6530,10 @@ async function processAgentConversation(
   // chat history so the new model does not mistake the fresh SDK session for
   // an empty conversation.
   const sessionId = getSession(effectiveGroup.folder, agentId) || undefined;
+  const workspaceSessionId = ensureSessionWorkspaceSessionId(
+    effectiveGroup.folder,
+    agentId,
+  );
   let currentAgentSessionId = sessionId;
   let prompt = formatMessages(missedMessages, false);
   const backendForPromptPolicy = resolveBackend(effectiveGroup);
@@ -7077,6 +7084,7 @@ async function processAgentConversation(
     const containerInput: ContainerInput = {
       prompt,
       sessionId,
+      workspaceSessionId,
       turnId: lastProcessed.id,
       groupFolder: effectiveGroup.folder,
       chatJid,

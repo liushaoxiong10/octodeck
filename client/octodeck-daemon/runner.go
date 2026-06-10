@@ -831,6 +831,9 @@ func resolveAgentWorkspaceCwd(cfg *Config, ws *AgentRunWorkspace) (string, error
 }
 
 func ensureNamedWorkspaceDir(cfg *Config, groupFolder string) (string, error) {
+	if err := validateNamedWorkspaceFolder(groupFolder); err != nil {
+		return "", err
+	}
 	dir := filepath.Join(workspaceDir(cfg), safeGroupFolder(groupFolder))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
@@ -868,6 +871,9 @@ func ensureWorkspaceSharedDir(workspaceRoot string) (string, error) {
 }
 
 func ensureNamedTmpDir(cfg *Config, groupFolder string) (string, error) {
+	if err := validateNamedWorkspaceFolder(groupFolder); err != nil {
+		return "", err
+	}
 	dir := filepath.Join(tmpDir(cfg), safeGroupFolder(groupFolder))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
@@ -1400,6 +1406,40 @@ func safeGroupFolder(folder string) string {
 }
 
 var unsafePathSegment = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+var validWorkspaceFolderSegment = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$`)
+
+var suspiciousWorkspaceFolderTokens = []string{
+	" and ", " or ", "select", "sleep", "extract", "extractvalue", "concat",
+	"cast", "chr", "char", "where", "from", "union", "dbms_pipe", "utl_inaddr",
+	"__import__", "pickle", "constructor", "child_process", "execsync", "popen",
+	"curl", "callback", "oast", "rce", "toDate",
+}
+
+func validateNamedWorkspaceFolder(folder string) error {
+	raw := strings.TrimSpace(folder)
+	if raw == "" {
+		return errors.New("workspace folder is required")
+	}
+	if strings.ContainsAny(raw, `/\`) || filepath.Clean(raw) != raw {
+		return fmt.Errorf("invalid workspace folder: %q", folder)
+	}
+	if !validWorkspaceFolderSegment.MatchString(raw) || safeGroupFolder(raw) != raw {
+		return fmt.Errorf("invalid workspace folder: %q", folder)
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '-' || r == '_' || r == '.'
+	})
+	if len(parts) > 6 {
+		return fmt.Errorf("invalid workspace folder: %q", folder)
+	}
+	lower := strings.ToLower(" " + raw + " ")
+	for _, token := range suspiciousWorkspaceFolderTokens {
+		if strings.Contains(lower, strings.ToLower(token)) {
+			return fmt.Errorf("invalid workspace folder: %q", folder)
+		}
+	}
+	return nil
+}
 
 func safePathSegment(s string) string {
 	s = unsafePathSegment.ReplaceAllString(s, "-")

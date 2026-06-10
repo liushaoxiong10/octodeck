@@ -43,6 +43,7 @@ import {
   RepoKnowledgeGraphEdgeKind,
   RepoKnowledgeIndex,
   RepoKnowledgeRun,
+  RepoKnowledgeRunMilestone,
   RepoKnowledgeRunStatus,
   RepoKnowledgeSearchHit,
   RepoKnowledgeStatus,
@@ -1099,6 +1100,11 @@ function initializeSqliteDatabase(
       status TEXT NOT NULL,
       source_kind TEXT,
       execution_device_link_id TEXT,
+      agent_client_id TEXT,
+      upload_token_hash TEXT,
+      files_uploaded_at TEXT,
+      enabled_skills_json TEXT NOT NULL DEFAULT '[]',
+      timeline_json TEXT NOT NULL DEFAULT '[]',
       stats_json TEXT NOT NULL DEFAULT '{}',
       error TEXT,
       queued_at TEXT NOT NULL,
@@ -1248,6 +1254,7 @@ function initializeSqliteDatabase(
   ensureColumn('issue_attachments', 'data_url', 'TEXT');
   ensureColumn('registered_groups', 'selected_skills', 'TEXT');
   ensureColumn('sessions', 'agent_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('sessions', 'workspace_session_id', 'TEXT');
   ensureColumn('agents', 'kind', "TEXT NOT NULL DEFAULT 'task'");
   ensureColumn('registered_groups', 'target_agent_id', 'TEXT');
   ensureColumn('registered_groups', 'target_main_jid', 'TEXT');
@@ -1961,7 +1968,21 @@ function initializeSqliteDatabase(
     }
   }
 
-  const SCHEMA_VERSION = '39';
+  // v39 → v40: repo_knowledge_runs 增加 task-agent 所需字段和 timeline 存储
+  {
+    const ensure = (col: string, decl: string) => {
+      const has = db.prepare("PRAGMA table_info('repo_knowledge_runs')").all()
+        .some((c: any) => c.name === col);
+      if (!has) db.exec(`ALTER TABLE repo_knowledge_runs ADD COLUMN ${col} ${decl}`);
+    };
+    ensure('agent_client_id', 'TEXT');
+    ensure('upload_token_hash', 'TEXT');
+    ensure('files_uploaded_at', 'TEXT');
+    ensure('enabled_skills_json', "TEXT NOT NULL DEFAULT '[]'");
+    ensure('timeline_json', "TEXT NOT NULL DEFAULT '[]'");
+  }
+
+  const SCHEMA_VERSION = '40';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -4817,6 +4838,39 @@ export function setSession(
   ).run(groupFolder, sessionId, effectiveAgentId);
 }
 
+export function getSessionWorkspaceSessionId(
+  groupFolder: string,
+  agentId?: string | null,
+): string | undefined {
+  const effectiveAgentId = agentId || '';
+  const row = db
+    .prepare(
+      'SELECT workspace_session_id FROM sessions WHERE group_folder = ? AND agent_id = ?',
+    )
+    .get(groupFolder, effectiveAgentId) as
+    | { workspace_session_id: string | null }
+    | undefined;
+  const value = row?.workspace_session_id?.trim();
+  return value || undefined;
+}
+
+export function ensureSessionWorkspaceSessionId(
+  groupFolder: string,
+  agentId?: string | null,
+): string {
+  const existing = getSessionWorkspaceSessionId(groupFolder, agentId);
+  if (existing) return existing;
+  const effectiveAgentId = agentId || '';
+  const workspaceSessionId = crypto.randomUUID();
+  db.prepare(
+    `INSERT INTO sessions (group_folder, session_id, agent_id, workspace_session_id)
+     VALUES (?, '', ?, ?)
+     ON CONFLICT(group_folder, agent_id) DO UPDATE SET
+       workspace_session_id = COALESCE(sessions.workspace_session_id, excluded.workspace_session_id)`,
+  ).run(groupFolder, effectiveAgentId, workspaceSessionId);
+  return getSessionWorkspaceSessionId(groupFolder, agentId) || workspaceSessionId;
+}
+
 export function deleteSession(
   groupFolder: string,
   agentId?: string | null,
@@ -5280,6 +5334,11 @@ type RepoKnowledgeRunRow = {
   status: string;
   source_kind: string | null;
   execution_device_link_id: string | null;
+  agent_client_id: string | null;
+  upload_token_hash: string | null;
+  files_uploaded_at: string | null;
+  enabled_skills_json: string | null;
+  timeline_json: string | null;
   stats_json: string | null;
   error: string | null;
   queued_at: string;
@@ -5348,9 +5407,19 @@ function parseRepoKnowledgeIndexRow(row: RepoKnowledgeIndexRow): RepoKnowledgeIn
   };
 }
 
+function parseJsonArray<T = unknown>(value: string | null | undefined): T[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 function parseRepoKnowledgeRunRow(row: RepoKnowledgeRunRow): RepoKnowledgeRun {
   const status: RepoKnowledgeRunStatus =
-    row.status === 'queued' || row.status === 'running' || row.status === 'ready' || row.status === 'error'
+    row.status === 'queued' || row.status === 'running' || row.status === 'uploading' || row.status === 'ready' || row.status === 'error'
       ? row.status
       : 'error';
   return {
@@ -5360,6 +5429,11 @@ function parseRepoKnowledgeRunRow(row: RepoKnowledgeRunRow): RepoKnowledgeRun {
     status,
     sourceKind: row.source_kind ?? undefined,
     executionDeviceLinkId: row.execution_device_link_id ?? undefined,
+    agentClientId: row.agent_client_id ?? undefined,
+    uploadTokenHash: row.upload_token_hash ?? undefined,
+    filesUploadedAt: row.files_uploaded_at ?? undefined,
+    enabledSkills: parseJsonArray<string>(row.enabled_skills_json),
+    timeline: parseJsonArray<RepoKnowledgeRunMilestone>(row.timeline_json),
     stats: parseJsonObject(row.stats_json),
     error: row.error ?? undefined,
     queuedAt: row.queued_at,
@@ -5440,6 +5514,10 @@ export function createRepoKnowledgeRun(input: {
   status?: RepoKnowledgeRunStatus;
   sourceKind?: string;
   executionDeviceLinkId?: string;
+  agentClientId?: string;
+  uploadTokenHash?: string;
+  enabledSkills?: string[];
+  timeline?: RepoKnowledgeRunMilestone[];
   stats?: Record<string, unknown>;
   error?: string;
   queuedAt?: string;
@@ -5449,8 +5527,10 @@ export function createRepoKnowledgeRun(input: {
   const queuedAt = input.queuedAt ?? now;
   db.prepare(
     `INSERT INTO repo_knowledge_runs (
-      id, repo_id, user_id, status, source_kind, execution_device_link_id, stats_json, error, queued_at, started_at, completed_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+      id, repo_id, user_id, status, source_kind, execution_device_link_id, agent_client_id,
+      upload_token_hash, enabled_skills_json, timeline_json,
+      stats_json, error, queued_at, started_at, completed_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
   ).run(
     input.id,
     input.repoId,
@@ -5458,6 +5538,10 @@ export function createRepoKnowledgeRun(input: {
     input.status ?? 'queued',
     input.sourceKind ?? null,
     input.executionDeviceLinkId ?? null,
+    input.agentClientId ?? null,
+    input.uploadTokenHash ?? null,
+    JSON.stringify(input.enabledSkills ?? []),
+    JSON.stringify(input.timeline ?? []),
     JSON.stringify(input.stats ?? {}),
     input.error ?? null,
     queuedAt,
@@ -5474,6 +5558,36 @@ export function getRepoKnowledgeRun(id: string, userId: string): RepoKnowledgeRu
   return row ? parseRepoKnowledgeRunRow(row) : undefined;
 }
 
+/** 通过一次性 upload token 查询（不校验 userId，用于上传端点；调用方自己校验 token） */
+export function getRepoKnowledgeRunByUploadTokenHash(hash: string): RepoKnowledgeRun | undefined {
+  if (!hash) return undefined;
+  const row = db
+    .prepare('SELECT * FROM repo_knowledge_runs WHERE upload_token_hash = ?')
+    .get(hash) as RepoKnowledgeRunRow | undefined;
+  return row ? parseRepoKnowledgeRunRow(row) : undefined;
+}
+
+export function appendRepoKnowledgeRunTimeline(
+  id: string,
+  userId: string,
+  item: Omit<RepoKnowledgeRunMilestone, 't'> & { t?: string },
+  limit = 500,
+): RepoKnowledgeRun | undefined {
+  const current = getRepoKnowledgeRun(id, userId);
+  if (!current) return undefined;
+  const milestone: RepoKnowledgeRunMilestone = {
+    t: item.t ?? new Date().toISOString(),
+    kind: item.kind,
+    label: item.label,
+    detail: item.detail,
+  };
+  const timeline = [...(current.timeline ?? []), milestone].slice(-limit);
+  db.prepare(
+    `UPDATE repo_knowledge_runs SET timeline_json = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+  ).run(JSON.stringify(timeline), milestone.t, id, userId);
+  return getRepoKnowledgeRun(id, userId);
+}
+
 export function updateRepoKnowledgeRun(
   id: string,
   userId: string,
@@ -5483,6 +5597,11 @@ export function updateRepoKnowledgeRun(
     error?: string | null;
     startedAt?: string | null;
     completedAt?: string | null;
+    filesUploadedAt?: string | null;
+    uploadTokenHash?: string | null;
+    agentClientId?: string | null;
+    executionDeviceLinkId?: string | null;
+    enabledSkills?: string[];
     updatedAt?: string;
   },
 ): RepoKnowledgeRun | undefined {
@@ -5491,7 +5610,9 @@ export function updateRepoKnowledgeRun(
   const updatedAt = patch.updatedAt ?? new Date().toISOString();
   db.prepare(
     `UPDATE repo_knowledge_runs SET
-      status = ?, stats_json = ?, error = ?, started_at = ?, completed_at = ?, updated_at = ?
+      status = ?, stats_json = ?, error = ?, started_at = ?, completed_at = ?,
+      files_uploaded_at = ?, upload_token_hash = ?, agent_client_id = ?,
+      execution_device_link_id = ?, enabled_skills_json = ?, updated_at = ?
      WHERE id = ? AND user_id = ?`,
   ).run(
     patch.status ?? current.status,
@@ -5499,6 +5620,11 @@ export function updateRepoKnowledgeRun(
     patch.error === undefined ? current.error ?? null : patch.error,
     patch.startedAt === undefined ? current.startedAt ?? null : patch.startedAt,
     patch.completedAt === undefined ? current.completedAt ?? null : patch.completedAt,
+    patch.filesUploadedAt === undefined ? current.filesUploadedAt ?? null : patch.filesUploadedAt,
+    patch.uploadTokenHash === undefined ? current.uploadTokenHash ?? null : patch.uploadTokenHash,
+    patch.agentClientId === undefined ? current.agentClientId ?? null : patch.agentClientId,
+    patch.executionDeviceLinkId === undefined ? current.executionDeviceLinkId ?? null : patch.executionDeviceLinkId,
+    JSON.stringify(patch.enabledSkills ?? current.enabledSkills ?? []),
     updatedAt,
     id,
     userId,
@@ -5572,7 +5698,7 @@ export function replaceRepoKnowledgeChunks(input: {
       db.prepare('DELETE FROM repo_knowledge_chunks_fts WHERE repo_id = ? AND user_id = ?').run(input.repoId, input.userId);
     }
     const insert = db.prepare(
-      `INSERT INTO repo_knowledge_chunks (
+      `INSERT OR REPLACE INTO repo_knowledge_chunks (
         id, repo_id, user_id, path, kind, name, language, start_line, end_line, content, keywords, metadata_json, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
@@ -5595,7 +5721,7 @@ export function replaceRepoKnowledgeChunks(input: {
     }
     if (repoKnowledgeFtsAvailable) {
       const insertFts = db.prepare(
-        `INSERT INTO repo_knowledge_chunks_fts (
+        `INSERT OR REPLACE INTO repo_knowledge_chunks_fts (
           chunk_id, repo_id, user_id, path, kind, name, language, keywords, content
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
@@ -5614,7 +5740,7 @@ export function replaceRepoKnowledgeChunks(input: {
       }
     }
     const insertEdge = db.prepare(
-      `INSERT INTO repo_knowledge_graph_edges (
+      `INSERT OR IGNORE INTO repo_knowledge_graph_edges (
         id, repo_id, user_id, from_path, to_path, edge_kind, symbol, package_name, source, metadata_json, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );

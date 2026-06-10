@@ -910,10 +910,16 @@ func applyAgentRunChatSessionScope(req *AgentRunRequestFrame) {
 			metadataString(req.Input.Metadata, "chatJid"),
 		)
 	}
-	// Keep Workspace.Folder as the workspace/group root. Only the per-conversation
-	// session directory is driven by chat-id:
-	//   workspace/<workspace-folder>/sessions/<chat-id>
-	if chatID != "" {
+	workspaceSessionID := metadataString(req.Input.Metadata, "workspaceSessionId")
+	// Keep Workspace.Folder as the workspace/group root. Newer servers send an
+	// explicit OctoDeck workspace-session id as metadata/scopeId; preserve it so
+	// /clear or "new session" gets an isolated workdir:
+	//   workspace/<workspace-folder>/sessions/<workspaceSessionId>
+	// Older frames used a provider/workspace scope id here, so keep falling back
+	// to chat-id for those.
+	if workspaceSessionID != "" {
+		req.Workspace.ScopeID = workspaceSessionID
+	} else if chatID != "" && (req.Workspace.ScopeID == "" || !strings.HasPrefix(req.Workspace.ScopeID, "octodeck-")) {
 		req.Workspace.ScopeID = chatID
 	}
 }

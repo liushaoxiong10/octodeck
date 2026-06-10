@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BrainCircuit, FolderGit2, GitBranch, HardDrive, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { AlertTriangle, BrainCircuit, CheckCircle2, Clock, FolderGit2, GitBranch, HardDrive, ListTree, Plus, RefreshCw, Search, Trash2, Upload, Wand2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
@@ -8,7 +8,18 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { Input } from '@/components/ui/input';
 import { DirectoryBrowser } from '@/components/shared/DirectoryBrowser';
 import { useAgentLinksStore } from '../stores/agentLinks';
-import { useReposStore, type ManagedRepoInfo, type RepoKnowledgeContextPackage, type RepoKnowledgeHit, type RepoKnowledgeRun } from '../stores/repos';
+import { useReposStore, type ManagedRepoInfo, type RepoKnowledgeContextPackage, type RepoKnowledgeHit, type RepoKnowledgeRun, type RepoKnowledgeRunMilestone } from '../stores/repos';
+
+const MILESTONE_ICONS: Record<RepoKnowledgeRunMilestone['kind'], { icon: typeof CheckCircle2; cls: string }> = {
+  milestone:   { icon: CheckCircle2, cls: 'text-emerald-600 bg-emerald-500/10' },
+  tool_start:  { icon: Wand2,       cls: 'text-cyan-600 bg-cyan-500/10' },
+  tool_end:    { icon: CheckCircle2, cls: 'text-cyan-700 bg-cyan-500/10' },
+  thinking:    { icon: BrainCircuit, cls: 'text-violet-600 bg-violet-500/10' },
+  agent_event: { icon: ListTree,    cls: 'text-sky-600 bg-sky-500/10' },
+  upload:      { icon: Upload,      cls: 'text-teal-600 bg-teal-500/10' },
+  warn:        { icon: AlertTriangle, cls: 'text-amber-600 bg-amber-500/10' },
+  error:       { icon: AlertTriangle, cls: 'text-destructive bg-destructive/10' },
+};
 
 function statNumber(stats: Record<string, unknown> | undefined, key: string): number | undefined {
   const value = stats?.[key];
@@ -145,7 +156,7 @@ export function ReposPage() {
   const [knowledgeHits, setKnowledgeHits] = useState<RepoKnowledgeHit[]>([]);
   const [knowledgeContext, setKnowledgeContext] = useState<RepoKnowledgeContextPackage | null>(null);
   const [searchingKnowledge, setSearchingKnowledge] = useState(false);
-  const [generateProvider, setGenerateProvider] = useState<'builtin' | 'auto' | 'graphify' | 'codegraph'>('builtin');
+  const [generateProvider, setGenerateProvider] = useState<'builtin' | 'auto' | 'graphify' | 'codegraph' | 'agent'>('builtin');
   const [searchBackend, setSearchBackend] = useState<'auto' | 'sqlite' | 'postgres' | 'mongo'>('auto');
   const [includeDocs, setIncludeDocs] = useState(true);
   const [includeDependencies, setIncludeDependencies] = useState(true);
@@ -158,6 +169,8 @@ export function ReposPage() {
   const [knowledgeRunsRepo, setKnowledgeRunsRepo] = useState<ManagedRepoInfo | null>(null);
   const [knowledgeRuns, setKnowledgeRuns] = useState<RepoKnowledgeRun[]>([]);
   const [loadingKnowledgeRuns, setLoadingKnowledgeRuns] = useState(false);
+  const [selectedRun, setSelectedRun] = useState<RepoKnowledgeRun | null>(null);
+  const [loadingSelectedRun, setLoadingSelectedRun] = useState(false);
 
   useEffect(() => {
     void load();
@@ -224,6 +237,9 @@ export function ReposPage() {
     if (!repo) return;
     if (repo.kind === 'device_path' && !repo.device_link_id) return toast.error('Device 目录 Repo 缺少绑定 Device');
     if (repo.kind === 'device_path' && generateExecutionDeviceLinkId !== repo.device_link_id) return toast.error('Device 目录 Repo 只能使用绑定 Device 生成知识库');
+    if (generateProvider === 'agent' && repo.kind === 'git' && !generateExecutionDeviceLinkId) {
+      return toast.error('provider=agent 的 Git 仓库必须选择一个执行 Device（无法在服务端本地克隆）');
+    }
     const id = repo.id;
     setGeneratingId(id);
     const index = await generateKnowledge(id, {
@@ -330,10 +346,11 @@ export function ReposPage() {
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <label className="text-xs text-muted-foreground">生成器插件
                   <select value={generateProvider} onChange={(e) => setGenerateProvider(e.target.value as typeof generateProvider)} className="mt-1 h-9 w-full rounded-md border border-border bg-transparent px-3 text-sm text-foreground">
-                    <option value="builtin">builtin</option>
-                    <option value="auto">auto</option>
-                    <option value="graphify">graphify</option>
-                    <option value="codegraph">codegraph</option>
+                    <option value="builtin">builtin · 内置扫描（默认）</option>
+                    <option value="agent">agent · AI 生成（外挂 Skill 驱动）</option>
+                    <option value="auto">auto · 自动选择</option>
+                    <option value="graphify">graphify · 托管适配器</option>
+                    <option value="codegraph">codegraph · 托管适配器</option>
                   </select>
                 </label>
                 <label className="text-xs text-muted-foreground">搜索后端
@@ -437,92 +454,206 @@ export function ReposPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={!!knowledgeRunsRepo} onOpenChange={(next) => { if (!next) setKnowledgeRunsRepo(null); }}>
+      <Dialog open={!!knowledgeRunsRepo} onOpenChange={(next) => { if (!next) { setKnowledgeRunsRepo(null); setSelectedRun(null); } }}>
         <DialogContent className="sm:max-w-3xl">
           <DialogHeader><DialogTitle>知识库生成历史</DialogTitle></DialogHeader>
-          <div className="space-y-3">
-            <div className="rounded-xl border border-border/70 bg-muted/30 p-3 text-xs text-muted-foreground">
-              <div className="font-medium text-foreground">{knowledgeRunsRepo?.name}</div>
-              <p className="mt-1">展示最近 30 次知识库生成任务，包括后台等待、执行设备、完成状态与错误摘要。</p>
-            </div>
-            <div className="max-h-[60vh] space-y-2 overflow-auto pr-1">
-              {loadingKnowledgeRuns ? (
-                <div className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">加载中...</div>
-              ) : knowledgeRuns.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">暂无生成历史。</div>
-              ) : knowledgeRuns.map((run) => {
-                const durationMs = run.startedAt && run.completedAt ? new Date(run.completedAt).getTime() - new Date(run.startedAt).getTime() : undefined;
-                const truncated = run.stats?.truncatedByOutputBudget === true;
-                return (
-                  <div key={run.id} className="rounded-xl border border-border/70 bg-muted/20 p-3 text-xs">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className={run.status === 'ready' ? 'rounded-full bg-emerald-500/10 px-2 py-0.5 text-emerald-600' : run.status === 'error' ? 'rounded-full bg-destructive/10 px-2 py-0.5 text-destructive' : 'rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-600'}>{run.status}</span>
-                      <span className="font-mono text-muted-foreground">{run.id}</span>
-                      {run.executionDeviceLinkId && <span className="rounded-full border border-border px-2 py-0.5 text-muted-foreground">Device {run.executionDeviceLinkId}</span>}
-                      {run.sourceKind && <span className="rounded-full border border-border px-2 py-0.5 text-muted-foreground">{run.sourceKind}</span>}
-                    </div>
-                    <div className="mt-2 grid gap-1 text-muted-foreground sm:grid-cols-2">
-                      <span>下发：{new Date(run.queuedAt).toLocaleString()}</span>
-                      <span>开始：{run.startedAt ? new Date(run.startedAt).toLocaleString() : '-'}</span>
-                      <span>完成：{run.completedAt ? new Date(run.completedAt).toLocaleString() : '-'}</span>
-                      <span>耗时：{typeof durationMs === 'number' && durationMs >= 0 ? `${Math.round(durationMs / 1000)}s` : '-'}</span>
-                    </div>
-                    {typeof run.stats?.fileCount === 'number' && (
-                      <p className="mt-2 text-muted-foreground">文件 {String(run.stats.fileCount)} · chunks {String(run.stats.chunkCount ?? '-')} · 图边 {String(run.stats.graphEdgeCount ?? '-')}</p>
-                    )}
-                    {truncated && <p className="mt-2 text-amber-600">结果较大，已按单帧预算截断采集，避免 Device 连接被大包断开。</p>}
-                    {run.error && <pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap rounded-lg bg-destructive/5 p-2 text-[11px] text-destructive">{run.error}</pre>}
+          {selectedRun ? (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => setSelectedRun(null)}>← 返回列表</Button>
+                  <span className="font-mono">{selectedRun.id}</span>
+                  <span className={
+                    selectedRun.status === 'ready' ? 'rounded-full bg-emerald-500/10 px-2 py-0.5 text-emerald-600'
+                    : selectedRun.status === 'error' ? 'rounded-full bg-destructive/10 px-2 py-0.5 text-destructive'
+                    : selectedRun.status === 'uploading' ? 'rounded-full bg-teal-500/10 px-2 py-0.5 text-teal-600'
+                    : 'rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-600'
+                  }>{selectedRun.status}</span>
+                </div>
+                <Button variant="outline" size="sm" className="h-7 gap-1 px-2 text-xs" disabled={loadingSelectedRun} onClick={() => void (async () => {
+                  setLoadingSelectedRun(true);
+                  const r = await useReposStore.getState().loadKnowledgeRun(selectedRun.id);
+                  if (r) setSelectedRun(r);
+                  setLoadingSelectedRun(false);
+                })()}>
+                  <RefreshCw className={`size-3 ${loadingSelectedRun ? 'animate-spin' : ''}`} /> 刷新
+                </Button>
+              </div>
+              <div className="grid gap-2 rounded-xl border border-border/70 bg-muted/20 p-3 text-[11px] text-muted-foreground sm:grid-cols-3">
+                <span>下发：{new Date(selectedRun.queuedAt).toLocaleString()}</span>
+                <span>开始：{selectedRun.startedAt ? new Date(selectedRun.startedAt).toLocaleString() : '-'}</span>
+                <span>完成：{selectedRun.completedAt ? new Date(selectedRun.completedAt).toLocaleString() : '-'}</span>
+                {selectedRun.executionDeviceLinkId && <span>执行 Device：{selectedRun.executionDeviceLinkId}</span>}
+                {selectedRun.agentClientId && <span>Agent 客户端：{selectedRun.agentClientId}</span>}
+                {selectedRun.filesUploadedAt && <span className="text-teal-600">产物已上传：{new Date(selectedRun.filesUploadedAt).toLocaleString()}</span>}
+                {typeof selectedRun.stats?.fileCount === 'number' && <span>文件 {String(selectedRun.stats.fileCount)}</span>}
+                {typeof selectedRun.stats?.chunkCount === 'number' && <span>chunks {String(selectedRun.stats.chunkCount)}</span>}
+                {typeof selectedRun.stats?.graphEdgeCount === 'number' && <span>图边 {String(selectedRun.stats.graphEdgeCount)}</span>}
+              </div>
+              {selectedRun.enabledSkills?.length ? (
+                <div className="rounded-xl border border-border/70 p-3 text-xs">
+                  <div className="mb-1.5 text-[11px] text-muted-foreground">本轮启用 Skills</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedRun.enabledSkills.map((s) => <span key={s} className="rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[11px] text-foreground/80">{s}</span>)}
                   </div>
-                );
-              })}
+                </div>
+              ) : null}
+              {selectedRun.error ? (
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-[11px] text-destructive">{selectedRun.error}</pre>
+              ) : null}
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <h3 className="text-sm font-medium">时间线</h3>
+                  <span className="text-[11px] text-muted-foreground">{selectedRun.timeline?.length ?? 0} 条</span>
+                </div>
+                <div className="max-h-[55vh] space-y-2 overflow-auto pr-1">
+                  {!selectedRun.timeline?.length ? (
+                    <div className="rounded-xl border border-dashed border-border p-6 text-center text-xs text-muted-foreground">暂无时间线数据。</div>
+                  ) : selectedRun.timeline.map((item, idx) => {
+                    const spec = MILESTONE_ICONS[item.kind] ?? MILESTONE_ICONS.milestone;
+                    const Icon = spec.icon;
+                    return (
+                      <div key={idx} className="flex gap-3 rounded-xl border border-border/70 bg-card/50 p-3">
+                        <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${spec.cls}`}>
+                          <Icon className="size-3.5" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-xs font-medium text-foreground">{item.label}</span>
+                            <span className="text-[11px] text-muted-foreground">{new Date(item.t).toLocaleTimeString()}</span>
+                          </div>
+                          {item.kind && <div className="mt-0.5 text-[10px] uppercase tracking-wider text-muted-foreground/70">{item.kind.replace('_', ' ')}</div>}
+                          {item.detail && Object.keys(item.detail).length > 0 && (
+                            <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap rounded-lg bg-muted/40 p-2 text-[11px] leading-5 text-muted-foreground">{JSON.stringify(item.detail, null, 2)}</pre>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="rounded-xl border border-border/70 bg-muted/30 p-3 text-xs text-muted-foreground">
+                <div className="font-medium text-foreground">{knowledgeRunsRepo?.name}</div>
+                <p className="mt-1">展示最近 30 次知识库生成任务，点击卡片查看时间线、启用 Skills 与产物状态。</p>
+              </div>
+              <div className="max-h-[60vh] space-y-2 overflow-auto pr-1">
+                {loadingKnowledgeRuns ? (
+                  <div className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">加载中...</div>
+                ) : knowledgeRuns.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">暂无生成历史。</div>
+                ) : knowledgeRuns.map((run) => {
+                  const durationMs = run.startedAt && run.completedAt ? new Date(run.completedAt).getTime() - new Date(run.startedAt).getTime() : undefined;
+                  const truncated = run.stats?.truncatedByOutputBudget === true;
+                  const statusBadge = run.status === 'ready'
+                    ? 'bg-emerald-500/10 text-emerald-600'
+                    : run.status === 'error'
+                      ? 'bg-destructive/10 text-destructive'
+                      : run.status === 'uploading'
+                        ? 'bg-teal-500/10 text-teal-600'
+                        : 'bg-amber-500/10 text-amber-600';
+                  return (
+                    <button type="button" key={run.id} onClick={() => void (async () => {
+                      setLoadingSelectedRun(true);
+                      const r = await useReposStore.getState().loadKnowledgeRun(run.id);
+                      setSelectedRun(r);
+                      setLoadingSelectedRun(false);
+                    })()} className="w-full rounded-xl border border-border/70 bg-muted/20 p-3 text-left text-xs transition hover:bg-muted/40">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`rounded-full px-2 py-0.5 ${statusBadge}`}>{run.status}</span>
+                        <span className="font-mono text-muted-foreground">{run.id}</span>
+                        {run.executionDeviceLinkId && <span className="rounded-full border border-border px-2 py-0.5 text-muted-foreground">Device {run.executionDeviceLinkId}</span>}
+                        {run.sourceKind && <span className="rounded-full border border-border px-2 py-0.5 text-muted-foreground">{run.sourceKind}</span>}
+                        {run.timeline && run.timeline.length > 0 && <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground"><Clock className="size-3" /> {run.timeline.length} events</span>}
+                      </div>
+                      <div className="mt-2 grid gap-1 text-muted-foreground sm:grid-cols-2">
+                        <span>下发：{new Date(run.queuedAt).toLocaleString()}</span>
+                        <span>开始：{run.startedAt ? new Date(run.startedAt).toLocaleString() : '-'}</span>
+                        <span>完成：{run.completedAt ? new Date(run.completedAt).toLocaleString() : '-'}</span>
+                        <span>耗时：{typeof durationMs === 'number' && durationMs >= 0 ? `${Math.round(durationMs / 1000)}s` : '-'}</span>
+                      </div>
+                      {typeof run.stats?.fileCount === 'number' && (
+                        <p className="mt-2 text-muted-foreground">文件 {String(run.stats.fileCount)} · chunks {String(run.stats.chunkCount ?? '-')} · 图边 {String(run.stats.graphEdgeCount ?? '-')}</p>
+                      )}
+                      {truncated && <p className="mt-2 text-amber-600">结果较大，已按单帧预算截断采集，避免 Device 连接被大包断开。</p>}
+                      {run.error && <pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap rounded-lg bg-destructive/5 p-2 text-[11px] text-destructive">{run.error}</pre>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 
       <Dialog open={!!generateRepo} onOpenChange={(next) => { if (!next && !generatingId) setGenerateRepo(null); }}>
         <DialogContent className="sm:max-w-xl">
           <DialogHeader><DialogTitle>生成知识库</DialogTitle></DialogHeader>
-          <div className="space-y-4">
-            <div className="rounded-xl border border-border/70 bg-muted/30 p-3 text-xs text-muted-foreground">
-              <div className="font-medium text-foreground">{generateRepo?.name}</div>
-              <p className="mt-1">生成知识库会沿用 Repo 自身配置。Git Repo 可选择一个在线 Device 负责执行克隆/读取；Device 目录 Repo 固定使用其绑定 Device。</p>
-            </div>
-            <div className="rounded-xl border border-border/70 p-3 text-xs text-muted-foreground">
-              当前 Repo 配置：{generateRepo?.kind === 'git'
-                ? `${generateRepo.git_url || '-'}${generateRepo.main_branch ? ` (${generateRepo.main_branch})` : ''}`
-                : `${generateRepo?.device_path || '-'} (${generateRepo?.device_link_id || '-'})`}
-            </div>
-            {generateRepo?.kind === 'git' ? (
-              <div>
-                <label className="mb-2 block text-sm font-medium">执行 Device</label>
-                <select value={generateExecutionDeviceLinkId} onChange={(e) => setGenerateExecutionDeviceLinkId(e.target.value)} className="h-9 w-full rounded-md border border-border bg-transparent px-3 text-sm">
-                  <option value="">不使用 Device（服务端执行）</option>
-                  {onlineDevices.map((device) => <option key={device.id} value={device.id}>{device.displayName} ({device.id})</option>)}
-                </select>
-                {onlineDevices.length === 0 && <p className="mt-2 text-xs text-amber-600">当前没有在线 Device；将由服务端按 Repo 的 Git 配置生成。</p>}
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <div>
-                  <label className="mb-2 block text-sm font-medium">绑定 Device</label>
-                  <select value={generateExecutionDeviceLinkId} disabled className="h-9 w-full rounded-md border border-border bg-transparent px-3 text-sm disabled:opacity-70">
-                    <option value={generateRepo?.device_link_id || ''}>{generateRepo?.device_link_id || '未绑定 Device'}</option>
-                  </select>
-                  <p className="mt-2 text-xs text-muted-foreground">Device 目录 Repo 只能使用创建时绑定的 Device 执行知识库生成。</p>
-                  {generateRepo?.device_link_id && !onlineDevices.some((device) => device.id === generateRepo.device_link_id) && (
-                    <p className="mt-2 text-xs text-amber-600">绑定 Device 当前不在线，生成可能失败。</p>
-                  )}
+          {(() => {
+            const isGit = generateRepo?.kind === 'git';
+            const agentMode = generateProvider === 'agent';
+            const agentGitRequiresDevice = isGit && agentMode;
+            const deviceMissing = agentGitRequiresDevice && !generateExecutionDeviceLinkId;
+            const submitDisabled = !!generatingId || deviceMissing;
+            return (
+              <div className="space-y-4">
+                <div className="rounded-xl border border-border/70 bg-muted/30 p-3 text-xs text-muted-foreground">
+                  <div className="font-medium text-foreground">{generateRepo?.name}</div>
+                  <p className="mt-1">生成器：<span className="text-foreground">{generateProvider}</span>。{isGit
+                    ? 'Git Repo 可选择一个在线 Device 负责执行克隆/读取。'
+                    : 'Device 目录 Repo 固定使用其绑定 Device。'}</p>
                 </div>
+                <div className="rounded-xl border border-border/70 p-3 text-xs text-muted-foreground">
+                  当前 Repo 配置：{generateRepo?.kind === 'git'
+                    ? `${generateRepo.git_url || '-'}${generateRepo.main_branch ? ` (${generateRepo.main_branch})` : ''}`
+                    : `${generateRepo?.device_path || '-'} (${generateRepo?.device_link_id || '-'})`}
+                </div>
+                {isGit ? (
+                  <div>
+                    <label className="mb-2 block text-sm font-medium">执行 Device</label>
+                    <select
+                      value={generateExecutionDeviceLinkId}
+                      onChange={(e) => setGenerateExecutionDeviceLinkId(e.target.value)}
+                      className={`h-9 w-full rounded-md border bg-transparent px-3 text-sm ${deviceMissing ? 'border-destructive focus:border-destructive focus:ring-destructive/30' : 'border-border'}`}
+                    >
+                      <option value="">不使用 Device（服务端执行）</option>
+                      {onlineDevices.map((device) => <option key={device.id} value={device.id}>{device.displayName} ({device.id})</option>)}
+                    </select>
+                    {deviceMissing && (
+                      <p className="mt-2 flex items-start gap-1.5 text-xs text-destructive">
+                        <AlertTriangle className="mt-0.5 size-3.5" />
+                        provider=agent 的 Git 仓库必须选择一个执行 Device（服务端无法在容器内克隆私有 Git 仓库）。
+                      </p>
+                    )}
+                    {!deviceMissing && onlineDevices.length === 0 && (
+                      <p className="mt-2 text-xs text-amber-600">当前没有在线 Device；将由服务端按 Repo 的 Git 配置生成。</p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="mb-2 block text-sm font-medium">绑定 Device</label>
+                      <select value={generateExecutionDeviceLinkId} disabled className="h-9 w-full rounded-md border border-border bg-transparent px-3 text-sm disabled:opacity-70">
+                        <option value={generateRepo?.device_link_id || ''}>{generateRepo?.device_link_id || '未绑定 Device'}</option>
+                      </select>
+                      <p className="mt-2 text-xs text-muted-foreground">Device 目录 Repo 只能使用创建时绑定的 Device 执行知识库生成。</p>
+                      {generateRepo?.device_link_id && !onlineDevices.some((device) => device.id === generateRepo.device_link_id) && (
+                        <p className="mt-2 text-xs text-amber-600">绑定 Device 当前不在线，生成可能失败。</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+                <DialogFooter className="gap-2 pt-2">
+                  <Button variant="outline" onClick={() => setGenerateRepo(null)} disabled={!!generatingId}>取消</Button>
+                  <Button onClick={handleGenerateKnowledge} disabled={submitDisabled} className="gap-2" title={deviceMissing ? '请先选择执行 Device' : ''}>
+                    <RefreshCw className={`size-4 ${generatingId ? 'animate-spin' : ''}`} /> 开始生成
+                  </Button>
+                </DialogFooter>
               </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setGenerateRepo(null)} disabled={!!generatingId}>取消</Button>
-            <Button onClick={handleGenerateKnowledge} disabled={!!generatingId} className="gap-2">
-              <RefreshCw className={`size-4 ${generatingId ? 'animate-spin' : ''}`} /> 开始生成
-            </Button>
-          </DialogFooter>
+            );
+          })()}
         </DialogContent>
       </Dialog>
 

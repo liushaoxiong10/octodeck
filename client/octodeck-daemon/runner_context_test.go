@@ -874,6 +874,34 @@ func TestAgentRuntimeDirectSessionWithoutScopeIDUsesMain(t *testing.T) {
 	}
 }
 
+func TestAgentRuntimePreservesExplicitWorkspaceSessionScopeID(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	rt := &agentRuntimeProcess{cfg: cfg}
+	req := &AgentRunRequestFrame{
+		AgentID: "traecli-acp",
+		Workspace: &AgentRunWorkspace{
+			Kind:    "workspace",
+			Folder:  "flow-demo",
+			Scope:   "session",
+			ScopeID: "ws-session-b",
+		},
+		Input:   AgentRunInput{Metadata: map[string]any{"chatId": "web:flow-demo", "workspaceSessionId": "ws-session-b"}},
+		Context: map[string]any{"group": map[string]any{"folder": "flow-demo"}},
+	}
+	cwd, err := rt.resolveCwd(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(cfg.WorkspaceDir, "flow-demo", "sessions", "ws-session-b")
+	if cwd != expected {
+		t.Fatalf("expected explicit workspace-session cwd %q, got %q", expected, cwd)
+	}
+	if req.Workspace.ScopeID != "ws-session-b" {
+		t.Fatalf("expected explicit scope id preserved, got %q", req.Workspace.ScopeID)
+	}
+}
+
 func TestDefaultRunCwdUsesOctodeckTaskDir(t *testing.T) {
 	root := t.TempDir()
 	cwd, err := defaultRunCwd(&Config{WorkspaceDir: filepath.Join(root, "workspace")}, "/server/groups/demo")
@@ -904,6 +932,33 @@ func TestValidateRunRequestAllowsDeviceWorkspaceURI(t *testing.T) {
 	}
 	if err := validateRunRequest(&Config{AllowedBinaries: []string{"/usr/bin/python3"}}, req); err != nil {
 		t.Fatalf("expected workspace URI cwd to pass validation, got %v", err)
+	}
+}
+
+func TestDefaultRunCwdRejectsSuspiciousWorkspaceURI(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	malicious := "octodeck-workspace://device-traeclicc-aND-5682-sEleCt-5682-FROm-pg_sLEEP-3"
+	if _, err := defaultRunCwd(cfg, malicious); err == nil {
+		t.Fatalf("expected suspicious workspace URI to be rejected")
+	}
+	entries, err := os.ReadDir(cfg.WorkspaceDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no workspace directory to be created, got %d entries", len(entries))
+	}
+}
+
+func TestDefaultRunCwdRejectsWorkspaceURIPathTraversal(t *testing.T) {
+	root := t.TempDir()
+	cfg := &Config{WorkspaceDir: filepath.Join(root, "workspace")}
+	if _, err := defaultRunCwd(cfg, "octodeck-workspace://../escape"); err == nil {
+		t.Fatalf("expected traversal workspace URI to be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(root, "escape")); !os.IsNotExist(err) {
+		t.Fatalf("expected escape dir not to exist, stat err=%v", err)
 	}
 }
 

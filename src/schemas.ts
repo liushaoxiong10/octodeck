@@ -277,7 +277,10 @@ export const RepoKnowledgeGenerateSchema = z.object({
   exclude_patterns: z.array(z.string().min(1)).optional(),
   max_files: z.number().int().min(1).max(5000).optional(),
   max_file_bytes: z.number().int().min(512).max(512 * 1024).optional(),
-  provider: z.enum(['builtin', 'auto', 'graphify', 'codegraph']).optional(),
+  provider: z.enum(['builtin', 'auto', 'graphify', 'codegraph', 'agent']).optional(),
+  enabled_skills: z.array(z.string().min(1).max(128)).max(20).optional(),
+  agent_prompt: z.string().max(60_000).optional(),
+  agent_timeout_ms: z.number().int().min(5 * 60_000).max(12 * 60 * 60_000).optional(),
   plugins: z.array(z.string().min(1)).optional(),
   use_external_graph: z.boolean().optional(),
   fallback_builtin: z.boolean().optional(),
@@ -294,6 +297,45 @@ export const RepoKnowledgeGenerateSchema = z.object({
   async: z.boolean().optional(),
   wait: z.boolean().optional(),
 });
+
+const KnowledgeChunkKind = z.enum(['overview', 'file', 'symbol', 'dependency', 'doc', 'graph']);
+const KnowledgeEdgeKind = z.enum(['imports', 'imported_by', 'depends_on', 'exports', 'documents', 'references']);
+
+export const RepoKnowledgeChunkPayloadSchema = z.object({
+  key: z.string().min(1).max(2048),
+  path: z.string().max(2048),
+  kind: KnowledgeChunkKind,
+  name: z.string().max(512).optional(),
+  language: z.string().max(64).optional(),
+  startLine: z.number().int().positive().optional(),
+  endLine: z.number().int().positive().optional(),
+  content: z.string().max(128 * 1024),
+  keywords: z.string().max(4096).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const RepoKnowledgeEdgePayloadSchema = z.object({
+  key: z.string().min(1).max(2048),
+  fromPath: z.string().max(2048),
+  toPath: z.string().max(2048).optional(),
+  edgeKind: KnowledgeEdgeKind,
+  symbol: z.string().max(256).optional(),
+  packageName: z.string().max(256).optional(),
+  source: z.string().max(128).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+/**
+ * Agent 上传产物的 payload schema（multipart 里 JSON 字段走 schema，JSON 直传也走同一 schema）。
+ */
+export const RepoKnowledgeUploadSchema = z.object({
+  chunks: z.array(RepoKnowledgeChunkPayloadSchema).max(20_000).optional(),
+  edges: z.array(RepoKnowledgeEdgePayloadSchema).max(50_000).optional(),
+  summary: z.string().max(100_000).optional(),
+  stats: z.record(z.string(), z.unknown()).optional(),
+  runLog: z.string().max(5_000_000).optional(),
+});
+export type RepoKnowledgeUploadPayload = z.infer<typeof RepoKnowledgeUploadSchema>;
 
 export const RepoKnowledgeSearchSchema = z.object({
   query: z.string().min(1).max(500),

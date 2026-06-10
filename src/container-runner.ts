@@ -238,6 +238,10 @@ function ensureSettingsJson(
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
+  /** OctoDeck-local workspace/session generation id. Unlike provider-native
+   * sessionId, this changes only when the user starts a fresh OctoDeck session
+   * (e.g. /clear / clear context), and is used to isolate daemon workdirs. */
+  workspaceSessionId?: string;
   groupFolder: string;
   chatJid: string;
   /** Source JID of the latest message that triggered this run (e.g. `discord:123…`).

@@ -240,6 +240,83 @@ describe('agent-link run context forwarding', () => {
     await promise;
   });
 
+  test('runViaAgentLink isolates repo worktrees by OctoDeck workspace session', async () => {
+    const sent: any[] = [];
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const commonGroup = {
+      name: 'Repo Session Isolation',
+      folder: 'repo-session',
+      added_at: '2026-01-01T00:00:00.000Z',
+      executionMode: 'host',
+      executionNode: 'cl_1234567890abcdef',
+      repoGitUrl: 'https://github.com/acme/project.git',
+    } as any;
+    const cfg = {
+      backendId: 'coco',
+      resolveBinary: () => '/bin/echo',
+      buildArgv: ({ prompt }: any) => [prompt],
+      outputProtocol: 'plain-text' as const,
+    };
+
+    const first = runViaAgentLink(
+      {
+        group: commonGroup,
+        input: {
+          prompt: 'hello',
+          chatJid: 'web:repo-session',
+          workspaceSessionId: 'ws-session-a',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      cfg,
+      'cl_1234567890abcdef',
+    );
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await first;
+
+    const second = runViaAgentLink(
+      {
+        group: commonGroup,
+        input: {
+          prompt: 'hello again',
+          chatJid: 'web:repo-session',
+          workspaceSessionId: 'ws-session-b',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      cfg,
+      'cl_1234567890abcdef',
+    );
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await second;
+
+    expect(sent[0].workspaceRepo).toMatchObject({
+      groupFolder: 'repo-session',
+      scope: 'session',
+      scopeId: 'ws-session-a',
+    });
+    expect(sent[1].workspaceRepo).toMatchObject({
+      groupFolder: 'repo-session',
+      scope: 'session',
+      scopeId: 'ws-session-b',
+    });
+  });
+
   test('runViaAgentLink keeps device workspace scope stable across native session changes', async () => {
     const sent: any[] = [];
     getSessionMock.mockReturnValue({
@@ -706,6 +783,77 @@ describe('agent-link run context forwarding', () => {
     expect(sent[0].policy.systemPrompt).toContain('<guidelines>');
     expect(sent[0].policy.systemPrompt).toContain('<channel-format>');
     expect(sent[0].policy.systemPrompt).toContain('飞书');
+
+    registerRunMock.mock.calls.at(-1)?.[0].finish({
+      ok: true,
+      result: 'ok',
+      error: null,
+      timedOut: false,
+      durationMs: 1,
+    });
+    await promise;
+  });
+
+  test('runViaAgentLink isolates agent.run workspace by OctoDeck workspace session', async () => {
+    const sent: any[] = [];
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef'
+        ? { capabilities: ['agent.run'] }
+        : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Device Claude Session',
+          folder: 'device-session',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:claude-code',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+          repoGitUrl: 'https://github.com/acme/project.git',
+        } as any,
+        input: {
+          prompt: 'hello',
+          chatJid: 'web:device-session',
+          workspaceSessionId: 'ws-session-a',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: 'mac-claude-code',
+        resolveBinary: () => '/usr/local/bin/claude',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:claude-code',
+    );
+
+    expect(sent[0]).toMatchObject({
+      type: 'agent.run.request',
+      workspace: {
+        folder: 'device-session',
+        scope: 'session',
+        scopeId: 'ws-session-a',
+      },
+      workspaceRepo: {
+        groupFolder: 'device-session',
+        scope: 'session',
+        scopeId: 'ws-session-a',
+      },
+      input: { metadata: { workspaceSessionId: 'ws-session-a' } },
+    });
 
     registerRunMock.mock.calls.at(-1)?.[0].finish({
       ok: true,

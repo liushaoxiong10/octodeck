@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# CLI wrapper for builtin-graph-scan Python skill.
+# Resolves to <skill-root>/scripts/builtin_graph_scan.py regardless of cwd.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PY_SCRIPT="${SKILL_ROOT}/scripts/builtin_graph_scan.py"
+
+if [ ! -f "${PY_SCRIPT}" ]; then
+  echo "builtin-graph-scan: script not found: ${PY_SCRIPT}" >&2
+  exit 2
+fi
+
+exec python3 "${PY_SCRIPT}" "$@"

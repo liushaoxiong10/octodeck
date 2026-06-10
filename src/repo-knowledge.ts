@@ -4,14 +4,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
+import { resolveBackend } from './backends/registry.js';
+import { runViaAgentLink } from './backends/agent-link-driver.js';
+import type { HostCliDriverConfig } from './backends/host-cli-driver.js';
 import { getSession } from './agent-link/registry.js';
 import { invokeRemoteTool } from './agent-link/tool-rpc.js';
-import { DATA_DIR } from './config.js';
+import type { ContainerOutput, ContainerInput } from './container-runner.js';
+import type { RegisteredGroup, RepoKnowledgeRunMilestone } from './types.js';
+import { DATA_DIR, OCTODECK_PUBLIC_BASE_URL } from './config.js';
 import SqliteDatabase from './sqlite-compat.js';
 import {
+  appendRepoKnowledgeRunTimeline,
   createRepoKnowledgeRun,
   getRepoKnowledgeIndex,
+  getRepoKnowledgeRun,
+  getUserHomeGroup,
   isRepoKnowledgeFtsAvailable,
+  listRepoKnowledgeChunks,
+  listRepoKnowledgeGraphEdges,
   replaceRepoKnowledgeChunks,
   updateRepoKnowledgeRun,
   upsertRepoKnowledgeIndex,
@@ -85,7 +95,7 @@ export interface RepoKnowledgeGenerateOptions {
   excludePatterns?: string[];
   maxFiles?: number;
   maxFileBytes?: number;
-  provider?: 'builtin' | 'auto' | 'graphify' | 'codegraph';
+  provider?: 'builtin' | 'auto' | 'graphify' | 'codegraph' | 'agent';
   plugins?: string[];
   useExternalGraph?: boolean;
   fallbackBuiltin?: boolean;
@@ -99,6 +109,18 @@ export interface RepoKnowledgeGenerateOptions {
   sourceDevicePath?: string;
   sourceDeviceLinkId?: string;
   executionDeviceLinkId?: string;
+  /** agent provider: 启用的 skills 清单；不填则默认启用 builtin-graph-scan（若 provider=agent） */
+  enabledSkills?: string[];
+  /** agent provider: 绑定到哪个 owner 的 home 容器执行；不填则用 repo.createdBy */
+  agentOwnerUserId?: string;
+  /** agent provider: 覆盖默认 prompt */
+  agentPrompt?: string;
+  /** agent provider: 单次任务超时（毫秒）；默认 60min */
+  agentTimeoutMs?: number;
+  /** 关联到的 RepoKnowledgeRun id，agent provider 模式下会写入一次性 upload token + 观测 timeline */
+  runId?: string;
+  /** @internal 服务端自身可访问的绝对 base URL，用于给 device 组装上传地址 */
+  serverBaseUrl?: string;
 }
 
 export interface RepoKnowledgeGenerationTask {
@@ -154,10 +176,11 @@ interface BuiltRepoKnowledge {
 }
 
 interface ExternalGraphResult extends BuiltRepoKnowledge {
-  provider: 'graphify' | 'codegraph';
+  provider: 'graphify' | 'codegraph' | 'agent';
 }
 
 function clampOptions(opts: RepoKnowledgeGenerateOptions = {}) {
+  const DEFAULT_ENABLED_SKILLS_AGENT = ['builtin-graph-scan'] as const;
   return {
     includePatterns: opts.includePatterns?.map((p) => p.trim()).filter(Boolean) ?? [],
     excludePatterns: opts.excludePatterns?.map((p) => p.trim()).filter(Boolean) ?? [],
@@ -175,6 +198,20 @@ function clampOptions(opts: RepoKnowledgeGenerateOptions = {}) {
     sourceDevicePath: opts.sourceDevicePath?.trim() || undefined,
     sourceDeviceLinkId: opts.sourceDeviceLinkId?.trim() || undefined,
     executionDeviceLinkId: opts.executionDeviceLinkId?.trim() || undefined,
+    agentOwnerUserId: opts.agentOwnerUserId?.trim() || undefined,
+    agentPrompt: typeof opts.agentPrompt === 'string' && opts.agentPrompt.trim() ? opts.agentPrompt : undefined,
+    agentTimeoutMs: opts.agentTimeoutMs ?? 60 * 60_000, // 60min
+    runId: typeof opts.runId === 'string' && opts.runId.trim() ? opts.runId.trim() : undefined,
+    serverBaseUrl:
+      typeof opts.serverBaseUrl === 'string' && opts.serverBaseUrl.trim()
+        ? opts.serverBaseUrl.replace(/\/+$/, '')
+        : undefined,
+    enabledSkills:
+      Array.isArray(opts.enabledSkills) && opts.enabledSkills.length > 0
+        ? [...new Set(opts.enabledSkills.map((s) => String(s).trim()).filter(Boolean))].slice(0, 20)
+        : opts.provider === 'agent'
+          ? [...DEFAULT_ENABLED_SKILLS_AGENT]
+          : [],
   };
 }
 
@@ -498,7 +535,7 @@ async function collectDeviceFiles(repo: ManagedRepo, opts: ReturnType<typeof cla
     linkId: repo.deviceLinkId,
     toolName: 'Bash',
     input: { command: remoteCollectCommand(repo.devicePath, opts) },
-    cwd: repo.devicePath,
+    cwd: 'octodeck-tmp://repo-knowledge',
     timeoutMs: 120_000,
     maxOutputBytes: MAX_REMOTE_OUTPUT_BYTES,
   });
@@ -541,12 +578,12 @@ async function collectGitFilesOnDevice(
   };
 }
 
-function stableChunkId(repoId: string, kind: RepoKnowledgeChunkKind, key: string): string {
+export function stableChunkId(repoId: string, kind: RepoKnowledgeChunkKind, key: string): string {
   const digest = crypto.createHash('sha1').update(`${repoId}:${kind}:${key}`).digest('hex').slice(0, 16);
   return `rk_${digest}`;
 }
 
-function stableEdgeId(repoId: string, edgeKind: RepoKnowledgeGraphEdgeKind, key: string): string {
+export function stableEdgeId(repoId: string, edgeKind: RepoKnowledgeGraphEdgeKind, key: string): string {
   const digest = crypto.createHash('sha1').update(`${repoId}:${edgeKind}:${key}`).digest('hex').slice(0, 16);
   return `rke_${digest}`;
 }
@@ -582,6 +619,148 @@ function extractSymbols(file: SourceFile, repoId: string): Array<Omit<RepoKnowle
   return symbols.slice(0, 40);
 }
 
+/**
+ * 将 agent 上传的产物追加写入仓库知识库索引：
+ *   - 生成稳定 id（前缀 `upload:`，与其它生成器命名空间隔离）
+ *   - 按 id 去重（本次上传内部的重复 + 与已存条目的重复都忽略）
+ *   - 不删除已有的 builtin / 旧 upload 条目，只追加
+ * 返回 merged=新增条目数，skipped=被去重跳过的条目数，stats=汇总信息
+ */
+export function ingestRepoKnowledgeUpload(
+  repo: ManagedRepo,
+  userId: string,
+  input: {
+    chunks: Array<{
+      key: string;
+      path: string;
+      kind: RepoKnowledgeChunkKind;
+      name?: string;
+      language?: string;
+      startLine?: number;
+      endLine?: number;
+      content: string;
+      keywords?: string;
+      metadata?: Record<string, unknown>;
+    }>;
+    edges: Array<{
+      key: string;
+      fromPath: string;
+      toPath?: string;
+      edgeKind: RepoKnowledgeGraphEdgeKind;
+      symbol?: string;
+      packageName?: string;
+      source?: string;
+      metadata?: Record<string, unknown>;
+    }>;
+    summary?: string;
+    stats?: Record<string, unknown>;
+  },
+): { merged: number; skipped: number; stats: Record<string, unknown> } {
+  const now = new Date().toISOString();
+  const mergedChunks: Array<Omit<RepoKnowledgeChunk, 'repoId' | 'userId' | 'updatedAt'>> = [];
+  const mergedEdges: Array<Omit<RepoKnowledgeGraphEdge, 'repoId' | 'userId' | 'updatedAt'>> = [];
+  const seenChunkIds = new Set<string>();
+  const seenEdgeIds = new Set<string>();
+  let skippedChunks = 0;
+  let skippedEdges = 0;
+
+  for (const c of input.chunks) {
+    const id = stableChunkId(repo.id, c.kind, `upload:${c.key}`);
+    if (seenChunkIds.has(id)) { skippedChunks++; continue; }
+    seenChunkIds.add(id);
+    mergedChunks.push({
+      id,
+      path: c.path,
+      kind: c.kind,
+      name: c.name,
+      language: c.language,
+      startLine: c.startLine,
+      endLine: c.endLine,
+      content: c.content,
+      keywords: c.keywords,
+      metadata: { ...(c.metadata ?? {}), _source: 'agent-upload' },
+    });
+  }
+  for (const e of input.edges) {
+    const id = stableEdgeId(repo.id, e.edgeKind, `upload:${e.key}`);
+    if (seenEdgeIds.has(id)) { skippedEdges++; continue; }
+    seenEdgeIds.add(id);
+    mergedEdges.push({
+      id,
+      fromPath: e.fromPath,
+      toPath: e.toPath,
+      edgeKind: e.edgeKind,
+      symbol: e.symbol,
+      packageName: e.packageName,
+      source: e.source && e.source.trim() ? `agent:${e.source}` : 'agent',
+      metadata: { ...(e.metadata ?? {}), _source: 'agent-upload' },
+    });
+  }
+
+  // 追加写入：不删旧的（保留 builtin 基础层）
+  const mergedCounts = appendRepoKnowledgeChunks(repo.id, userId, {
+    chunks: mergedChunks,
+    edges: mergedEdges,
+    updatedAt: now,
+  });
+
+  return {
+    merged: mergedCounts.mergedChunks + mergedCounts.mergedEdges,
+    skipped: skippedChunks + skippedEdges,
+    stats: {
+      ...(input.stats ?? {}),
+      uploadedChunks: mergedCounts.mergedChunks,
+      uploadedEdges: mergedCounts.mergedEdges,
+      skippedChunks,
+      skippedEdges,
+    },
+  };
+}
+
+/**
+ * 追加写入知识库条目（不删除已有）：先读旧条目中 agent 以外的基础层（含 builtin、graphify、
+ * codegraph），与本次新条目合并后，用 replaceRepoKnowledgeChunks 全量回写。
+ * agent 的 `_source: 'agent-upload'` 条目按 id 幂等替换，避免同 key 反复上传产生重复。
+ * 与 replaceRepoKnowledgeChunks 的"先删后写"语义互补，用于 agent 上传追加。
+ */
+function appendRepoKnowledgeChunks(
+  repoId: string,
+  userId: string,
+  input: {
+    chunks: Array<Omit<RepoKnowledgeChunk, 'repoId' | 'userId' | 'updatedAt'>>;
+    edges?: Array<Omit<RepoKnowledgeGraphEdge, 'repoId' | 'userId' | 'updatedAt'>>;
+    updatedAt?: string;
+  },
+): { mergedChunks: number; mergedEdges: number } {
+  const inputChunkCount = input.chunks.length;
+  const inputEdgeCount = input.edges?.length ?? 0;
+  if (inputChunkCount === 0 && inputEdgeCount === 0) {
+    return { mergedChunks: 0, mergedEdges: 0 };
+  }
+  // 读已有 → 合并（保留非 agent 的 builtin 基础层 + 旧 agent upload 中 key 未冲突者）→ 全量 replace
+  const existingChunks = (listRepoKnowledgeChunksInternal({ repoId, userId, limit: 200_000 }) ?? []) as unknown as
+    Array<Omit<RepoKnowledgeChunk, 'repoId' | 'userId' | 'updatedAt'>>;
+  const existingEdges = (listRepoKnowledgeEdgesInternal({ repoId, userId, limit: 500_000 }) ?? []) as unknown as
+    Array<Omit<RepoKnowledgeGraphEdge, 'repoId' | 'userId' | 'updatedAt'>>;
+  const newChunkIds = new Set(input.chunks.map((c) => c.id));
+  const newEdgeIds = new Set((input.edges ?? []).map((e) => e.id));
+  const keptChunks = existingChunks.filter((c) => !newChunkIds.has(c.id));
+  const keptEdges = existingEdges.filter((e) => !newEdgeIds.has(e.id));
+  const mergedChunks = [...keptChunks, ...input.chunks];
+  const mergedEdges = [...keptEdges, ...(input.edges ?? [])];
+  replaceRepoKnowledgeChunks({ repoId, userId, chunks: mergedChunks, edges: mergedEdges });
+  return {
+    mergedChunks: mergedChunks.length - keptChunks.length,
+    mergedEdges: mergedEdges.length - keptEdges.length,
+  };
+}
+
+// 占位引用，确保 db.ts 未来 export 后能无缝切换
+import {
+  listRepoKnowledgeChunks as listRepoKnowledgeChunksInternal,
+  listRepoKnowledgeGraphEdges as listRepoKnowledgeEdgesInternal,
+} from './db.js';
+
 function packageNameFromSpecifier(specifier: string): string {
   if (specifier.startsWith('@')) return specifier.split('/').slice(0, 2).join('/');
   return specifier.split('/')[0] || specifier;
@@ -611,7 +790,12 @@ function resolveInternalTarget(fromPath: string, target: string, filePathSet: Se
 
 function extractImportEdges(file: SourceFile, repoId: string, filePathSet: Set<string>): Array<Omit<RepoKnowledgeGraphEdge, 'repoId' | 'userId' | 'updatedAt'>> {
   const edges: Array<Omit<RepoKnowledgeGraphEdge, 'repoId' | 'userId' | 'updatedAt'>> = [];
+  const seen = new Set<string>();
   const add = (target: string, source: string) => {
+    // dedupe by (target, source); multiple regex patterns may hit the same import.
+    const key = `${target}\0${source}`;
+    if (seen.has(key)) return;
+    seen.add(key);
     const resolvedTarget = resolveInternalTarget(file.path, target, filePathSet);
     const isInternal = target.startsWith('.') || target.startsWith('/');
     edges.push({
@@ -1370,6 +1554,797 @@ async function buildExternalGraphKnowledgeOnDevice(
   return parseRemoteExternalGraphResult(repo, parsed);
 }
 
+const AGENT_KNOWLEDGE_TIMEOUT_MS = 15 * 60_000;
+
+function buildAgentKnowledgePrompt(
+  repo: ManagedRepo,
+  opts: ReturnType<typeof clampOptions>,
+  files: Array<{ path: string; size: number; language?: string }>,
+): string {
+  if (opts.agentPrompt) return opts.agentPrompt;
+  const topList = files.slice(0, 120)
+    .map((f) => `- ${f.path}${f.language ? `  [${f.language}]` : ''}  (${f.size}B)`)
+    .join('\n');
+  return `你是仓库知识图谱构建专家。请用仓库根目录下全部代码 / 文档生成结构化知识图谱，\
+并在最后用一个 JSON 代码块（\`\`\`json ... \`\`\`）输出结果，不要有额外文字。
+
+## 执行策略（按优先级）
+1. **builtin-graph-scan（强烈推荐）**：项目自带确定性 Python 扫描脚本（零依赖、python3>=3.8），直接调用：
+   \`\`\`bash
+   OUT_DIR="<repo>/.octodeck/knowledge"
+   mkdir -p "$OUT_DIR"
+   <builtin-graph-scan 或 builtin_graph_scan.py 路径> --repo . --output-dir "$OUT_DIR" --max-files 1500 --pretty
+   \`\`\`
+   脚本完成后会在 $OUT_DIR 生成 chunks.json / edges.json / stats.json / summary.md / run.log 五件套。
+2. **外挂 graph Skill**（repo-knowledge-graph / graphify / codegraph）：如已挂载，按各自说明执行并把产物对齐为上面 5 文件格式。
+3. **手工流程（兜底）**：Bash find + 语言正则提取 + LLM 语义补齐。
+
+## 上下文
+- 仓库名: ${repo.name}
+- 仓库 ID: ${repo.id}
+- 工作目录: 即为仓库源码根
+- 扫描到的入口文件（仅列前 ${Math.min(files.length, 120)} 个，完整文件列表请自行遍历工作区）:
+${topList}
+
+## 可选外挂 Skill
+如果挂载了 repo-knowledge-graph / graphify / codegraph 等 Skill，请优先调用；\
+builtin-graph-scan 未安装时也可以用 Bash + 语言分析 + LLM 语义理解自行生成。
+
+## 输出 JSON 规范（根级对象，字段都可省略但建议尽量填充）
+{
+  "summary": "一句话 + 小节的仓库语义摘要",
+  "chunks": [
+    {
+      "kind": "symbol" | "dependency" | "doc" | "graph",
+      "key": "本 chunk 的稳定唯一标识字符串（路径+符号/标题等，会用来生成稳定 chunk_id）",
+      "path": "相对仓库根的文件路径",
+      "name": "符号名或标题",
+      "language": "ts/tsx/py/go/rs/.../markdown",
+      "startLine": 1,
+      "endLine": 40,
+      "content": "chunk 文本内容",
+      "keywords": "空格分隔的关键词",
+      "metadata": { "任意字段": "任意值" }
+    }
+  ],
+  "edges": [
+    {
+      "edgeKind": "imports" | "imported_by" | "depends_on" | "exports" | "documents" | "references",
+      "key": "本边的稳定唯一标识",
+      "fromPath": "起点相对路径（必填）",
+      "toPath": "终点相对路径（选填）",
+      "symbol": "边关联的符号名（选填）",
+      "packageName": "当 fromPath 依赖第三方包时填包名（选填）",
+      "source": "来源标识，比如 'agent' / 'agent:repo-knowledge-graph-skill'",
+      "metadata": { "任意字段": "任意值" }
+    }
+  ],
+  "stats": { "任意指标": "任意值" }
+}
+
+要求:
+1. chunks 覆盖关键类 / 函数 / 模块 / 配置 / 文档章节，数量 200~800；
+2. edges 覆盖 import、依赖、调用、文档交叉引用、模块关系，数量 200~2000；
+3. 只输出一个 JSON 代码块，不要额外说明文字。`;
+}
+
+type AgentGraphRawChunk = {
+  kind?: string;
+  key?: string;
+  path?: string;
+  name?: string;
+  language?: string;
+  startLine?: number;
+  endLine?: number;
+  content?: string;
+  keywords?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type AgentGraphRawEdge = {
+  edgeKind?: string;
+  key?: string;
+  fromPath?: string;
+  toPath?: string;
+  symbol?: string;
+  packageName?: string;
+  source?: string;
+  metadata?: Record<string, unknown>;
+};
+
+function sanitizeChunkKind(kind: unknown): RepoKnowledgeChunkKind {
+  switch (kind) {
+    case 'symbol': case 'dependency': case 'doc': case 'graph': case 'overview': case 'file':
+      return kind;
+    default:
+      return 'graph';
+  }
+}
+
+function sanitizeEdgeKind(kind: unknown): RepoKnowledgeGraphEdgeKind {
+  switch (kind) {
+    case 'imports': case 'imported_by': case 'depends_on': case 'exports': case 'documents': case 'references':
+      return kind;
+    default:
+      return 'references';
+  }
+}
+
+function extractLastJsonBlock(text: string): unknown {
+  const open = text.lastIndexOf('```json');
+  if (open >= 0) {
+    const start = open + 7;
+    const close = text.indexOf('```', start);
+    const body = close >= 0 ? text.slice(start, close) : text.slice(start);
+    return JSON.parse(body.trim());
+  }
+  const bare = text.trim();
+  if (bare.startsWith('{')) return JSON.parse(bare);
+  throw new Error('Agent 未输出 ```json 代码块');
+}
+
+/** 生成 32 字节十六进制一次性上传 token。 */
+function generateUploadToken(): string {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function appendTimeline(runId: string | undefined, userId: string, kind: RepoKnowledgeRunMilestone['kind'], label: string, detail?: Record<string, unknown>) {
+  if (!runId) return;
+  try {
+    appendRepoKnowledgeRunTimeline(runId, userId, { kind, label, detail });
+  } catch {
+    // ignore — timeline 写入失败不影响主流程
+  }
+}
+
+/**
+ * 通过 agent.link 在 device 上拉起一个 task agent：
+ *   - daemon 会基于 RegisteredGroup.repoGitUrl / repoDevicePath 自动 resolve 为 git worktree / 目录快照
+ *   - 通过 env 注入上传地址 / 一次性 token / 输出目录
+ *   - 把 onOutput 的流式事件写进 timeline
+ *   - 完成时若 run.filesUploadedAt 为空，主动通过 Read/Bash 工具拉回 .octodeck/knowledge/*
+ */
+async function runDeviceKnowledgeAgent(
+  repo: ManagedRepo,
+  ownerUserId: string,
+  opts: ReturnType<typeof clampOptions>,
+  files: SourceFile[],
+): Promise<ExternalGraphResult> {
+  const linkId = opts.executionDeviceLinkId ?? (repo.kind === 'device_path' ? repo.deviceLinkId : undefined);
+  if (!linkId) throw new Error('agent provider (device): execution device link id 未指定');
+  const session = getSession(linkId);
+  if (!session || session.state !== 'open') throw new Error(`Device is offline: ${linkId}`);
+  const home = getUserHomeGroup(ownerUserId);
+  const ownerHomeFolder = home?.folder ?? 'main';
+  const runId = opts.runId;
+  const serverBase = opts.serverBaseUrl ?? OCTODECK_PUBLIC_BASE_URL;
+
+  // ── 一次性上传 token ──────────────────────────────────────────────────────
+  const uploadToken = generateUploadToken();
+  const uploadTokenHash = crypto.createHash('sha256').update(uploadToken).digest('hex');
+  const uploadUrl = `${serverBase}/api/repos/knowledge/runs/${encodeURIComponent(runId ?? '')}/upload`;
+  const OUTPUT_DIR = '.octodeck/knowledge';
+  if (runId) {
+    updateRepoKnowledgeRun(runId, ownerUserId, {
+      uploadTokenHash,
+      enabledSkills: opts.enabledSkills,
+      executionDeviceLinkId: linkId,
+    });
+  }
+  appendTimeline(runId, ownerUserId, 'milestone', `下发 agent.run.request 到 device (${linkId})`, {
+    uploadUrl,
+    outputDir: OUTPUT_DIR,
+    enabledSkills: opts.enabledSkills,
+    timeoutMs: opts.agentTimeoutMs,
+  });
+
+  // ── 构造 Repo spec：让 daemon 以 worktree 打开 git / 目录快照 ─────────────────
+  const agentGroup: RegisteredGroup = {
+    name: `RepoKnowledge Agent: ${repo.name}`,
+    folder: ownerHomeFolder,
+    added_at: new Date().toISOString(),
+    containerConfig: { timeout: opts.agentTimeoutMs },
+    executionMode: 'host',
+    created_by: ownerUserId,
+    is_home: false,
+    repoId: repo.id,
+    repoGitUrl: repo.kind === 'git' ? repo.gitUrl : undefined,
+    repoMainBranch: repo.kind === 'git' ? repo.mainBranch : undefined,
+    repoDevicePath: repo.kind === 'device_path' ? repo.devicePath : undefined,
+    visibleRepoMode: 'selected',
+    visibleRepoIds: [repo.id],
+    executionNode: linkId,
+  };
+
+  const fileIndex = files.map((f) => ({ path: f.path, size: f.size, language: languageForFile(f.path) ?? undefined }));
+  const prompt = buildDeviceAgentPrompt(repo, opts, fileIndex, {
+    uploadUrl,
+    uploadToken,
+    outputDir: OUTPUT_DIR,
+  });
+
+  const customEnv: Record<string, string> = {
+    OCTODECK_PUBLIC_BASE_URL: OCTODECK_PUBLIC_BASE_URL,
+    OCTODECK_REPO_KNOWLEDGE_OUTPUT_DIR: OUTPUT_DIR,
+    OCTODECK_REPO_KNOWLEDGE_UPLOAD_URL: uploadUrl,
+    OCTODECK_REPO_KNOWLEDGE_UPLOAD_TOKEN: uploadToken,
+    OCTODECK_REPO_ID: repo.id,
+    OCTODECK_REPO_NAME: repo.name,
+    OCTODECK_ENABLED_SKILLS: opts.enabledSkills.length > 0 ? opts.enabledSkills.join(',') : '',
+  };
+
+  const cfg: HostCliDriverConfig = {
+    backendId: 'octodeck-repo-knowledge',
+    // 即使 fallback 到 server-side（理论不会到这里），也要有 resolveBinary
+    resolveBinary: () => null,
+    // 走 agent.runtime 模式时由 daemon 选 binary（parseAgentLinkTarget 指定 agentClientId）
+    buildArgv: () => [],
+    outputProtocol: 'jsonline-stream-json',
+    timeoutMs: opts.agentTimeoutMs,
+    maxOutputBytes: 10 * 1024 * 1024,
+    envOverrides: customEnv,
+    runtime: 'local-device',
+  };
+  const input: ContainerInput = {
+    prompt,
+    groupFolder: ownerHomeFolder,
+    chatJid: `system:repo-knowledge:${repo.id}`,
+    isMain: false,
+    isHome: false,
+    isAdminHome: false,
+    sessionId: undefined,
+    isScheduledTask: true,
+    scheduledTaskHasWorkspace: true,
+    taskRunId: runId,
+    messageTaskId: runId,
+  };
+
+  let streamedOutputText = '';
+  const onOutput = async (out: ContainerOutput): Promise<void> => {
+    if (out.status === 'stream') {
+      const ev = out.streamEvent;
+      if (ev && runId) {
+        try {
+          switch (ev.eventType) {
+            case 'tool_use_start':
+              appendTimeline(runId, ownerUserId, 'tool_start', `tool_use_start: ${ev.toolName}`, {
+                tool: ev.toolName,
+                summary: typeof ev.toolInputSummary === 'string' ? ev.toolInputSummary.slice(0, 500) : undefined,
+              });
+              break;
+            case 'tool_use_end':
+              appendTimeline(runId, ownerUserId, 'tool_end', `tool_use_end: ${ev.toolName}`, {
+                tool: ev.toolName,
+                isError: typeof ev.statusText === 'string' && /error|fail/i.test(ev.statusText) ? ev.statusText.slice(0, 200) : undefined,
+              });
+              break;
+            case 'thinking_delta':
+              // thinking 不逐条刷 timeline，避免 500 条上限过快耗尽
+              break;
+            case 'text_delta':
+              streamedOutputText += typeof ev.text === 'string' ? ev.text : '';
+              break;
+            default:
+              appendTimeline(runId, ownerUserId, 'agent_event', ev.eventType, {
+                text: typeof ev.text === 'string' ? ev.text.slice(0, 500) : undefined,
+                sessionId: ev.sessionId,
+              });
+          }
+        } catch {
+          // ignore
+        }
+      } else if (ev && ev.eventType === 'text_delta' && typeof ev.text === 'string') {
+        streamedOutputText += ev.text;
+      }
+    }
+  };
+
+  let output: ContainerOutput;
+  try {
+    output = await runViaAgentLink(
+      {
+        group: agentGroup,
+        input,
+        executionMode: 'host',
+        onProcess: () => undefined,
+        onOutput,
+        signal: undefined,
+      },
+      cfg,
+      linkId,
+    );
+  } catch (err) {
+    appendTimeline(runId, ownerUserId, 'error', 'agent.run 请求失败', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw new Error(`agent provider (device): 启动失败: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (output.status !== 'success') {
+    appendTimeline(runId, ownerUserId, 'error', 'agent 任务失败', {
+      error: output.error,
+      result: typeof output.result === 'string' ? output.result.slice(0, 1000) : undefined,
+    });
+    throw new Error(`agent provider (device): 任务失败: ${output.error ?? output.result ?? 'unknown'}`);
+  }
+
+  const finalText = streamedOutputText || (typeof output.result === 'string' ? output.result : '');
+
+  // ── 检查是否已主动上传；否则 fallback pull ────────────────────────────────
+  const runAfter = runId ? getRepoKnowledgeRun(runId, ownerUserId) : undefined;
+  const alreadyUploaded = !!runAfter?.filesUploadedAt;
+  appendTimeline(runId, ownerUserId, 'milestone', alreadyUploaded ? 'agent 已主动上传产物' : 'agent 完成，开始 pull 产物', {
+    usage: output.streamEvent?.usage ?? undefined,
+  });
+
+  if (!alreadyUploaded) {
+    const pulled = await pullKnowledgeOutputsOnDevice(linkId, OUTPUT_DIR);
+    if (pulled) {
+      appendTimeline(runId, ownerUserId, 'upload', 'fallback pull 完成，入库中', {
+        chunks: pulled.chunks.length,
+        edges: pulled.edges.length,
+      });
+      const runRow = runId ? getRepoKnowledgeRun(runId, ownerUserId) : undefined;
+      // 把 runId 记录到 run stats；ingest 内部通过 run.filesUploadedAt 判断是否需要写上传完成时间，但我们 fallback pull 里手动改
+      if (runRow) {
+        ingestRepoKnowledgeUpload(repo, ownerUserId, {
+          chunks: pulled.chunks.map((c, idx): {
+            key: string; path: string; kind: RepoKnowledgeChunkKind; name?: string; language?: string;
+            startLine?: number; endLine?: number; content: string; keywords?: string; metadata?: Record<string, unknown>;
+          } => ({
+            key: typeof c.key === 'string' && c.key ? c.key : `pull:chunk:${idx}`,
+            path: typeof c.path === 'string' && c.path ? c.path : '__agent__',
+            kind: sanitizeChunkKind(c.kind),
+            name: c.name,
+            language: c.language,
+            startLine: c.startLine,
+            endLine: c.endLine,
+            content: typeof c.content === 'string' ? c.content : '',
+            keywords: c.keywords,
+            metadata: c.metadata,
+          })),
+          edges: pulled.edges.map((e, idx): {
+            key: string; fromPath: string; toPath?: string; edgeKind: RepoKnowledgeGraphEdgeKind;
+            symbol?: string; packageName?: string; source?: string; metadata?: Record<string, unknown>;
+          } => ({
+            key: typeof e.key === 'string' && e.key ? e.key : `pull:edge:${idx}`,
+            fromPath: typeof e.fromPath === 'string' ? e.fromPath : '',
+            toPath: e.toPath,
+            edgeKind: sanitizeEdgeKind(e.edgeKind),
+            symbol: e.symbol,
+            packageName: e.packageName,
+            source: e.source,
+            metadata: e.metadata,
+          })),
+          summary: pulled.summary,
+          stats: pulled.stats,
+        });
+        updateRepoKnowledgeRun(runId!, ownerUserId, {
+          filesUploadedAt: new Date().toISOString(),
+          error: null,
+        });
+      }
+      return {
+        provider: 'agent',
+        chunks: normalizeRawChunks(repo, pulled.chunks, 'agent'),
+        edges: normalizeRawEdges(repo, pulled.edges, 'agent'),
+        summary: pulled.summary ?? `Device agent (fallback pull) 生成 ${pulled.chunks.length} chunks + ${pulled.edges.length} edges.`,
+        stats: {
+          provider: 'agent',
+          delivery: 'fallback-pull',
+          chunkCount: pulled.chunks.length,
+          edgeCount: pulled.edges.length,
+          ...(pulled.stats ?? {}),
+        },
+      };
+    }
+    // fallback pull 也没找到文件，回退到解析回复里的最后一个 JSON 块
+    appendTimeline(runId, ownerUserId, 'warn', 'fallback pull 未发现产物，尝试解析回复 JSON');
+  }
+
+  // 已主动上传：直接从 run.stats 读取 summary 即可，后续调用者会把 repoKnowledgeChunks 已入库的条目（builtin +
+  // graph 其他来源）作为 base，ExternalGraphResult 语义是"再加新条目"—— 这里给一个空集，避免把已经 ingest 的 chunks 再次双写。
+  if (alreadyUploaded) {
+    return {
+      provider: 'agent',
+      chunks: [],
+      edges: [],
+      summary: `Device agent 主动上传成功。`,
+      stats: { provider: 'agent', delivery: 'agent-upload' },
+    };
+  }
+
+  // 最后兜底：解析 agent 回复文本中最后一个 ```json``` 块
+  const parsed = extractLastJsonBlock(finalText) as Record<string, unknown>;
+  if (!parsed || typeof parsed !== 'object') throw new Error('agent provider (device): 回复中未找到 JSON 且未上传产物');
+  return extractExternalGraphFromJsonReply(repo, parsed);
+}
+
+/**
+ * 在 device 上通过 Bash/Read 工具扫描 OUTPUT_DIR 下的产物文件并拉回。
+ * 返回 null 表示"完全没找到文件"。
+ */
+async function pullKnowledgeOutputsOnDevice(
+  linkId: string,
+  outputDir: string,
+): Promise<{
+  chunks: AgentGraphRawChunk[];
+  edges: AgentGraphRawEdge[];
+  summary?: string;
+  stats?: Record<string, unknown>;
+  runLog?: string;
+} | null> {
+  const session = getSession(linkId);
+  if (!session || session.state !== 'open') return null;
+  // ── 列出目录下文件（用 Bash ls + jq 或直接 python cat）
+  const glob = await invokeRemoteTool(session, {
+    linkId,
+    toolName: 'Bash',
+    input: {
+      command: `python3 - <<'PY'\nimport json, os\nbase = os.path.abspath(${JSON.stringify(outputDir)})\nout=[]\nif os.path.isdir(base):\n    for name in sorted(os.listdir(base)):\n        p = os.path.join(base, name)\n        if os.path.isfile(p):\n            out.append({'name': name, 'size': os.path.getsize(p)})\nprint(json.dumps(out))\nPY`,
+    },
+    cwd: 'octodeck-tmp://repo-knowledge',
+    timeoutMs: 30_000,
+    maxOutputBytes: 2 * 1024 * 1024,
+  });
+  if (!glob.ok) return null;
+  const stdout = (glob.result as { stdout?: unknown } | null)?.stdout;
+  let files: Array<{ name: string; size?: number }> = [];
+  try {
+    files = JSON.parse(typeof stdout === 'string' ? stdout : '[]') as typeof files;
+  } catch {
+    return null;
+  }
+  const names = new Set(files.map((f) => f.name));
+  if (names.size === 0) return null;
+
+  const readFile = async (name: string, maxBytes: number): Promise<string | null> => {
+    if (!names.has(name)) return null;
+    const r = await invokeRemoteTool(session, {
+      linkId,
+      toolName: 'Bash',
+      input: {
+        command: `python3 - <<'PY'\nimport json, os, sys\np = os.path.abspath(${JSON.stringify(`${outputDir}/${name}`)})\nif not os.path.isfile(p): sys.exit(0)\nwith open(p, 'r', encoding='utf-8', errors='replace') as f:\n    data = f.read()\nprint(json.dumps(data))\nPY`,
+      },
+      cwd: 'octodeck-tmp://repo-knowledge',
+      timeoutMs: 60_000,
+      maxOutputBytes: Math.max(2 * 1024 * 1024, maxBytes + 4096),
+    });
+    if (!r.ok) return null;
+    const out = (r.result as { stdout?: unknown } | null)?.stdout;
+    try {
+      const v = JSON.parse(typeof out === 'string' ? out : 'null') as unknown;
+      return typeof v === 'string' ? v : null;
+    } catch {
+      return null;
+    }
+  };
+  const chunksRaw = await readFile('chunks.json', 64 * 1024 * 1024);
+  const edgesRaw = await readFile('edges.json', 64 * 1024 * 1024);
+  const summary = await readFile('summary.md', 128 * 1024);
+  const statsRaw = await readFile('stats.json', 16 * 1024 * 1024);
+  const runLog = await readFile('run.log', 4 * 1024 * 1024);
+  if (!chunksRaw && !edgesRaw && !summary) return null;
+  let chunks: AgentGraphRawChunk[] = [];
+  let edges: AgentGraphRawEdge[] = [];
+  let stats: Record<string, unknown> | undefined;
+  if (chunksRaw) {
+    try {
+      const parsed = JSON.parse(chunksRaw) as unknown;
+      if (Array.isArray(parsed)) chunks = parsed as AgentGraphRawChunk[];
+    } catch {
+      chunks = [];
+    }
+  }
+  if (edgesRaw) {
+    try {
+      const parsed = JSON.parse(edgesRaw) as unknown;
+      if (Array.isArray(parsed)) edges = parsed as AgentGraphRawEdge[];
+    } catch {
+      edges = [];
+    }
+  }
+  if (statsRaw) {
+    try {
+      const parsed = JSON.parse(statsRaw) as unknown;
+      if (parsed && typeof parsed === 'object') stats = parsed as Record<string, unknown>;
+    } catch {
+      stats = undefined;
+    }
+  }
+  return { chunks, edges, summary: summary ?? undefined, stats, runLog: runLog ?? undefined };
+}
+
+/** 把 agent 回复的 JSON → ExternalGraphResult。 */
+function extractExternalGraphFromJsonReply(
+  repo: ManagedRepo,
+  parsed: Record<string, unknown>,
+): ExternalGraphResult {
+  const rawChunks = Array.isArray(parsed.chunks) ? (parsed.chunks as AgentGraphRawChunk[]) : [];
+  const chunks = normalizeRawChunks(repo, rawChunks, 'agent');
+  const rawEdges = Array.isArray(parsed.edges) ? (parsed.edges as AgentGraphRawEdge[]) : [];
+  const edges = normalizeRawEdges(repo, rawEdges, 'agent');
+  const summary = typeof parsed.summary === 'string'
+    ? parsed.summary
+    : `Agent indexed ${chunks.length} chunks and ${edges.length} edges.`;
+  const stats = parsed.stats && typeof parsed.stats === 'object'
+    ? { ...(parsed.stats as Record<string, unknown>), provider: 'agent', chunkCount: chunks.length, edgeCount: edges.length }
+    : { provider: 'agent', chunkCount: chunks.length, edgeCount: edges.length };
+  return { provider: 'agent', chunks, edges, summary, stats };
+}
+
+function normalizeRawChunks(
+  repo: ManagedRepo,
+  raw: AgentGraphRawChunk[],
+  sourcePrefix: 'agent',
+): Array<Omit<RepoKnowledgeChunk, 'repoId' | 'userId' | 'updatedAt'>> {
+  type _Out = Omit<RepoKnowledgeChunk, 'repoId' | 'userId' | 'updatedAt'>;
+  const out: _Out[] = [];
+  const seen = new Set<string>();
+  for (const [i, item] of raw.entries()) {
+    if (!item || typeof item !== 'object') continue;
+    const kind = sanitizeChunkKind(item.kind);
+    const key = typeof item.key === 'string' && item.key ? item.key : `${kind}:${item.path ?? ''}:${item.name ?? i}`;
+    const p = typeof item.path === 'string' && item.path ? item.path : '__agent__';
+    const content = typeof item.content === 'string' ? item.content : '';
+    if (!content && !(typeof item.name === 'string' && item.name)) continue;
+    const id = stableChunkId(repo.id, kind, `agent:${key}`);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      path: p,
+      kind,
+      name: typeof item.name === 'string' ? item.name : undefined,
+      language: typeof item.language === 'string' ? item.language : p ? (languageForFile(p) ?? undefined) : undefined,
+      startLine: typeof item.startLine === 'number' ? item.startLine : undefined,
+      endLine: typeof item.endLine === 'number' ? item.endLine : undefined,
+      content,
+      keywords: typeof item.keywords === 'string' ? item.keywords : `${p} ${item.name ?? ''}`.trim(),
+      metadata: item.metadata && typeof item.metadata === 'object' ? { ...item.metadata, provider: 'agent' } : { provider: 'agent', source: sourcePrefix },
+    });
+  }
+  return out;
+}
+
+function normalizeRawEdges(
+  repo: ManagedRepo,
+  raw: AgentGraphRawEdge[],
+  sourcePrefix: 'agent',
+): Array<Omit<RepoKnowledgeGraphEdge, 'repoId' | 'userId' | 'updatedAt'>> {
+  type _Out = Omit<RepoKnowledgeGraphEdge, 'repoId' | 'userId' | 'updatedAt'>;
+  const out: _Out[] = [];
+  const seen = new Set<string>();
+  for (const [i, item] of raw.entries()) {
+    if (!item || typeof item !== 'object') continue;
+    const edgeKind = sanitizeEdgeKind(item.edgeKind);
+    const fromPath = typeof item.fromPath === 'string' ? item.fromPath : '';
+    if (!fromPath) continue;
+    const key = typeof item.key === 'string' && item.key
+      ? item.key
+      : `${edgeKind}:${fromPath}:${item.toPath ?? ''}:${item.symbol ?? i}`;
+    const id = stableEdgeId(repo.id, edgeKind, `agent:${key}`);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      fromPath,
+      toPath: typeof item.toPath === 'string' ? item.toPath : undefined,
+      edgeKind,
+      symbol: typeof item.symbol === 'string' ? item.symbol : undefined,
+      packageName: typeof item.packageName === 'string' ? item.packageName : undefined,
+      source: typeof item.source === 'string' && item.source ? `agent:${item.source}` : 'agent',
+      metadata: item.metadata && typeof item.metadata === 'object' ? { ...item.metadata, provider: 'agent' } : { provider: 'agent', source: sourcePrefix },
+    });
+  }
+  return out;
+}
+
+/**
+ * Device 端 task agent 的提示词：
+ *   - 告知输出目录、上传 URL/Token
+ *   - 列出推荐 skills（builtin-graph-scan 等）
+ *   - 明确鼓励把结果落盘并主动上传；提示"最后也可以用一个 ```json``` 块兜底"
+ */
+function buildDeviceAgentPrompt(
+  repo: ManagedRepo,
+  opts: ReturnType<typeof clampOptions>,
+  files: Array<{ path: string; size: number; language?: string }>,
+  env: { uploadUrl: string; uploadToken: string; outputDir: string },
+): string {
+  if (opts.agentPrompt) return opts.agentPrompt;
+  const topList = files.slice(0, 120)
+    .map((f) => `- ${f.path}${f.language ? `  [${f.language}]` : ''}  (${f.size}B)`)
+    .join('\n');
+  const skillList = opts.enabledSkills.length > 0
+    ? opts.enabledSkills.map((s) => `- ${s}`).join('\n')
+    : '- builtin-graph-scan（Python 内置：Bash 调脚本，输出 chunks.json/edges.json/stats.json/summary.md/run.log）';
+  return [
+    '你是仓库知识图谱构建专家。当前工作区即对应仓库源码根（daemon 已基于 git worktree / 设备目录快照准备好）。',
+    '你的任务是：遍历源码和文档，生成 chunks（符号/文档/依赖/文件摘要）与 edges（import/dependency/文档引用/调用等），',
+    `并把产物写入 \`${env.outputDir}/\` 目录并主动上传到服务端。`,
+    '',
+    '## 执行策略（三选一，按优先级从高到低）',
+    '1. **builtin-graph-scan（默认，强烈推荐）**：项目自带的确定性 Python 扫描脚本，纯标准库（python3>=3.8，零依赖）。',
+    '   从服务端拉取脚本到本地临时目录后执行（下方命令**真实可直接复制运行**）：',
+    '   ```bash',
+    `   BUILTIN_SCRIPT_URL=\${OCTODECK_PUBLIC_BASE_URL%/}/api/repos/knowledge/builtin-script`,
+    `   BUILTIN_SCRIPT_PATH="/tmp/builtin_graph_scan_\$(date +%s).py"`,
+    '   echo "下载 builtin-graph-scan 脚本到 $BUILTIN_SCRIPT_PATH"',
+    '   if ! curl -fsSL --max-time 30 "$BUILTIN_SCRIPT_URL" -o "$BUILTIN_SCRIPT_PATH"; then',
+    `     echo "[WARN] curl 下载脚本失败，尝试用 wget"; wget -q --timeout=30 -O "$BUILTIN_SCRIPT_PATH" "$BUILTIN_SCRIPT_URL" || echo "[ERROR] 无法下载脚本，跳过第 1 级"`,
+    '   fi',
+    `   OUT_DIR="${env.outputDir}"`,
+    '   mkdir -p "$OUT_DIR"',
+    `   if [ -s "$BUILTIN_SCRIPT_PATH" ] && python3 -c "import py_compile; py_compile.compile('$BUILTIN_SCRIPT_PATH', doraise=True)" 2>/dev/null; then`,
+    '     python3 "$BUILTIN_SCRIPT_PATH" \\',
+    '       --repo . \\',
+    `       --output-dir "$OUT_DIR" \\`,
+    `       --repo-name "${repo.name.replace(/"/g, '\\"')}" \\`,
+    '       --max-files 2000 \\',
+    '       --max-output-mb 32 \\',
+    '       --pretty \\',
+    '       2>&1 | tee -a "$OUT_DIR/run.log"',
+    '     SCAN_EXIT="${PIPESTATUS[0]}"',
+    '     echo "builtin-graph-scan exit=$SCAN_EXIT"',
+    '   else',
+    '     echo "[ERROR] 脚本下载损坏或语法异常，回退到第 2/3 级"',
+    '     SCAN_EXIT=1',
+    '   fi',
+    '   ```',
+    '   - 变量 `OCTODECK_PUBLIC_BASE_URL` 已由服务端通过环境变量注入（如未设置请自行补全）。',
+    '   - 执行成功（SCAN_EXIT=0）后请直接跳到下方「输出目录与上传」执行 curl 上传；失败则回退到下一级。',
+    '',
+    '2. **其它外挂 graph skill**（graphify / codegraph / 自定义）：如检测到已安装，按各自说明调用，最终把产物对齐写入 `chunks.json / edges.json / stats.json / summary.md` 四个文件。',
+    '',
+    '3. **手工流程（仅当以上两者均不可用时才回退）**：用 Bash find + grep/AST 脚本自行生成 chunks/edges（格式见下）。',
+    '',
+    `## 仓库上下文`,
+    `- 仓库名: ${repo.name}`,
+    `- 仓库 ID: ${repo.id}`,
+    `- 仓库源: ${repo.kind === 'git' ? (repo.gitUrl ?? '') : (repo.devicePath ?? '')}`,
+    `- 入口文件预览（前 ${Math.min(files.length, 120)} 个，完整列表请自行遍历工作区）:`,
+    topList,
+    '',
+    `## 输出目录与上传`,
+    `- 输出目录（请自行 mkdir -p）：\`${env.outputDir}/\``,
+    '  - `chunks.json`  — JSON 数组，元素形如 {key, path, kind, name, language, startLine, endLine, content, keywords, metadata}',
+    '  - `edges.json`   — JSON 数组，元素形如 {key, fromPath, toPath?, edgeKind, symbol?, packageName?, source?, metadata?}',
+    '  - `summary.md`  — 人类可读的仓库语义摘要',
+    '  - `stats.json`  — 统计指标（chunk/edge 数量、语言分布、耗时、跳过文件数等）',
+    '  - `run.log`     — 执行过程日志，由 skill 或你的 Bash 输出写入',
+    `- chunk.kind 枚举：overview | file | symbol | dependency | doc | graph`,
+    `- edge.edgeKind 枚举：imports | imported_by | depends_on | exports | documents | references`,
+    `- 落盘完成后，用 Bash curl 把产物 multipart POST 到服务端（下方是**真实可直接执行**的完整命令，直接 copy 运行即可）：`,
+    '  ```bash',
+    `  OUT_DIR="${env.outputDir}"`,
+    `  UPLOAD_URL="${env.uploadUrl}"`,
+    `  TOKEN="${env.uploadToken}"`,
+    '  curl -sS --max-time 300 --retry 2 --retry-delay 3 -X POST "$UPLOAD_URL" \\',
+    '       -H "Authorization: Bearer $TOKEN" \\',
+    '       -F "chunks.json=@$OUT_DIR/chunks.json;type=application/json" \\',
+    '       -F "edges.json=@$OUT_DIR/edges.json;type=application/json" \\',
+    '       -F "summary.md=@$OUT_DIR/summary.md;type=text/markdown" \\',
+    '       -F "stats.json=@$OUT_DIR/stats.json;type=application/json" \\',
+    '       -F "run.log=@$OUT_DIR/run.log;type=text/plain"',
+    '  ```',
+    `- 如 curl 返回非 2xx，**不要**删除 \`${env.outputDir}/\` 下的文件 —— 服务端会通过 fallback pull 自动把它们拉回。`,
+    '',
+    '## 可用外挂 Skill',
+    skillList,
+    '',
+    '## 手工流程（仅回退时）',
+    '1. 扫目录：Bash find + 文件大小过滤，排除 .git / node_modules / dist / build / coverage / vendor / target / __pycache__ / .next / .turbo / .cache',
+    '2. 语言分析：TS/JS/TSX/JSX 抽取类/函数/接口/类型/常量；Python 抽 def/class；Go 抽 func；Rust 抽 fn/struct/enum；Java/Kotlin 抽 class/interface/enum；每个符号写一条 symbol chunk，content 为定义行 ±36 行（≤ 4KB）。',
+    '3. 依赖：从 package.json、requirements.txt、go.mod、Cargo.toml、pyproject.toml、pom.xml、build.gradle 抽 dependencies 写 dependency chunk + depends_on 边。',
+    '4. 引用图：从 import/require/from import/use 抽 imports，对内部路径解析到 repo 内真实文件；对每条内部 imports 写反向 imported_by 边。',
+    '5. 文档：从 README.md / docs/**/*.md 按 #~###### 标题切 doc chunk；相对路径链接写 documents 边。',
+    '6. 扫密：.env / .pem / .key / id_rsa / credentials.json / AKIA / ghp_ / JWT / password= 匹配到的文件整份跳过，不要进入 content 字段。',
+    '',
+    '## 质量约束',
+    '- chunks 总数目标 200–8000；edges 200–20000',
+    '- 单个 chunk.content ≤ 128KB；chunks.json 整体尽量 ≤ 64MB，edges.json ≤ 16MB',
+    '- chunk.key / edge.key **必须稳定**（同一代码位置每次运行都生成一致字符串），基于 `repo_name:path:kind:name` 的 hash，否则会造成知识库条目重复膨胀。',
+    '- 不要把 .env / 密钥 / 数据库密码写进任何 chunk.content 或 metadata。',
+    '',
+    '## 完成判定',
+    '完成后请用一句话汇报：builtin-graph-scan 成功/自定义 skill 成功/已按手工流程生成，并附上 curl 上传的 HTTP 响应码（或上传失败的错误信息）。**不要**在回复里再粘贴 chunks/edges JSON —— 文件已被上传或会被服务端拉回。',
+  ].join('\n');
+}
+
+async function runAgentKnowledgeTask(
+  repo: ManagedRepo,
+  sourceRoot: string,
+  sourceDeviceLinkId: string | undefined,
+  ownerUserId: string,
+  opts: ReturnType<typeof clampOptions>,
+  files: SourceFile[],
+): Promise<ExternalGraphResult> {
+  // 有明确 device 链接 → device 端 task agent（worktree + upload + fallback pull + timeline）
+  const useDevice =
+    !!opts.executionDeviceLinkId ||
+    !!sourceDeviceLinkId ||
+    (repo.kind === 'git' && opts.provider === 'agent'); // git 源 + agent 模式强制 device（路由层已经校验，这里双保险）
+  if (useDevice) {
+    return runDeviceKnowledgeAgent(repo, ownerUserId, opts, files);
+  }
+
+  // 没有 device：服务端走 container/host backend.run 兼容老路径，最终解析回复中的 ```json```
+  const home = getUserHomeGroup(ownerUserId);
+  const ownerHomeFolder = home?.folder ?? 'main';
+  const runId = opts.runId;
+  appendTimeline(runId, ownerUserId, 'milestone', '服务端 agent 启动（本地 container/host）');
+  const agentGroup: RegisteredGroup = {
+    name: `RepoKnowledge Agent: ${repo.name}`,
+    folder: ownerHomeFolder,
+    added_at: new Date().toISOString(),
+    containerConfig: { timeout: Math.min(opts.agentTimeoutMs, AGENT_KNOWLEDGE_TIMEOUT_MS) },
+    executionMode: 'container',
+    created_by: ownerUserId,
+    is_home: false,
+  };
+  const backend = resolveBackend(agentGroup);
+  const resolvedExecutionMode: 'host' | 'container' = backend.supportsExecutionMode(agentGroup.executionMode ?? 'container')
+    ? (agentGroup.executionMode ?? 'container')
+    : 'host';
+  const fileIndex = files.map((f) => ({ path: f.path, size: f.size, language: languageForFile(f.path) ?? undefined }));
+  const prompt = buildAgentKnowledgePrompt(repo, opts, fileIndex);
+  const turnId = `rk-agent-${repo.id}-${crypto.randomBytes(6).toString('hex')}`;
+
+  let output: ContainerOutput;
+  try {
+    output = await backend.run({
+      group: agentGroup,
+      executionMode: resolvedExecutionMode,
+      input: {
+        prompt,
+        groupFolder: ownerHomeFolder,
+        chatJid: `system:repo-knowledge:${repo.id}`,
+        isMain: false,
+        isHome: false,
+        isAdminHome: false,
+        turnId,
+        agentId: `repo-knowledge-agent`,
+        sessionId: undefined,
+        remoteExecutionLinkId: sourceDeviceLinkId,
+        remoteToolCwd: sourceRoot,
+        executionProfile: 'single-turn-json',
+      },
+      onProcess: () => undefined,
+      signal: undefined,
+    });
+  } catch (err) {
+    appendTimeline(runId, ownerUserId, 'error', '服务端 agent 启动失败', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw new Error(`agent provider: 启动失败: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (output.status !== 'success') {
+    appendTimeline(runId, ownerUserId, 'error', '服务端 agent 任务失败', {
+      error: output.error,
+    });
+    throw new Error(`agent provider: 任务失败: ${output.error ?? output.result ?? 'unknown'}`);
+  }
+  const rawText = output.result ?? '';
+  const parsed = extractLastJsonBlock(rawText) as Record<string, unknown>;
+  if (!parsed || typeof parsed !== 'object') {
+    appendTimeline(runId, ownerUserId, 'error', 'agent 回复中未找到 JSON 代码块');
+    throw new Error('agent provider: 未输出 ```json``` 代码块');
+  }
+  appendTimeline(runId, ownerUserId, 'milestone', '解析回复 JSON 完成');
+  return extractExternalGraphFromJsonReply(repo, parsed);
+}
+
+async function buildAgentGraphKnowledge(
+  repo: ManagedRepo,
+  sourceRoot: string,
+  sourceDeviceLinkId: string | undefined,
+  ownerUserId: string,
+  opts: ReturnType<typeof clampOptions>,
+  files: SourceFile[],
+): Promise<ExternalGraphResult> {
+  return runAgentKnowledgeTask(repo, sourceRoot, sourceDeviceLinkId, ownerUserId, opts, files);
+}
+
 function resolveKnowledgeSourceRepo(repo: ManagedRepo, opts: ReturnType<typeof clampOptions>): { repo: ManagedRepo; sourceMode: string } {
   if (opts.sourceKind === 'git') {
     if (!opts.sourceGitUrl) throw new Error('source_git_url is required when source_kind=git');
@@ -1465,7 +2440,45 @@ export async function generateRepoKnowledge(
     let summary = built.summary;
     let stats = built.stats;
     let externalGraphStats: Record<string, unknown> | undefined;
-    if (pluginSelection.provider === 'graphify' || pluginSelection.provider === 'codegraph') {
+    if (pluginSelection.provider === 'agent') {
+      try {
+        const ownerUserId = opts.agentOwnerUserId ?? repo.createdBy;
+        const sourceRoot = localSourceRoot ?? remoteSourceRoot;
+        const effectiveSourceRoot: string = sourceRoot
+          ?? (repo.kind === 'git' && repo.gitUrl ? (await prepareGitSource(sourceRepo)).root : '');
+        if (!effectiveSourceRoot && !remoteSourceDeviceLinkId) {
+          throw new Error('agent provider: 无法确定仓库源码根目录');
+        }
+        const external = await buildAgentGraphKnowledge(
+          repo,
+          effectiveSourceRoot,
+          remoteSourceDeviceLinkId,
+          ownerUserId,
+          opts,
+          files,
+        );
+        chunks = [...chunks, ...external.chunks];
+        edges = [...edges, ...external.edges];
+        summary = `${summary}\n\nAI Agent graph:\n${external.summary}`;
+        stats = {
+          ...stats,
+          chunkCount: chunks.length,
+          graphEdgeCount: edges.length,
+        };
+        externalGraphStats = {
+          ...external.stats,
+          applied: true,
+        };
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        if (!opts.fallbackBuiltin) throw new Error(error);
+        externalGraphStats = {
+          provider: 'agent',
+          applied: false,
+          error,
+        };
+      }
+    } else if (pluginSelection.provider === 'graphify' || pluginSelection.provider === 'codegraph') {
       if (!localSourceRoot && (!remoteSourceRoot || !remoteSourceDeviceLinkId)) {
         const error = 'external_graph_source_unavailable: external graph providers require a local repo root or a device repo path';
         if (!opts.fallbackBuiltin) throw new Error(error);
@@ -1635,7 +2648,12 @@ export function startRepoKnowledgeGenerationTask(
   const promise = (async () => {
     const startedAt = new Date().toISOString();
     updateRepoKnowledgeRun(taskId, userId, { status: 'running', startedAt, updatedAt: startedAt });
-    const finalIndex = await generateRepoKnowledgeWithOfflineRetry(repo, userId, options);
+    const runOptions: RepoKnowledgeGenerateOptions = {
+      ...options,
+      runId: taskId,
+      serverBaseUrl: OCTODECK_PUBLIC_BASE_URL,
+    };
+    const finalIndex = await generateRepoKnowledgeWithOfflineRetry(repo, userId, runOptions);
     const completedAt = new Date().toISOString();
     updateRepoKnowledgeRun(taskId, userId, {
       status: finalIndex.status === 'ready' ? 'ready' : finalIndex.status === 'error' ? 'error' : 'running',
