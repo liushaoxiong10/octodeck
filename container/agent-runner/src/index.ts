@@ -1019,6 +1019,46 @@ function buildMemoryRecallPrompt(isHome: boolean, disableMemoryLayer: boolean): 
   return isHome ? MEMORY_SYSTEM_HOME : MEMORY_SYSTEM_GUEST;
 }
 
+/**
+ * 在 query 启动前从云端拉取该 owner 的全局记忆 (cloud_memories memoryType='global'),
+ * 直接拼进 systemPrompt,模型每次对话都能看到,无需主动调用 cloud_memory_get。
+ * 拉取失败/为空都返回空串,失败原因记录到 stderr。
+ */
+async function fetchCloudGlobalMemory(
+  ownerUserId: string | undefined,
+  agentToolToken: string,
+  serverBaseUrl: string,
+): Promise<string> {
+  if (!ownerUserId) return '';
+  if (!agentToolToken) return '';
+  try {
+    const url = `${serverBaseUrl.replace(/\/$/, '')}/api/cloud-memory/tool`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${agentToolToken}`,
+      },
+      body: JSON.stringify({
+        userId: ownerUserId,
+        operation: 'get',
+        memoryType: 'global',
+        path: 'CLAUDE.md',
+      }),
+    });
+    if (!res.ok) {
+      log(`fetchCloudGlobalMemory: HTTP ${res.status}`);
+      return '';
+    }
+    const data: any = await res.json().catch(() => ({}));
+    const content = data?.memory?.content;
+    return typeof content === 'string' ? content.trim() : '';
+  } catch (err) {
+    log(`fetchCloudGlobalMemory error: ${err instanceof Error ? err.message : String(err)}`);
+    return '';
+  }
+}
+
 /** 读取用户配置的 MCP servers（stdio/http/sse 类型） */
 function loadUserMcpServers(): Record<string, unknown> {
   // 禁用记忆层模式下 CLAUDE_CONFIG_DIR 指向 ~/.claude/，OctoDeck 管理的 per-user MCP
@@ -1080,6 +1120,7 @@ async function runQuery(
   disallowedTools?: string[],
   images?: Array<{ data: string; mimeType?: string }>,
   sourceKindOverride?: ContainerOutput['sourceKind'],
+  cloudGlobalMemory?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; contextOverflow?: boolean; unrecoverableTranscriptError?: boolean; interruptedDuringQuery: boolean; sessionResumeFailed?: boolean; pipedMessagesDuringQuery: Array<{ text: string; images?: Array<{ data: string; mimeType?: string }> }> }> {
   const stream = new MessageStream();
   // Track messages piped into this query.  When the query is interrupted,
@@ -1268,6 +1309,12 @@ async function runQuery(
     { name: 'security-rules.md', text: `<security>\n${buildSecurityRulesPrompt(disableMemoryLayer)}\n</security>` },
     ...(memoryRecall && memoryPromptName
       ? [{ name: memoryPromptName, text: `<memory-system>\n${memoryRecall}\n</memory-system>` }]
+      : []),
+    ...(cloudGlobalMemory && cloudGlobalMemory.trim()
+      ? [{
+          name: 'cloud-global-memory.md',
+          text: `<cloud-global-memory>\n以下是该用户在 OctoDeck 云端的全局记忆 (cloud://global/global:${containerInput.ownerUserId ?? ''}/CLAUDE.md)。请将其作为长期记忆参考,在适当时遵循其中的偏好与约定。\n\n${cloudGlobalMemory.trim()}\n</cloud-global-memory>`,
+        }]
       : []),
     { name: 'guidelines', text: GUIDELINES_BLOCK },
     ...(channelGuidelines
@@ -1857,6 +1904,15 @@ async function main(): Promise<void> {
   });
   let mcpServerConfig = buildMcpServerConfig();
   const memoryRecallPrompt = buildMemoryRecallPrompt(isHome, disableMemoryLayer);
+  // 拉取云端全局记忆 (cloud_memories memoryType='global', path='CLAUDE.md'),
+  // 直接拼进 systemPrompt,模型每个 turn 都能看到该用户的全局记忆。
+  const cloudGlobalMemoryContent = !disableMemoryLayer
+    ? await fetchCloudGlobalMemory(
+        containerInput.ownerUserId,
+        mcpToolsConfig.agentToolToken,
+        mcpToolsConfig.serverBaseUrl,
+      )
+    : '';
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
 
   // Clean up stale sentinels from previous container runs.
@@ -1941,6 +1997,8 @@ async function main(): Promise<void> {
         DEFAULT_ALLOWED_TOOLS,
         undefined,
         promptImages,
+        undefined,
+        cloudGlobalMemoryContent,
       );
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
@@ -2110,6 +2168,9 @@ async function main(): Promise<void> {
           false,
           MEMORY_FLUSH_ALLOWED_TOOLS,
           MEMORY_FLUSH_DISALLOWED_TOOLS,
+          undefined,
+          undefined,
+          cloudGlobalMemoryContent,
         );
         if (flushResult.newSessionId) { sessionId = flushResult.newSessionId; latestSessionId = sessionId; }
         if (flushResult.lastAssistantUuid) resumeAt = flushResult.lastAssistantUuid;
@@ -2164,6 +2225,7 @@ async function main(): Promise<void> {
             undefined,
             undefined,
             'auto_continue',
+            cloudGlobalMemoryContent,
           );
           if (autoContResult.newSessionId) {
             sessionId = autoContResult.newSessionId;

@@ -290,7 +290,6 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
   const MESSAGES_DIR = path.join(ctx.workspaceIpc, 'messages');
   const TASKS_DIR = path.join(ctx.workspaceIpc, 'tasks');
   const hasCrossGroupAccess = ctx.isAdminHome;
-  const toRelativePath = createToRelativePath(ctx);
 
   /**
    * Generic IPC call helper: writes a request with requestId to TASKS_DIR,
@@ -1985,47 +1984,24 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
               isError: true,
             };
           }
-          const resolvedPath = path.normalize(
-            path.join(ctx.workspaceMemory, `${date}.md`),
-          );
-          const inMemory =
-            resolvedPath === ctx.workspaceMemory ||
-            resolvedPath.startsWith(ctx.workspaceMemory + path.sep);
-          if (!inMemory) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: '\u8bbf\u95ee\u88ab\u62d2\u7edd\uff1a\u8def\u5f84\u8d85\u51fa\u5de5\u4f5c\u533a\u8303\u56f4\u3002',
-                },
-              ],
-              isError: true,
-            };
-          }
+          // 直接写入云端 cloud_memories: session 类型,path = memory/YYYY-MM-DD.md
           try {
-            fs.mkdirSync(ctx.workspaceMemory, { recursive: true });
-            const fileExists = fs.existsSync(resolvedPath);
-            const currentSize = fileExists ? fs.statSync(resolvedPath).size : 0;
-            const separator = currentSize > 0 ? '\n---\n\n' : '';
-            const entry = `${separator}### ${new Date().toISOString()}\n${normalizedContent}\n`;
-            const nextSize = currentSize + Buffer.byteLength(entry, 'utf-8');
-            if (nextSize > MAX_MEMORY_FILE_SIZE) {
-              return {
-                content: [
-                  {
-                    type: 'text' as const,
-                    text: `\u8bb0\u5fc6\u6587\u4ef6\u5c06\u8d85\u8fc7 ${MAX_MEMORY_FILE_SIZE} \u5b57\u8282\u4e0a\u9650\uff0c\u8bf7\u7f29\u77ed\u5185\u5bb9\u3002`,
-                  },
-                ],
-                isError: true,
-              };
-            }
-            fs.appendFileSync(resolvedPath, entry, 'utf-8');
+            const data = await invokeCloudMemory(ctx, {
+              operation: 'append',
+              memoryType: 'session',
+              groupFolder: ctx.groupFolder,
+              path: `memory/${date}.md`,
+              content: normalizedContent,
+            });
+            const revision = data?.memory?.revision;
             return {
               content: [
                 {
                   type: 'text' as const,
-                  text: `\u5df2\u8ffd\u52a0\u5230 memory/${date}.md\uff08${appendBytes} \u5b57\u8282\uff09\u3002`,
+                  text:
+                    `\u5df2\u8ffd\u52a0\u5230\u4e91\u7aef memory/${date}.md\uff08${appendBytes} \u5b57\u8282${
+                      revision ? `\uff0crev ${revision}` : ''
+                    }\uff09\u3002`,
                 },
               ],
             };
@@ -2034,7 +2010,7 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
               content: [
                 {
                   type: 'text' as const,
-                  text: `\u8ffd\u52a0\u8bb0\u5fc6\u65f6\u51fa\u9519\uff1a${err instanceof Error ? err.message : String(err)}`,
+                  text: `\u8ffd\u52a0\u4e91\u7aef\u8bb0\u5fc6\u65f6\u51fa\u9519\uff1a${err instanceof Error ? err.message : String(err)}`,
                 },
               ],
               isError: true,
@@ -2050,9 +2026,8 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
     tools.push(
     tool(
       'memory_search',
-      `\u5728\u5de5\u4f5c\u533a\u7684\u8bb0\u5fc6\u6587\u4ef6\u4e2d\u641c\u7d22\uff08CLAUDE.md\u3001memory/\u3001conversations/ \u53ca\u5176\u4ed6 .md/.txt \u6587\u4ef6\uff09\u3002
-\u8fd4\u56de\u6587\u4ef6\u8def\u5f84\u3001\u884c\u53f7\u548c\u4e0a\u4e0b\u6587\u7247\u6bb5\u3002\u8d85\u8fc7 512KB \u7684\u6587\u4ef6\u4f1a\u88ab\u8df3\u8fc7\u3002
-\u7528\u4e8e\u56de\u5fc6\u8fc7\u53bb\u7684\u51b3\u7b56\u3001\u504f\u597d\u3001\u9879\u76ee\u4e0a\u4e0b\u6587\u6216\u5bf9\u8bdd\u5386\u53f2\u3002`,
+      `\u5728\u4e91\u7aef\u8bb0\u5fc6\uff08\u5168\u5c40 / \u5f53\u524d\u4f1a\u8bdd / client agent \u955c\u50cf\uff09\u4e2d\u641c\u7d22\u5173\u952e\u8bcd\u3002
+\u8fd4\u56de\u8bb0\u5fc6\u8def\u5f84\u4e0e\u4e0a\u4e0b\u6587\u7247\u6bb5\u3002\u8bb0\u5fc6\u6570\u636e\u7edf\u4e00\u5b58\u4e8e\u4e91\u7aef\u6570\u636e\u5e93\uff0c\u4e0d\u518d\u4f9d\u8d56\u672c\u5730\u6587\u4ef6\u3002`,
       {
         query: z
           .string()
@@ -2081,32 +2056,28 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
         }
         const maxResults = Math.min(Math.max(args.max_results ?? 20, 1), 50);
         const queryLower = args.query.toLowerCase();
-        const files: string[] = [];
-        collectMemoryFiles(ctx.workspaceMemory, files, 4);
-        collectMemoryFiles(ctx.workspaceGroup, files, 4);
-        collectMemoryFiles(ctx.workspaceGlobal, files, 4);
-        const uniqueFiles = Array.from(new Set(files));
-        if (uniqueFiles.length === 0) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: '\u672a\u627e\u5230\u8bb0\u5fc6\u6587\u4ef6\u3002',
-              },
-            ],
-          };
-        }
-        const results: string[] = [];
-        let skippedLarge = 0;
-        for (const filePath of uniqueFiles) {
-          if (results.length >= maxResults) break;
-          try {
-            const stat = fs.statSync(filePath);
-            if (stat.size > MAX_MEMORY_FILE_SIZE) {
-              skippedLarge++;
-              continue;
-            }
-            const content = fs.readFileSync(filePath, 'utf-8');
+        try {
+          const data = await invokeCloudMemory(ctx, {
+            operation: 'search',
+            query: args.query,
+          });
+          const memories: any[] = Array.isArray(data?.memories) ? data.memories : [];
+          if (memories.length === 0) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: '\u4e91\u7aef\u672a\u627e\u5230\u8bb0\u5fc6\u6587\u4ef6\u3002',
+                },
+              ],
+            };
+          }
+          const results: string[] = [];
+          for (const memory of memories) {
+            if (results.length >= maxResults) break;
+            const content: string = typeof memory.content === 'string' ? memory.content : '';
+            if (!content) continue;
+            const cloudPath = `cloud://${memory.memoryType}/${memory.scopeKey}/${memory.path}`;
             const lines = content.split('\n');
             let lastEnd = -1;
             for (let i = 0; i < lines.length; i++) {
@@ -2117,49 +2088,51 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
                 const end = Math.min(lines.length, i + 2);
                 lastEnd = end;
                 const snippet = lines.slice(start, end).join('\n');
-                results.push(
-                  `${toRelativePath(filePath)}:${i + 1}\n${snippet}`,
-                );
+                results.push(`${cloudPath}:${i + 1}\n${snippet}`);
               }
             }
-          } catch {
-            /* skip unreadable */
           }
-        }
-        const skippedNote =
-          skippedLarge > 0
-            ? `\uff08\u8df3\u8fc7 ${skippedLarge} \u4e2a\u5927\u6587\u4ef6\uff09`
-            : '';
-        if (results.length === 0) {
+          if (results.length === 0) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `\u5728 ${memories.length} \u4e2a\u4e91\u7aef\u8bb0\u5fc6\u4e2d\u672a\u627e\u5230\u201c${args.query}\u201d\u7684\u5339\u914d\u3002`,
+                },
+              ],
+            };
+          }
           return {
             content: [
               {
                 type: 'text' as const,
-                text: `\u5728 ${uniqueFiles.length} \u4e2a\u8bb0\u5fc6\u6587\u4ef6\u4e2d\u672a\u627e\u5230\u201c${args.query}\u201d\u7684\u5339\u914d\u3002${skippedNote}`,
+                text: `\u4e91\u7aef\u627e\u5230 ${results.length} \u6761\u5339\u914d\uff1a\n\n${results.join('\n---\n')}`,
               },
             ],
           };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `\u641c\u7d22\u4e91\u7aef\u8bb0\u5fc6\u65f6\u51fa\u9519\uff1a${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            isError: true,
+          };
         }
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `\u627e\u5230 ${results.length} \u6761\u5339\u914d${skippedNote}\uff1a\n\n${results.join('\n---\n')}`,
-            },
-          ],
-        };
       },
     ),
 
     // --- memory_get ---
     tool(
       'memory_get',
-      `\u8bfb\u53d6\u8bb0\u5fc6\u6587\u4ef6\u6216\u6307\u5b9a\u884c\u8303\u56f4\u3002\u5728 memory_search \u4e4b\u540e\u4f7f\u7528\u4ee5\u83b7\u53d6\u5b8c\u6574\u4e0a\u4e0b\u6587\u3002`,
+      `\u8bfb\u53d6\u4e91\u7aef\u8bb0\u5fc6\u3002\u5728 memory_search \u4e4b\u540e\u4f7f\u7528\u4ee5\u83b7\u53d6\u5b8c\u6574\u4e0a\u4e0b\u6587\u3002\u53ef\u4f20\u5165\u5b8c\u6574 cloud:// \u8def\u5f84\uff0c\u6216\u7b80\u5199\u5982 "CLAUDE.md"\uff08\u5f53\u524d\u4f1a\u8bdd\uff09\u3001"[global] CLAUDE.md"\u3001"[memory] 2026-01-15.md"\u3002`,
       {
         file: z
           .string()
           .describe(
-            '\u76f8\u5bf9\u8def\u5f84\uff0c\u53ef\u5e26 :\u884c\u53f7\uff08\u5982 "CLAUDE.md:12"\u3001"[global] CLAUDE.md:8" \u6216 "[memory] 2026-01-15.md"\uff09',
+            '\u4e91\u7aef\u8bb0\u5fc6\u8def\u5f84\u3002\u53ef\u4f20\u5b8c\u6574 cloud:// \u8def\u5f84\u6216\u7b80\u5199\uff0c\u53ef\u5e26 :\u884c\u53f7',
           ),
         from_line: z
           .number()
@@ -2176,62 +2149,78 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
       },
       async (args) => {
         const { pathRef, lineFromRef } = parseMemoryFileReference(args.file);
-        let resolvedPath: string;
-        if (pathRef.startsWith('[global] ')) {
-          resolvedPath = path.join(
-            ctx.workspaceGlobal,
-            pathRef.slice('[global] '.length),
-          );
+        // 把简写或 cloud:// 路径解析成 invokeCloudMemory 的参数
+        let memoryType: 'global' | 'session' | 'agent' = 'session';
+        let memoryPath = pathRef;
+        let groupFolder: string | undefined = ctx.groupFolder;
+        let deviceLinkId: string | undefined;
+        let agentId: string | undefined;
+        let displayPath = pathRef;
+
+        if (pathRef.startsWith('cloud://')) {
+          const rest = pathRef.slice('cloud://'.length);
+          const [type, ...parts] = rest.split('/');
+          const scopeKey = parts.shift() ?? '';
+          const remainder = parts.join('/');
+          if ((type === 'global' || type === 'session' || type === 'agent') && scopeKey && remainder) {
+            memoryType = type;
+            memoryPath = remainder;
+            if (type === 'session' && scopeKey.startsWith('session:')) {
+              groupFolder = scopeKey.slice('session:'.length);
+            } else if (type === 'agent' && scopeKey.startsWith('agent:')) {
+              const [, dev, ag] = scopeKey.split(':');
+              deviceLinkId = dev;
+              agentId = ag;
+              groupFolder = undefined;
+            } else if (type === 'global') {
+              groupFolder = undefined;
+            }
+            displayPath = pathRef;
+          }
+        } else if (pathRef.startsWith('[global] ')) {
+          memoryType = 'global';
+          memoryPath = pathRef.slice('[global] '.length);
+          groupFolder = undefined;
+          displayPath = `[global] ${memoryPath}`;
         } else if (pathRef.startsWith('[memory] ')) {
-          resolvedPath = path.join(
-            ctx.workspaceMemory,
-            pathRef.slice('[memory] '.length),
-          );
-        } else {
-          resolvedPath = path.join(ctx.workspaceGroup, pathRef);
+          memoryType = 'session';
+          memoryPath = `memory/${pathRef.slice('[memory] '.length)}`;
+          displayPath = `[memory] ${pathRef.slice('[memory] '.length)}`;
+        } else if (pathRef.startsWith('[conversations] ')) {
+          memoryType = 'session';
+          memoryPath = `conversations/${pathRef.slice('[conversations] '.length)}`;
+          displayPath = `[conversations] ${pathRef.slice('[conversations] '.length)}`;
         }
-        resolvedPath = path.normalize(resolvedPath);
-        const inGroup =
-          resolvedPath === ctx.workspaceGroup ||
-          resolvedPath.startsWith(ctx.workspaceGroup + path.sep);
-        const inGlobal =
-          resolvedPath === ctx.workspaceGlobal ||
-          resolvedPath.startsWith(ctx.workspaceGlobal + path.sep);
-        const inMemory =
-          resolvedPath === ctx.workspaceMemory ||
-          resolvedPath.startsWith(ctx.workspaceMemory + path.sep);
-        if (!inGroup && !inGlobal && !inMemory) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: '\u8bbf\u95ee\u88ab\u62d2\u7edd\uff1a\u8def\u5f84\u8d85\u51fa\u5de5\u4f5c\u533a\u8303\u56f4\u3002',
-              },
-            ],
-            isError: true,
-          };
-        }
-        if (!fs.existsSync(resolvedPath)) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `\u6587\u4ef6\u672a\u627e\u5230\uff1a${pathRef}`,
-              },
-            ],
-            isError: true,
-          };
-        }
+
         try {
-          const content = fs.readFileSync(resolvedPath, 'utf-8');
-          const allLines = content.split('\n');
+          const data = await invokeCloudMemory(ctx, {
+            operation: 'get',
+            memoryType,
+            path: memoryPath,
+            groupFolder,
+            deviceLinkId,
+            agentId,
+          });
+          const memory = data?.memory;
+          if (!memory || typeof memory.content !== 'string') {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `\u4e91\u7aef\u672a\u627e\u5230\u8bb0\u5fc6\uff1a${displayPath}`,
+                },
+              ],
+              isError: true,
+            };
+          }
+          const allLines = memory.content.split('\n');
           const fromLine = Math.max(
             (args.from_line ?? lineFromRef ?? 1) - 1,
             0,
           );
           const maxLines = Math.min(args.lines ?? allLines.length, 200);
           const slice = allLines.slice(fromLine, fromLine + maxLines);
-          const header = `${pathRef}\uff08\u7b2c ${fromLine + 1}-${fromLine + slice.length} \u884c\uff0c\u5171 ${allLines.length} \u884c\uff09`;
+          const header = `${displayPath}\uff08\u7b2c ${fromLine + 1}-${fromLine + slice.length} \u884c\uff0c\u5171 ${allLines.length} \u884c\uff0crev ${memory.revision}\uff09`;
           return {
             content: [
               {
@@ -2245,7 +2234,7 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
             content: [
               {
                 type: 'text' as const,
-                text: `\u8bfb\u53d6\u6587\u4ef6\u65f6\u51fa\u9519\uff1a${err instanceof Error ? err.message : String(err)}`,
+                text: `\u8bfb\u53d6\u4e91\u7aef\u8bb0\u5fc6\u65f6\u51fa\u9519\uff1a${err instanceof Error ? err.message : String(err)}`,
               },
             ],
             isError: true,

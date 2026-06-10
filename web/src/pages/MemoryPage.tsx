@@ -237,7 +237,7 @@ export function MemoryPage() {
         if (folderParam) {
           nextSelected =
             data.sources.find(
-              (s) => s.type === 'session' && s.path.includes(`/${folderParam}/`) && s.path.endsWith('CLAUDE.md'),
+              (s) => s.type === 'session' && s.folder === folderParam && s.path.endsWith('CLAUDE.md'),
             )?.path || null;
         }
       }

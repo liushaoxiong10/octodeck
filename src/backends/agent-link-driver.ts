@@ -22,6 +22,7 @@ import type { ChildProcess } from 'child_process';
 
 import { createAgentToolToken, GROUPS_DIR } from '../config.js';
 import { logger } from '../logger.js';
+import { getCloudMemory } from '../memory-store.js';
 import {
   LONG_RUNNING_LOCAL_CLI_TIMEOUT_MS,
   getSystemSettings,
@@ -445,12 +446,37 @@ function getChannelFromJid(jid: string | undefined): string | null {
 
 function buildDeviceCliSystemPrompt(
   input: BackendRunArgs['input'],
+  ownerUserId?: string,
 ): string | undefined {
   const channel = getChannelFromJid(input.currentSourceJid || input.chatJid);
+
+  // 拉取云端全局记忆 (cloud_memories memoryType='global'),拼进 systemPrompt。
+  // 记忆内容随用户编辑会变化,因此按 owner+contentHash 作为缓存 key。
+  let cloudGlobalMemoryContent = '';
+  if (ownerUserId) {
+    try {
+      const record = getCloudMemory({
+        userId: ownerUserId,
+        memoryType: 'global',
+        path: 'CLAUDE.md',
+      });
+      if (record?.content) cloudGlobalMemoryContent = record.content.trim();
+    } catch (err) {
+      logger.warn(
+        { err, ownerUserId },
+        'Failed to load cloud global memory for device CLI system prompt',
+      );
+    }
+  }
+
   const cacheKey = JSON.stringify({
     isHome: !!input.isHome,
     channel,
     hasAgentOverride: !!input.agentId,
+    ownerUserId: ownerUserId ?? '',
+    cloudHash: cloudGlobalMemoryContent
+      ? crypto.createHash('sha256').update(cloudGlobalMemoryContent).digest('hex')
+      : '',
   });
   if (deviceSystemPromptCache.has(cacheKey)) {
     return deviceSystemPromptCache.get(cacheKey) || undefined;
@@ -479,6 +505,11 @@ function buildDeviceCliSystemPrompt(
       `<skill-routing>\n${loadPromptFile('skill-routing.md')}\n</skill-routing>`,
       `<security>\n${securityRules}\n</security>`,
       `<memory-system>\n${memoryPrompt}\n</memory-system>`,
+      ...(cloudGlobalMemoryContent
+        ? [
+            `<cloud-global-memory>\n以下是该用户在 OctoDeck 云端的全局记忆 (cloud://global/global:${ownerUserId}/CLAUDE.md)。请将其作为长期记忆参考,在适当时遵循其中的偏好与约定。\n\n${cloudGlobalMemoryContent}\n</cloud-global-memory>`,
+          ]
+        : []),
       `<guidelines>\n${outputGuidelines}\n${webFetchGuidelines}\n${backgroundTaskGuidelines}\n</guidelines>`,
       ...(channelGuidelines
         ? [`<channel-format>\n${channelGuidelines}\n</channel-format>`]
@@ -502,10 +533,11 @@ function buildDeviceCliSystemPrompt(
 function buildAgentRunPolicy(
   cfg: HostCliDriverConfig,
   input: BackendRunArgs['input'],
+  ownerUserId?: string,
 ): Record<string, unknown> {
   const policy: Record<string, unknown> = {};
   if (cfg.model) policy.model = cfg.model;
-  const systemPrompt = buildDeviceCliSystemPrompt(input);
+  const systemPrompt = buildDeviceCliSystemPrompt(input, ownerUserId);
   if (systemPrompt) policy.systemPrompt = systemPrompt;
   return policy;
 }
@@ -514,10 +546,11 @@ function appendClaudeCodeSystemPromptArg(
   argv: string[],
   agentClientId: string | undefined,
   input: BackendRunArgs['input'],
+  ownerUserId?: string,
 ): string[] {
   if (agentClientId !== 'claude-code') return argv;
   if (argv.includes('--append-system-prompt')) return argv;
-  const systemPrompt = buildDeviceCliSystemPrompt(input);
+  const systemPrompt = buildDeviceCliSystemPrompt(input, ownerUserId);
   if (!systemPrompt) return argv;
   return [...argv, '--append-system-prompt', systemPrompt];
 }
@@ -1208,7 +1241,7 @@ async function runViaAgentRuntime(opts: {
       env: remoteEnv,
       timeoutMs,
       maxOutputBytes,
-      policy: buildAgentRunPolicy(cfg, input),
+      policy: buildAgentRunPolicy(cfg, input, group.created_by),
       context: runContext,
       remoteCwdPlaceholder: REMOTE_CWD_PLACEHOLDER,
       workspaceRepos: workspaceRepos.length > 0 ? workspaceRepos : undefined,
@@ -1363,6 +1396,7 @@ export async function runViaAgentLink(
       argv,
       resolvedTarget?.agentClientId,
       input,
+      group.created_by,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -305,6 +305,47 @@ export function listCloudMemories(userId: string): CloudMemoryRecord[] {
     .map(toRecord);
 }
 
+/**
+ * 删除某个用户某个 group 下的所有 session 类型云端记忆。
+ * 用于删群 / reset workspace 时清理云端 cloud_memories 残留。
+ */
+export function deleteCloudMemoriesByGroup(
+  userId: string,
+  groupFolder: string,
+): number {
+  const scopeKey = `session:${groupFolder}`;
+  const result = getDatabaseForInternalUse()
+    .prepare(
+      `DELETE FROM cloud_memories WHERE user_id = ? AND memory_type = 'session' AND scope_key = ?`,
+    )
+    .run(userId, scopeKey);
+  return result.changes ?? 0;
+}
+
+/**
+ * 删除某个用户在某个 scope 下指定 path 的云端记忆条目。
+ * 仅对 cloud-authoritative 的 global/session 生效;agent 镜像不允许通过此入口清除。
+ */
+export function deleteCloudMemoryEntry(args: {
+  userId: string;
+  memoryType: 'global' | 'session';
+  groupFolder?: string;
+  path: string;
+}): boolean {
+  const memoryPath = normalizePath(args.path);
+  const scopeKey = buildScopeKey({
+    memoryType: args.memoryType,
+    userId: args.userId,
+    groupFolder: args.groupFolder,
+  });
+  const result = getDatabaseForInternalUse()
+    .prepare(
+      `DELETE FROM cloud_memories WHERE user_id = ? AND memory_type = ? AND scope_key = ? AND path = ?`,
+    )
+    .run(args.userId, args.memoryType, scopeKey, memoryPath);
+  return (result.changes ?? 0) > 0;
+}
+
 export function importLegacyCloudMemories(args: {
   userId: string;
   groupFolders: string[];
@@ -352,17 +393,36 @@ export function importLegacyCloudMemories(args: {
     });
 
     const legacyDateDir = path.join(DATA_DIR, 'memory', groupFolder);
-    if (!fs.existsSync(legacyDateDir)) continue;
-    for (const entry of fs.readdirSync(legacyDateDir, {
-      withFileTypes: true,
-    })) {
-      if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-      importIfMissing({
-        memoryType: 'session',
-        groupFolder,
-        memoryPath: `memory/${entry.name}`,
-        filePath: path.join(legacyDateDir, entry.name),
-      });
+    if (fs.existsSync(legacyDateDir)) {
+      for (const entry of fs.readdirSync(legacyDateDir, {
+        withFileTypes: true,
+      })) {
+        if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+        importIfMissing({
+          memoryType: 'session',
+          groupFolder,
+          memoryPath: `memory/${entry.name}`,
+          filePath: path.join(legacyDateDir, entry.name),
+        });
+      }
+    }
+
+    // 对话归档 conversations/*.md → cloud session memory
+    const conversationsDir = path.join(GROUPS_DIR, groupFolder, 'conversations');
+    if (fs.existsSync(conversationsDir)) {
+      for (const entry of fs.readdirSync(conversationsDir, {
+        withFileTypes: true,
+      })) {
+        if (!entry.isFile()) continue;
+        const ext = path.extname(entry.name).toLowerCase();
+        if (ext !== '.md' && ext !== '.txt' && ext !== '.json') continue;
+        importIfMissing({
+          memoryType: 'session',
+          groupFolder,
+          memoryPath: `conversations/${entry.name}`,
+          filePath: path.join(conversationsDir, entry.name),
+        });
+      }
     }
   }
 

@@ -71,6 +71,7 @@ import {
 } from '../runtime-config.js';
 import { clearTargetAgentBindingsForDeletedAgents } from '../im-context-isolation.js';
 import { getChannelType } from '../im-channel.js';
+import { deleteCloudMemoriesByGroup } from '../memory-store.js';
 import {
   loadMountAllowlist,
   findAllowedRoot,
@@ -392,6 +393,19 @@ function resetWorkspaceForGroup(folder: string): void {
     recursive: true,
     force: true,
   });
+
+  // 5. 清除该 group 在云端 cloud_memories 中的所有 session 记忆,
+  //    避免本地清空但云端仍有僵尸数据。
+  try {
+    const group = Object.values(getAllRegisteredGroups()).find(
+      (g) => g.folder === folder,
+    );
+    if (group?.created_by) {
+      deleteCloudMemoriesByGroup(group.created_by, folder);
+    }
+  } catch (err) {
+    logger.warn({ err, folder }, 'Failed to clear cloud memories for group');
+  }
 }
 
 async function clearDeviceMainAgentSession(opts: {
@@ -1336,6 +1350,18 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
   }
   deleteGroupData(jid, existing.folder);
   removeFlowArtifacts(existing.folder);
+
+  // 清理云端 cloud_memories 中该 group 的所有 session 记忆
+  if (existing.created_by) {
+    try {
+      deleteCloudMemoriesByGroup(existing.created_by, existing.folder);
+    } catch (err) {
+      logger.warn(
+        { err, jid, folder: existing.folder },
+        'Failed to clear cloud memories on group delete',
+      );
+    }
+  }
 
   const cleanupDeviceLinkId =
     existing.deviceLinkId || deviceLinkIdFromExecutionTarget(existing.executionNode);

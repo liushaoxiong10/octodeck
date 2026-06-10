@@ -1,8 +1,11 @@
-// Memory management routes and utilities
+// Memory management routes — fully cloud-backed (cloud_memories table).
+//
+// 所有记忆操作(list/get/put/search)统一走 cloud_memories 数据库;
+// 仅保留 importLegacyCloudMemories 一次性把本地 data/groups/**/CLAUDE.md、
+// data/memory/{folder}/*.md、data/groups/{folder}/conversations/* 迁入云端。
+// 前端 path 形式: cloud://{memoryType}/{scopeKey}/{path}
 
 import { Hono } from 'hono';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import type { Variables } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
 import {
@@ -14,10 +17,8 @@ import {
 } from '../schemas.js';
 import { getAllRegisteredGroups, getUserById } from '../db.js';
 import { logger } from '../logger.js';
-import { GROUPS_DIR, DATA_DIR } from '../config.js';
 import type { AuthUser } from '../types.js';
 import {
-  appendCloudMemory,
   getCloudMemory,
   importLegacyCloudMemories,
   listCloudMemories,
@@ -31,27 +32,10 @@ import {
 const memoryRoutes = new Hono<{ Variables: Variables }>();
 
 // --- Constants ---
-
-const USER_GLOBAL_DIR = path.join(GROUPS_DIR, 'user-global');
-const MAIN_MEMORY_DIR = path.join(GROUPS_DIR, 'main');
-const MAIN_MEMORY_FILE = path.join(MAIN_MEMORY_DIR, 'CLAUDE.md');
-const MEMORY_DATA_DIR = path.join(DATA_DIR, 'memory');
 const MAX_GLOBAL_MEMORY_LENGTH = 200_000;
 const MAX_MEMORY_FILE_LENGTH = 500_000;
 const MEMORY_LIST_LIMIT = 500;
 const MEMORY_SEARCH_LIMIT = 120;
-const MEMORY_SOURCE_EXTENSIONS = new Set([
-  '.md',
-  '.txt',
-  '.json',
-  '.jsonl',
-  '.yaml',
-  '.yml',
-  '.toml',
-  '.ini',
-  '.cfg',
-  '.conf',
-]);
 
 function ownedFoldersForUser(user: AuthUser): string[] {
   const groups = getAllRegisteredGroups();
@@ -70,30 +54,36 @@ function ensureLegacyImported(user: AuthUser): void {
   });
 }
 
+function classifyCloudType(record: CloudMemoryRecord): MemorySource['type'] {
+  if (record.memoryType === 'global') return 'global';
+  if (record.memoryType === 'agent') return 'agent';
+  if (record.path.startsWith('memory/')) return 'date';
+  if (record.path.startsWith('conversations/')) return 'conversation';
+  return 'session';
+}
+
 function cloudRecordToSource(record: CloudMemoryRecord): MemorySource {
   const owner = getUserById(record.userId);
   const ownerLabel = owner
     ? owner.display_name || owner.username
     : record.userId;
-  const type =
-    record.memoryType === 'agent'
-      ? 'agent'
-      : record.memoryType === 'global'
-        ? 'global'
-        : record.path.startsWith('memory/')
-          ? 'date'
-          : 'session';
+  const type = classifyCloudType(record);
   const labelPrefix =
     record.memoryType === 'global'
       ? `${ownerLabel} / 云端全局记忆`
       : record.memoryType === 'agent'
         ? `${record.deviceLinkId || 'client'} / client agent 记忆镜像`
-        : `${record.groupFolder || record.scopeKey} / 云端会话记忆`;
+        : type === 'date'
+          ? `${record.groupFolder || record.scopeKey} / 日期记忆`
+          : type === 'conversation'
+            ? `${record.groupFolder || record.scopeKey} / 对话归档`
+            : `${record.groupFolder || record.scopeKey} / 云端会话记忆`;
   return {
     path: `cloud://${record.memoryType}/${record.scopeKey}/${record.path}`,
     label: `${labelPrefix} / ${record.path}`,
     type,
-    writable: record.authority === 'cloud',
+    // agent 镜像只读;conversation 归档只读
+    writable: record.authority === 'cloud' && type !== 'conversation',
     exists: true,
     updatedAt: record.updatedAt,
     size: Buffer.byteLength(record.content, 'utf-8'),
@@ -102,14 +92,16 @@ function cloudRecordToSource(record: CloudMemoryRecord): MemorySource {
   };
 }
 
-function parseCloudPath(cloudPath: string): {
+interface ParsedCloudPath {
   memoryType: CloudMemoryType;
   scopeKey: string;
   path: string;
   groupFolder?: string;
   deviceLinkId?: string;
   agentId?: string;
-} | null {
+}
+
+function parseCloudPath(cloudPath: string): ParsedCloudPath | null {
   if (!cloudPath.startsWith('cloud://')) return null;
   const rest = cloudPath.slice('cloud://'.length);
   const [memoryType, ...parts] = rest.split('/');
@@ -138,453 +130,185 @@ function parseCloudPath(cloudPath: string): {
   return { memoryType, scopeKey, path: memoryPath };
 }
 
-// --- Utility Functions ---
-
-function isWithinRoot(targetPath: string, rootPath: string): boolean {
-  const relative = path.relative(rootPath, targetPath);
-  return (
-    relative === '' ||
-    (!relative.startsWith('..') && !path.isAbsolute(relative))
-  );
-}
-
-function normalizeRelativePath(input: unknown): string {
-  if (typeof input !== 'string') {
-    throw new Error('path must be a string');
-  }
-  const normalized = input.replace(/\\/g, '/').trim().replace(/^\/+/, '');
-  if (!normalized || normalized.includes('\0')) {
-    throw new Error('Invalid memory path');
-  }
-  const parts = normalized.split('/');
-  if (parts.some((p) => !p || p === '.' || p === '..')) {
-    throw new Error('Invalid memory path');
-  }
-  return normalized;
-}
-
-function resolveMemoryPath(
-  relativePath: string,
+/**
+ * 兼容旧 path: data/groups/user-global/{userId}/CLAUDE.md、
+ * data/groups/{folder}/CLAUDE.md、data/memory/{folder}/{name}.md、
+ * data/groups/{folder}/conversations/{name} 等映射到 cloud://...。
+ *
+ * 历史前端缓存或外部链接可能仍在使用这些路径,做一次重定向解析。
+ */
+function parseLegacyPath(
+  legacyPath: string,
   user: AuthUser,
-): {
-  absolutePath: string;
-  writable: boolean;
-} {
-  const absolute = path.resolve(process.cwd(), relativePath);
-  const inGroups = isWithinRoot(absolute, GROUPS_DIR);
-  const inMemoryData = isWithinRoot(absolute, MEMORY_DATA_DIR);
-  const writable = inGroups || inMemoryData;
+): ParsedCloudPath | null {
+  const normalized = legacyPath.replace(/\\/g, '/').replace(/^\/+/, '');
+  const parts = normalized.split('/');
+  if (parts.length < 3) return null;
+  if (parts[0] !== 'data') return null;
 
-  if (!writable) {
-    throw new Error('Memory path out of allowed scope');
+  if (parts[1] === 'groups' && parts[2] === 'user-global') {
+    // data/groups/user-global/{userId}/CLAUDE.md
+    const ownerUserId = parts[3];
+    if (!ownerUserId) return null;
+    if (user.role !== 'admin' && ownerUserId !== user.id) return null;
+    const memoryPath = parts.slice(4).join('/') || 'CLAUDE.md';
+    return {
+      memoryType: 'global',
+      scopeKey: `global:${ownerUserId}`,
+      path: memoryPath,
+    };
   }
 
-  // User ownership check for non-admin
+  if (parts[1] === 'groups') {
+    // data/groups/{folder}/CLAUDE.md 或 data/groups/{folder}/conversations/...
+    const folder = parts[2];
+    if (!folder) return null;
+    const memoryPath = parts.slice(3).join('/');
+    if (!memoryPath) return null;
+    return {
+      memoryType: 'session',
+      scopeKey: `session:${folder}`,
+      groupFolder: folder,
+      path: memoryPath,
+    };
+  }
+
+  if (parts[1] === 'memory') {
+    // data/memory/{folder}/{name}.md → memory/{name}.md
+    const folder = parts[2];
+    const fileName = parts.slice(3).join('/');
+    if (!folder || !fileName) return null;
+    return {
+      memoryType: 'session',
+      scopeKey: `session:${folder}`,
+      groupFolder: folder,
+      path: `memory/${fileName}`,
+    };
+  }
+
+  return null;
+}
+
+function resolveAccessibleCloudRef(
+  inputPath: string,
+  user: AuthUser,
+): ParsedCloudPath {
+  const ref = parseCloudPath(inputPath) ?? parseLegacyPath(inputPath, user);
+  if (!ref) throw new Error('Invalid memory path');
+
+  // 权限校验
   if (user.role !== 'admin') {
-    // user-global/{userId}/... — member can only access their own
-    if (isWithinRoot(absolute, USER_GLOBAL_DIR)) {
-      const relToUserGlobal = path.relative(USER_GLOBAL_DIR, absolute);
-      const ownerUserId = relToUserGlobal.split(path.sep)[0];
-      if (ownerUserId !== user.id) {
+    if (ref.memoryType === 'global') {
+      const ownerId = ref.scopeKey.startsWith('global:')
+        ? ref.scopeKey.slice('global:'.length)
+        : '';
+      if (ownerId && ownerId !== user.id)
+        throw new Error('Memory path out of allowed scope');
+    } else if (ref.memoryType === 'session') {
+      const folder = ref.groupFolder;
+      if (!folder || !ownedFoldersForUser(user).includes(folder)) {
         throw new Error('Memory path out of allowed scope');
       }
-    }
-    // data/groups/{folder}/... — check group ownership
-    else if (inGroups) {
-      const relToGroups = path.relative(GROUPS_DIR, absolute);
-      const folder = relToGroups.split(path.sep)[0];
-      if (!isUserOwnedFolder(user, folder)) {
-        throw new Error('Memory path out of allowed scope');
-      }
-    }
-    // data/memory/{folder}/... — check group ownership
-    else if (inMemoryData) {
-      const relToMemory = path.relative(MEMORY_DATA_DIR, absolute);
-      const folder = relToMemory.split(path.sep)[0];
-      if (!isUserOwnedFolder(user, folder)) {
-        throw new Error('Memory path out of allowed scope');
-      }
+    } else if (ref.memoryType === 'agent') {
+      // agent 记忆只读,仅本人 device 可见(由列表已过滤;读时简单兜底)
+      // listCloudMemories 已按 user_id 过滤,此处不再阻止
     }
   }
 
-  return { absolutePath: absolute, writable };
-}
-
-/** Check if a folder belongs to the user (via registered_groups). */
-function isUserOwnedFolder(
-  user: { id: string; role: string },
-  folder: string,
-): boolean {
-  if (user.role === 'admin') return true;
-  if (!folder) return false;
-  const groups = getAllRegisteredGroups();
-  for (const group of Object.values(groups)) {
-    if (group.folder === folder && group.created_by === user.id) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function classifyMemorySource(
-  relativePath: string,
-): Pick<MemorySource, 'type' | 'label' | 'ownerName' | 'folder'> {
-  const parts = relativePath.split('/');
-
-  // data/groups/user-global/{userId}/...
-  if (
-    parts[0] === 'data' &&
-    parts[1] === 'groups' &&
-    parts[2] === 'user-global'
-  ) {
-    const userId = parts[3] || 'unknown';
-    const name = parts.slice(4).join('/') || 'CLAUDE.md';
-    const owner = getUserById(userId);
-    const ownerLabel = owner ? owner.display_name || owner.username : userId;
-
-    return {
-      type: 'global',
-      label: `${ownerLabel} / 全局记忆 / ${name}`,
-      ownerName: ownerLabel,
-    };
-  }
-
-  // data/memory/{folder}/...
-  if (parts[0] === 'data' && parts[1] === 'memory') {
-    const folder = parts[2] || 'unknown';
-    const name = parts.slice(3).join('/') || 'memory';
-    return {
-      type: 'date',
-      label: `${folder} / 日期记忆 / ${name}`,
-      folder,
-    };
-  }
-
-  // data/groups/{folder}/conversations/...
-  if (
-    parts[0] === 'data' &&
-    parts[1] === 'groups' &&
-    parts.length >= 4 &&
-    parts[3] === 'conversations'
-  ) {
-    const folder = parts[2] || 'unknown';
-    const name = parts.slice(4).join('/');
-    return {
-      type: 'conversation',
-      label: `${folder} / 对话归档 / ${name}`,
-      folder,
-    };
-  }
-
-  // data/groups/{folder}/... (session memory)
-  if (parts[0] === 'data' && parts[1] === 'groups') {
-    const folder = parts[2] || 'unknown';
-    const name = parts.slice(3).join('/');
-    return {
-      type: 'session',
-      label: `${folder} / ${name}`,
-      folder,
-    };
-  }
-
-  // Fallback
-  return {
-    type: 'session',
-    label: parts.slice(2).join('/'),
-    folder: parts[2] || undefined,
-  };
+  return ref;
 }
 
 function readMemoryFile(
-  relativePath: string,
+  inputPath: string,
   user: AuthUser,
 ): MemoryFilePayload {
-  const cloudRef = parseCloudPath(relativePath);
-  if (cloudRef) {
-    ensureLegacyImported(user);
-    const record = getCloudMemory({
-      userId: user.id,
-      memoryType: cloudRef.memoryType,
-      groupFolder: cloudRef.groupFolder,
-      deviceLinkId: cloudRef.deviceLinkId,
-      agentId: cloudRef.agentId,
-      path: cloudRef.path,
-    });
-    if (!record) throw new Error('Memory file not found');
-    return {
-      path: relativePath,
-      content: record.content,
-      updatedAt: record.updatedAt,
-      size: Buffer.byteLength(record.content, 'utf-8'),
-      writable: record.authority === 'cloud',
-    };
-  }
-  const normalized = normalizeRelativePath(relativePath);
-  const { absolutePath, writable } = resolveMemoryPath(normalized, user);
-  if (!fs.existsSync(absolutePath)) {
-    if (!writable) {
-      throw new Error('Memory file not found');
+  ensureLegacyImported(user);
+  const ref = resolveAccessibleCloudRef(inputPath, user);
+  const record = getCloudMemory({
+    userId: user.id,
+    memoryType: ref.memoryType,
+    groupFolder: ref.groupFolder,
+    deviceLinkId: ref.deviceLinkId,
+    agentId: ref.agentId,
+    path: ref.path,
+  });
+  if (!record) {
+    if (ref.memoryType === 'session') {
+      // 还未创建,返回空白可写记录
+      return {
+        path: `cloud://${ref.memoryType}/${ref.scopeKey}/${ref.path}`,
+        content: '',
+        updatedAt: null,
+        size: 0,
+        writable: true,
+      };
     }
-    return {
-      path: normalized,
-      content: '',
-      updatedAt: null,
-      size: 0,
-      writable,
-    };
+    throw new Error('Memory file not found');
   }
-  const content = fs.readFileSync(absolutePath, 'utf-8');
-  const stat = fs.statSync(absolutePath);
   return {
-    path: normalized,
-    content,
-    updatedAt: stat.mtime.toISOString(),
-    size: Buffer.byteLength(content, 'utf-8'),
-    writable,
+    path: `cloud://${record.memoryType}/${record.scopeKey}/${record.path}`,
+    content: record.content,
+    updatedAt: record.updatedAt,
+    size: Buffer.byteLength(record.content, 'utf-8'),
+    writable:
+      record.authority === 'cloud' && classifyCloudType(record) !== 'conversation',
   };
 }
 
-// 记忆路径中禁止写入的系统子目录（CLAUDE.md 除外，它是记忆文件）
-const MEMORY_BLOCKED_DIRS = ['logs', '.claude', 'conversations'];
-
-function isBlockedMemoryPath(normalizedPath: string): boolean {
-  const parts = normalizedPath.split('/');
-  // 路径格式: data/groups/{folder}/{subpath...} 或 data/memory/{folder}/{subpath...}
-  // 检查 data/groups/{folder}/ 下的系统子目录
-  if (parts[0] === 'data' && parts[1] === 'groups' && parts.length >= 4) {
-    const subPath = parts[3];
-    if (MEMORY_BLOCKED_DIRS.includes(subPath)) return true;
-  }
-  return false;
-}
-
 function writeMemoryFile(
-  relativePath: string,
+  inputPath: string,
   content: string,
   user: AuthUser,
 ): MemoryFilePayload {
-  const cloudRef = parseCloudPath(relativePath);
-  if (cloudRef) {
-    if (cloudRef.memoryType === 'agent')
-      throw new Error('client agent memory is read-only cloud mirror');
-    const record = putCloudMemory({
-      userId: user.id,
-      memoryType: cloudRef.memoryType,
-      groupFolder: cloudRef.groupFolder,
-      path: cloudRef.path,
-      content,
-      source: 'web',
-      updatedBy: user.id,
-    });
-    return {
-      path: relativePath,
-      content: record.content,
-      updatedAt: record.updatedAt,
-      size: Buffer.byteLength(record.content, 'utf-8'),
-      writable: true,
-    };
+  ensureLegacyImported(user);
+  const ref = resolveAccessibleCloudRef(inputPath, user);
+  if (ref.memoryType === 'agent') {
+    throw new Error('client agent memory is read-only cloud mirror');
   }
-  const normalized = normalizeRelativePath(relativePath);
-  const { absolutePath, writable } = resolveMemoryPath(normalized, user);
-  if (!writable) {
-    throw new Error('Memory file is read-only');
-  }
-  if (isBlockedMemoryPath(normalized)) {
-    throw new Error('Cannot write to system path');
+  if (ref.memoryType === 'session' && ref.path.startsWith('conversations/')) {
+    throw new Error('conversation archive is read-only');
   }
   if (Buffer.byteLength(content, 'utf-8') > MAX_MEMORY_FILE_LENGTH) {
     throw new Error('Memory file is too large');
   }
-
-  fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
-  const tempPath = `${absolutePath}.tmp`;
-  fs.writeFileSync(tempPath, content, 'utf-8');
-  fs.renameSync(tempPath, absolutePath);
-
-  const stat = fs.statSync(absolutePath);
-  return {
-    path: normalized,
+  const record = putCloudMemory({
+    userId: user.id,
+    memoryType: ref.memoryType,
+    groupFolder: ref.groupFolder,
+    path: ref.path,
     content,
-    updatedAt: stat.mtime.toISOString(),
-    size: Buffer.byteLength(content, 'utf-8'),
-    writable,
+    source: 'web',
+    updatedBy: user.id,
+  });
+  return {
+    path: `cloud://${record.memoryType}/${record.scopeKey}/${record.path}`,
+    content: record.content,
+    updatedAt: record.updatedAt,
+    size: Buffer.byteLength(record.content, 'utf-8'),
+    writable: true,
   };
 }
 
-// Directories to skip when scanning group workspaces for memory files
-const WALK_SKIP_DIRS = new Set([
-  'logs',
-  '.claude',
-  'conversations',
-  'downloads',
-  'node_modules',
-]);
-
-function walkFiles(
-  baseDir: string,
-  maxDepth: number,
-  limit: number,
-  out: string[],
-  currentDepth = 0,
-): void {
-  if (out.length >= limit || currentDepth > maxDepth || !fs.existsSync(baseDir))
-    return;
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(baseDir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (out.length >= limit) break;
-    const fullPath = path.join(baseDir, entry.name);
-    if (entry.isDirectory()) {
-      if (WALK_SKIP_DIRS.has(entry.name)) continue;
-      walkFiles(fullPath, maxDepth, limit, out, currentDepth + 1);
-      continue;
-    }
-    out.push(fullPath);
-  }
-}
-
-function isMemoryCandidateFile(filePath: string): boolean {
-  const ext = path.extname(filePath).toLowerCase();
-  return MEMORY_SOURCE_EXTENSIONS.has(ext);
-}
+const TYPE_RANK: Record<MemorySource['type'], number> = {
+  global: 0,
+  session: 1,
+  agent: 2,
+  date: 3,
+  conversation: 4,
+};
 
 function listMemorySources(user: AuthUser): MemorySource[] {
   ensureLegacyImported(user);
-  const cloudSources = listCloudMemories(user.id)
-    .map(cloudRecordToSource);
-
-  const files = new Set<string>();
-  const isAdmin = user.role === 'admin';
-  const groups = getAllRegisteredGroups();
-  const accessibleFolders = new Set<string>();
-
-  if (isAdmin) {
-    for (const group of Object.values(groups)) {
-      accessibleFolders.add(group.folder);
-    }
-  } else {
-    for (const group of Object.values(groups)) {
-      if (group.created_by === user.id) {
-        accessibleFolders.add(group.folder);
-      }
-    }
-  }
-
-  // 1. User-global memory
-  files.add(path.join(USER_GLOBAL_DIR, user.id, 'CLAUDE.md'));
-
-  // 2. Group CLAUDE.md files
-  for (const folder of accessibleFolders) {
-    files.add(path.join(GROUPS_DIR, folder, 'CLAUDE.md'));
-  }
-
-  // 3. Scan group workspace directories (skips system dirs via WALK_SKIP_DIRS)
-  for (const folder of accessibleFolders) {
-    const folderDir = path.join(GROUPS_DIR, folder);
-    const scanned: string[] = [];
-    walkFiles(folderDir, 4, MEMORY_LIST_LIMIT, scanned);
-    for (const f of scanned) {
-      if (isMemoryCandidateFile(f)) files.add(f);
-    }
-  }
-
-  // 4. Scan data/memory/ (date memory files)
-  if (fs.existsSync(MEMORY_DATA_DIR)) {
-    const memFolders = fs.readdirSync(MEMORY_DATA_DIR, { withFileTypes: true });
-    for (const d of memFolders) {
-      if (d.isDirectory() && (isAdmin || accessibleFolders.has(d.name))) {
-        const scanned: string[] = [];
-        walkFiles(
-          path.join(MEMORY_DATA_DIR, d.name),
-          4,
-          MEMORY_LIST_LIMIT,
-          scanned,
-        );
-        for (const f of scanned) {
-          if (isMemoryCandidateFile(f)) files.add(f);
-        }
-      }
-    }
-  }
-
-  // 5. Scan conversations/ directories (read-only archives)
-  for (const folder of accessibleFolders) {
-    const convDir = path.join(GROUPS_DIR, folder, 'conversations');
-    if (!fs.existsSync(convDir)) continue;
-    try {
-      const entries = fs.readdirSync(convDir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (files.size >= MEMORY_LIST_LIMIT) break;
-        if (!entry.isFile()) continue;
-        const fullPath = path.join(convDir, entry.name);
-        if (isMemoryCandidateFile(fullPath)) files.add(fullPath);
-      }
-    } catch {
-      /* skip unreadable */
-    }
-  }
-
-  const sources: MemorySource[] = [];
-  for (const absolutePath of files) {
-    const inGroups = isWithinRoot(absolutePath, GROUPS_DIR);
-    const inMemoryData = isWithinRoot(absolutePath, MEMORY_DATA_DIR);
-    if (!inGroups && !inMemoryData) continue;
-
-    const relativePath = path
-      .relative(process.cwd(), absolutePath)
-      .replace(/\\/g, '/');
-    const exists = fs.existsSync(absolutePath);
-    let updatedAt: string | null = null;
-    let size = 0;
-    if (exists) {
-      const stat = fs.statSync(absolutePath);
-      updatedAt = stat.mtime.toISOString();
-      size = stat.size;
-    }
-
-    const classified = classifyMemorySource(relativePath);
-    const writable = classified.type !== 'conversation';
-    sources.push({
-      path: relativePath,
-      writable,
-      exists,
-      updatedAt,
-      size,
-      ...classified,
-    });
-  }
-
-  const typeRank: Record<MemorySource['type'], number> = {
-    global: 0,
-    session: 1,
-    agent: 2,
-    date: 3,
-    conversation: 4,
-  };
-
+  const records = listCloudMemories(user.id);
+  const sources = records.map(cloudRecordToSource);
   sources.sort((a, b) => {
-    if (typeRank[a.type] !== typeRank[b.type])
-      return typeRank[a.type] - typeRank[b.type];
+    if (TYPE_RANK[a.type] !== TYPE_RANK[b.type])
+      return TYPE_RANK[a.type] - TYPE_RANK[b.type];
     if (a.folder !== b.folder)
       return (a.folder || '').localeCompare(b.folder || '', 'zh-CN');
     return a.path.localeCompare(b.path, 'zh-CN');
   });
-
-  // Merge cloud sources with local filesystem sources, deduplicating by path.
-  // Cloud sources take priority over local sources with the same path.
-  const localPaths = new Set(sources.map(s => s.path));
-  const merged = [...sources];
-  for (const cs of cloudSources) {
-    if (!localPaths.has(cs.path)) {
-      merged.push(cs);
-    }
-  }
-
-  return merged.slice(0, MEMORY_LIST_LIMIT);
+  return sources.slice(0, MEMORY_LIST_LIMIT);
 }
 
 function buildSearchSnippet(
@@ -603,94 +327,43 @@ function searchMemorySources(
   limit = MEMORY_SEARCH_LIMIT,
 ): MemorySearchHit[] {
   ensureLegacyImported(user);
-  const cloudHits = searchCloudMemory({ userId: user.id, query: keyword, limit }).map(
-    (record) => {
-      const lower = record.content.toLowerCase();
-      const normalizedKeyword = keyword.trim().toLowerCase();
-      const firstIndex = lower.indexOf(normalizedKeyword);
-      let count = 0;
-      let from = 0;
-      while (from < lower.length) {
-        const idx = lower.indexOf(normalizedKeyword, from);
-        if (idx === -1) break;
-        count += 1;
-        from = idx + normalizedKeyword.length;
-      }
-      return {
-        ...cloudRecordToSource(record),
-        hits: count,
-        snippet:
-          firstIndex >= 0
-            ? buildSearchSnippet(
-                record.content,
-                firstIndex,
-                normalizedKeyword.length,
-              )
-            : '',
-      };
-    },
-  );
-
   const normalizedKeyword = keyword.trim().toLowerCase();
-  if (!normalizedKeyword) return cloudHits;
+  if (!normalizedKeyword) return [];
 
   const maxResults = Number.isFinite(limit)
     ? Math.max(1, Math.min(MEMORY_SEARCH_LIMIT, Math.trunc(limit)))
     : MEMORY_SEARCH_LIMIT;
 
-  const hits: MemorySearchHit[] = [];
-  const sources = listMemorySources(user);
+  const records = searchCloudMemory({
+    userId: user.id,
+    query: keyword,
+    limit: maxResults,
+  });
 
-  for (const source of sources) {
-    if (hits.length >= maxResults) break;
-    if (!source.exists || source.size === 0) continue;
-    if (source.size > MAX_MEMORY_FILE_LENGTH) continue;
-
-    try {
-      const payload = readMemoryFile(source.path, user);
-      const lower = payload.content.toLowerCase();
-      const firstIndex = lower.indexOf(normalizedKeyword);
-      if (firstIndex === -1) continue;
-
-      let count = 0;
-      let from = 0;
-      while (from < lower.length) {
-        const idx = lower.indexOf(normalizedKeyword, from);
-        if (idx === -1) break;
-        count += 1;
-        from = idx + normalizedKeyword.length;
-      }
-
-      hits.push({
-        ...source,
-        hits: count,
-        snippet: buildSearchSnippet(
-          payload.content,
-          firstIndex,
-          normalizedKeyword.length,
-        ),
-      });
-    } catch {
-      continue;
+  return records.map((record) => {
+    const lower = record.content.toLowerCase();
+    const firstIndex = lower.indexOf(normalizedKeyword);
+    let count = 0;
+    let from = 0;
+    while (from < lower.length) {
+      const idx = lower.indexOf(normalizedKeyword, from);
+      if (idx === -1) break;
+      count += 1;
+      from = idx + normalizedKeyword.length;
     }
-  }
-
-  // Merge cloud hits with local filesystem hits, deduplicating by path.
-  // Cloud hits take priority when the same path exists in both.
-  const localPaths = new Set(hits.map(h => h.path));
-  const merged = [...hits];
-  for (const ch of cloudHits) {
-    if (!localPaths.has(ch.path)) {
-      merged.push(ch);
-    }
-  }
-
-  return merged.slice(0, maxResults);
+    return {
+      ...cloudRecordToSource(record),
+      hits: count,
+      snippet:
+        firstIndex >= 0
+          ? buildSearchSnippet(record.content, firstIndex, normalizedKeyword.length)
+          : '',
+    };
+  });
 }
 
 // --- Routes ---
 // All memory routes require authentication (member + admin).
-// User-level filtering is handled inside each function.
 
 memoryRoutes.get('/sources', authMiddleware, (c) => {
   try {
@@ -753,7 +426,7 @@ memoryRoutes.put('/file', authMiddleware, async (c) => {
   }
 });
 
-// Legacy /global API — now operates on the current user's user-global memory.
+// Legacy /global API — operates on the current user's user-global memory (cloud-backed).
 memoryRoutes.get('/global', authMiddleware, (c) => {
   try {
     const user = c.get('user') as AuthUser;
