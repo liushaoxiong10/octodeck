@@ -256,7 +256,8 @@ func resolveWorkspaceRepo(ctx context.Context, cfg *Config, spec *WorkspaceRepoS
 		if isGitDir(worktreeDir) {
 			return worktreeDir, nil
 		}
-		if err := runGit(ctx, cacheDir, "worktree", "add", "--force", worktreeDir, ref); err != nil {
+		branch := deriveWorktreeBranch(spec)
+		if err := addWorktreeOnBranch(ctx, cacheDir, worktreeDir, ref, branch); err != nil {
 			_ = os.RemoveAll(worktreeDir)
 			return "", err
 		}
@@ -460,7 +461,7 @@ func mountWorkspaceRepoAt(ctx context.Context, cfg *Config, baseDir string, spec
 				_ = os.Remove(target)
 			}
 		}
-		if err := runGit(ctx, cacheDir, "worktree", "add", "--force", target, ref); err != nil {
+		if err := addWorktreeOnBranch(ctx, cacheDir, target, ref, deriveWorktreeBranch(spec)); err != nil {
 			_ = os.RemoveAll(target)
 			return "", err
 		}
@@ -1403,6 +1404,59 @@ func safeGroupFolder(folder string) string {
 		return v
 	}
 	return "workspace"
+}
+
+// deriveWorktreeBranch 为某个 spec 派生一个稳定的 worktree 分支名,使同一 session/task
+// 下的 worktree 始终落在同一个分支上,跨多 turn / 重启 daemon 都保持一致。
+// 命名规则 (与 ensureWorkspaceRepoBaseDir 的 scope 对齐):
+//   - scope=session/direct_session: octodeck/session/<scopeID>
+//   - scope=task: octodeck/task/<taskID>/<taskRunID|scopeID>
+//   - scope=workspace 或无 scope: 返回空串,表示不创建命名分支(沿用旧行为 detached)
+func deriveWorktreeBranch(spec *WorkspaceRepoSpec) string {
+	if spec == nil {
+		return ""
+	}
+	scope := strings.TrimSpace(spec.Scope)
+	switch scope {
+	case "session", "direct_session":
+		scopeID := strings.TrimSpace(spec.ScopeID)
+		if scopeID == "" {
+			return ""
+		}
+		return "octodeck/session/" + safePathSegment(scopeID)
+	case "task":
+		taskID := strings.TrimSpace(spec.TaskID)
+		runID := firstNonEmpty(strings.TrimSpace(spec.TaskRunID), strings.TrimSpace(spec.ScopeID))
+		if taskID == "" || runID == "" {
+			return ""
+		}
+		return "octodeck/task/" + safePathSegment(taskID) + "/" + safePathSegment(runID)
+	default:
+		return ""
+	}
+}
+
+// gitBranchExists 在仓库内检测本地分支是否已存在
+func gitBranchExists(ctx context.Context, repoDir, branch string) bool {
+	if branch == "" {
+		return false
+	}
+	return runGit(ctx, repoDir, "show-ref", "--verify", "--quiet", "refs/heads/"+branch) == nil
+}
+
+// addWorktreeOnBranch 添加 worktree 时若 branch 非空则将其作为稳定分支:
+//   - 分支不存在 ⇒ git worktree add --force -B <branch> <target> <ref>
+//   - 分支已存在 ⇒ git worktree add --force <target> <branch>
+//
+// branch 为空时退化为旧行为: git worktree add --force <target> <ref>。
+func addWorktreeOnBranch(ctx context.Context, repoDir, target, ref, branch string) error {
+	if branch == "" {
+		return runGit(ctx, repoDir, "worktree", "add", "--force", target, ref)
+	}
+	if gitBranchExists(ctx, repoDir, branch) {
+		return runGit(ctx, repoDir, "worktree", "add", "--force", target, branch)
+	}
+	return runGit(ctx, repoDir, "worktree", "add", "--force", "-B", branch, target, ref)
 }
 
 var unsafePathSegment = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
