@@ -17,6 +17,7 @@ import {
   ensureChatExists,
   deleteMessagesForChatJid,
   deleteSession,
+  ensureSessionWorkspaceSessionId,
   getGroupsByTargetAgent,
   setRegisteredGroup,
   getJidsByFolder,
@@ -198,6 +199,14 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
 
   // Create IPC + session directories
   ensureAgentDirectories(group.folder, agentId);
+
+  // Pre-allocate this conversation's workspace_session_id so the daemon-side
+  // workdir (workspace/<folder>/sessions/<id>) and ACP process key are isolated
+  // per-conversation from the very first message — instead of being lazily
+  // created later when the user actually sends a prompt. Without this, two
+  // conversations created back-to-back can race and the second one ends up
+  // reusing the first conversation's daemon cwd / ACP session.
+  ensureSessionWorkspaceSessionId(group.folder, agentId);
 
   // Create virtual chat record for this agent's messages
   const virtualChatJid = `${jid}#agent:${agentId}`;

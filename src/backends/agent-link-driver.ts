@@ -788,6 +788,10 @@ function buildStableWorkspaceScopeId(
   const { input, group } = args;
   if (input.isScheduledTask) return input.taskRunId;
 
+  if (input.workspaceSessionId) {
+    return safeWorkspaceScopeSegment(input.workspaceSessionId, 'session');
+  }
+
   // Workspace scope must be rooted in the OctoDeck workspace/group, not the
   // transient chat channel. A single workspace may be driven from web/IM/etc.;
   // changing chatJid must not move the daemon cwd or split the ACP process key.
@@ -818,6 +822,18 @@ function buildStableWorkspaceScopeId(
 
 function buildStableChatId(args: BackendRunArgs): string | undefined {
   const { input, group } = args;
+  // Conversation-scoped chatId: same workspace can host multiple conversation
+  // agents (kind:'conversation'), each must own its own daemon-side workdir
+  // and ACP session. The daemon's acpConversationID/acpSessionProcessKey reads
+  // metadata.chatId first, so it MUST encode the agentId — otherwise two
+  // conversations under the same workspace collapse onto a single ACP session.
+  // Prefer workspaceSessionId (already per-(folder, agentId)); else build a
+  // virtual chatJid with the agentId suffix; else fall back to the legacy
+  // single-conversation identifiers.
+  if (input.workspaceSessionId) return input.workspaceSessionId;
+  if (input.chatJid && input.agentId) {
+    return `${input.chatJid}#agent:${input.agentId}`;
+  }
   return input.chatJid || input.taskRunId || input.messageTaskId || group.folder;
 }
 
@@ -827,6 +843,9 @@ function buildRemoteSessionScopeId(
 ): string | undefined {
   const { input } = args;
   if (input.isScheduledTask) return input.taskRunId;
+  if (input.workspaceSessionId) {
+    return safeWorkspaceScopeSegment(input.workspaceSessionId, 'session');
+  }
   const chatId = buildStableChatId(args);
   return chatId || workspaceId;
 }
@@ -1177,6 +1196,7 @@ async function runViaAgentRuntime(opts: {
         metadata: {
           scheduledTask: !!input.isScheduledTask,
           workspaceId,
+          workspaceSessionId: input.workspaceSessionId,
           groupFolder: group.folder,
           chatId,
           conversationId: chatId,
