@@ -573,7 +573,7 @@ function CreateIssueDialog({ open, onOpenChange }: { open: boolean; onOpenChange
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-5xl overflow-y-auto">
+      <DialogContent className="max-h-[90vh] w-full sm:max-w-5xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>New issue</DialogTitle>
           <DialogDescription>先把工作上下文定清楚：workspace 决定队列与会话归属，project/agent 决定后续运行位置。</DialogDescription>

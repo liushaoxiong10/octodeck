@@ -4,6 +4,8 @@ import {
   Bot,
   CheckCircle2,
   Cpu,
+  ExternalLink,
+  Eye,
   KeyRound,
   Layers3,
   Loader2,
@@ -41,6 +43,7 @@ import { useTasksStore, type ScheduledTask } from '../stores/tasks';
 import { useIssuesStore, type WorkspaceIssue } from '../stores/issues';
 import {
   useAgentTeamsStore,
+  type AgentMdStorePreview,
   type AgentMdStoreEntry,
   type AgentMdReference,
   type AgentTeam,
@@ -3648,6 +3651,7 @@ function AgentMdPanel({
     createAgentMdDefinition,
     listAgentMdStoreEntries,
     importAgentMdFromStore,
+    previewAgentMdStoreEntry,
     updateAgentMdDefinition,
     removeAgentMdDefinition,
   } = useAgentTeamsStore();
@@ -3674,8 +3678,12 @@ function AgentMdPanel({
   const [storeEntries, setStoreEntries] = useState<AgentMdStoreEntry[]>([]);
   const [storeLoading, setStoreLoading] = useState(false);
   const [importingPath, setImportingPath] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewEntry, setPreviewEntry] = useState<AgentMdStorePreview | null>(null);
   const generatorName = generatorAgent?.displayName ?? 'Agent';
   const generatorId = generatorAgent?.id ?? 'manual';
+  const storeEntryKey = (entry: AgentMdStoreEntry) => `${entry.sourceId}:${entry.path}`;
   const selectAgentMd = (agentMdId: string | null) => {
     setSelectedId(agentMdId);
     onSelectedAgentMdIdChange(agentMdId ?? undefined);
@@ -3749,16 +3757,31 @@ function AgentMdPanel({
   };
 
   const handleImportFromStore = async (entry: AgentMdStoreEntry) => {
-    setImportingPath(entry.path);
+    setImportingPath(storeEntryKey(entry));
     try {
-      const saved = await importAgentMdFromStore(entry.path, generatorId);
+      const saved = await importAgentMdFromStore(entry.path, generatorId, entry.sourceId);
       selectAgentMd(saved.id);
       setStoreOpen(false);
+      setPreviewOpen(false);
       toast.success(`已从商店添加 agent.md「${saved.name}」`);
     } catch (err) {
       toast.error(getErrorMessage(err, '从商店添加 agent.md 失败'));
     } finally {
       setImportingPath(null);
+    }
+  };
+
+  const handlePreviewStoreEntry = async (entry: AgentMdStoreEntry) => {
+    setPreviewOpen(true);
+    setPreviewEntry(null);
+    setPreviewLoading(true);
+    try {
+      setPreviewEntry(await previewAgentMdStoreEntry(entry));
+    } catch (err) {
+      toast.error(getErrorMessage(err, '加载 agent.md 预览失败'));
+      setPreviewOpen(false);
+    } finally {
+      setPreviewLoading(false);
     }
   };
 
@@ -4064,7 +4087,8 @@ function AgentMdPanel({
           <DialogHeader>
             <DialogTitle>从商店添加 agent.md</DialogTitle>
             <DialogDescription>
-              从 https://github.com/msitarzewski/agency-agents
+              从 https://github.com/msitarzewski/agency-agents 和
+              https://github.com/jnMetaCode/agency-agents-zh
               读取角色定义，导入后会保存为当前用户的 agent.md。
             </DialogDescription>
           </DialogHeader>
@@ -4080,7 +4104,7 @@ function AgentMdPanel({
                 value={storeQuery}
                 onChange={(event) => setStoreQuery(event.target.value)}
                 className="min-w-0 flex-1 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
-                placeholder="搜索名称、分类或路径，例如 backend、marketing、security"
+                placeholder="搜索名称、商店、分类或路径，例如 zh、backend、marketing、security"
               />
               <Button type="submit" variant="outline" disabled={storeLoading}>
                 {storeLoading ? (
@@ -4102,7 +4126,7 @@ function AgentMdPanel({
               ) : (
                 storeEntries.map((entry) => (
                   <div
-                    key={entry.path}
+                    key={entry.id}
                     className="flex flex-col gap-3 rounded-xl border border-border bg-background/80 p-3 sm:flex-row sm:items-start sm:justify-between"
                   >
                     <div className="min-w-0">
@@ -4110,27 +4134,104 @@ function AgentMdPanel({
                         {entry.name}
                       </div>
                       <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                        {entry.path} · {entry.category} ·{' '}
+                        {entry.sourceName} · {entry.path} · {entry.category} ·{' '}
                         {Math.ceil(entry.size / 1024)} KB
                       </div>
                     </div>
-                    <Button
-                      size="sm"
-                      onClick={() => void handleImportFromStore(entry)}
-                      disabled={saving || importingPath === entry.path}
-                    >
-                      {importingPath === entry.path ? (
-                        <Loader2 className="size-4 animate-spin" />
-                      ) : (
-                        <Plus className="size-4" />
-                      )}
-                      添加
-                    </Button>
+                    <div className="flex shrink-0 flex-wrap gap-2 sm:justify-end">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void handlePreviewStoreEntry(entry)}
+                        disabled={storeLoading || previewLoading}
+                      >
+                        <Eye className="size-4" />
+                        预览
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => void handleImportFromStore(entry)}
+                        disabled={saving || importingPath === storeEntryKey(entry)}
+                      >
+                        {importingPath === storeEntryKey(entry) ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Plus className="size-4" />
+                        )}
+                        添加
+                      </Button>
+                    </div>
                   </div>
                 ))
               )}
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+        <DialogContent className="flex max-h-[88vh] flex-col overflow-hidden sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>
+              预览 agent.md{previewEntry ? `：${previewEntry.name}` : ''}
+            </DialogTitle>
+            <DialogDescription>
+              先查看商店中的 Markdown 内容，确认合适后再添加为当前用户的 agent.md。
+            </DialogDescription>
+          </DialogHeader>
+
+          {previewLoading ? (
+            <div className="flex items-center justify-center gap-2 rounded-xl border border-border bg-muted/20 p-10 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              正在加载 agent.md 预览…
+            </div>
+          ) : previewEntry ? (
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+              <div className="grid gap-2 rounded-xl border border-border bg-muted/10 p-3 text-xs text-muted-foreground sm:grid-cols-[auto_1fr] sm:gap-x-3">
+                <span className="font-medium text-foreground">路径</span>
+                <span className="break-all font-mono">{previewEntry.path}</span>
+                <span className="font-medium text-foreground">商店</span>
+                <span>{previewEntry.sourceName}</span>
+                <span className="font-medium text-foreground">分类</span>
+                <span>{previewEntry.category}</span>
+                <span className="font-medium text-foreground">大小</span>
+                <span>{Math.ceil(previewEntry.size / 1024)} KB</span>
+                <span className="font-medium text-foreground">来源</span>
+                <a
+                  href={previewEntry.sourceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex w-fit items-center gap-1 break-all text-primary underline-offset-4 hover:underline"
+                >
+                  GitHub
+                  <ExternalLink className="size-3" />
+                </a>
+              </div>
+              <div className="rounded-xl border border-border bg-background p-4">
+                <MarkdownRenderer content={previewEntry.content} variant="docs" />
+              </div>
+            </div>
+          ) : null}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPreviewOpen(false)}>
+              关闭
+            </Button>
+            <Button
+              onClick={() => {
+                if (!previewEntry) return;
+                void handleImportFromStore(previewEntry);
+              }}
+              disabled={!previewEntry || saving || importingPath === storeEntryKey(previewEntry)}
+            >
+              {previewEntry && importingPath === storeEntryKey(previewEntry) ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Plus className="size-4" />
+              )}
+              添加此 agent.md
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

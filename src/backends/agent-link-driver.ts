@@ -350,9 +350,16 @@ function streamEventFromAgentRunFrame(frame: {
     };
   }
   if (frame.eventType === 'permission_request') {
+    const payload = (frame.payload ?? {}) as Record<string, unknown>;
+    const toolName =
+      (typeof payload.toolName === 'string' ? payload.toolName : undefined) ??
+      (typeof payload.tool_name === 'string' ? payload.tool_name : undefined);
     return {
-      eventType: 'permission_denied',
+      eventType: 'permission_request',
       sessionId: frame.sessionId,
+      toolName,
+      title: toolName ? `Permission request: ${toolName}` : 'Permission request',
+      summary: toolName ? `Agent is requesting permission to use ${toolName}.` : 'Agent is requesting permission.',
       detail: compactJson(frame.payload) ?? undefined,
       rawEvent: frame.payload,
     };
@@ -1132,6 +1139,16 @@ async function runViaAgentRuntime(opts: {
         if (frame.eventType === 'log') {
           if (frame.text && logAccum.length < 20000) {
             logAccum += frame.text.slice(0, 20000 - logAccum.length);
+          }
+          return;
+        }
+        // 'final_result' 是 daemon 在解析到 stream-json 中的 {"type":"result"}
+        // 时为「单 shot CLI 兜底」发出的事件（daemon 已经保证：当流式 text_delta
+        // 已存在时不会再发 final_result 的副本）。这里只做累积兜底，不再下发
+        // 重复的 stream event 给 UI。
+        if (frame.eventType === 'final_result') {
+          if (frame.text && textAccum.length === 0) {
+            textAccum = frame.text.slice(0, maxOutputBytes);
           }
           return;
         }

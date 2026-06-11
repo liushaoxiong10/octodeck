@@ -4,7 +4,8 @@
        backup restore help _ensure-docker-image logs status stop \
        _check-sync _build-web-if-stale _build-ar-if-stale _build-backend-if-stale \
        _start-pm2 _start-direct \
-       docker-build docker-run docker-stop docker-logs docker-clean
+       docker-build docker-run docker-stop docker-logs docker-clean \
+       build-daemon build-daemon-all
 
 # ─── Runtime Detection ──────────────────────────────────────
 # 优先使用 bun（跳过编译、启动更快），fallback 到 npm + tsx + node
@@ -49,8 +50,14 @@ dev-web: ## 仅启动前端
 
 # ─── Build ───────────────────────────────────────────────────
 
-build: sync-types ## 编译前后端及 agent-runner
+build: sync-types ## 编译前后端及 agent-runner，顺带构建 daemon 四平台二进制（有 Go 时）
 	$(PKG) run build:all
+	@if command -v go >/dev/null 2>&1; then \
+		echo "🔨 检测到 Go，构建 daemon 四平台二进制..."; \
+		$(MAKE) --no-print-directory build-daemon-all; \
+	else \
+		echo "ℹ️  未检测到 Go，跳过 daemon 二进制构建（若需要 /api/daemon/octodeck-daemon-bin 多平台下载，请安装 Go 后执行: make build-daemon-all）"; \
+	fi
 	@touch .build-sentinel
 
 build-backend: ## 仅编译后端
@@ -344,10 +351,11 @@ help: ## 显示帮助
 DOCKER_IMAGE ?= octodeck:latest
 DOCKER_CONTAINER ?= octodeck
 
-docker-build: ## 构建 OctoDeck 主服务 Docker 镜像（多阶段构建）
-	@echo "🐳 构建 OctoDeck 主服务镜像..."
+docker-build: ## 构建 OctoDeck 主服务 Docker 镜像（多阶段构建，Dockerfile 内自动交叉编译 daemon 四平台二进制，不依赖宿主机 Go）
+	@echo "🐳 构建 OctoDeck 主服务镜像（内部构建 daemon 四平台二进制: darwin/amd64 darwin/arm64 linux/amd64 linux/arm64）..."
 	docker build -t $(DOCKER_IMAGE) .
 	@echo "✅ 镜像构建完成: $(DOCKER_IMAGE)"
+	@echo "   镜像内已内置 daemon 二进制于 /app/client/octodeck-daemon/dist/，/api/daemon/octodeck-daemon-bin/:os/:arch 可直接对外下载"
 
 docker-run: ## 使用 docker run 启动服务
 	@echo "🚀 启动 OctoDeck 容器..."
@@ -379,3 +387,42 @@ docker-clean: ## 清理 OctoDeck 容器和镜像
 	@docker rm $(DOCKER_CONTAINER) 2>/dev/null || true
 	@docker rmi $(DOCKER_IMAGE) 2>/dev/null || true
 	@echo "✅ 清理完成"
+
+# ─── OctoDeck Daemon (Go) ─────────────────────────────────────
+
+DAEMON_SRC_DIR  := client/octodeck-daemon
+DAEMON_DIST_DIR := $(DAEMON_SRC_DIR)/dist
+DAEMON_MATRIX   := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64
+
+# 构建 daemon 二进制：
+#   make build-daemon                 -> 本机构建，写 client/octodeck-daemon/octodeck-daemon
+#   make build-daemon GOOS=linux GOARCH=arm64  -> 交叉编译到 client/octodeck-daemon/dist/octodeck-daemon-linux-arm64
+build-daemon: ## 构建 octodeck-daemon 二进制（可选 GOOS= GOARCH= 交叉编译）
+	@if command -v go >/dev/null 2>&1; then :; else echo "error: go 1.23+ is required to build octodeck-daemon" >&2; exit 1; fi
+	@if [ -n "$(GOOS)" ] && [ -n "$(GOARCH)" ]; then \
+		mkdir -p "$(DAEMON_DIST_DIR)"; \
+		out="octodeck-daemon-$(GOOS)-$(GOARCH)"; \
+		echo "🔨 cross-compile octodeck-daemon $(GOOS)/$(GOARCH) -> $(DAEMON_DIST_DIR)/$$out"; \
+		(cd $(DAEMON_SRC_DIR) && GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "dist/$$out" .); \
+	else \
+		echo "🔨 build native octodeck-daemon -> $(DAEMON_SRC_DIR)/octodeck-daemon"; \
+		(cd $(DAEMON_SRC_DIR) && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o octodeck-daemon .); \
+	fi
+
+# 一次性交叉编译 4 个平台的二进制，产物落在 client/octodeck-daemon/dist/
+build-daemon-all: ## 交叉编译 Darwin/Linux x86_64 + arm64 共 4 份 daemon 二进制
+	@if command -v go >/dev/null 2>&1; then :; else echo "error: go 1.23+ is required to build octodeck-daemon" >&2; exit 1; fi
+	@mkdir -p "$(DAEMON_DIST_DIR)"
+	@for pair in $(DAEMON_MATRIX); do \
+		goos=$${pair%/*}; goarch=$${pair#*/}; \
+		out="octodeck-daemon-$$goos-$$goarch"; \
+		echo "🔨 $$goos/$$goarch -> $(DAEMON_DIST_DIR)/$$out"; \
+		(cd $(DAEMON_SRC_DIR) && GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "dist/$$out" .); \
+	done
+	@echo ""
+	@echo "✅ daemon 二进制产物："
+	@for pair in $(DAEMON_MATRIX); do \
+		goos=$${pair%/*}; goarch=$${pair#*/}; \
+		f="$(DAEMON_DIST_DIR)/octodeck-daemon-$$goos-$$goarch"; \
+		[ -f "$$f" ] && echo "   - $$f ($$(du -h "$$f" | cut -f1))"; \
+	done

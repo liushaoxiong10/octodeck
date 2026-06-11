@@ -1735,6 +1735,36 @@ Returns null if the current chat is a DM (DMs do not belong to a server). Only w
         }
       },
     ),
+
+    tool(
+      'ask_user',
+      'Pause the current run and ask a question to the issue requester. The run will end naturally and resume automatically once the user replies in the issue. Use ONLY for questions you genuinely need answered to make progress (do not use for status updates — use comment_issue for that).',
+      {
+        question: z.string().min(1).max(2000).describe('Question to ask the user'),
+        choices: z.array(z.string()).max(10).optional().describe('Optional list of suggested choices'),
+      },
+      async ({ question, choices }) => {
+        try {
+          const runId = process.env.OCTODECK_RUN_ID;
+          const issueId = process.env.OCTODECK_ISSUE_ID;
+          if (!runId || !issueId) {
+            throw new Error('ask_user is only available when running inside an issue agent run');
+          }
+          const result = await ipcCall<{
+            requestId?: string;
+            error?: string;
+          }>('issue_ask_user', { runId, issueId, question, choices });
+          if (result.error || !result.requestId) throw new Error(result.error ?? 'Failed to ask user');
+          return toolJson({
+            requestId: result.requestId,
+            status: 'pending',
+            note: 'Question recorded. Stop your current task; the run will resume automatically when the user replies.',
+          });
+        } catch (err) {
+          return toolError(err);
+        }
+      },
+    ),
   ];
 
   if (ctx.ownerUserId) {

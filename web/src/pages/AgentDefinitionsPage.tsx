@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Bot, Loader2, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
+import { ArrowLeft, Bot, Download, Loader2, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
@@ -10,6 +10,7 @@ import {
   useAgentDefinitionsStore,
   type AgentDefinitionDetail,
 } from '../stores/agent-definitions';
+import { InstallAgentMarketplaceDialog } from '@/components/agent-definitions/InstallAgentMarketplaceDialog';
 
 export function AgentDefinitionsPage() {
   const { agents, loading, error: listError, loadAgents, createAgent } =
@@ -34,6 +35,9 @@ export function AgentDefinitionsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [createName, setCreateName] = useState('');
   const [creating, setCreating] = useState(false);
+
+  // Marketplace dialog
+  const [showMarketplace, setShowMarketplace] = useState(false);
 
   // Notice
   const [notice, setNotice] = useState<string | null>(null);
@@ -174,10 +178,14 @@ tools:
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <Button variant="outline" size="sm" onClick={loadAgents} disabled={loading}>
                 <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
                 刷新
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setShowMarketplace(true)}>
+                <Download size={16} />
+                从商店添加
               </Button>
               <Button size="sm" onClick={() => setShowCreate(true)}>
                 <Plus size={16} />
@@ -381,6 +389,11 @@ tools:
           </Card>
         </div>
       )}
+
+      <InstallAgentMarketplaceDialog
+        open={showMarketplace}
+        onClose={() => setShowMarketplace(false)}
+      />
     </div>
   );
 }

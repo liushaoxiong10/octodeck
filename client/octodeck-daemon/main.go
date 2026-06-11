@@ -27,7 +27,7 @@ import (
 func goos() string   { return runtime.GOOS }
 func goarch() string { return runtime.GOARCH }
 
-const daemonVersion = "octodeck-daemon/1.0.18"
+const daemonVersion = "octodeck-daemon/1.0.23"
 
 var daemonUpdateMu sync.Mutex
 
@@ -422,7 +422,8 @@ func updateDaemonBinary(cfg *Config, targetPath string, restart bool) error {
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("stat target binary: %w", err)
 	}
-	binURL := strings.TrimRight(cfg.Server, "/") + "/api/daemon/octodeck-daemon-bin"
+	binURL := strings.TrimRight(cfg.Server, "/") +
+		"/api/daemon/octodeck-daemon-bin/" + runtime.GOOS + "/" + runtime.GOARCH
 	tmp := filepath.Join(filepath.Dir(targetPath), fmt.Sprintf(".octodeck-daemon.update.%d", os.Getpid()))
 	if err := downloadFile(binURL, tmp, mode); err != nil {
 		_ = os.Remove(tmp)

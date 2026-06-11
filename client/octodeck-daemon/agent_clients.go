@@ -40,6 +40,10 @@ var supportedAgentClients = []agentClientCandidate{
 	{id: "codex", displayName: "Codex CLI", command: "codex"},
 	{id: "traecli-acp", displayName: "TraeCLI (ACP)", command: "traecli", provider: "traecli", transport: "acp", args: []string{"acp"}, probeArgs: [][]string{{"acp", "--help"}, {"--help"}}},
 	{id: "traecli", displayName: "TraeCLI", command: "traecli"},
+	// traex: 本地的另一个 agent CLI 二进制，调用约定与 codex 一致（exec --json）。
+	// 优先尝试 ACP，失败 fallback 到 codex 风格 stream-json。
+	{id: "traex-acp", displayName: "Traex (ACP)", command: "traex", provider: "traex", transport: "acp", args: []string{"acp"}, probeArgs: [][]string{{"acp", "--help"}, {"--help"}}},
+	{id: "traex", displayName: "Traex", command: "traex", provider: "traex"},
 }
 
 var agentClientVersionArgs = map[string][]string{
@@ -49,6 +53,8 @@ var agentClientVersionArgs = map[string][]string{
 	"codex-acp":   {"--version"},
 	"traecli":     {"--version"},
 	"traecli-acp": {"--version"},
+	"traex":       {"--version"},
+	"traex-acp":   {"--version"},
 }
 
 var agentClientPermissionModes = map[string][]string{
@@ -58,6 +64,9 @@ var agentClientPermissionModes = map[string][]string{
 	"codex-acp":   {"default", "read-only", "workspace-write", "full-access"},
 	"traecli":     {"default", "acceptEdits", "bypassPermissions"},
 	"traecli-acp": {"default", "acceptEdits", "bypassPermissions"},
+	// traex 与 codex 调用约定一致，复用 codex 的 sandbox 风格权限模式。
+	"traex":     {"default", "read-only", "workspace-write", "full-access"},
+	"traex-acp": {"default", "read-only", "workspace-write", "full-access"},
 }
 
 var agentClientCapabilities = map[string][]string{
@@ -67,6 +76,8 @@ var agentClientCapabilities = map[string][]string{
 	"codex-acp":   {"acp", "jsonrpc", "mcp", "tools", "sandbox", "approval-policy", "session"},
 	"traecli":     {"print", "plain-text", "permissions", "tools"},
 	"traecli-acp": {"acp", "jsonrpc", "mcp", "permissions", "tools", "session"},
+	"traex":       {"exec", "jsonl", "tools", "sandbox", "approval-policy"},
+	"traex-acp":   {"acp", "jsonrpc", "mcp", "tools", "sandbox", "approval-policy", "session"},
 }
 
 func agentClientSearchDirs() []string {
@@ -170,9 +181,19 @@ func discoverAgentClientsForConfig(cfg *Config) []AgentClientInfo {
 	if cfg != nil && cfg.RuntimePolicy.DisableAutoDiscover {
 		return registryAgentClients(cfg)
 	}
-	clients := make([]AgentClientInfo, 0, len(supportedAgentClients))
+	// 同一 binary（claude / codex / traecli）只发布一种 client：
+	//   1. 优先尝试 ACP（结构化 jsonrpc，能拿到完整 tool_call / thinking /
+	//      permission 通知，链路稳定）
+	//   2. ACP 探测失败时再 fallback 到非 ACP（print/stream-json/jsonl）
+	//   3. 两者都不行则该 binary 不发布
+	// 这样 server 端 runtimes 列表清爽，避免用户误选导致拿不到中间执行轨迹。
 	dirs := agentClientSearchDirs()
+	clients := make([]AgentClientInfo, 0, len(supportedAgentClients))
+	usedCommand := make(map[string]struct{})
 	for _, c := range supportedAgentClients {
+		if _, taken := usedCommand[c.command]; taken {
+			continue
+		}
 		bin := findExecutableInDirs(c.command, dirs)
 		if bin == "" {
 			continue
@@ -199,6 +220,7 @@ func discoverAgentClientsForConfig(cfg *Config) []AgentClientInfo {
 			PermissionModes: agentClientPermissionModes[c.id],
 			Capabilities:    agentClientCapabilities[c.id],
 		})
+		usedCommand[c.command] = struct{}{}
 	}
 	return mergeAgentClients(clients, registryAgentClients(cfg))
 }
@@ -236,7 +258,12 @@ func supportsAgentClientCandidate(c agentClientCandidate, binary string) bool {
 	if c.transport != "acp" {
 		return true
 	}
-	if os.Getenv("OCTODECK_DAEMON_PROBE_AGENT_CLIENTS") != "1" {
+	// ACP 候选默认探测 `<binary> acp --help`，确保只有真正支持 ACP 子命令的
+	// 二进制才会被注册成 *-acp。这样可以避免老版本（不带 acp 子命令）被错误
+	// 标成 ACP，又因 jsonrpc 握手失败导致中间过程拿不到。
+	// 通过设置 OCTODECK_DAEMON_PROBE_AGENT_CLIENTS=0 可以临时跳过探测（仅用于
+	// 测试 / 离线机器）。
+	if os.Getenv("OCTODECK_DAEMON_PROBE_AGENT_CLIENTS") == "0" {
 		return true
 	}
 	probes := c.probeArgs

@@ -124,6 +124,10 @@ function templateForAgentClient(
       };
     case 'codex-acp':
     case 'codex':
+    // traex 是 daemon 上注册的本地 agent CLI，调用约定与 codex 一致
+    // （exec --json + --skip-git-repo-check + -m {model}）。
+    case 'traex-acp':
+    case 'traex':
       return {
         argvTemplate: [
           'exec',

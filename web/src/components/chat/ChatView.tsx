@@ -49,12 +49,20 @@ const EMPTY_AGENTS: import('../../types').AgentInfo[] = [];
 
 type SidebarTab = 'files' | 'env' | 'skills' | 'mcp' | 'members';
 
-function sessionFileDefaultPath(sessionId: string | null | undefined): string | undefined {
+/**
+ * 聊天窗口打开文件面板时的默认起点：
+ * - 根目录保持为当前 workspace（由后端基于 group.folder/customCwd 控制，前端不传 root）
+ * - 默认落在 workspace 内的 conversations/ 目录（PreCompact Hook 归档的会话摘要 md 文件
+ *   就放在这里，属于"当前会话相关"在文件面板内可见的部分。未产生归档或会话还未
+ *   触发 compact 时返回空串，停留在 workspace 根。
+ * - sessionId 仅用于防御性校验，避免把非法值拼进路径。
+ */
+function sessionFileDefaultPath(sessionId: string | null | undefined): string {
   const value = sessionId?.trim();
-  if (!value || value === '.' || value === '..' || value.includes('/') || value.includes('\\')) {
-    return undefined;
+  if (value && (value === '.' || value === '..' || value.includes('/') || value.includes('\\'))) {
+    return '';
   }
-  return `sessions/${value}`;
+  return 'conversations';
 }
 
 interface ChatViewProps {

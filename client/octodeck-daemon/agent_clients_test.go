@@ -15,11 +15,15 @@ func TestDiscoverAgentClientsFindsSupportedClientsOnPath(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"claude", "codex", "traecli"} {
 		p := filepath.Join(dir, name)
+		// fake 二进制对任意参数都返回相同输出，且不包含 ACP marker
+		// （"agent client protocol" / "acp"）。这样 ACP 探测会失败，discover
+		// 自动 fallback 到非 ACP 候选（claude-code / codex / traecli）。
 		if err := os.WriteFile(p, []byte("#!/bin/sh\necho "+name+" 1.0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Setenv("PATH", dir)
+	t.Setenv("OCTODECK_DAEMON_EXTRA_PATH", "")
 
 	clients := discoverAgentClients()
 	ids := map[string]string{}
@@ -36,12 +40,31 @@ func TestDiscoverAgentClientsFindsSupportedClientsOnPath(t *testing.T) {
 	if ids["traecli"] != filepath.Join(dir, "traecli") {
 		t.Fatalf("missing traecli discovery: %#v", clients)
 	}
+	// 同一个 binary 只注册一种 client（非 ACP fallback 命中后，*-acp 不应同时
+	// 出现）。这是 ACP-优先策略的关键不变量。
+	if _, ok := ids["claude-acp"]; ok {
+		t.Fatalf("claude-acp must not coexist with claude-code: %#v", clients)
+	}
+	if _, ok := ids["codex-acp"]; ok {
+		t.Fatalf("codex-acp must not coexist with codex: %#v", clients)
+	}
+	if _, ok := ids["traecli-acp"]; ok {
+		t.Fatalf("traecli-acp must not coexist with traecli: %#v", clients)
+	}
 }
 
-func TestDiscoverAgentClientsDoesNotStartCLIForVersion(t *testing.T) {
+func TestDiscoverAgentClientsDoesNotProbeVersion(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "codex")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\necho started >> \"$CLI_STARTED_LOG\"\necho 'codex-cli 1.2.3'\n"), 0o755); err != nil {
+	// fake 二进制每次被调用都把第 1 个参数追加到 log。
+	// discover 阶段允许通过 `acp --help` 探测 ACP 支持（这是 ACP-优先策略
+	// 的核心：必须实际跑一下才能判断），但严禁额外调 `--version`（版本
+	// 探测应当延迟到第一次真正使用 client 时再做，避免每次 discover 都
+	// 让所有 CLI 启动一次）。
+	script := "#!/bin/sh\n" +
+		"echo \"$1\" >> \"$CLI_STARTED_LOG\"\n" +
+		"echo 'codex-cli 1.2.3'\n"
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(dir, "started.log")
@@ -51,17 +74,22 @@ func TestDiscoverAgentClientsDoesNotStartCLIForVersion(t *testing.T) {
 
 	clients := discoverAgentClients()
 	for _, c := range clients {
-		if c.ID == "codex" {
-			if c.Version != "" {
-				t.Fatalf("expected no startup-time version probe, got %q in %#v", c.Version, clients)
-			}
-			if _, err := os.Stat(logPath); !os.IsNotExist(err) {
-				t.Fatalf("discover should not execute CLI; stat err=%v", err)
-			}
-			return
+		if c.Provider != "codex" && c.ID != "codex" && c.ID != "codex-acp" {
+			continue
+		}
+		if c.Version != "" {
+			t.Fatalf("expected no startup-time version probe, got %q in %#v", c.Version, clients)
 		}
 	}
-	t.Fatalf("missing codex discovery: %#v", clients)
+	// 允许 ACP 探测调用（`acp --help`），但不能出现 `--version`。
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read started log: %v", err)
+	}
+	logContent := string(logBytes)
+	if strings.Contains(logContent, "--version") {
+		t.Fatalf("discover must not probe --version, got log:\n%s", logContent)
+	}
 }
 
 func TestDiscoverAgentClientsFindsHomeLocalBinWhenPathIsMinimal(t *testing.T) {

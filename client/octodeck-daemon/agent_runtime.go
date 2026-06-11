@@ -642,7 +642,7 @@ func permissionDecisionTimeout(cfg *Config) time.Duration {
 	if cfg != nil && cfg.RuntimePolicy.PermissionTimeoutMs > 0 {
 		return time.Duration(cfg.RuntimePolicy.PermissionTimeoutMs) * time.Millisecond
 	}
-	return 30 * time.Minute
+	return 5 * time.Hour
 }
 
 func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, req *AgentRunRequestFrame) {
@@ -1099,6 +1099,11 @@ func buildAgentAdapters(cfg *Config) map[string]agentAdapter {
 			out[client.ID] = &codexAdapter{baseAgentAdapter{client: client}}
 		case "traecli":
 			out[client.ID] = &traecliAdapter{baseAgentAdapter{client: client}}
+		case "traex":
+			// traex 的 stdio 调用约定与 codex 一致（exec --json），直接复用
+			// codexAdapter，避免维护重复 BuildRunCommand。ACP 路径走 traex-acp，
+			// 上面的 client.Transport == "acp" 分支已经把它指向 acpAdapter。
+			out[client.ID] = &codexAdapter{baseAgentAdapter{client: client}}
 		default:
 			out[client.ID] = &plainCLIAdapter{baseAgentAdapter{client: client}}
 		}
@@ -1126,6 +1131,10 @@ func (a *baseAgentAdapter) providerDirName() string {
 		return "traecli"
 	case "traecli-acp":
 		return "traecli-acp"
+	case "traex":
+		return "traex"
+	case "traex-acp":
+		return "traex-acp"
 	default:
 		return safePathSegment(a.client.ID)
 	}
@@ -1494,7 +1503,8 @@ func prepareAgentRuntimeMCPConfig(cfg *Config, req *AgentRunRequestFrame, cwd st
 	case "claude-code":
 		_, err := writeAgentTeamMCPConfig(cfg, req.Env)
 		return err
-	case "codex":
+	case "codex", "traex":
+		// traex 与 codex 共用 codex 风格 mcp 配置（在 $sessionDir/<provider>/config.toml）。
 		return writeCodexMCPConfig(cfg, req, cwd)
 	case "traecli":
 		return writeAgentTeamMCPProjectConfig(cfg, cwd, req.Env)

@@ -412,6 +412,12 @@ export const AgentRunEventFrame = z.object({
     'session',
     'usage',
     'log',
+    // 'final_result' 由 daemon 在解析 stream-json 中的 {"type":"result"} 时
+    // 发出（agent_runtime.go normalizeAgentJSONLineFrames 第 3 段）。
+    // 服务端不会把它转成 stream event 推给 UI（避免和已经推完的 text_delta
+    // 重复），但必须列在枚举里，否则整帧 zod 校验失败会导致 ws 被关掉，
+    // 进而丢失这帧之后到达的 agent.run.result 与中间的 tool/thinking 事件。
+    'final_result',
   ]),
   text: z.string().optional(),
   sessionId: z.string().max(256).optional(),

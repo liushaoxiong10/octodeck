@@ -4,6 +4,7 @@ import type { ContainerOutput } from './container-runner.js';
 import type { StreamEvent } from './stream-event.types.js';
 import {
   ensureChatExists,
+  createIssueAgentRequest,
   createIssueAgentRunEvent,
   createIssueEvent,
   getIssueAgentRunById,
@@ -11,8 +12,11 @@ import {
   getLastCompletedIssueRunAt,
   getRegisteredGroup,
   getUserHomeGroup,
+  listIssueAgentRequests,
   listIssueComments,
+  setIssueAgentRunAwaiting,
   storeMessageDirect,
+  touchIssueAgentRunHeartbeat,
   updateIssue,
   updateIssueAgentRun,
   updateIssueLastRun,
@@ -21,11 +25,43 @@ import {
 import { logger } from './logger.js';
 import { afterIssueEventCreated } from './issue-notifier.js';
 import { resolveBackend } from './backends/registry.js';
-import type { IssueAgentRun, IssueComment, RegisteredGroup, WorkspaceIssue } from './types.js';
+import type {
+  IssueAgentRequest,
+  IssueAgentRun,
+  IssueComment,
+  RegisteredGroup,
+  WorkspaceIssue,
+} from './types.js';
 import type { WebDeps } from './web-context.js';
 
-export function buildIssuePrompt(issue: WorkspaceIssue, run: IssueAgentRun, comments: IssueComment[] | null = null): string {
-  const parts = [
+export function buildIssuePrompt(
+  issue: WorkspaceIssue,
+  run: IssueAgentRun,
+  comments: IssueComment[] | null = null,
+  lastAnsweredRequest: IssueAgentRequest | null = null,
+): string {
+  const parts: (string | null)[] = [];
+  if (lastAnsweredRequest) {
+    if (lastAnsweredRequest.kind === 'clarification') {
+      const question =
+        (lastAnsweredRequest.payload as Record<string, unknown> | null)?.question ??
+        lastAnsweredRequest.summary ??
+        '(question not available)';
+      parts.push('[USER REPLY TO YOUR PREVIOUS QUESTION]');
+      parts.push(`Q: ${String(question)}`);
+      parts.push(`A: ${lastAnsweredRequest.answer ?? '(empty)'}`);
+      parts.push('');
+    } else if (lastAnsweredRequest.kind === 'permission') {
+      parts.push('[PERMISSION DECISION]');
+      parts.push(
+        `Decision: ${lastAnsweredRequest.decision ?? 'unknown'}${
+          lastAnsweredRequest.answer ? `; Message: ${lastAnsweredRequest.answer}` : ''
+        }`,
+      );
+      parts.push('');
+    }
+  }
+  parts.push(
     '<issue_context>',
     `Issue ID: ${issue.id}`,
     `Issue Run ID: ${run.id}`,
@@ -40,7 +76,7 @@ export function buildIssuePrompt(issue: WorkspaceIssue, run: IssueAgentRun, comm
     '',
     'Description:',
     issue.description || '(empty)',
-  ];
+  );
   if (comments && comments.length) {
     parts.push('');
     parts.push('Discussion (newest first, use as context update since initial issue):');
@@ -152,7 +188,7 @@ function streamEventSummary(event: StreamEvent): string {
 export async function runIssueAgent(
   issueId: string,
   runId: string,
-  deps: Pick<WebDeps, 'queue'> & {
+  deps: Pick<WebDeps, 'queue' | 'broadcastIssueRequest'> & {
     broadcastStreamEvent?: (chatJid: string, event: StreamEvent) => void;
   },
 ): Promise<void> {
@@ -161,7 +197,12 @@ export async function runIssueAgent(
   if (!issue || !run) return;
 
   const startedAt = new Date().toISOString();
-  updateIssueAgentRun(runId, { status: 'running', run_started_at: startedAt });
+  updateIssueAgentRun(runId, {
+    status: 'running',
+    run_started_at: startedAt,
+    last_seen_at: startedAt,
+    heartbeat_deadline_at: new Date(Date.now() + 90_000).toISOString(),
+  });
   updateIssueLastRun(issueId, runId, 'running');
   auditIssueRunEvent(issueId, runId, 'run_started', {
     title: 'Run started',
@@ -224,7 +265,25 @@ export async function runIssueAgent(
       logger.warn({ err, issueId: issue.id, runId: run.id }, 'Failed to load issue comments for prompt injection; continuing without comments');
       injectedComments = null;
     }
-    const prompt = buildIssuePrompt(issue, run, injectedComments);
+
+    // --- last answered agent request injection (clarification / permission resume) ---
+    let lastAnsweredRequest: IssueAgentRequest | null = null;
+    if (run.parent_run_id) {
+      try {
+        const answered = listIssueAgentRequests(issue.id, {
+          status: 'answered',
+          runId: run.parent_run_id,
+        });
+        lastAnsweredRequest = answered[0] ?? null;
+      } catch (err) {
+        logger.warn(
+          { err, issueId: issue.id, parentRunId: run.parent_run_id },
+          'Failed to load answered agent request for prompt injection',
+        );
+      }
+    }
+
+    const prompt = buildIssuePrompt(issue, run, injectedComments, lastAnsweredRequest);
     const runChatJid = issueRunChatJid(issue, run);
     persistIssuePrompt(issue, run, issue.created_by, prompt);
     auditIssueRunEvent(issueId, runId, 'input_prepared', {
@@ -298,14 +357,74 @@ export async function runIssueAgent(
           });
         },
         onOutput: async (streamedOutput) => {
+          // Touch heartbeat on any frame so the reconciler keeps this run alive.
+          try {
+            touchIssueAgentRunHeartbeat(runId);
+          } catch (err) {
+            logger.warn({ err, runId }, 'Failed to touch issue agent run heartbeat');
+          }
           if (streamedOutput.status === 'stream' && streamedOutput.streamEvent) {
-            auditIssueRunEvent(issueId, runId, `stream:${streamedOutput.streamEvent.eventType}`, {
-              title: streamedOutput.streamEvent.title || streamedOutput.streamEvent.eventType,
-              summary: streamEventSummary(streamedOutput.streamEvent),
-              detail: streamedOutput.streamEvent.detail || streamedOutput.streamEvent.text || null,
-              payload: { streamEvent: streamedOutput.streamEvent },
+            const se = streamedOutput.streamEvent;
+            auditIssueRunEvent(issueId, runId, `stream:${se.eventType}`, {
+              title: se.title || se.eventType,
+              summary: streamEventSummary(se),
+              detail: se.detail || se.text || null,
+              payload: { streamEvent: se },
             });
-            deps.broadcastStreamEvent?.(runChatJid, streamedOutput.streamEvent);
+            deps.broadcastStreamEvent?.(runChatJid, se);
+
+            // P1-4: persist permission_request as a pending agent request and
+            // pause the run / issue so the human can decide.
+            if (se.eventType === 'permission_request') {
+              try {
+                const raw = (se as unknown as { rawEvent?: unknown }).rawEvent;
+                const rawObj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null;
+                const correlationId =
+                  (rawObj?.requestId as string | undefined) ??
+                  (rawObj?.request_id as string | undefined) ??
+                  (rawObj?.id as string | undefined) ??
+                  null;
+                const now = new Date().toISOString();
+                const expiresAt = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString();
+                const reqId = `iaq_${crypto.randomBytes(8).toString('hex')}`;
+                const req = createIssueAgentRequest({
+                  id: reqId,
+                  issue_id: issueId,
+                  run_id: runId,
+                  kind: 'permission',
+                  correlation_id: correlationId,
+                  title: 'Agent requested permission',
+                  summary: (se.title || se.toolName || 'permission request').slice(0, 200),
+                  detail: se.detail ?? null,
+                  payload: rawObj ?? null,
+                  status: 'pending',
+                  created_at: now,
+                  expires_at: expiresAt,
+                });
+                setIssueAgentRunAwaiting(runId, 'permission', req.id);
+                if (issue.status !== 'waiting_for_human') {
+                  updateIssue(issueId, { status: 'waiting_for_human' });
+                }
+                const evReq = createIssueEvent({
+                  issue_id: issueId,
+                  run_id: runId,
+                  event_type: 'agent_request_created',
+                  actor_type: 'agent',
+                  title: 'Agent waiting for human approval',
+                  summary: req.summary ?? null,
+                  payload: { requestId: req.id, kind: 'permission', correlationId },
+                });
+                afterIssueEventCreated(evReq, issue);
+                deps.broadcastIssueRequest?.(
+                  issue.workspace_jid,
+                  issueId,
+                  req,
+                  'issue_request_created',
+                );
+              } catch (err) {
+                logger.error({ err, runId, issueId }, 'Failed to persist permission_request');
+              }
+            }
           }
           if (streamedOutput.result) {
             latestResult = streamedOutput.result;
@@ -330,7 +449,24 @@ export async function runIssueAgent(
 
     if (output.result) latestResult = output.result;
     if (output.error) latestError = output.error;
-    if (getIssueAgentRunById(runId)?.status === 'canceled') {
+    const currentStatus = getIssueAgentRunById(runId)?.status;
+    if (currentStatus === 'canceled') {
+      return;
+    }
+    // If the run was paused while waiting for human input (permission /
+    // clarification), do not overwrite the status with success/error – let the
+    // human answer drive the next state transition.
+    if (currentStatus === 'awaiting_input') {
+      auditIssueRunEvent(issueId, runId, 'run_paused_for_input', {
+        title: 'Run paused, waiting for human input',
+        summary: `awaiting_input (${getIssueAgentRunById(runId)?.awaiting_kind ?? 'unknown'})`,
+        payload: { sessionId: output.newSessionId ?? run.session_id ?? null },
+      });
+      // Persist new session id (if any) so the resumed run can reuse it.
+      if (output.newSessionId) {
+        updateIssueAgentRun(runId, { session_id: output.newSessionId });
+      }
+      updateIssueLastRun(issueId, runId, 'awaiting_input');
       return;
     }
     const status = output.status === 'error' ? 'error' : 'success';

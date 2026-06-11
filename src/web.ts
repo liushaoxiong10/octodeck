@@ -124,6 +124,7 @@ import { persistPluginExpansion } from './plugin-expander-store.js';
 import { parseAgentLinkTarget } from './backends/agent-link-driver.js';
 import { logger } from './logger.js';
 import { IssueAutoDriver } from './issue-auto-driver.js';
+import { IssueRunReconciler } from './issue-run-reconciler.js';
 import {
   executeSessionReset,
   isClearCommand,
@@ -2383,6 +2384,22 @@ export function broadcastIssueWsEvent(
   safeBroadcast(msg, isHostGroupJid(workspaceJid), allowedUserIds);
 }
 
+export function broadcastIssueRequest(
+  workspaceJid: string,
+  issueId: string,
+  request: import('./types.js').IssueAgentRequest,
+  eventName: 'issue_request_created' | 'issue_request_answered' | 'issue_request_expired' = 'issue_request_created',
+): void {
+  const allowedUserIds = getGroupAllowedUserIds(workspaceJid);
+  const msg: WsMessageOut = {
+    type: eventName,
+    workspaceJid,
+    issueId,
+    request,
+  };
+  safeBroadcast(msg, isHostGroupJid(workspaceJid), allowedUserIds);
+}
+
 export function broadcastGroupCreated(
   jid: string,
   folder: string,
@@ -2566,10 +2583,12 @@ let statusInterval: ReturnType<typeof setInterval> | null = null;
 let httpServer: ReturnType<typeof serve> | null = null;
 let wss: WebSocketServer | null = null;
 let issueAutoDriver: IssueAutoDriver | null = null;
+let issueRunReconciler: IssueRunReconciler | null = null;
 
 export function startWebServer(webDeps: WebDeps): void {
   webDeps.broadcastStreamEvent = broadcastStreamEvent;
   webDeps.broadcastIssueEvent = broadcastIssueWsEvent;
+  webDeps.broadcastIssueRequest = broadcastIssueRequest;
   deps = webDeps;
   setWebDeps(webDeps);
   injectConfigDeps(webDeps);
@@ -2617,6 +2636,12 @@ export function startWebServer(webDeps: WebDeps): void {
   issueAutoDriver = new IssueAutoDriver(webDeps);
   issueAutoDriver.start();
 
+  issueRunReconciler?.stop();
+  issueRunReconciler = new IssueRunReconciler({
+    broadcastIssueRequest: webDeps.broadcastIssueRequest,
+  });
+  issueRunReconciler.start();
+
   // Broadcast status every 5 seconds
   if (statusInterval) clearInterval(statusInterval);
   statusInterval = setInterval(broadcastStatus, 5000);
@@ -2635,6 +2660,8 @@ export async function shutdownWebServer(): Promise<void> {
   }
   issueAutoDriver?.stop();
   issueAutoDriver = null;
+  issueRunReconciler?.stop();
+  issueRunReconciler = null;
   // Close all WebSocket connections
   for (const client of wsClients.keys()) {
     try {

@@ -1750,6 +1750,14 @@ export async function runHostAgent(
     // host 模式由 octodeck 主进程托管（见 permissionMode: 'bypassPermissions'），
     // 相当于显式沙箱，故无条件声明而不再仅限 root —— 非 root 部署也保留语义对齐。
     hostEnv['IS_SANDBOX'] = '1';
+    // P2-1: 让 issue 内嵌的 ask_user MCP 工具能定位当前 run/issue。
+    // messageTaskId/ taskRunId 在 issue 上下文里分别等于 issue.id 与 run.id。
+    if (input.isScheduledTask && input.messageTaskId) {
+      hostEnv['OCTODECK_ISSUE_ID'] = input.messageTaskId;
+    }
+    if (input.taskRunId) {
+      hostEnv['OCTODECK_RUN_ID'] = input.taskRunId;
+    }
 
     // 5b. Host capability preflight — detect external tools & inject env vars
     const capResult = await checkHostCapabilities();

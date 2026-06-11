@@ -10,6 +10,7 @@ import type {
   StreamEvent,
   UserSessionWithUser,
   IssueEvent,
+  IssueAgentRequest,
 } from './types.js';
 import type { RuntimeOwnerCandidateUser } from './runtime-owner.js';
 import {
@@ -142,6 +143,13 @@ export interface WebDeps {
   broadcastStreamEvent?: (chatJid: string, event: StreamEvent) => void;
   /** Broadcast an issue timeline event to users who can access the workspace. */
   broadcastIssueEvent?: (workspaceJid: string, issueId: string, event: IssueEvent, runId?: string | null) => void;
+  /** Broadcast an issue agent request lifecycle event (created/answered/expired). */
+  broadcastIssueRequest?: (
+    workspaceJid: string,
+    issueId: string,
+    request: IssueAgentRequest,
+    eventName?: 'issue_request_created' | 'issue_request_answered' | 'issue_request_expired',
+  ) => void;
   handleSpawnCommand?: (
     chatJid: string,
     message: string,

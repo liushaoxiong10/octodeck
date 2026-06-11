@@ -12,6 +12,7 @@ import {
   recordAgentLinkResources,
   recordAgentLinkConnect,
   touchAgentLinkSeen,
+  touchIssueAgentRunHeartbeat,
 } from '../db.js';
 import {
   HEARTBEAT_INTERVAL_MS,
@@ -46,7 +47,7 @@ import {
 } from './agent-runtime-rpc.js';
 import { AgentLinkSession } from './session.js';
 
-export const LATEST_DAEMON_VERSION = 'octodeck-daemon/1.0.18';
+export const LATEST_DAEMON_VERSION = 'octodeck-daemon/1.0.23';
 
 export interface OnlineLinkInfo {
   linkId: string;
@@ -214,6 +215,29 @@ export function handleFrame(
   touchSeenThrottled(session.linkId);
 
   switch (frame.type) {
+    case 'agent.run.status':
+    case 'agent.run.event':
+    case 'agent.run.result':
+    case 'run.status':
+    case 'run.event':
+    case 'run.result': {
+      // P0-7: any frame carrying a runId implicitly proves the run is alive.
+      const runId = (frame as { runId?: string }).runId;
+      if (runId) {
+        try {
+          touchIssueAgentRunHeartbeat(runId);
+        } catch {
+          /* ignore: the run may not be an issue run */
+        }
+      }
+      // fall through to specific handlers below
+      break;
+    }
+    default:
+      break;
+  }
+
+  switch (frame.type) {
     case 'ping': {
       const meta = sessionMeta.get(session.linkId);
       if (meta) {
@@ -239,6 +263,18 @@ export function handleFrame(
           });
         }
         sessionMeta.set(session.linkId, meta);
+      }
+      // P0-7: every active run reported by daemon implicitly proves liveness;
+      // refresh issue_agent_runs.last_seen_at so the reconciler does not reap
+      // long-running tools that are silent on the stream channel.
+      if (frame.runningRuns && frame.runningRuns.length) {
+        for (const r of frame.runningRuns) {
+          try {
+            touchIssueAgentRunHeartbeat(r.runId);
+          } catch {
+            /* ignore: the run may not be an issue run */
+          }
+        }
       }
       if (frame.resources) {
         try {

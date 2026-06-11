@@ -130,12 +130,18 @@ export interface AgentMdReference {
 
 export interface AgentMdStoreEntry {
   id: string;
+  sourceId: AgentMdStoreSourceId;
+  sourceName: string;
   path: string;
   name: string;
   summary: string;
   category: string;
   size: number;
   sourceUrl: string;
+}
+
+export interface AgentMdStorePreview extends AgentMdStoreEntry {
+  content: string;
 }
 
 interface JsDelivrFlatResponse {
@@ -145,11 +151,32 @@ interface JsDelivrFlatResponse {
   }>;
 }
 
-const AGENCY_AGENTS_REPO_OWNER = 'msitarzewski';
-const AGENCY_AGENTS_REPO_NAME = 'agency-agents';
-const AGENCY_AGENTS_BRANCH = 'main';
-const AGENCY_AGENTS_INDEX_URL = `https://data.jsdelivr.com/v1/package/gh/${AGENCY_AGENTS_REPO_OWNER}/${AGENCY_AGENTS_REPO_NAME}@${AGENCY_AGENTS_BRANCH}/flat`;
-const AGENCY_AGENTS_RAW_BASE_URL = `https://cdn.jsdelivr.net/gh/${AGENCY_AGENTS_REPO_OWNER}/${AGENCY_AGENTS_REPO_NAME}@${AGENCY_AGENTS_BRANCH}`;
+type AgentMdStoreSourceId = 'agency-agents' | 'agency-agents-zh';
+
+interface AgentMdStoreSource {
+  id: AgentMdStoreSourceId;
+  owner: string;
+  repo: string;
+  branch: string;
+  name: string;
+}
+
+const AGENT_MD_STORE_SOURCES: AgentMdStoreSource[] = [
+  {
+    id: 'agency-agents',
+    owner: 'msitarzewski',
+    repo: 'agency-agents',
+    branch: 'main',
+    name: 'msitarzewski/agency-agents',
+  },
+  {
+    id: 'agency-agents-zh',
+    owner: 'jnMetaCode',
+    repo: 'agency-agents-zh',
+    branch: 'main',
+    name: 'jnMetaCode/agency-agents-zh',
+  },
+];
 const AGENT_MD_STORE_CACHE_TTL_MS = 60_000;
 const AGENT_TEAM_GENERATION_SUBMIT_TIMEOUT_MS = 30_000;
 const AGENCY_AGENTS_CATEGORIES = new Set([
@@ -158,6 +185,8 @@ const AGENCY_AGENTS_CATEGORIES = new Set([
   'engineering',
   'finance',
   'game-development',
+  'hr',
+  'legal',
   'marketing',
   'paid-media',
   'product',
@@ -166,6 +195,8 @@ const AGENCY_AGENTS_CATEGORIES = new Set([
   'security',
   'spatial-computing',
   'specialized',
+  'strategy',
+  'supply-chain',
   'support',
   'testing',
 ]);
@@ -228,11 +259,23 @@ async function fetchTextWithTimeout(
   }
 }
 
-function agencyAgentRawUrl(filePath: string): string {
-  return `${AGENCY_AGENTS_RAW_BASE_URL}/${filePath
+function agentMdStoreIndexUrl(source: AgentMdStoreSource): string {
+  return `https://data.jsdelivr.com/v1/package/gh/${source.owner}/${source.repo}@${source.branch}/flat`;
+}
+
+function agentMdStoreRawUrl(source: AgentMdStoreSource, filePath: string): string {
+  return `https://cdn.jsdelivr.net/gh/${source.owner}/${source.repo}@${source.branch}/${filePath
     .split('/')
     .map((part) => encodeURIComponent(part))
     .join('/')}`;
+}
+
+function agentMdStoreSourceUrl(source: AgentMdStoreSource, filePath: string): string {
+  return `https://github.com/${source.owner}/${source.repo}/blob/${source.branch}/${filePath}`;
+}
+
+function agentMdStoreSourceById(sourceId: AgentMdStoreSourceId): AgentMdStoreSource {
+  return AGENT_MD_STORE_SOURCES.find((source) => source.id === sourceId) ?? AGENT_MD_STORE_SOURCES[0];
 }
 
 function parseFrontmatter(content: string): Record<string, string> {
@@ -263,30 +306,47 @@ async function loadAgentMdStoreEntries(): Promise<AgentMdStoreEntry[]> {
   if (agentMdStoreEntriesCache && agentMdStoreEntriesCacheExpiresAt > now) {
     return agentMdStoreEntriesCache;
   }
-  const indexUrl = `${AGENCY_AGENTS_INDEX_URL}?_=${Math.floor(now / AGENT_MD_STORE_CACHE_TTL_MS)}`;
-  const data = await fetchJsonWithTimeout<JsDelivrFlatResponse>(
-    indexUrl,
+  const cacheKey = Math.floor(now / AGENT_MD_STORE_CACHE_TTL_MS);
+  const results = await Promise.allSettled(
+    AGENT_MD_STORE_SOURCES.map(async (source) => {
+      const data = await fetchJsonWithTimeout<JsDelivrFlatResponse>(
+        `${agentMdStoreIndexUrl(source)}?_=${cacheKey}`,
+      );
+      return (data.files ?? [])
+        .map((item) => ({
+          path: (item.name || '').replace(/^\/+/, ''),
+          size: item.size ?? 0,
+        }))
+        .filter((item) => isAgencyAgentMarkdownPath(item.path))
+        .map((item) => {
+          const filePath = item.path;
+          const category = filePath.split('/')[0] || source.repo;
+          return {
+            id: `${source.id}-${filePath.replace(/\.md$/i, '').replace(/[^a-zA-Z0-9]+/g, '-')}`,
+            sourceId: source.id,
+            sourceName: source.name,
+            path: filePath,
+            name: titleFromAgentPath(filePath),
+            summary: `${source.name} / ${category} / ${filePath.split('/').pop()}`,
+            category,
+            size: item.size,
+            sourceUrl: agentMdStoreSourceUrl(source, filePath),
+          } satisfies AgentMdStoreEntry;
+        });
+    }),
   );
-  agentMdStoreEntriesCache = (data.files ?? [])
-    .map((item) => ({
-      path: (item.name || '').replace(/^\/+/, ''),
-      size: item.size ?? 0,
-    }))
-    .filter((item) => isAgencyAgentMarkdownPath(item.path))
-    .map((item) => {
-      const filePath = item.path;
-      const category = filePath.split('/')[0] || 'agency-agents';
-      return {
-        id: filePath.replace(/\.md$/i, '').replace(/[^a-zA-Z0-9]+/g, '-'),
-        path: filePath,
-        name: titleFromAgentPath(filePath),
-        summary: `${category} / ${filePath.split('/').pop()}`,
-        category,
-        size: item.size,
-        sourceUrl: `https://github.com/${AGENCY_AGENTS_REPO_OWNER}/${AGENCY_AGENTS_REPO_NAME}/blob/${AGENCY_AGENTS_BRANCH}/${filePath}`,
-      } satisfies AgentMdStoreEntry;
-    })
-    .sort((a, b) => a.path.localeCompare(b.path));
+  const entries = results.flatMap((result) =>
+    result.status === 'fulfilled' ? result.value : [],
+  );
+  if (entries.length === 0) {
+    const firstError = results.find((result) => result.status === 'rejected');
+    throw firstError?.status === 'rejected'
+      ? firstError.reason
+      : new Error('agent.md 商店暂无可用条目');
+  }
+  agentMdStoreEntriesCache = entries.sort((a, b) =>
+    `${a.sourceName}/${a.path}`.localeCompare(`${b.sourceName}/${b.path}`),
+  );
   agentMdStoreEntriesCacheExpiresAt = now + AGENT_MD_STORE_CACHE_TTL_MS;
   return agentMdStoreEntriesCache;
 }
@@ -298,7 +358,7 @@ function filterAgentMdStoreEntries(
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) return entries;
   return entries.filter((entry) =>
-    [entry.name, entry.path, entry.category]
+    [entry.name, entry.path, entry.category, entry.sourceName]
       .join(' ')
       .toLowerCase()
       .includes(normalizedQuery),
@@ -551,9 +611,11 @@ interface AgentTeamsState {
     input: AgentMdDefinitionInput,
   ) => Promise<AgentMdDefinition>;
   listAgentMdStoreEntries: (query?: string) => Promise<AgentMdStoreEntry[]>;
+  previewAgentMdStoreEntry: (entry: AgentMdStoreEntry) => Promise<AgentMdStorePreview>;
   importAgentMdFromStore: (
     path: string,
     createdByAgentId: string,
+    sourceId?: AgentMdStoreSourceId,
   ) => Promise<AgentMdDefinition>;
   updateAgentMdDefinition: (
     id: string,
@@ -841,15 +903,29 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
     return filterAgentMdStoreEntries(entries, query);
   },
 
-  importAgentMdFromStore: async (path, createdByAgentId) => {
+  previewAgentMdStoreEntry: async (entry) => {
+    const pathToPreview = entry.path.trim();
+    if (!isAgencyAgentMarkdownPath(pathToPreview)) {
+      throw new Error('unsupported agency-agents store path');
+    }
+    const source = agentMdStoreSourceById(entry.sourceId);
+    const content = (await fetchTextWithTimeout(
+      agentMdStoreRawUrl(source, pathToPreview),
+      30_000,
+    )).trim();
+    return { ...entry, content };
+  },
+
+  importAgentMdFromStore: async (path, createdByAgentId, sourceId = 'agency-agents') => {
     set({ saving: true, error: null });
     try {
       const pathToImport = path.trim();
       if (!isAgencyAgentMarkdownPath(pathToImport)) {
         throw new Error('unsupported agency-agents store path');
       }
+      const source = agentMdStoreSourceById(sourceId);
       const content = (await fetchTextWithTimeout(
-        agencyAgentRawUrl(pathToImport),
+        agentMdStoreRawUrl(source, pathToImport),
         30_000,
       )).trim();
       const frontmatter = parseFrontmatter(content);

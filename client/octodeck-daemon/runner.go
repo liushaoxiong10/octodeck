@@ -1052,6 +1052,16 @@ func writeAgentTeamMCPProjectConfig(cfg *Config, cwd string, env ...map[string]s
 }
 
 func writeCodexMCPConfig(cfg *Config, req *AgentRunRequestFrame, cwd string) error {
+	// codex 与 traex 共用 codex 风格的 stdio 调用约定，但应当各自有独立的
+	// HOME 目录，避免 mcp 配置互相覆盖。subDir 由 agent client id 决定：
+	//   - codex / codex-acp -> "codex"
+	//   - traex / traex-acp -> "traex"
+	//   - 其它 (legacy) -> "codex"
+	subDir := "codex"
+	switch req.AgentID {
+	case "traex", "traex-acp":
+		subDir = "traex"
+	}
 	folder := groupFolderFromRunContext(req.Context)
 	if folder == "" && req.Workspace != nil {
 		folder = req.Workspace.Folder
@@ -1059,7 +1069,7 @@ func writeCodexMCPConfig(cfg *Config, req *AgentRunRequestFrame, cwd string) err
 	if folder == "" {
 		folder = filepath.Base(filepath.Clean(cwd))
 	}
-	codexHome := filepath.Join(sessionDir(cfg), safeGroupFolder(folder), "codex")
+	codexHome := filepath.Join(sessionDir(cfg), safeGroupFolder(folder), subDir)
 	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		return err
 	}
@@ -1594,6 +1604,8 @@ func buildEnv(cfg *Config, overrides map[string]string, runContext any) []string
 			"CLAUDE_CONFIG_DIR":  filepath.Join(root, "claude"),
 			"CODEX_HOME":         filepath.Join(root, "codex"),
 			"TRAECLI_CONFIG_DIR": filepath.Join(root, "traecli"),
+			// traex 与 codex 调用约定一致，但应当独立其配置目录避免互覆盖。
+			"TRAEX_HOME": filepath.Join(root, "traex"),
 		}
 		for key, dir := range providerDirs {
 			_ = os.MkdirAll(dir, 0o700)

@@ -19,7 +19,7 @@ function isToolAuditEvent(event: IssueAgentRunEvent): boolean {
   const se = event.payload?.streamEvent;
   if (isRecord(se)) {
     const type = String(se.eventType || '');
-    if (type.startsWith('tool_') || type === 'permission_denied') return true;
+    if (type.startsWith('tool_') || type === 'permission_denied' || type === 'permission_request') return true;
   }
   return isToolAuditEventType(event.event_type) || event.event_type.includes('permission');
 }

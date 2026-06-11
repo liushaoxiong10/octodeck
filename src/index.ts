@@ -98,13 +98,16 @@ import {
   updateAgentContextInfo,
   backfillEmptyAllowlistsForUser,
   createIssue,
+  createIssueAgentRequest,
   createIssueAgentRun,
   createIssueComment,
   createIssueEvent,
   getAgentLinkById,
+  getIssueAgentRunById,
   getIssueById,
   getManagedRepoById,
   listIssues,
+  setIssueAgentRunAwaiting,
   updateIssue,
   updateIssueAgentRun,
   updateIssueLastRun,
@@ -6108,6 +6111,61 @@ async function processTaskIpc(
         afterIssueEventCreated(ev, issue);
 
         return { comment: { id: comment.id, created_at: comment.created_at } };
+      });
+      break;
+
+    case 'issue_ask_user':
+      await handleIpcResultReply(data, sourceGroup, 'issue_ask_user', async () => {
+        const askData = data as Record<string, unknown>;
+        const runId = askData.runId as string | undefined;
+        const issueId = askData.issueId as string | undefined;
+        const question = askData.question as string | undefined;
+        const choices = (askData.choices as string[] | undefined) ?? undefined;
+        if (!runId || !issueId || !question) {
+          return { error: 'Missing runId, issueId or question' };
+        }
+        const issue = getIssueById(issueId);
+        if (!issue) return { error: 'Issue not found' };
+        const callerUserId = sourceGroupEntry?.created_by;
+        const group = getRegisteredGroup(issue.workspace_jid);
+        if (!isAdminHome && group?.created_by !== callerUserId) return { error: 'Issue not found' };
+        const run = getIssueAgentRunById(runId);
+        if (!run || run.issue_id !== issueId) return { error: 'Run not found' };
+
+        const now = new Date().toISOString();
+        const expiresAt = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString();
+        const reqId = `iaq_${crypto.randomBytes(8).toString('hex')}`;
+        const req = createIssueAgentRequest({
+          id: reqId,
+          issue_id: issueId,
+          run_id: runId,
+          kind: 'clarification',
+          title: 'Agent asked a question',
+          summary: question.slice(0, 200),
+          payload: { question, choices: choices ?? [] },
+          status: 'pending',
+          created_at: now,
+          expires_at: expiresAt,
+        });
+        setIssueAgentRunAwaiting(runId, 'clarification', req.id);
+        if (issue.status !== 'waiting_for_human') {
+          updateIssue(issueId, { status: 'waiting_for_human' });
+        }
+        const ev = createIssueEvent({
+          issue_id: issueId,
+          run_id: runId,
+          event_type: 'agent_request_created',
+          actor_id: callerUserId ?? null,
+          actor_type: 'agent',
+          title: 'Agent asked a question',
+          summary: question.slice(0, 200),
+          payload: { requestId: req.id, kind: 'clarification', question, choices: choices ?? [] },
+          reference_id: req.id,
+        });
+        afterIssueEventCreated(ev, issue);
+        const deps = getWebDeps();
+        deps?.broadcastIssueRequest?.(issue.workspace_jid, issueId, req, 'issue_request_created');
+        return { requestId: req.id };
       });
       break;
 

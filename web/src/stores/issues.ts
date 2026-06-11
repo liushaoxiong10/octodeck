@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
 
-export type IssueStatus = 'todo' | 'in_progress' | 'review' | 'done' | 'canceled';
+export type IssueStatus = 'todo' | 'in_progress' | 'waiting_for_human' | 'review' | 'done' | 'canceled';
 export type IssuePriority = 'low' | 'medium' | 'high' | 'urgent';
 export type IssueViewMode = 'board' | 'list';
 export type IssueSortField = 'status' | 'updated' | 'created' | 'priority' | 'due_date';
@@ -37,12 +37,46 @@ export interface WorkspaceIssue {
 export interface IssueAgentRun {
   id: string;
   issue_id: string;
-  status: 'queued' | 'running' | 'success' | 'error' | 'canceled';
+  status:
+    | 'queued'
+    | 'running'
+    | 'awaiting_input'
+    | 'paused'
+    | 'success'
+    | 'error'
+    | 'canceled'
+    | 'lost';
   result?: string | null;
   error?: string | null;
+  session_id?: string | null;
+  parent_run_id?: string | null;
+  awaiting_kind?: 'permission' | 'clarification' | null;
+  awaiting_payload_id?: string | null;
+  last_seen_at?: string | null;
+  heartbeat_deadline_at?: string | null;
   created_at: string;
   run_started_at?: string | null;
   run_completed_at?: string | null;
+}
+
+export interface IssueAgentRequest {
+  id: string;
+  issue_id: string;
+  run_id: string;
+  kind: 'permission' | 'clarification';
+  correlation_id?: string | null;
+  title?: string | null;
+  summary?: string | null;
+  detail?: string | null;
+  payload?: Record<string, unknown> | null;
+  status: 'pending' | 'answered' | 'expired' | 'canceled';
+  decision?: 'approve' | 'reject' | 'reply' | null;
+  answer?: string | null;
+  answered_at?: string | null;
+  answered_by?: string | null;
+  consumed_at?: string | null;
+  expires_at?: string | null;
+  created_at: string;
 }
 
 export interface IssueAgentRunEvent {
@@ -161,6 +195,8 @@ interface IssuesState {
   eventsByIssue: Record<string, IssueEvent[]>;
   // Comments by issue id
   commentsByIssue: Record<string, IssueComment[]>;
+  // Pending / answered agent requests (permission / clarification) by issue id
+  requestsByIssue: Record<string, IssueAgentRequest[]>;
   setQuery: (query: string) => void;
   setView: (view: IssueViewMode) => void;
   setFilters: (filters: Partial<IssueFilters>) => void;
@@ -184,6 +220,15 @@ interface IssuesState {
   createIssueComment: (id: string, body: string) => Promise<IssueComment | null>;
   updateIssueComment: (issueId: string, commentId: string, body: string) => Promise<IssueComment | null>;
   deleteIssueComment: (issueId: string, commentId: string) => Promise<void>;
+  // Agent requests
+  loadIssueRequests: (id: string, opts?: { status?: IssueAgentRequest['status'] }) => Promise<IssueAgentRequest[]>;
+  answerIssueRequest: (
+    issueId: string,
+    runId: string,
+    requestId: string,
+    payload: { decision: 'approve' | 'reject' | 'reply'; message?: string; answer?: string },
+  ) => Promise<IssueAgentRequest | null>;
+  upsertIssueRequest: (issueId: string, request: IssueAgentRequest) => void;
 }
 
 const defaultFilters: IssueFilters = {
@@ -228,6 +273,7 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
   issueById: {},
   eventsByIssue: {},
   commentsByIssue: {},
+  requestsByIssue: {},
 
   setQuery: (query) => set({ query }),
   setView: (view) => {
@@ -292,8 +338,30 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
   },
 
   deleteIssue: async (id) => {
-    await api.delete(`/api/issues/${encodeURIComponent(id)}`);
-    set((state) => ({ issues: state.issues.filter((issue) => issue.id !== id) }));
+    try {
+      await api.delete(`/api/issues/${encodeURIComponent(id)}`);
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    }
+    set((state) => {
+      const { [id]: _removedIssue, ...issueById } = state.issueById;
+      const { [id]: _removedRuns, ...runsByIssue } = state.runsByIssue;
+      const { [id]: _removedAttachments, ...attachmentsByIssue } = state.attachmentsByIssue;
+      const { [id]: _removedEvents, ...eventsByIssue } = state.eventsByIssue;
+      const { [id]: _removedComments, ...commentsByIssue } = state.commentsByIssue;
+      const { [id]: _removedRequests, ...requestsByIssue } = state.requestsByIssue;
+      return {
+        issues: state.issues.filter((issue) => issue.id !== id),
+        total: Math.max(0, state.total - 1),
+        issueById,
+        runsByIssue,
+        attachmentsByIssue,
+        eventsByIssue,
+        commentsByIssue,
+        requestsByIssue,
+      };
+    });
   },
 
   runIssueAgent: async (id) => {
@@ -511,5 +579,53 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
       },
     }));
     await get().loadIssueEvents(issueId);
+  },
+
+  loadIssueRequests: async (id, opts = {}) => {
+    try {
+      const url = new URL(
+        `/api/issues/${encodeURIComponent(id)}/requests`,
+        window.location.origin,
+      );
+      if (opts.status) url.searchParams.set('status', opts.status);
+      const data = await api.get<{ requests: IssueAgentRequest[] }>(
+        url.pathname + url.search,
+      );
+      set((state) => ({
+        requestsByIssue: { ...state.requestsByIssue, [id]: data.requests },
+      }));
+      return data.requests;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return [];
+    }
+  },
+
+  answerIssueRequest: async (issueId, runId, requestId, payload) => {
+    try {
+      const data = await api.post<{ request: IssueAgentRequest }>(
+        `/api/issues/${encodeURIComponent(issueId)}/runs/${encodeURIComponent(runId)}/decision`,
+        { request_id: requestId, ...payload },
+      );
+      get().upsertIssueRequest(issueId, data.request);
+      await get().loadIssueRuns(issueId);
+      return data.request;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  },
+
+  upsertIssueRequest: (issueId, request) => {
+    set((state) => {
+      const existing = state.requestsByIssue[issueId] ?? [];
+      const filtered = existing.filter((r) => r.id !== request.id);
+      return {
+        requestsByIssue: {
+          ...state.requestsByIssue,
+          [issueId]: [request, ...filtered],
+        },
+      };
+    });
   },
 }));

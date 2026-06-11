@@ -39,6 +39,7 @@ import { showToast } from '@/utils/toast';
 import { wsManager } from '@/api/ws';
 import {
   useIssuesStore,
+  type IssueAgentRequest,
   type IssueAgentRun,
   type IssueEvent,
   type WorkspaceIssue,
@@ -54,6 +55,7 @@ import {
   IssueRunLivePanel,
   RunHistoryRow,
 } from '@/components/issues/IssueRunLivePanel';
+import { AgentRequestCard } from '@/components/issues/AgentRequestCard';
 import { IssueAttachmentsGrid } from '@/components/issues/IssueAttachmentsGrid';
 import {
   formatOptionalDate,
@@ -107,12 +109,15 @@ export function IssueDetailPage() {
   const attachmentsByIssue = useIssuesStore((s) => s.attachmentsByIssue);
   const eventsByIssue = useIssuesStore((s) => s.eventsByIssue);
   const commentsByIssue = useIssuesStore((s) => s.commentsByIssue);
+  const requestsByIssue = useIssuesStore((s) => s.requestsByIssue);
   const loadIssueById = useIssuesStore((s) => s.loadIssueById);
   const loadIssueEvents = useIssuesStore((s) => s.loadIssueEvents);
   const loadIssueRuns = useIssuesStore((s) => s.loadIssueRuns);
   const loadIssueRunEvents = useIssuesStore((s) => s.loadIssueRunEvents);
   const loadIssueAttachments = useIssuesStore((s) => s.loadIssueAttachments);
   const loadIssueComments = useIssuesStore((s) => s.loadIssueComments);
+  const loadIssueRequests = useIssuesStore((s) => s.loadIssueRequests);
+  const upsertIssueRequest = useIssuesStore((s) => s.upsertIssueRequest);
   const updateIssue = useIssuesStore((s) => s.updateIssue);
   const deleteIssue = useIssuesStore((s) => s.deleteIssue);
   const runIssueAgent = useIssuesStore((s) => s.runIssueAgent);
@@ -141,6 +146,15 @@ export function IssueDetailPage() {
   const attachments = attachmentsByIssue[issueId] ?? [];
   const events: IssueEvent[] = eventsByIssue[issueId] ?? [];
   const comments = commentsByIssue[issueId] ?? [];
+  const requests: IssueAgentRequest[] = requestsByIssue[issueId] ?? [];
+  const pendingRequests = useMemo(
+    () => requests.filter((r) => r.status === 'pending'),
+    [requests],
+  );
+  const pendingClarification = useMemo(
+    () => pendingRequests.find((r) => r.kind === 'clarification') ?? null,
+    [pendingRequests],
+  );
 
   // --- UI state ---
   const [loading, setLoading] = useState(true);
@@ -182,6 +196,7 @@ export function IssueDetailPage() {
           loadIssueRuns(issueId),
           loadIssueAttachments(issueId),
           loadIssueComments(issueId),
+          loadIssueRequests(issueId),
           fetchUsers({ status: 'active' }).catch(() => {}),
         ] as const);
         if (cancelled) return;
@@ -252,9 +267,27 @@ export function IssueDetailPage() {
       if (evt.event_type.startsWith('comment_')) {
         loadIssueComments(issueId);
       }
+      // If agent_request_* event, refresh issue (status may have changed)
+      if (evt.event_type.startsWith('agent_request_')) {
+        loadIssueById(issueId);
+      }
     });
+    const handleRequest = (data: any) => {
+      if (!data || data.issueId !== issueId) return;
+      const req: IssueAgentRequest | undefined = data.request;
+      if (!req) return;
+      upsertIssueRequest(issueId, req);
+      loadIssueById(issueId);
+      loadIssueRuns(issueId);
+    };
+    const unsubCreated = wsManager.on('issue_request_created', handleRequest);
+    const unsubAnswered = wsManager.on('issue_request_answered', handleRequest);
+    const unsubExpired = wsManager.on('issue_request_expired', handleRequest);
     return () => {
       unsub && unsub();
+      unsubCreated && unsubCreated();
+      unsubAnswered && unsubAnswered();
+      unsubExpired && unsubExpired();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [issueId]);
@@ -363,6 +396,8 @@ export function IssueDetailPage() {
       await deleteIssue(issue.id);
       showToast('Issue deleted');
       navigate('/issues', { replace: true });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to delete issue');
     } finally {
       setDeleting(false);
     }
@@ -561,6 +596,15 @@ export function IssueDetailPage() {
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_max-w-sm] xl:grid-cols-[minmax(0,2fr)_minmax(320px,380px)]">
           {/* LEFT / MAIN column */}
           <div className="space-y-4 min-w-0">
+            {/* Pending agent requests (permission / clarification) */}
+            {pendingRequests.length > 0 && (
+              <section className="space-y-2">
+                {pendingRequests.map((req) => (
+                  <AgentRequestCard key={req.id} issueId={issue.id} request={req} />
+                ))}
+              </section>
+            )}
+
             {/* Description section */}
             <section className="rounded-xl border bg-card p-4 shadow-sm">
               <div className="mb-3 flex items-center justify-between">
@@ -661,7 +705,16 @@ export function IssueDetailPage() {
             </section>
 
             {/* Comment composer */}
-            <IssueCommentComposer onSubmit={handleSubmitComment} />
+            <IssueCommentComposer
+              onSubmit={handleSubmitComment}
+              agentQuestion={
+                pendingClarification
+                  ? (((pendingClarification.payload as Record<string, unknown> | null)?.question as string | undefined) ??
+                    pendingClarification.summary ??
+                    null)
+                  : null
+              }
+            />
           </div>
 
           {/* RIGHT column (desktop) or tab (mobile) */}

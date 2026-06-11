@@ -244,7 +244,12 @@ export function InstallSkillDialog({
 
   const onlineDevices = devices.filter((device) => device.online);
   const onlineDeviceIds = new Set(onlineDevices.map((device) => device.id));
-  const workspaceAgents = agents.filter((agent) => agent.deviceLinkId && onlineDeviceIds.has(agent.deviceLinkId));
+  const workspaceAgents = agents.filter(
+    (agent) =>
+      agent.deviceLinkId
+      && agent.agentClientId
+      && onlineDeviceIds.has(agent.deviceLinkId),
+  );
 
   const getWorkspaceDisplayName = (agent: CustomBackendDef): string => {
     if (agent.workdirMode === 'custom' && agent.workdir) {

@@ -50,6 +50,7 @@ import {
   ImContextBinding,
   IssueAgentRun,
   IssueAgentRunEvent,
+  IssueAgentRequest,
   IssueAttachment,
   IssueComment,
   IssueEvent,
@@ -462,6 +463,31 @@ function initializeSqliteDatabase(
     );
     CREATE INDEX IF NOT EXISTS idx_issue_run_events_run ON issue_agent_run_events(run_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_issue_run_events_issue ON issue_agent_run_events(issue_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS issue_agent_requests (
+      id TEXT PRIMARY KEY,
+      issue_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      correlation_id TEXT,
+      title TEXT,
+      summary TEXT,
+      detail TEXT,
+      payload TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      decision TEXT,
+      answer TEXT,
+      answered_at TEXT,
+      answered_by TEXT,
+      consumed_at TEXT,
+      expires_at TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (issue_id) REFERENCES issues(id),
+      FOREIGN KEY (run_id) REFERENCES issue_agent_runs(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_iar_run_status ON issue_agent_requests(run_id, status);
+    CREATE INDEX IF NOT EXISTS idx_iar_issue_status ON issue_agent_requests(issue_id, status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_iar_correlation ON issue_agent_requests(correlation_id);
 
     CREATE TABLE IF NOT EXISTS issue_attachments (
       id TEXT PRIMARY KEY,
@@ -1248,6 +1274,21 @@ function initializeSqliteDatabase(
   ensureColumn('issue_agent_run_events', 'summary', 'TEXT');
   ensureColumn('issue_agent_run_events', 'detail', 'TEXT');
   ensureColumn('issue_agent_run_events', 'payload', 'TEXT');
+  ensureColumn('issue_agent_runs', 'last_seen_at', 'TEXT');
+  ensureColumn('issue_agent_runs', 'heartbeat_deadline_at', 'TEXT');
+  ensureColumn('issue_agent_runs', 'awaiting_kind', 'TEXT');
+  ensureColumn('issue_agent_runs', 'awaiting_payload_id', 'TEXT');
+  ensureColumn('issue_agent_runs', 'parent_run_id', 'TEXT');
+  try {
+    db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_issue_agent_runs_status_seen ON issue_agent_runs(status, last_seen_at)',
+    );
+    db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_issue_agent_runs_parent ON issue_agent_runs(parent_run_id)',
+    );
+  } catch {
+    // ignore: idempotent index creation
+  }
   ensureColumn('issue_attachments', 'filename', 'TEXT');
   ensureColumn('issue_attachments', 'mime_type', 'TEXT');
   ensureColumn('issue_attachments', 'size_bytes', 'INTEGER NOT NULL DEFAULT 0');
@@ -4276,8 +4317,7 @@ export function listAutoDrivableIssues(limit = 20): WorkspaceIssue[] {
       `
       SELECT i.*
       FROM issues i
-      WHERE i.status = 'todo'
-        AND i.closed_at IS NULL
+      WHERE i.closed_at IS NULL
         AND (
           i.execution_node IS NOT NULL OR
           i.agent_link_id IS NOT NULL OR
@@ -4286,7 +4326,16 @@ export function listAutoDrivableIssues(limit = 20): WorkspaceIssue[] {
         )
         AND NOT EXISTS (
           SELECT 1 FROM issue_agent_runs r
-          WHERE r.issue_id = i.id AND r.status IN ('queued', 'running')
+          WHERE r.issue_id = i.id AND r.status IN ('queued', 'running', 'awaiting_input')
+        )
+        AND (
+          i.status = 'todo'
+          OR (
+            i.status = 'waiting_for_human' AND EXISTS (
+              SELECT 1 FROM issue_agent_requests q
+              WHERE q.issue_id = i.id AND q.status = 'answered' AND q.consumed_at IS NULL
+            )
+          )
         )
       ORDER BY
         CASE i.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC,
@@ -4374,6 +4423,8 @@ export function deleteIssue(id: string): void {
     `DELETE FROM issue_event_notifications WHERE event_id IN (SELECT id FROM issue_events WHERE issue_id = ?)`,
   ).run(id);
   db.prepare('DELETE FROM issue_events WHERE issue_id = ?').run(id);
+  db.prepare('DELETE FROM issue_agent_requests WHERE issue_id = ?').run(id);
+  db.prepare('DELETE FROM issue_agent_run_events WHERE issue_id = ?').run(id);
   db.prepare('DELETE FROM issue_agent_runs WHERE issue_id = ?').run(id);
   db.prepare('DELETE FROM issues WHERE id = ?').run(id);
 }
@@ -4386,8 +4437,9 @@ export function createIssueAgentRun(
     INSERT INTO issue_agent_runs (
       id, issue_id, workspace_jid, workspace_folder, agent_link_id, agent_client_id,
       execution_node, backend, selected_skills, status, result, error, session_id,
+      parent_run_id, awaiting_kind, awaiting_payload_id, last_seen_at, heartbeat_deadline_at,
       created_by, created_at, run_started_at, run_completed_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
   ).run(
     run.id,
@@ -4403,6 +4455,11 @@ export function createIssueAgentRun(
     run.result == null ? null : toUtf8String(run.result, 'issue_agent_runs.result'),
     run.error == null ? null : toUtf8String(run.error, 'issue_agent_runs.error'),
     run.session_id ?? null,
+    run.parent_run_id ?? null,
+    run.awaiting_kind ?? null,
+    run.awaiting_payload_id ?? null,
+    run.last_seen_at ?? null,
+    run.heartbeat_deadline_at ?? null,
     run.created_by,
     run.created_at,
     run.run_started_at ?? null,
@@ -4428,7 +4485,20 @@ export function listIssueAgentRuns(issueId: string): IssueAgentRun[] {
 export function updateIssueAgentRun(
   id: string,
   updates: Partial<
-    Pick<IssueAgentRun, 'status' | 'result' | 'error' | 'session_id' | 'run_started_at' | 'run_completed_at'>
+    Pick<
+      IssueAgentRun,
+      | 'status'
+      | 'result'
+      | 'error'
+      | 'session_id'
+      | 'parent_run_id'
+      | 'awaiting_kind'
+      | 'awaiting_payload_id'
+      | 'last_seen_at'
+      | 'heartbeat_deadline_at'
+      | 'run_started_at'
+      | 'run_completed_at'
+    >
   >,
 ): void {
   const fields: string[] = [];
@@ -4443,6 +4513,11 @@ export function updateIssueAgentRun(
   if (updates.error !== undefined)
     add('error', updates.error == null ? null : toUtf8String(updates.error, 'issue_agent_runs.error'));
   if (updates.session_id !== undefined) add('session_id', updates.session_id);
+  if (updates.parent_run_id !== undefined) add('parent_run_id', updates.parent_run_id);
+  if (updates.awaiting_kind !== undefined) add('awaiting_kind', updates.awaiting_kind);
+  if (updates.awaiting_payload_id !== undefined) add('awaiting_payload_id', updates.awaiting_payload_id);
+  if (updates.last_seen_at !== undefined) add('last_seen_at', updates.last_seen_at);
+  if (updates.heartbeat_deadline_at !== undefined) add('heartbeat_deadline_at', updates.heartbeat_deadline_at);
   if (updates.run_started_at !== undefined) add('run_started_at', updates.run_started_at);
   if (updates.run_completed_at !== undefined) add('run_completed_at', updates.run_completed_at);
   if (fields.length === 0) return;
@@ -4480,6 +4555,206 @@ export function listIssueAgentRunEvents(runId: string): IssueAgentRunEvent[] {
     .prepare('SELECT * FROM issue_agent_run_events WHERE run_id = ? ORDER BY created_at ASC')
     .all(runId)
     .map(mapIssueRunEventRow);
+}
+
+// --- Issue agent run heartbeat / awaiting helpers (P0) ---
+
+const HEARTBEAT_DEADLINE_MS_DEFAULT = 90_000;
+
+export function touchIssueAgentRunHeartbeat(
+  runId: string,
+  opts: { now?: string; deadlineMs?: number } = {},
+): void {
+  const now = opts.now ?? new Date().toISOString();
+  const deadlineMs = opts.deadlineMs ?? HEARTBEAT_DEADLINE_MS_DEFAULT;
+  const deadline = new Date(Date.now() + deadlineMs).toISOString();
+  db.prepare(
+    `UPDATE issue_agent_runs
+       SET last_seen_at = ?, heartbeat_deadline_at = ?
+     WHERE id = ?
+       AND status IN ('queued', 'running', 'awaiting_input', 'paused')`,
+  ).run(now, deadline, runId);
+}
+
+export function markIssueAgentRunLost(runId: string, reason: string): void {
+  db.prepare(
+    `UPDATE issue_agent_runs
+       SET status = 'lost', error = ?
+     WHERE id = ? AND status IN ('queued', 'running')`,
+  ).run(reason, runId);
+}
+
+export function findStaleRunningRuns(now: string, staleMs: number): IssueAgentRun[] {
+  const threshold = new Date(new Date(now).getTime() - staleMs).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT * FROM issue_agent_runs
+        WHERE status IN ('running', 'queued')
+          AND (last_seen_at IS NULL OR last_seen_at < ?)
+          AND created_at < ?`,
+    )
+    .all(threshold, threshold);
+  return rows.map(mapIssueRunRow);
+}
+
+export function setIssueAgentRunAwaiting(
+  runId: string,
+  kind: 'permission' | 'clarification',
+  payloadId: string,
+): void {
+  db.prepare(
+    `UPDATE issue_agent_runs
+       SET status = 'awaiting_input', awaiting_kind = ?, awaiting_payload_id = ?
+     WHERE id = ?`,
+  ).run(kind, payloadId, runId);
+}
+
+export function clearIssueAgentRunAwaiting(runId: string): void {
+  db.prepare(
+    `UPDATE issue_agent_runs
+       SET awaiting_kind = NULL, awaiting_payload_id = NULL
+     WHERE id = ?`,
+  ).run(runId);
+}
+
+// --- Issue agent requests (P1) ---
+
+function mapIssueAgentRequestRow(row: unknown): IssueAgentRequest {
+  const r = row as Omit<IssueAgentRequest, 'payload'> & { payload?: string | null };
+  let payload: Record<string, unknown> | null = null;
+  if (r.payload) {
+    try {
+      const parsed = JSON.parse(r.payload);
+      payload = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { value: parsed };
+    } catch {
+      payload = { raw: r.payload };
+    }
+  }
+  return {
+    ...r,
+    title: toUtf8StringOrNull(r.title),
+    summary: toUtf8StringOrNull(r.summary),
+    detail: toUtf8StringOrNull(r.detail),
+    answer: toUtf8StringOrNull(r.answer),
+    payload,
+  };
+}
+
+export function createIssueAgentRequest(
+  input: Omit<IssueAgentRequest, 'payload'> & { payload?: Record<string, unknown> | null },
+): IssueAgentRequest {
+  db.prepare(
+    `INSERT INTO issue_agent_requests (
+        id, issue_id, run_id, kind, correlation_id, title, summary, detail, payload,
+        status, decision, answer, answered_at, answered_by, consumed_at, expires_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.id,
+    input.issue_id,
+    input.run_id,
+    input.kind,
+    input.correlation_id ?? null,
+    input.title == null ? null : toUtf8String(input.title, 'issue_agent_requests.title'),
+    input.summary == null ? null : toUtf8String(input.summary, 'issue_agent_requests.summary'),
+    input.detail == null ? null : toUtf8String(input.detail, 'issue_agent_requests.detail'),
+    input.payload == null ? null : JSON.stringify(input.payload),
+    input.status,
+    input.decision ?? null,
+    input.answer == null ? null : toUtf8String(input.answer, 'issue_agent_requests.answer'),
+    input.answered_at ?? null,
+    input.answered_by ?? null,
+    input.consumed_at ?? null,
+    input.expires_at ?? null,
+    input.created_at,
+  );
+  const created = getIssueAgentRequestById(input.id);
+  if (!created) throw new Error('Failed to create issue agent request');
+  return created;
+}
+
+export function getIssueAgentRequestById(id: string): IssueAgentRequest | undefined {
+  const row = db.prepare('SELECT * FROM issue_agent_requests WHERE id = ?').get(id);
+  return row ? mapIssueAgentRequestRow(row) : undefined;
+}
+
+export function getIssueAgentRequestByCorrelationId(
+  correlationId: string,
+): IssueAgentRequest | undefined {
+  const row = db
+    .prepare('SELECT * FROM issue_agent_requests WHERE correlation_id = ? ORDER BY created_at DESC')
+    .get(correlationId);
+  return row ? mapIssueAgentRequestRow(row) : undefined;
+}
+
+export function listIssueAgentRequests(
+  issueId: string,
+  opts: { status?: IssueAgentRequest['status']; runId?: string } = {},
+): IssueAgentRequest[] {
+  const clauses: string[] = ['issue_id = ?'];
+  const params: unknown[] = [issueId];
+  if (opts.status) {
+    clauses.push('status = ?');
+    params.push(opts.status);
+  }
+  if (opts.runId) {
+    clauses.push('run_id = ?');
+    params.push(opts.runId);
+  }
+  const rows = db
+    .prepare(
+      `SELECT * FROM issue_agent_requests WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`,
+    )
+    .all(...params);
+  return rows.map(mapIssueAgentRequestRow);
+}
+
+export function answerIssueAgentRequest(
+  id: string,
+  args: {
+    decision: NonNullable<IssueAgentRequest['decision']>;
+    answer?: string | null;
+    answered_by?: string | null;
+    now: string;
+  },
+): IssueAgentRequest | undefined {
+  db.prepare(
+    `UPDATE issue_agent_requests
+       SET status = 'answered',
+           decision = ?,
+           answer = ?,
+           answered_by = ?,
+           answered_at = ?
+     WHERE id = ? AND status = 'pending'`,
+  ).run(
+    args.decision,
+    args.answer == null ? null : toUtf8String(args.answer, 'issue_agent_requests.answer'),
+    args.answered_by ?? null,
+    args.now,
+    id,
+  );
+  return getIssueAgentRequestById(id);
+}
+
+export function consumeIssueAgentRequest(id: string, now: string): void {
+  db.prepare(
+    `UPDATE issue_agent_requests SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL`,
+  ).run(now, id);
+}
+
+export function expireIssueAgentRequests(now: string): IssueAgentRequest[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM issue_agent_requests
+        WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?`,
+    )
+    .all(now) as Array<{ id: string }>;
+  if (rows.length === 0) return [];
+  const ids = rows.map((row) => row.id);
+  const placeholders = ids.map(() => '?').join(',');
+  db.prepare(`UPDATE issue_agent_requests SET status = 'expired' WHERE id IN (${placeholders})`).run(
+    ...ids,
+  );
+  return rows.map(mapIssueAgentRequestRow);
 }
 
 export function getLastCompletedIssueRunAt(issueId: string, excludeRunId?: string): string | null {

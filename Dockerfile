@@ -64,15 +64,35 @@ COPY container/agent-runner/ ./container/agent-runner/
 RUN npm run build:all
 
 # -----------------------------------------------------------------------------
-# Stage 2b: Go daemon builder - Compile octodeck-daemon with go.mod version
+# Stage 2b: Go daemon builder - Cross-compile octodeck-daemon for 4 platforms
+#   支持的平台（与 src/routes/daemon.ts SUPPORTED_PLATFORMS 保持一致）:
+#     darwin/amd64, darwin/arm64, linux/amd64, linux/arm64
+#   产物固定输出到 /app/client/octodeck-daemon/dist/octodeck-daemon-{os}-{arch}
 # -----------------------------------------------------------------------------
-FROM golang:1.21-bookworm AS daemon-builder
+FROM golang:1.23-bookworm AS daemon-builder
 
-WORKDIR /app/client/octodeck-daemon
+WORKDIR /src
 
-# Build Go daemon
+# Prefetch modules for better layer cache
+COPY client/octodeck-daemon/go.mod client/octodeck-daemon/go.sum ./
+RUN GOPROXY=https://goproxy.cn,direct go mod download
+
+# Copy source
 COPY client/octodeck-daemon/ ./
-RUN GOPROXY=https://goproxy.cn,direct go build -o octodeck-daemon .
+
+# Cross-compile all four targets (CGO_ENABLED=0 = pure static binaries, compatible with alpine/slim)
+RUN set -eux; \
+    mkdir -p /out/dist; \
+    for pair in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do \
+      goos="${pair%/*}"; \
+      goarch="${pair#*/}"; \
+      out="/out/dist/octodeck-daemon-${goos}-${goarch}"; \
+      CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+        go build -trimpath -ldflags="-s -w" -o "${out}" .; \
+    done; \
+    # 为旧路由 /api/daemon/octodeck-daemon-bin (无后缀) 准备一个当前平台的默认副本
+    cp /out/dist/octodeck-daemon-linux-amd64 /out/octodeck-daemon; \
+    ls -lh /out /out/dist
 
 # -----------------------------------------------------------------------------
 # Stage 3: Production - Minimal runtime image
@@ -116,8 +136,9 @@ COPY --from=builder /app/container/agent-runner/package.json ./container/agent-r
 # Copy config directory (mount allowlist etc.)
 COPY --from=builder /app/config ./config
 
-# Copy Go daemon binary
-COPY --from=daemon-builder /app/client/octodeck-daemon/octodeck-daemon ./client/octodeck-daemon/octodeck-daemon
+# Copy Go daemon binaries (4 platforms + legacy single-binary fallback)
+COPY --from=daemon-builder /out/octodeck-daemon ./client/octodeck-daemon/octodeck-daemon
+COPY --from=daemon-builder /out/dist/         ./client/octodeck-daemon/dist/
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \

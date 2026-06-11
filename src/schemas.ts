@@ -114,7 +114,7 @@ export const IssueCreateSchema = z.object({
   title: z.string().min(1).max(200),
   description: z.string().max(20000).optional().default(''),
   status: z
-    .enum(['todo', 'in_progress', 'review', 'done', 'canceled'])
+    .enum(['todo', 'in_progress', 'waiting_for_human', 'review', 'done', 'canceled'])
     .optional()
     .default('todo'),
   priority: z
@@ -136,7 +136,7 @@ export const IssueCreateSchema = z.object({
 export const IssuePatchSchema = z.object({
   title: z.string().min(1).max(200).optional(),
   description: z.string().max(20000).optional(),
-  status: z.enum(['todo', 'in_progress', 'review', 'done', 'canceled']).optional(),
+  status: z.enum(['todo', 'in_progress', 'waiting_for_human', 'review', 'done', 'canceled']).optional(),
   priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
   assignee_user_id: z.string().nullable().optional(),
   due_date: z.string().nullable().optional(),

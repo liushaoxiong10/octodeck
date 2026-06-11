@@ -12,8 +12,11 @@ import {
   isHostExecutionGroup,
 } from '../web-context.js';
 import {
+  answerIssueAgentRequest,
+  clearIssueAgentRunAwaiting,
   createIssue,
   createIssueAttachment,
+  createIssueAgentRequest,
   createIssueAgentRun,
   createIssueAgentRunEvent,
   createIssueComment,
@@ -21,6 +24,7 @@ import {
   deleteIssueAttachment,
   deleteIssue,
   getAgentLinkById,
+  getIssueAgentRequestById,
   getIssueAttachmentById,
   getIssueById,
   getIssueCommentById,
@@ -28,6 +32,7 @@ import {
   getManagedRepoById,
   getRegisteredGroup,
   getUserHomeGroup,
+  listIssueAgentRequests,
   listIssueAgentRuns,
   listIssueAgentRunEvents,
   listIssueAttachments,
@@ -42,6 +47,7 @@ import {
 } from '../db.js';
 import { runIssueAgent } from '../issue-runner.js';
 import { afterIssueEventCreated } from '../issue-notifier.js';
+import { getSession as getAgentLinkSession, getOnlineMeta as getAgentLinkOnlineMeta } from '../agent-link/registry.js';
 
 const issueRoutes = new Hono<{ Variables: Variables }>();
 
@@ -577,6 +583,138 @@ issueRoutes.post('/:id/runs/:runId/cancel', authMiddleware, async (c) => {
   return c.json({ run: updatedRun });
 });
 
+// --- Agent requests (P1/P2) ---
+
+issueRoutes.get('/:id/requests', authMiddleware, async (c) => {
+  const issue = getIssueById(c.req.param('id'));
+  const authUser = c.get('user') as AuthUser;
+  if (!issue || !ensureIssueAccess(issue, authUser)) return c.json({ error: 'Issue not found' }, 404);
+  const statusParam = c.req.query('status');
+  const status =
+    statusParam === 'pending' ||
+    statusParam === 'answered' ||
+    statusParam === 'expired' ||
+    statusParam === 'canceled'
+      ? statusParam
+      : undefined;
+  const requests = listIssueAgentRequests(issue.id, { status });
+  return c.json({ requests });
+});
+
+issueRoutes.post('/:id/runs/:runId/decision', authMiddleware, async (c) => {
+  const issue = getIssueById(c.req.param('id'));
+  const authUser = c.get('user') as AuthUser;
+  if (!issue || !ensureIssueAccess(issue, authUser)) return c.json({ error: 'Issue not found' }, 404);
+
+  const run = listIssueAgentRuns(issue.id).find((item) => item.id === c.req.param('runId'));
+  if (!run) return c.json({ error: 'Run not found' }, 404);
+
+  const body = (await c.req.json().catch(() => ({}))) as {
+    request_id?: string;
+    decision?: string;
+    message?: string;
+    answer?: string;
+  };
+  if (!body.request_id || (body.decision !== 'approve' && body.decision !== 'reject' && body.decision !== 'reply')) {
+    return c.json({ error: 'Invalid request body' }, 400);
+  }
+  const reqRow = getIssueAgentRequestById(body.request_id);
+  if (!reqRow || reqRow.issue_id !== issue.id || reqRow.run_id !== run.id) {
+    return c.json({ error: 'Request not found' }, 404);
+  }
+  if (reqRow.status !== 'pending') {
+    return c.json({ error: `Request already ${reqRow.status}` }, 409);
+  }
+
+  const now = new Date().toISOString();
+  const updated = answerIssueAgentRequest(reqRow.id, {
+    decision: body.decision,
+    answer: body.answer ?? body.message ?? null,
+    answered_by: authUser.id,
+    now,
+  });
+  if (!updated) return c.json({ error: 'Failed to record decision' }, 500);
+
+  // Permission decisions also need to be sent back to the daemon so the agent
+  // process can resume immediately. Clarification answers are picked up by the
+  // IssueAutoDriver on the next tick (it inherits session_id and prompt-injects
+  // the Q&A).
+  if (reqRow.kind === 'permission') {
+    const linkId = run.agent_link_id ?? issue.agent_link_id ?? null;
+    const session = linkId ? getAgentLinkSession(linkId) : undefined;
+    const meta = linkId ? getAgentLinkOnlineMeta(linkId) : undefined;
+    const capable =
+      !meta?.capabilities ||
+      meta.capabilities.length === 0 ||
+      meta.capabilities.includes('permission.decision') ||
+      meta.capabilities.includes('permission_decision');
+    if (session && reqRow.correlation_id) {
+      try {
+        session.send({
+          type: 'agent.permission.decision',
+          runId: run.id,
+          requestId: reqRow.correlation_id,
+          decision: body.decision === 'approve' ? 'approve' : 'reject',
+          message: body.message,
+        });
+        if (!capable) {
+          // Best-effort: older daemons might silently ignore; surface a hint
+          // in the timeline so operators know to upgrade the daemon.
+          afterIssueEventCreated(
+            createIssueEvent({
+              issue_id: issue.id,
+              run_id: run.id,
+              event_type: 'agent_request_answered',
+              actor_id: authUser.id,
+              actor_type: 'system',
+              title: 'Daemon capability missing',
+              summary: 'Daemon did not advertise permission_decision capability; decision sent best-effort',
+              payload: { requestId: reqRow.id, capabilities: meta?.capabilities ?? [] },
+            }),
+            issue,
+          );
+        }
+      } catch (err) {
+        return c.json(
+          { error: `Failed to forward decision to daemon: ${err instanceof Error ? err.message : String(err)}` },
+          502,
+        );
+      }
+    }
+    // Resume the run state so the heartbeat/audit pipeline treats it as live.
+    clearIssueAgentRunAwaiting(run.id);
+    updateIssueAgentRun(run.id, { status: 'running' });
+    if (issue.status === 'waiting_for_human') {
+      updateIssue(issue.id, { status: 'in_progress' });
+    }
+  }
+
+  const evAns = createIssueEvent({
+    issue_id: issue.id,
+    run_id: run.id,
+    event_type: 'agent_request_answered',
+    actor_id: authUser.id,
+    actor_type: 'user',
+    title:
+      reqRow.kind === 'permission'
+        ? `Permission ${body.decision === 'approve' ? 'approved' : 'rejected'}`
+        : 'Clarification answered',
+    summary: (body.message ?? body.answer ?? '').slice(0, 240) || null,
+    payload: {
+      requestId: reqRow.id,
+      kind: reqRow.kind,
+      decision: body.decision,
+    },
+    reference_id: reqRow.id,
+  });
+  afterIssueEventCreated(evAns, issue);
+  const deps = getWebDeps();
+  deps?.broadcastIssueRequest?.(issue.workspace_jid, issue.id, updated, 'issue_request_answered');
+
+  const updatedRun = listIssueAgentRuns(issue.id).find((item) => item.id === run.id) ?? run;
+  return c.json({ request: updated, run: updatedRun });
+});
+
 // --- Comments ---
 
 issueRoutes.get('/:id/comments', authMiddleware, async (c) => {
@@ -616,6 +754,40 @@ issueRoutes.post('/:id/comments', authMiddleware, async (c) => {
     reference_id: comment.id,
   });
   afterIssueEventCreated(evComment, issue);
+
+  // P2-2: if the issue is waiting on a clarification request from the agent,
+  // treat the comment as the answer so the IssueAutoDriver picks it up on the
+  // next tick (it consumes the answered request and queues a resume run).
+  if (issue.status === 'waiting_for_human') {
+    const pending = listIssueAgentRequests(issue.id, { status: 'pending' });
+    const clar = pending.find((r) => r.kind === 'clarification');
+    if (clar) {
+      const now = new Date().toISOString();
+      const answered = answerIssueAgentRequest(clar.id, {
+        decision: 'reply',
+        answer: comment.body,
+        answered_by: authUser.id,
+        now,
+      });
+      if (answered) {
+        const evAns = createIssueEvent({
+          issue_id: issue.id,
+          run_id: clar.run_id,
+          event_type: 'agent_request_answered',
+          actor_id: authUser.id,
+          actor_type: 'user',
+          title: 'Clarification answered via comment',
+          summary: comment.body.slice(0, 240),
+          payload: { requestId: clar.id, kind: 'clarification', via: 'comment' },
+          reference_id: clar.id,
+        });
+        afterIssueEventCreated(evAns, issue);
+        const deps = getWebDeps();
+        deps?.broadcastIssueRequest?.(issue.workspace_jid, issue.id, answered, 'issue_request_answered');
+      }
+    }
+  }
+
   return c.json({ comment }, 201);
 });
 

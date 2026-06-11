@@ -15,6 +15,7 @@ export function IssueStatusBar({ current, onChange, disabled }: IssueStatusBarPr
     <div className="flex flex-wrap items-center gap-2">
       {STATUSES.map((status, idx) => {
         const isCurrent = status.value === current;
+        const isWaiting = status.value === 'waiting_for_human';
         return (
           <button
             key={status.value}
@@ -30,15 +31,21 @@ export function IssueStatusBar({ current, onChange, disabled }: IssueStatusBarPr
               variant="outline"
               className={cn(
                 'transition-all',
-                isCurrent
-                  ? 'border-primary bg-primary/10 text-primary font-medium'
-                  : 'hover:border-primary/40 hover:bg-primary/5',
+                isCurrent && isWaiting
+                  ? 'border-amber-500 bg-amber-100 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200 font-medium animate-pulse'
+                  : isCurrent
+                    ? 'border-primary bg-primary/10 text-primary font-medium'
+                    : isWaiting
+                      ? 'border-amber-400/40 hover:border-amber-500 hover:bg-amber-100/40'
+                      : 'hover:border-primary/40 hover:bg-primary/5',
                 !isCurrent && !disabled && 'group-hover:underline decoration-dotted',
               )}
               style={{
                 borderLeftWidth: isCurrent ? '3px' : undefined,
                 borderLeftColor: isCurrent
-                  ? 'hsl(var(--primary))'
+                  ? isWaiting
+                    ? 'rgb(245 158 11)'
+                    : 'hsl(var(--primary))'
                   : idx <= currentIndex
                     ? 'hsl(var(--primary) / 0.3)'
                     : undefined,

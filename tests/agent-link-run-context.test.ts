@@ -1320,6 +1320,115 @@ describe('agent-link run context forwarding', () => {
     });
   });
 
+  // 回归：device daemon 在解析 stream-json 末尾的 {"type":"result"} 时会发出
+  // eventType="final_result" 的 agent.run.event 帧（agent_runtime.go
+  // normalizeAgentJSONLineFrames 第 3 段）。
+  // - protocol.ts 的 zod 枚举必须接受 final_result，否则 parseInboundFrame
+  //   失败 → AgentLinkSession 关掉整条 ws → 该帧之前/之后到达的 tool / thinking
+  //   事件全部丢失，表现为「服务端拿不到 device cli 执行过程」。
+  // - 服务端不应把 final_result 再转成新的 stream event 推给 UI（避免和已经
+  //   流过的 text_delta 重复），仅在累计 text 为空时作为兜底返回最终文本。
+  test('final_result frames are accepted by protocol and act as text fallback', async () => {
+    const { AgentRunEventFrame, parseInboundFrame } = await import(
+      '../src/agent-link/protocol.js'
+    );
+    const finalResultFrame = {
+      type: 'agent.run.event',
+      runId: 'r-final-result',
+      eventType: 'final_result',
+      sessionId: 'sess-final-result',
+      text: '最终回答',
+      payload: { type: 'result', result: '最终回答' },
+    };
+    expect(AgentRunEventFrame.safeParse(finalResultFrame).success).toBe(true);
+    expect(parseInboundFrame(JSON.stringify(finalResultFrame)).ok).toBe(true);
+
+    const sent: any[] = [];
+    const outputs: any[] = [];
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef'
+        ? { capabilities: ['agent.run'] }
+        : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } = await import(
+      '../src/backends/agent-link-driver.js'
+    );
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Final Result Fallback',
+          folder: 'final-result-fallback',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:claude-code',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: 'hello',
+          chatJid: 'web:final-result-fallback',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+        onOutput: vi.fn(async (output) => outputs.push(output)),
+      },
+      {
+        backendId: 'mac-claude-code',
+        resolveBinary: () => '/usr/local/bin/claude',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:claude-code',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'agent.run.request' });
+    const controller = registerRunMock.mock.calls.at(-1)?.[0] as any;
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'tool_call',
+      sessionId: 'sess-final-result',
+      payload: { id: 'tool-1', name: 'Bash', input: { command: 'pwd' } },
+    });
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'final_result',
+      sessionId: 'sess-final-result',
+      text: '最终回答',
+      payload: { type: 'result', result: '最终回答' },
+    });
+    controller.finish({
+      type: 'agent.run.result',
+      runId: controller.runId,
+      ok: true,
+      result: undefined,
+      error: null,
+      sessionId: 'sess-final-result',
+      timedOut: false,
+      durationMs: 1,
+    });
+
+    const result = await promise;
+    const streamEventTypes = outputs
+      .map((output) => output.streamEvent?.eventType)
+      .filter(Boolean);
+    // tool 事件仍然能流出，证明 final_result 没有让 ws 协议校验失败。
+    expect(streamEventTypes).toContain('tool_use_start');
+    // final_result 不能再产生重复的 stream event。
+    expect(streamEventTypes).not.toContain('final_result');
+    // final_result 的文本必须作为最终结果兜底返回。
+    expect(result).toMatchObject({ status: 'success', result: '最终回答' });
+  });
+
   test('runViaAgentLink appends OctoDeck system prompt to legacy device Claude CLI argv', async () => {
     const sent: any[] = [];
     getSessionMock.mockReturnValue({

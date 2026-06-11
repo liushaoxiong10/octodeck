@@ -376,6 +376,7 @@ export interface TaskRunLog {
 export type IssueStatus =
   | 'todo'
   | 'in_progress'
+  | 'waiting_for_human'
   | 'review'
   | 'done'
   | 'canceled';
@@ -420,14 +421,47 @@ export interface IssueAgentRun {
   execution_node?: string | null;
   backend?: string | null;
   selected_skills?: string[] | null;
-  status: 'queued' | 'running' | 'success' | 'error' | 'canceled';
+  status:
+    | 'queued'
+    | 'running'
+    | 'awaiting_input'
+    | 'paused'
+    | 'success'
+    | 'error'
+    | 'canceled'
+    | 'lost';
   result?: string | null;
   error?: string | null;
   session_id?: string | null;
+  parent_run_id?: string | null;
+  awaiting_kind?: 'permission' | 'clarification' | null;
+  awaiting_payload_id?: string | null;
+  last_seen_at?: string | null;
+  heartbeat_deadline_at?: string | null;
   created_by: string;
   created_at: string;
   run_started_at?: string | null;
   run_completed_at?: string | null;
+}
+
+export interface IssueAgentRequest {
+  id: string;
+  issue_id: string;
+  run_id: string;
+  kind: 'permission' | 'clarification';
+  correlation_id?: string | null;
+  title?: string | null;
+  summary?: string | null;
+  detail?: string | null;
+  payload?: Record<string, unknown> | null;
+  status: 'pending' | 'answered' | 'expired' | 'canceled';
+  decision?: 'approve' | 'reject' | 'reply' | null;
+  answer?: string | null;
+  answered_at?: string | null;
+  answered_by?: string | null;
+  consumed_at?: string | null;
+  expires_at?: string | null;
+  created_at: string;
 }
 
 export interface IssueAgentRunEvent {
@@ -484,7 +518,11 @@ export type IssueEventType =
   | 'run_canceled'
   | 'run_event'
   | 'run_delta'
-  | 'run_result';
+  | 'run_result'
+  | 'run_lost'
+  | 'agent_request_created'
+  | 'agent_request_answered'
+  | 'agent_request_expired';
 
 export interface IssueEvent {
   id: string;
@@ -859,6 +897,12 @@ export type WsMessageOut =
       issueId: string;
       runId: string | null;
       event: IssueEvent;
+    }
+  | {
+      type: 'issue_request_created' | 'issue_request_answered' | 'issue_request_expired';
+      workspaceJid: string;
+      issueId: string;
+      request: IssueAgentRequest;
     };
 
 export type WsMessageIn =
