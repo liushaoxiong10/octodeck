@@ -8,8 +8,11 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { toast } from 'sonner';
 import { useSkillsStore, type Skill } from '../stores/skills';
-import { useAgentLinksStore } from '../stores/agentLinks';
-import { useCustomBackendsStore } from '../stores/customBackends';
+import { useAgentLinksStore, type AgentLink } from '../stores/agentLinks';
+import {
+  useCustomBackendsStore,
+  type CustomBackendDef,
+} from '../stores/customBackends';
 import { SkillCard } from '../components/skills/SkillCard';
 import { SkillDetail } from '../components/skills/SkillDetail';
 import { InstallSkillDialog } from '../components/skills/InstallSkillDialog';
@@ -28,6 +31,20 @@ type SkillSourceFilter = 'all' | 'cloud' | 'device' | 'workspace';
 interface AgentSkillsResponse {
   workspaceSkills: Array<Partial<Skill> & { id: string; source: 'workspace' }>;
   cliSkills: Array<Partial<Skill> & { id: string; source: 'cli' }>;
+}
+
+function getDeviceSkillsBackends(
+  backends: CustomBackendDef[],
+  devices: AgentLink[],
+): CustomBackendDef[] {
+  const devicesById = new Map(devices.map((device) => [device.id, device]));
+  return backends.filter((backend) => {
+    if (!backend.deviceLinkId || !backend.agentClientId) return false;
+    const device = devicesById.get(backend.deviceLinkId);
+    return (device?.agentClients ?? []).some(
+      (client) => client.id === backend.agentClientId,
+    );
+  });
 }
 
 export function SkillsPage() {
@@ -62,9 +79,7 @@ export function SkillsPage() {
   }, [loadSkills, loadDevices, loadBackends]);
 
   useEffect(() => {
-    const deviceBackends = backends.filter(
-      (backend) => backend.deviceLinkId && backend.agentClientId,
-    );
+    const deviceBackends = getDeviceSkillsBackends(backends, devices);
     if (deviceBackends.length === 0) {
       setDeviceSkills([]);
       setDeviceSkillsError(null);
@@ -139,7 +154,7 @@ export function SkillsPage() {
     return () => {
       cancelled = true;
     };
-  }, [backends, deviceSkillsRefreshKey]);
+  }, [backends, devices, deviceSkillsRefreshKey]);
 
   const allSkills = useMemo(
     () => dedupeSkillsByIdentity([...skills, ...deviceSkills]),

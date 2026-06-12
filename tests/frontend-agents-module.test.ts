@@ -220,6 +220,20 @@ describe('frontend agents module', () => {
     expect(skillsStore).toContain('workspacePath?: string');
   });
 
+  test('skills page skips stale device backends whose provider is no longer reported', () => {
+    const skillsPage = readFileSync(
+      join(repoRoot, 'web/src/pages/SkillsPage.tsx'),
+      'utf8',
+    );
+
+    expect(skillsPage).toContain('function getDeviceSkillsBackends');
+    expect(skillsPage).toContain('device?.agentClients ?? []');
+    expect(skillsPage).toContain('client.id === backend.agentClientId');
+    expect(skillsPage).toContain(
+      'const deviceBackends = getDeviceSkillsBackends(backends, devices);',
+    );
+  });
+
   test('skills UI uses Cloud / Device / Workspace fallback package labels', () => {
     expect(normalizeSkillDisplayText('宿主机')).toBe('Device');
     expect(getSkillPackageName({ packageName: '宿主机' })).toBe('Device');
