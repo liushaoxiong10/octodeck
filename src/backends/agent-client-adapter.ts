@@ -104,16 +104,41 @@ export function normalizeAgentClientBackendDef(
   }
 }
 
-function templateForAgentClient(
-  id: string,
-): Pick<
+type AgentClientTemplate = Pick<
   CustomBackendDef,
   | 'argvTemplate'
   | 'outputProtocol'
   | 'supportsNativeSessions'
   | 'sessionArgvTemplate'
   | 'resumeArgvTemplate'
-> {
+>;
+
+const CODEX_STYLE_EXEC_TEMPLATE: AgentClientTemplate = {
+  argvTemplate: [
+    'exec',
+    '--json',
+    '--skip-git-repo-check',
+    '-m',
+    '{model}',
+    '{prompt}',
+  ],
+  outputProtocol: 'jsonline-stream-json',
+  supportsNativeSessions: true,
+  resumeArgvTemplate: [
+    'exec',
+    'resume',
+    '--json',
+    '--skip-git-repo-check',
+    '-m',
+    '{model}',
+    '{sessionId}',
+    '{prompt}',
+  ],
+};
+
+function templateForAgentClient(
+  id: string,
+): AgentClientTemplate {
   switch (id) {
     case 'claude-acp':
     case 'claude-code':
@@ -135,32 +160,11 @@ function templateForAgentClient(
       };
     case 'codex-acp':
     case 'codex':
-    // traex 是 daemon 上注册的本地 agent CLI，调用约定与 codex 一致
-    // （exec --json + --skip-git-repo-check + -m {model}）。
+      return CODEX_STYLE_EXEC_TEMPLATE;
     case 'traex-acp':
     case 'traex':
-      return {
-        argvTemplate: [
-          'exec',
-          '--json',
-          '--skip-git-repo-check',
-          '-m',
-          '{model}',
-          '{prompt}',
-        ],
-        outputProtocol: 'jsonline-stream-json',
-        supportsNativeSessions: true,
-        resumeArgvTemplate: [
-          'exec',
-          'resume',
-          '--json',
-          '--skip-git-repo-check',
-          '-m',
-          '{model}',
-          '{sessionId}',
-          '{prompt}',
-        ],
-      };
+      // traex 的 stdio 调用约定与 codex 基本一致，权限参数单独适配。
+      return CODEX_STYLE_EXEC_TEMPLATE;
     case 'traecli-acp':
     case 'traecli':
       return {

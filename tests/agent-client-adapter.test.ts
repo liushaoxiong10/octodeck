@@ -136,6 +136,25 @@ describe('agent client adapter', () => {
     ]);
   });
 
+  test('adapts bypass permission mode to TraeX no-approval argv', () => {
+    expect(normalizePermissionModeForAgent('traex', 'bypassPermissions')).toBe('full-access');
+    expect(
+      applyAgentPermissionArgs(
+        ['exec', '--json', '--skip-git-repo-check', '-m', 'doubao-1.5-pro', 'hello'],
+        'traex',
+        'bypassPermissions',
+      ),
+    ).toEqual([
+      '--dangerously-bypass-approvals-and-sandbox',
+      'exec',
+      '--json',
+      '--skip-git-repo-check',
+      '-m',
+      'doubao-1.5-pro',
+      'hello',
+    ]);
+  });
+
   test('adapts bypass permission mode to TraeCLI yes argv', () => {
     expect(
       applyAgentPermissionArgs(

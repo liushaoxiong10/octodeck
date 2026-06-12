@@ -1136,10 +1136,9 @@ func buildAgentAdapters(cfg *Config) map[string]agentAdapter {
 		case "traecli":
 			out[client.ID] = &traecliAdapter{baseAgentAdapter{client: client}}
 		case "traex":
-			// traex 的 stdio 调用约定与 codex 一致（exec --json），直接复用
-			// codexAdapter，避免维护重复 BuildRunCommand。ACP 路径走 traex-acp，
-			// 上面的 client.Transport == "acp" 分支已经把它指向 acpAdapter。
-			out[client.ID] = &codexAdapter{baseAgentAdapter{client: client}}
+			// traex 的 stdio 调用约定与 codex 基本一致（exec --json），
+			// 但 full-access / bypassPermissions 必须走 TraeX 自己的全局参数。
+			out[client.ID] = &traexAdapter{baseAgentAdapter{client: client}}
 		default:
 			out[client.ID] = &plainCLIAdapter{baseAgentAdapter{client: client}}
 		}
@@ -1190,6 +1189,7 @@ func (a *baseAgentAdapter) DeleteSession(ctx context.Context, cfg *Config, works
 
 type claudeCodeAdapter struct{ baseAgentAdapter }
 type codexAdapter struct{ baseAgentAdapter }
+type traexAdapter struct{ baseAgentAdapter }
 type traecliAdapter struct{ baseAgentAdapter }
 type plainCLIAdapter struct{ baseAgentAdapter }
 type acpAdapter struct {
@@ -1291,6 +1291,28 @@ func (a *codexAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]
 		if mode == "danger-full-access" {
 			argv = append(argv, "--ask-for-approval", "never")
 		}
+	}
+	argv = append(argv, prompt)
+	return argv, true, nil
+}
+
+func (a *traexAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
+	prompt := promptWithSystemContext(req, req.Input.SessionID == "")
+	prefix := []string{}
+	if req.Policy.PermissionMode != "" && normalizeCodexPermissionMode(req.Policy.PermissionMode) == "danger-full-access" {
+		prefix = append(prefix, "--dangerously-bypass-approvals-and-sandbox")
+	}
+	if req.Input.SessionID != "" {
+		argv := append(prefix, "exec", "resume", "--json", "--skip-git-repo-check")
+		if req.Policy.Model != "" {
+			argv = append(argv, "-m", req.Policy.Model)
+		}
+		argv = append(argv, req.Input.SessionID, prompt)
+		return argv, true, nil
+	}
+	argv := append(prefix, "exec", "--json", "--skip-git-repo-check")
+	if req.Policy.Model != "" {
+		argv = append(argv, "-m", req.Policy.Model)
 	}
 	argv = append(argv, prompt)
 	return argv, true, nil

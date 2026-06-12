@@ -8,10 +8,11 @@ function insertBeforeTail(argv: string[], tailCount: number, extra: string[]): s
   return [...argv.slice(0, index), ...extra, ...argv.slice(index)];
 }
 
-function agentFamily(agentClientId: string | undefined | null): 'claude' | 'codex' | 'traecli' | 'unknown' {
+function agentFamily(agentClientId: string | undefined | null): 'claude' | 'codex' | 'traecli' | 'traex' | 'unknown' {
   const id = (agentClientId || '').toLowerCase();
   if (id === 'claude-code' || id === 'claude-acp' || id.includes('claude')) return 'claude';
-  if (id === 'codex' || id === 'codex-acp' || id === 'traex' || id === 'traex-acp' || id.includes('codex') || id.includes('traex')) return 'codex';
+  if (id === 'traex' || id === 'traex-acp' || id.includes('traex')) return 'traex';
+  if (id === 'codex' || id === 'codex-acp' || id.includes('codex')) return 'codex';
   if (id === 'traecli' || id === 'traecli-acp' || id.includes('traecli')) return 'traecli';
   return 'unknown';
 }
@@ -23,7 +24,7 @@ export function normalizePermissionModeForAgent(
   const mode = permissionMode?.trim();
   if (!mode || mode === 'default') return undefined;
   const family = agentFamily(agentClientId);
-  if (family === 'codex') {
+  if (family === 'codex' || family === 'traex') {
     switch (mode) {
       case 'bypassPermissions':
       case 'dangerously-skip-permissions':
@@ -69,6 +70,12 @@ export function applyAgentPermissionArgs(
     if (extra.length === 0) return argv;
     const tailCount = argv[0] === 'exec' && argv[1] === 'resume' ? 2 : 1;
     return insertBeforeTail(argv, tailCount, extra);
+  }
+
+  if (family === 'traex') {
+    if (mode !== 'full-access' && mode !== 'danger-full-access') return argv;
+    if (hasArg(argv, '--dangerously-bypass-approvals-and-sandbox')) return argv;
+    return ['--dangerously-bypass-approvals-and-sandbox', ...argv];
   }
 
   return argv;

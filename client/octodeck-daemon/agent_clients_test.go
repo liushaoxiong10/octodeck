@@ -903,6 +903,32 @@ func TestDeviceAdaptersApplyNoApprovalPermissionArgs(t *testing.T) {
 		t.Fatalf("traecli no-approval argv should include -y: %#v", traeArgv)
 	}
 
+	traexReq := &AgentRunRequestFrame{
+		Input:  AgentRunInput{Prompt: "hello"},
+		Policy: AgentRunPolicy{PermissionMode: "bypassPermissions"},
+	}
+	traexArgv, _, err := (&traexAdapter{}).BuildRunCommand(nil, traexReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	traexJoined := strings.Join(traexArgv, " ")
+	if !strings.HasPrefix(traexJoined, "--dangerously-bypass-approvals-and-sandbox exec ") {
+		t.Fatalf("traex no-approval argv should start with bypass flag: %#v", traexArgv)
+	}
+	if strings.Contains(traexJoined, "--sandbox") || strings.Contains(traexJoined, "--ask-for-approval") {
+		t.Fatalf("traex no-approval argv should not use codex permission flags: %#v", traexArgv)
+	}
+	fullAccessTraexArgv, _, err := (&traexAdapter{}).BuildRunCommand(nil, &AgentRunRequestFrame{
+		Input:  AgentRunInput{Prompt: "hello"},
+		Policy: AgentRunPolicy{PermissionMode: "full-access"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(strings.Join(fullAccessTraexArgv, " "), "--dangerously-bypass-approvals-and-sandbox exec ") {
+		t.Fatalf("traex full-access argv should start with bypass flag: %#v", fullAccessTraexArgv)
+	}
+
 	defaultTraeReq := &AgentRunRequestFrame{Input: AgentRunInput{Prompt: "hello"}}
 	defaultTraeArgv, _, err := (&traecliAdapter{}).BuildRunCommand(nil, defaultTraeReq)
 	if err != nil {

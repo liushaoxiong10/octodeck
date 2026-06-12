@@ -64,9 +64,10 @@ var agentClientPermissionModes = map[string][]string{
 	"codex-acp":   {"default", "read-only", "workspace-write", "full-access"},
 	"traecli":     {"default", "acceptEdits", "bypassPermissions"},
 	"traecli-acp": {"default", "acceptEdits", "bypassPermissions"},
-	// traex 与 codex 调用约定一致，复用 codex 的 sandbox 风格权限模式。
-	"traex":     {"default", "read-only", "workspace-write", "full-access"},
-	"traex-acp": {"default", "read-only", "workspace-write", "full-access"},
+	// traex 接受 OctoDeck 的 bypassPermissions 别名，并在实际启动时
+	// 转成 TraeX 自己的免审批全局参数。
+	"traex":     {"default", "read-only", "workspace-write", "full-access", "bypassPermissions"},
+	"traex-acp": {"default", "read-only", "workspace-write", "full-access", "bypassPermissions"},
 }
 
 var agentClientCapabilities = map[string][]string{
