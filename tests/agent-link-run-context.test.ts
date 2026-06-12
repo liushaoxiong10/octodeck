@@ -1508,6 +1508,94 @@ describe('agent-link run context forwarding', () => {
     expect(result).toMatchObject({ status: 'success', result: '最终回答' });
   });
 
+  test('agent.run.result usage from device cli is normalized into stream usage', async () => {
+    const sent: any[] = [];
+    const outputs: any[] = [];
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef'
+        ? { capabilities: ['agent.run'] }
+        : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Device Usage',
+          folder: 'device-usage',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:claude-code',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: 'hello',
+          chatJid: 'web:device-usage',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+        onOutput: vi.fn(async (output) => outputs.push(output)),
+      },
+      {
+        backendId: 'mac-claude-code',
+        model: 'claude-device',
+        resolveBinary: () => '/usr/local/bin/claude',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:claude-code',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'agent.run.request' });
+    const controller = registerRunMock.mock.calls.at(-1)?.[0] as any;
+    controller.finish({
+      type: 'agent.run.result',
+      runId: controller.runId,
+      ok: true,
+      result: 'done',
+      error: null,
+      sessionId: 'sess-device-usage',
+      usage: {
+        input_token_count: 120,
+        output_token_count: 30,
+        cached_read_tokens: 7,
+        cached_write_tokens: 5,
+        duration_ms: 456,
+      },
+      timedOut: false,
+      durationMs: 456,
+    });
+
+    await promise;
+    const usageEvent = outputs
+      .map((output) => output.streamEvent)
+      .find((event) => event?.eventType === 'usage');
+    expect(usageEvent?.usage).toMatchObject({
+      inputTokens: 120,
+      outputTokens: 30,
+      cacheReadInputTokens: 7,
+      cacheCreationInputTokens: 5,
+      durationMs: 456,
+      modelUsage: {
+        'claude-device': {
+          inputTokens: 120,
+          outputTokens: 30,
+          cacheReadInputTokens: 7,
+          cacheCreationInputTokens: 5,
+        },
+      },
+    });
+  });
+
   // 回归：device daemon 的 stderr / ACP 未识别通知会作为 eventType="log"
   // 回传。protocol.ts 必须接受该帧，否则 AgentLinkSession 会按协议错误关闭
   // ws，后续 text_delta / agent.run.result 无法送达，前端看起来一直没有响应。
