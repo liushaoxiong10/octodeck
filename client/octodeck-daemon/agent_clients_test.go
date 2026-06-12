@@ -16,8 +16,8 @@ func TestDiscoverAgentClientsFindsSupportedClientsOnPath(t *testing.T) {
 	for _, name := range []string{"claude", "codex", "traecli"} {
 		p := filepath.Join(dir, name)
 		// fake 二进制对任意参数都返回相同输出，且不包含 ACP marker
-		// （"agent client protocol" / "acp"）。这样 ACP 探测会失败，discover
-		// 自动 fallback 到非 ACP 候选（claude-code / codex / traecli）。
+		// （"agent client protocol" / "acp"）。Claude/Codex 可通过内嵌
+		// acp-adapter fallback 注册为 ACP；TraeCLI 仍 fallback 到非 ACP。
 		if err := os.WriteFile(p, []byte("#!/bin/sh\necho "+name+" 1.0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -31,22 +31,22 @@ func TestDiscoverAgentClientsFindsSupportedClientsOnPath(t *testing.T) {
 		ids[c.ID] = c.Binary
 	}
 
-	if ids["claude-code"] != filepath.Join(dir, "claude") {
-		t.Fatalf("missing claude-code discovery: %#v", clients)
+	if ids["claude-acp"] != filepath.Join(dir, "claude") {
+		t.Fatalf("missing embedded claude-acp discovery: %#v", clients)
 	}
-	if ids["codex"] != filepath.Join(dir, "codex") {
-		t.Fatalf("missing codex discovery: %#v", clients)
+	if ids["codex-acp"] != filepath.Join(dir, "codex") {
+		t.Fatalf("missing embedded codex-acp discovery: %#v", clients)
 	}
 	if ids["traecli"] != filepath.Join(dir, "traecli") {
 		t.Fatalf("missing traecli discovery: %#v", clients)
 	}
-	// 同一个 binary 只注册一种 client（非 ACP fallback 命中后，*-acp 不应同时
-	// 出现）。这是 ACP-优先策略的关键不变量。
-	if _, ok := ids["claude-acp"]; ok {
-		t.Fatalf("claude-acp must not coexist with claude-code: %#v", clients)
+	// 同一个 binary 只注册一种 client。Claude/Codex 的 ACP 兼容可由内嵌
+	// acp-adapter 提供，因此不应同时出现非 ACP fallback。
+	if _, ok := ids["claude-code"]; ok {
+		t.Fatalf("claude-code must not coexist with claude-acp: %#v", clients)
 	}
-	if _, ok := ids["codex-acp"]; ok {
-		t.Fatalf("codex-acp must not coexist with codex: %#v", clients)
+	if _, ok := ids["codex"]; ok {
+		t.Fatalf("codex must not coexist with codex-acp: %#v", clients)
 	}
 	if _, ok := ids["traecli-acp"]; ok {
 		t.Fatalf("traecli-acp must not coexist with traecli: %#v", clients)
@@ -114,11 +114,11 @@ func TestDiscoverAgentClientsFindsHomeLocalBinWhenPathIsMinimal(t *testing.T) {
 		ids[c.ID] = c.Binary
 	}
 
-	if ids["claude-code"] != filepath.Join(binDir, "claude") {
-		t.Fatalf("missing claude-code from home local bin: %#v", clients)
+	if ids["claude-acp"] != filepath.Join(binDir, "claude") {
+		t.Fatalf("missing embedded claude-acp from home local bin: %#v", clients)
 	}
-	if ids["codex"] != filepath.Join(binDir, "codex") {
-		t.Fatalf("missing codex from home local bin: %#v", clients)
+	if ids["codex-acp"] != filepath.Join(binDir, "codex") {
+		t.Fatalf("missing embedded codex-acp from home local bin: %#v", clients)
 	}
 	if ids["traecli"] != filepath.Join(binDir, "traecli") {
 		t.Fatalf("missing traecli from home local bin: %#v", clients)
@@ -136,11 +136,11 @@ func TestDiscoverAgentClientsFindsExtraPathWhenPathIsMinimal(t *testing.T) {
 
 	clients := discoverAgentClients()
 	for _, c := range clients {
-		if c.ID == "codex" && c.Binary == p {
+		if c.ID == "codex-acp" && c.Binary == p {
 			return
 		}
 	}
-	t.Fatalf("missing codex from OCTODECK_DAEMON_EXTRA_PATH: %#v", clients)
+	t.Fatalf("missing embedded codex-acp from OCTODECK_DAEMON_EXTRA_PATH: %#v", clients)
 }
 
 func TestDiscoverAgentClientsFindsACPClientsWhenBinaryAdvertisesACP(t *testing.T) {
@@ -585,7 +585,7 @@ func TestACPConversationIDPrefersChatIDOverWorkspaceScope(t *testing.T) {
 func TestACPAdapterRunDirectUsesDiscoveredClientArgs(t *testing.T) {
 	cfg := &Config{SessionDir: t.TempDir()}
 	client := AgentClientInfo{
-		ID:        "claude-acp",
+		ID:        "custom-acp",
 		Binary:    os.Args[0],
 		Transport: "acp",
 		Args:      []string{"-test.run=TestACPHelperProcess"},
@@ -606,6 +606,310 @@ func TestACPAdapterRunDirectUsesDiscoveredClientArgs(t *testing.T) {
 	}
 	if !result.OK || result.SessionID != "sess-jsonrpc" || !strings.Contains(result.Result, "assistant reply") {
 		t.Fatalf("unexpected ACP auto result: %#v", result)
+	}
+}
+
+func TestNormalizeACPServerArgsAddsServeForTraeCLIFamily(t *testing.T) {
+	for _, binary := range []string{"/opt/homebrew/bin/coco", "/opt/homebrew/bin/traecli", "/usr/local/bin/traex"} {
+		got := normalizeACPServerArgs(binary, []string{"acp"}, AgentRunPolicy{})
+		if strings.Join(got, " ") != "acp serve" {
+			t.Fatalf("expected %s ACP server command, got %q", binary, strings.Join(got, " "))
+		}
+	}
+}
+
+func TestNormalizeACPServerArgsLeavesOtherACPCommandsUnchanged(t *testing.T) {
+	cases := []struct {
+		binary string
+		args   []string
+	}{
+		{binary: "/usr/local/bin/claude", args: []string{"acp"}},
+		{binary: "/opt/homebrew/bin/coco", args: []string{"acp", "serve"}},
+		{binary: "/opt/homebrew/bin/coco", args: []string{"acp", "--debug"}},
+		{binary: "/opt/homebrew/bin/traecli", args: []string{"acp", "serve"}},
+		{binary: "/opt/homebrew/bin/traecli", args: []string{"acp", "--debug"}},
+	}
+	for _, tc := range cases {
+		got := normalizeACPServerArgs(tc.binary, tc.args, AgentRunPolicy{})
+		if strings.Join(got, "\x00") != strings.Join(tc.args, "\x00") {
+			t.Fatalf("expected args %q unchanged for %s, got %q", strings.Join(tc.args, " "), tc.binary, strings.Join(got, " "))
+		}
+	}
+}
+
+func TestNormalizeACPServerArgsInjectsBypassForTrae(t *testing.T) {
+	cases := []struct {
+		name   string
+		binary string
+		input  []string
+		mode   string
+		want   string
+	}{
+		{name: "coco bypass prepends --yolo before acp serve", binary: "/opt/homebrew/bin/coco", input: []string{"acp"}, mode: "bypassPermissions", want: "--yolo acp serve"},
+		{name: "traecli bypass prepends --yolo before acp serve", binary: "/opt/homebrew/bin/traecli", input: []string{"acp"}, mode: "bypassPermissions", want: "--yolo acp serve"},
+		{name: "traex bypass prepends bypass flag before acp serve", binary: "/usr/local/bin/traex", input: []string{"acp"}, mode: "full-access", want: "--dangerously-bypass-approvals-and-sandbox acp serve"},
+		{name: "traex bypass keeps existing acp serve order", binary: "/usr/local/bin/traex", input: []string{"acp", "serve"}, mode: "bypassPermissions", want: "--dangerously-bypass-approvals-and-sandbox acp serve"},
+		{name: "default mode does not inject", binary: "/opt/homebrew/bin/coco", input: []string{"acp"}, mode: "default", want: "acp serve"},
+		{name: "claude is unaffected", binary: "/usr/local/bin/claude", input: []string{"acp"}, mode: "bypassPermissions", want: "acp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeACPServerArgs(tc.binary, tc.input, AgentRunPolicy{PermissionMode: tc.mode})
+			if strings.Join(got, " ") != tc.want {
+				t.Fatalf("got %q, want %q", strings.Join(got, " "), tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeACPServerArgsDoesNotDoubleInject(t *testing.T) {
+	cases := []struct {
+		binary string
+		input  []string
+	}{
+		{binary: "/opt/homebrew/bin/coco", input: []string{"--yolo", "acp", "serve"}},
+		{binary: "/opt/homebrew/bin/traecli", input: []string{"-y", "acp", "serve"}},
+		{binary: "/usr/local/bin/traex", input: []string{"--dangerously-bypass-approvals-and-sandbox", "acp"}},
+	}
+	for _, tc := range cases {
+		got := normalizeACPServerArgs(tc.binary, tc.input, AgentRunPolicy{PermissionMode: "bypassPermissions"})
+		if strings.Join(got, "\x00") != strings.Join(tc.input, "\x00") {
+			t.Fatalf("expected idempotent injection for %s, got %q", tc.binary, strings.Join(got, " "))
+		}
+	}
+}
+func TestNormalizeACPServerArgsInjectsModelForTrae(t *testing.T) {
+	cases := []struct {
+		name   string
+		binary string
+		input  []string
+		policy AgentRunPolicy
+		want   string
+	}{
+		{
+			name:   "coco model only prepends -c override",
+			binary: "/opt/homebrew/bin/coco",
+			input:  []string{"acp"},
+			policy: AgentRunPolicy{Model: "claude-sonnet-4-6"},
+			want:   "-c model.name=claude-sonnet-4-6 acp serve",
+		},
+		{
+			name:   "traecli model + bypass orders model before yolo",
+			binary: "/opt/homebrew/bin/traecli",
+			input:  []string{"acp"},
+			policy: AgentRunPolicy{Model: "doubao-1.5-pro", PermissionMode: "bypassPermissions"},
+			want:   "--yolo -c model.name=doubao-1.5-pro acp serve",
+		},
+		{
+			name:   "empty model leaves args alone",
+			binary: "/opt/homebrew/bin/coco",
+			input:  []string{"acp", "serve"},
+			policy: AgentRunPolicy{},
+			want:   "acp serve",
+		},
+		{
+			name:   "claude is unaffected",
+			binary: "/usr/local/bin/claude",
+			input:  []string{"acp"},
+			policy: AgentRunPolicy{Model: "claude-sonnet-4-6"},
+			want:   "acp",
+		},
+		{
+			name:   "traex model only prepends -c override and adds serve",
+			binary: "/usr/local/bin/traex",
+			input:  []string{"acp"},
+			policy: AgentRunPolicy{Model: "doubao-1.5-pro"},
+			want:   "-c model=doubao-1.5-pro acp serve",
+		},
+		{
+			name:   "traex model + bypass orders model after bypass",
+			binary: "/usr/local/bin/traex",
+			input:  []string{"acp", "serve"},
+			policy: AgentRunPolicy{Model: "claude-sonnet-4-6", PermissionMode: "bypassPermissions"},
+			want:   "--dangerously-bypass-approvals-and-sandbox -c model=claude-sonnet-4-6 acp serve",
+		},
+		{
+			name:   "traex preserves pre-existing -c model override",
+			binary: "/usr/local/bin/traex",
+			input:  []string{"-c", "model=manual-model", "acp", "serve"},
+			policy: AgentRunPolicy{Model: "doubao-1.5-pro"},
+			want:   "-c model=manual-model acp serve",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeACPServerArgs(tc.binary, tc.input, tc.policy)
+			if strings.Join(got, " ") != tc.want {
+				t.Fatalf("got %q, want %q", strings.Join(got, " "), tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeACPServerArgsModelDoesNotDoubleInject(t *testing.T) {
+	input := []string{"-c", "model.name=already-set", "acp", "serve"}
+	got := normalizeACPServerArgs("/opt/homebrew/bin/coco", input, AgentRunPolicy{Model: "claude-sonnet-4-6"})
+	if strings.Join(got, "\x00") != strings.Join(input, "\x00") {
+		t.Fatalf("expected pre-existing model.name override to be preserved, got %q", strings.Join(got, " "))
+	}
+}
+
+func TestPromptWithSystemContextWrapsGlobalMemory(t *testing.T) {
+	req := &AgentRunRequestFrame{
+		Input:  AgentRunInput{Prompt: "用户问题"},
+		Policy: AgentRunPolicy{SystemPrompt: "<cloud-global-memory>全局记忆</cloud-global-memory>"},
+	}
+	got := promptWithSystemContext(req, true)
+	for _, want := range []string{"<octodeck-system-context>", "<cloud-global-memory>全局记忆</cloud-global-memory>", "<user-prompt>\n用户问题", "</user-prompt>"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("wrapped prompt missing %q: %s", want, got)
+		}
+	}
+	if continued := promptWithSystemContext(req, false); continued != "用户问题" {
+		t.Fatalf("continued session prompt should not include system context, got %q", continued)
+	}
+}
+
+func TestEmbeddedACPAdaptersUseNativeSystemPrompt(t *testing.T) {
+	req := &AgentRunRequestFrame{
+		Input:  AgentRunInput{Prompt: "用户问题"},
+		Policy: AgentRunPolicy{Model: "model-x", PermissionMode: "bypassPermissions", SystemPrompt: "global memory"},
+	}
+
+	claude := &acpAdapter{baseAgentAdapter: baseAgentAdapter{client: AgentClientInfo{ID: "claude-acp", Binary: "claude"}}}
+	if got := claude.acpPromptText(req, true); got != "用户问题" {
+		t.Fatalf("embedded claude ACP should keep user prompt clean when native system prompt is available, got %q", got)
+	}
+	claudeCfg := claude.embeddedClaudeRuntimeConfig(req)
+	if claudeCfg.DefaultProfile != "octodeck" || claudeCfg.Profiles["octodeck"].SystemInstructions != "global memory" {
+		t.Fatalf("embedded claude ACP should inject native system instructions via profile: %#v", claudeCfg)
+	}
+	if claudeCfg.Profiles["octodeck"].Model != "model-x" {
+		t.Fatalf("embedded claude ACP profile should preserve requested model: %#v", claudeCfg.Profiles["octodeck"])
+	}
+
+	codex := &acpAdapter{baseAgentAdapter: baseAgentAdapter{client: AgentClientInfo{ID: "codex-acp", Binary: "codex"}}}
+	if got := codex.acpPromptText(req, true); got != "用户问题" {
+		t.Fatalf("embedded codex ACP should keep user prompt clean when native system prompt is available, got %q", got)
+	}
+	codexCfg := codex.embeddedCodexRuntimeConfig(req)
+	if codexCfg.DefaultProfile != "octodeck" || codexCfg.Profiles["octodeck"].SystemInstructions != "global memory" {
+		t.Fatalf("embedded codex ACP should inject native system instructions via profile: %#v", codexCfg)
+	}
+	if codexCfg.Profiles["octodeck"].Model != "model-x" || codexCfg.Profiles["octodeck"].Sandbox != "danger-full-access" {
+		t.Fatalf("embedded codex ACP profile should preserve model and sandbox: %#v", codexCfg.Profiles["octodeck"])
+	}
+}
+
+func TestACPSessionProcessKeyIncludesSystemPrompt(t *testing.T) {
+	base := &AgentRunRequestFrame{
+		AgentID: "claude-acp",
+		Cwd:     "/workspace/project",
+		Input: AgentRunInput{
+			Prompt:   "hello",
+			Metadata: map[string]any{"chatId": "web:project"},
+		},
+		Policy: AgentRunPolicy{Model: "model-x", SystemPrompt: "global memory v1"},
+	}
+	changed := *base
+	changed.Policy = AgentRunPolicy{Model: "model-x", SystemPrompt: "global memory v2"}
+
+	if acpSessionProcessKey(base) == acpSessionProcessKey(&changed) {
+		t.Fatalf("ACP session process key must change when system prompt/global memory changes")
+	}
+}
+
+func TestNonEmbeddedACPAdaptersInlineSystemPromptFallback(t *testing.T) {
+	req := &AgentRunRequestFrame{
+		Input:  AgentRunInput{Prompt: "用户问题"},
+		Policy: AgentRunPolicy{SystemPrompt: "global memory"},
+	}
+	trae := &acpAdapter{baseAgentAdapter: baseAgentAdapter{client: AgentClientInfo{ID: "traecli-acp", Binary: "traecli"}}}
+	got := trae.acpPromptText(req, true)
+	if !strings.Contains(got, "<octodeck-system-context>") || !strings.Contains(got, "global memory") || !strings.Contains(got, "<user-prompt>\n用户问题") {
+		t.Fatalf("non-embedded ACP should inline system context fallback, got %q", got)
+	}
+	if continued := trae.acpPromptText(req, false); continued != "用户问题" {
+		t.Fatalf("continued ACP session should not inline system context, got %q", continued)
+	}
+}
+
+func TestDeviceAdaptersInlineSystemContextWhenNoNativeSystemPromptArg(t *testing.T) {
+	req := &AgentRunRequestFrame{
+		Input:  AgentRunInput{Prompt: "hello"},
+		Policy: AgentRunPolicy{SystemPrompt: "global memory"},
+	}
+	codexArgv, _, err := (&codexAdapter{}).BuildRunCommand(nil, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(codexArgv[len(codexArgv)-1], "global memory") || !strings.Contains(codexArgv[len(codexArgv)-1], "<user-prompt>\nhello") {
+		t.Fatalf("codex prompt should include system context and user prompt: %#v", codexArgv)
+	}
+
+	traeArgv, _, err := (&traecliAdapter{}).BuildRunCommand(nil, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(traeArgv) < 2 || !strings.Contains(traeArgv[1], "global memory") || !strings.Contains(traeArgv[1], "<user-prompt>\nhello") {
+		t.Fatalf("traecli prompt should include system context and user prompt: %#v", traeArgv)
+	}
+
+	continuedReq := &AgentRunRequestFrame{
+		Input:  AgentRunInput{Prompt: "hello again", SessionID: "sess-1"},
+		Policy: AgentRunPolicy{SystemPrompt: "global memory"},
+	}
+	continuedCodexArgv, _, err := (&codexAdapter{}).BuildRunCommand(nil, continuedReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if continuedCodexArgv[len(continuedCodexArgv)-1] != "hello again" {
+		t.Fatalf("continued codex session should not include system context: %#v", continuedCodexArgv)
+	}
+	continuedTraeArgv, _, err := (&traecliAdapter{}).BuildRunCommand(nil, continuedReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(continuedTraeArgv) < 2 || continuedTraeArgv[1] != "hello again" {
+		t.Fatalf("continued traecli session should not include system context: %#v", continuedTraeArgv)
+	}
+}
+
+func TestDeviceAdaptersApplyNoApprovalPermissionArgs(t *testing.T) {
+	codexReq := &AgentRunRequestFrame{
+		Input:  AgentRunInput{Prompt: "hello"},
+		Policy: AgentRunPolicy{PermissionMode: "bypassPermissions"},
+	}
+	codexArgv, _, err := (&codexAdapter{}).BuildRunCommand(nil, codexReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexJoined := strings.Join(codexArgv, " ")
+	for _, want := range []string{"--sandbox danger-full-access", "--ask-for-approval never"} {
+		if !strings.Contains(codexJoined, want) {
+			t.Fatalf("codex no-approval argv missing %q: %#v", want, codexArgv)
+		}
+	}
+
+	traeReq := &AgentRunRequestFrame{
+		Input:  AgentRunInput{Prompt: "hello"},
+		Policy: AgentRunPolicy{PermissionMode: "bypassPermissions"},
+	}
+	traeArgv, _, err := (&traecliAdapter{}).BuildRunCommand(nil, traeReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(traeArgv, "-y") {
+		t.Fatalf("traecli no-approval argv should include -y: %#v", traeArgv)
+	}
+
+	defaultTraeReq := &AgentRunRequestFrame{Input: AgentRunInput{Prompt: "hello"}}
+	defaultTraeArgv, _, err := (&traecliAdapter{}).BuildRunCommand(nil, defaultTraeReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsString(defaultTraeArgv, "-y") {
+		t.Fatalf("traecli default argv should not force -y: %#v", defaultTraeArgv)
 	}
 }
 
@@ -760,6 +1064,57 @@ func TestACPAdapterResumesMappedSessionAfterProcessExit(t *testing.T) {
 	}
 }
 
+func TestACPAdapterSuppressesLoadSessionHistoryReplay(t *testing.T) {
+	entry := AgentRegistryEntry{
+		ID:        "custom-acp-history",
+		Transport: "acp",
+		Binary:    os.Args[0],
+		Args:      []string{"-test.run=TestACPHelperProcess"},
+		Env: map[string]string{
+			"GO_WANT_ACP_HELPER_PROCESS":   "1",
+			"ACP_HELPER_INITIALIZE_RESULT": `{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}`,
+			"ACP_HELPER_ALLOW_LOAD":        "1",
+			"ACP_HELPER_NEW_SESSION_ID":    "sess-history",
+			"ACP_HELPER_LOAD_HISTORY_TEXT": "old assistant reply",
+		},
+	}
+	cfg := &Config{AgentRegistry: []AgentRegistryEntry{entry}, SessionDir: t.TempDir(), StateDir: t.TempDir()}
+	adapter := &acpAdapter{baseAgentAdapter: baseAgentAdapter{client: AgentClientInfo{ID: entry.ID, Binary: entry.Binary, Transport: entry.Transport}}, entry: &entry}
+	cwd := t.TempDir()
+	baseReq := func(runID, prompt string) *AgentRunRequestFrame {
+		return &AgentRunRequestFrame{
+			RunID:          runID,
+			AgentID:        entry.ID,
+			Cwd:            cwd,
+			MaxOutputBytes: 1024,
+			Input:          AgentRunInput{Prompt: prompt},
+			Workspace:      &AgentRunWorkspace{Folder: "demo", AgentID: entry.ID, Scope: "session", ScopeID: "conversation-history"},
+			Context:        map[string]any{"group": map[string]any{"folder": "demo"}},
+		}
+	}
+	first, err := adapter.RunDirect(context.Background(), cfg, baseReq("run-history-1", "hello"), func(AgentRunEventFrame) {})
+	if err != nil || !first.OK || first.SessionID != "sess-history" {
+		t.Fatalf("unexpected first result: %#v err=%v", first, err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	var events []AgentRunEventFrame
+	second, err := adapter.RunDirect(context.Background(), cfg, baseReq("run-history-2", "again"), func(event AgentRunEventFrame) {
+		events = append(events, event)
+	})
+	if err != nil || !second.OK {
+		t.Fatalf("unexpected second result: %#v err=%v", second, err)
+	}
+	if strings.Contains(second.Result, "old assistant reply") {
+		t.Fatalf("session/load history replay leaked into final result: %q", second.Result)
+	}
+	if !strings.Contains(second.Result, "assistant reply") {
+		t.Fatalf("expected current prompt reply in result, got %q", second.Result)
+	}
+	if hasAgentRunEvent(events, "text_delta", "old assistant reply") {
+		t.Fatalf("session/load history replay leaked as text_delta event: %#v", events)
+	}
+}
+
 func TestDeleteACPSessionRecordsRemovesLocalMapping(t *testing.T) {
 	cfg := &Config{StateDir: t.TempDir()}
 	rec := acpSessionMapRecord{
@@ -814,6 +1169,10 @@ func TestACPHelperProcess(t *testing.T) {
 			writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(result)})
 		case "session/load":
 			if os.Getenv("ACP_HELPER_ALLOW_LOAD") == "1" {
+				if text := os.Getenv("ACP_HELPER_LOAD_HISTORY_TEXT"); text != "" {
+					sessionID := acpHelperSessionIDFromParams(msg.Params)
+					writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", Method: "session/update", Params: rawACPHelperJSON(`{"sessionId":"` + sessionID + `","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"` + text + `"}}}`)})
+				}
 				writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Result: rawACPHelperJSON(`null`)})
 			} else {
 				writeACPHelperMessage(enc, runtimeRPCMessage{JSONRPC: "2.0", ID: msg.ID, Error: &runtimeRPCError{Code: -32601, Message: "method not found"}})

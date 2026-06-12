@@ -820,57 +820,66 @@ export function AgentsPage() {
                           还没有可用 Agent，点击「新增 Agent」开始添加。
                         </div>
                       ) : (
-                        agents.map((agent) => (
-                          <button
-                            type="button"
-                            key={agent.id}
-                            onClick={() => handleSelectAgent(agent.id)}
-                            className={`group w-full px-4 py-3 text-left transition ${
-                              selectedAgent?.id === agent.id
-                                ? 'bg-primary/10'
-                                : 'hover:bg-muted/70'
-                            }`}
-                          >
-                            <div className="flex items-start gap-3">
-                              <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-2xl border border-border bg-background text-muted-foreground group-hover:text-foreground">
-                                {agent.runtime === 'local-device' ? (
-                                  <Cpu className="size-4" />
-                                ) : agent.kind === 'custom' ? (
-                                  <TerminalSquare className="size-4" />
-                                ) : (
-                                  <Bot className="size-4" />
-                                )}
-                              </span>
-                              <span className="min-w-0 flex-1">
-                                <span className="flex items-center gap-2">
-                                  <span className="truncate text-sm font-medium text-foreground">
-                                    {agent.displayName}
-                                  </span>
-                                  {agent.status === 'default' ? (
-                                    <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-medium text-primary-foreground">
-                                      默认
+                        agents.map((agent) => {
+                          const deviceId = agent.custom?.deviceLinkId;
+                          const device = deviceId
+                            ? devices.find((item) => item.id === deviceId)
+                            : null;
+                          const deviceLabel = device
+                            ? device.displayName
+                            : deviceId;
+                          return (
+                            <button
+                              type="button"
+                              key={agent.id}
+                              onClick={() => handleSelectAgent(agent.id)}
+                              className={`group w-full px-4 py-3 text-left transition ${
+                                selectedAgent?.id === agent.id
+                                  ? 'bg-primary/10'
+                                  : 'hover:bg-muted/70'
+                              }`}
+                            >
+                              <div className="flex items-start gap-3">
+                                <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-2xl border border-border bg-background text-muted-foreground group-hover:text-foreground">
+                                  {agent.runtime === 'local-device' ? (
+                                    <Cpu className="size-4" />
+                                  ) : agent.kind === 'custom' ? (
+                                    <TerminalSquare className="size-4" />
+                                  ) : (
+                                    <Bot className="size-4" />
+                                  )}
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                  <span className="flex items-center gap-2">
+                                    <span className="truncate text-sm font-medium text-foreground">
+                                      {agent.displayName}
                                     </span>
-                                  ) : null}
+                                    {agent.status === 'default' ? (
+                                      <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-medium text-primary-foreground">
+                                        默认
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                  <span className="mt-1 block truncate font-mono text-[11px] text-muted-foreground">
+                                    {agent.id}
+                                  </span>
+                                  <span className="mt-2 flex flex-wrap gap-1">
+                                    <Pill>{runtimeLabel(agent.runtime)}</Pill>
+                                    {deviceLabel ? (
+                                      <Pill
+                                        tone={
+                                          device?.online ? 'green' : 'muted'
+                                        }
+                                      >
+                                        {deviceLabel}
+                                      </Pill>
+                                    ) : null}
+                                  </span>
                                 </span>
-                                <span className="mt-1 block truncate font-mono text-[11px] text-muted-foreground">
-                                  {agent.id}
-                                </span>
-                                <span className="mt-2 flex flex-wrap gap-1">
-                                  <Pill>{runtimeLabel(agent.runtime)}</Pill>
-                                  <Pill
-                                    tone={
-                                      agent.status === 'disabled'
-                                        ? 'muted'
-                                        : 'green'
-                                    }
-                                  >
-                                    {statusLabel(agent.status)}
-                                  </Pill>
-                                </span>
-                              </span>
-                            </div>
-                          </button>
-                        ))
+                              </div>
+                            </button>
+                          );
+                        })
                       )}
                     </div>
                   </CardContent>
@@ -946,6 +955,7 @@ export function AgentsPage() {
           open={dialogOpen}
           onOpenChange={setDialogOpen}
           backend={editing}
+          onSaved={load}
         />
       </div>
     </div>
@@ -1659,9 +1669,7 @@ function AgentTeamWorkspace({
     if (!selectedTeam) return;
     const teamId = selectedTeam.id;
     setRunHistory(await listRuns({ teamId }));
-    setAgentTeamMetrics(
-      await loadMetrics({ teamId }).catch(() => null),
-    );
+    setAgentTeamMetrics(await loadMetrics({ teamId }).catch(() => null));
   }, [listRuns, loadMetrics, selectedTeam?.id]);
 
   const refreshRunObservability = useCallback(
@@ -1712,7 +1720,9 @@ function AgentTeamWorkspace({
             finalResult:
               freshRun.finalResult ??
               freshRun.error ??
-              (status === 'waiting_approval' ? '等待审批，批准后将继续执行。' : ''),
+              (status === 'waiting_approval'
+                ? '等待审批，批准后将继续执行。'
+                : ''),
             runId: freshRun.id,
             traceId: freshRun.traceId,
             roleResults: [],
@@ -1845,8 +1855,7 @@ function AgentTeamWorkspace({
       resetRunObservability();
       return;
     }
-    void refreshRunHistory()
-      .catch(() => setRunHistory([]));
+    void refreshRunHistory().catch(() => setRunHistory([]));
     setRoleAssignments((current) => {
       const roleIds = new Set(selectedTeam.roles.map((role) => role.id));
       const next = Object.fromEntries(
@@ -1915,7 +1924,9 @@ function AgentTeamWorkspace({
     );
     let deleteLinkedAgentMd = false;
     if (linkedAgentMdDefinitions.length > 0) {
-      const linkedNames = linkedAgentMdDefinitions.map((definition) => `「${definition.name}」`).join('、');
+      const linkedNames = linkedAgentMdDefinitions
+        .map((definition) => `「${definition.name}」`)
+        .join('、');
       deleteLinkedAgentMd = confirm(
         `Agent Team「${selectedTeam.name}」生成了 ${linkedAgentMdDefinitions.length} 个 agent.md：${linkedNames}\n\n是否在删除 Team 时一并删除这些 agent.md？\n选择“取消”将只删除 Team，保留 agent.md。`,
       );
@@ -1924,11 +1935,22 @@ function AgentTeamWorkspace({
     try {
       await remove(selectedTeam.id, { deleteLinkedAgentMd });
       selectTeam(null);
-      toast.success(deleteLinkedAgentMd ? 'Agent Team 及关联 agent.md 已删除' : 'Agent Team 已删除');
+      toast.success(
+        deleteLinkedAgentMd
+          ? 'Agent Team 及关联 agent.md 已删除'
+          : 'Agent Team 已删除',
+      );
     } catch (err) {
-      const refs = ((err as { body?: { references?: AgentMdReference[] } })?.body?.references ?? []);
+      const refs =
+        (err as { body?: { references?: AgentMdReference[] } })?.body
+          ?.references ?? [];
       if (refs.length > 0) {
-        const refText = refs.map((ref) => `• agent.md「${ref.agentMdName ?? ref.name}」被 ${ref.kind === 'team' ? 'Team' : 'Agent'}「${ref.name}」引用${ref.detail ? `（${ref.detail}）` : ''}`).join('\n');
+        const refText = refs
+          .map(
+            (ref) =>
+              `• agent.md「${ref.agentMdName ?? ref.name}」被 ${ref.kind === 'team' ? 'Team' : 'Agent'}「${ref.name}」引用${ref.detail ? `（${ref.detail}）` : ''}`,
+          )
+          .join('\n');
         toast.error(`关联 agent.md 仍被引用，无法联动删除：\n${refText}`);
         return;
       }
@@ -2365,7 +2387,9 @@ function AgentTeamPanel({
                 />
                 <AgentTeamPropertyCard
                   label="Avg Duration"
-                  value={formatMetricDuration(agentTeamMetrics.averageDurationMs)}
+                  value={formatMetricDuration(
+                    agentTeamMetrics.averageDurationMs,
+                  )}
                   hint={`${agentTeamMetrics.cancelledRuns} cancelled`}
                 />
                 <AgentTeamPropertyCard
@@ -2880,9 +2904,7 @@ function AgentTeamPanel({
                       </div>
                     ) : null}
                   </div>
-                  <Pill
-                    tone={executionResultTone(executionResult.status)}
-                  >
+                  <Pill tone={executionResultTone(executionResult.status)}>
                     {executionResult.status}
                   </Pill>
                 </div>
@@ -3680,10 +3702,13 @@ function AgentMdPanel({
   const [importingPath, setImportingPath] = useState<string | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewEntry, setPreviewEntry] = useState<AgentMdStorePreview | null>(null);
+  const [previewEntry, setPreviewEntry] = useState<AgentMdStorePreview | null>(
+    null,
+  );
   const generatorName = generatorAgent?.displayName ?? 'Agent';
   const generatorId = generatorAgent?.id ?? 'manual';
-  const storeEntryKey = (entry: AgentMdStoreEntry) => `${entry.sourceId}:${entry.path}`;
+  const storeEntryKey = (entry: AgentMdStoreEntry) =>
+    `${entry.sourceId}:${entry.path}`;
   const selectAgentMd = (agentMdId: string | null) => {
     setSelectedId(agentMdId);
     onSelectedAgentMdIdChange(agentMdId ?? undefined);
@@ -3759,7 +3784,11 @@ function AgentMdPanel({
   const handleImportFromStore = async (entry: AgentMdStoreEntry) => {
     setImportingPath(storeEntryKey(entry));
     try {
-      const saved = await importAgentMdFromStore(entry.path, generatorId, entry.sourceId);
+      const saved = await importAgentMdFromStore(
+        entry.path,
+        generatorId,
+        entry.sourceId,
+      );
       selectAgentMd(saved.id);
       setStoreOpen(false);
       setPreviewOpen(false);
@@ -3838,9 +3867,16 @@ function AgentMdPanel({
       selectAgentMd(null);
       toast.success('agent.md 已删除');
     } catch (err) {
-      const refs = ((err as { body?: { references?: AgentMdReference[] } })?.body?.references ?? []);
+      const refs =
+        (err as { body?: { references?: AgentMdReference[] } })?.body
+          ?.references ?? [];
       if (refs.length > 0) {
-        const refText = refs.map((ref) => `• ${ref.kind === 'team' ? 'Team' : 'Agent'}「${ref.name}」${ref.detail ? `（${ref.detail}）` : ''}`).join('\n');
+        const refText = refs
+          .map(
+            (ref) =>
+              `• ${ref.kind === 'team' ? 'Team' : 'Agent'}「${ref.name}」${ref.detail ? `（${ref.detail}）` : ''}`,
+          )
+          .join('\n');
         toast.error(`该 agent.md 正在被引用，不能删除：\n${refText}`);
         return;
       }
@@ -4151,7 +4187,9 @@ function AgentMdPanel({
                       <Button
                         size="sm"
                         onClick={() => void handleImportFromStore(entry)}
-                        disabled={saving || importingPath === storeEntryKey(entry)}
+                        disabled={
+                          saving || importingPath === storeEntryKey(entry)
+                        }
                       >
                         {importingPath === storeEntryKey(entry) ? (
                           <Loader2 className="size-4 animate-spin" />
@@ -4176,7 +4214,8 @@ function AgentMdPanel({
               预览 agent.md{previewEntry ? `：${previewEntry.name}` : ''}
             </DialogTitle>
             <DialogDescription>
-              先查看商店中的 Markdown 内容，确认合适后再添加为当前用户的 agent.md。
+              先查看商店中的 Markdown 内容，确认合适后再添加为当前用户的
+              agent.md。
             </DialogDescription>
           </DialogHeader>
 
@@ -4208,7 +4247,10 @@ function AgentMdPanel({
                 </a>
               </div>
               <div className="rounded-xl border border-border bg-background p-4">
-                <MarkdownRenderer content={previewEntry.content} variant="docs" />
+                <MarkdownRenderer
+                  content={previewEntry.content}
+                  variant="docs"
+                />
               </div>
             </div>
           ) : null}
@@ -4222,7 +4264,11 @@ function AgentMdPanel({
                 if (!previewEntry) return;
                 void handleImportFromStore(previewEntry);
               }}
-              disabled={!previewEntry || saving || importingPath === storeEntryKey(previewEntry)}
+              disabled={
+                !previewEntry ||
+                saving ||
+                importingPath === storeEntryKey(previewEntry)
+              }
             >
               {previewEntry && importingPath === storeEntryKey(previewEntry) ? (
                 <Loader2 className="size-4 animate-spin" />

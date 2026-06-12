@@ -82,6 +82,7 @@ export function SkillsPage() {
               : `octodeck-workspace://${backend.id}`;
             const data = await api.get<AgentSkillsResponse>(
               `/api/agent-links/${encodeURIComponent(backend.deviceLinkId!)}/providers/${encodeURIComponent(backend.agentClientId!)}/skills?cwd=${encodeURIComponent(cwd)}`,
+              30_000,
             );
             const workspacePath = backend.workdirMode === 'custom'
               ? (backend.workdir ?? '自定义 Workspace')
@@ -112,8 +113,22 @@ export function SkillsPage() {
         );
         if (!cancelled) {
           setDeviceSkills(results.flatMap((result) => (result.status === 'fulfilled' ? result.value : [])));
-          const failedCount = results.filter((result) => result.status === 'rejected').length;
-          setDeviceSkillsError(failedCount > 0 ? `${failedCount} 个 Device Skills 加载失败` : null);
+          const failures = results.flatMap((result, index) => {
+            if (result.status !== 'rejected') return [];
+            const backend = deviceBackends[index];
+            const reason = result.reason as { message?: string; body?: { error?: string } } | Error | undefined;
+            const detail =
+              (reason && typeof reason === 'object' && 'body' in reason && reason.body?.error) ||
+              (reason instanceof Error ? reason.message : undefined) ||
+              (reason && typeof reason === 'object' && 'message' in reason ? reason.message : undefined) ||
+              '未知错误';
+            return [`${backend?.displayName || backend?.id || 'Device'}: ${detail}`];
+          });
+          setDeviceSkillsError(
+            failures.length > 0
+              ? `${failures.length} 个 Device Skills 加载失败 (${failures.join('; ')})`
+              : null,
+          );
         }
       } finally {
         if (!cancelled) setDeviceSkillsLoading(false);

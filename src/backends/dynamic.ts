@@ -33,6 +33,8 @@ export interface CustomBackendDef {
   model?: string;
   /** Native CLI session resume support. When true, OctoDeck skips prompt history injection. */
   supportsNativeSessions?: boolean;
+  /** Optional device CLI permission/sandbox mode. */
+  permissionMode?: string | null;
   /** Extra argv rendered and appended only when input.sessionId is present. */
   sessionArgvTemplate?: string[];
   /** Full argv rendered instead of argvTemplate when input.sessionId is present. */
@@ -153,6 +155,8 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
         envOverrides: Object.keys(env).length > 0 ? env : undefined,
         runtime: def.runtime,
         model,
+        permissionMode: def.permissionMode,
+        agentClientId: def.agentClientId ?? def.id,
         workdirMode: def.workdirMode,
         workdir: def.workdir,
       };

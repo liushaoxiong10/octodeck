@@ -22,8 +22,15 @@ import { optimizeMarkdownStyle } from './feishu-markdown-style.js';
 import {
   buildAgentReplyCard,
   buildStreamingAgentCard,
+  buildCardBatch,
 } from './feishu-cards/builder.js';
 import type { CardStatus, ToolCallStat } from './feishu-cards/types.js';
+import {
+  CARD_MD_LIMIT,
+  CARD_SIZE_LIMIT,
+  splitCodeBlockSafe,
+  MAX_BODY_ELEMENTS_PER_CARD,
+} from './feishu-cards/length.js';
 import {
   CARD_ELEMENT_IDS,
   statusHeadline,
@@ -64,115 +71,7 @@ export interface StreamingCardOptions {
   onCardCreated?: (messageId: string) => void;
 }
 
-// ─── Code-Block-Safe Splitting ───────────────────────────────
-
-interface CodeBlockRange {
-  open: number;
-  close: number;
-  lang: string;
-}
-
-/**
- * Scan text for fenced code block ranges (``` ... ```).
- */
-function findCodeBlockRanges(text: string): CodeBlockRange[] {
-  const ranges: CodeBlockRange[] = [];
-  const regex = /^```(\w*)\s*$/gm;
-  let match: RegExpExecArray | null;
-  let openMatch: RegExpExecArray | null = null;
-  let openLang = '';
-
-  while ((match = regex.exec(text)) !== null) {
-    if (!openMatch) {
-      openMatch = match;
-      openLang = match[1] || '';
-    } else {
-      ranges.push({
-        open: openMatch.index,
-        close: match.index + match[0].length,
-        lang: openLang,
-      });
-      openMatch = null;
-      openLang = '';
-    }
-  }
-
-  // Unclosed code block — treat from open to end of text
-  if (openMatch) {
-    ranges.push({
-      open: openMatch.index,
-      close: text.length,
-      lang: openLang,
-    });
-  }
-
-  return ranges;
-}
-
-/**
- * Check if a position falls inside any code block range.
- * Returns the range if found, null otherwise.
- */
-function findContainingBlock(
-  pos: number,
-  ranges: CodeBlockRange[],
-): CodeBlockRange | null {
-  for (const r of ranges) {
-    if (pos > r.open && pos < r.close) return r;
-  }
-  return null;
-}
-
-/**
- * Split text respecting fenced code block boundaries — never truncates inside
- * a code block without properly closing/reopening the fence.
- */
-function splitCodeBlockSafe(text: string, maxLen: number): string[] {
-  if (text.length <= maxLen) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > maxLen) {
-    // Recompute ranges on current remaining text each iteration.
-    // This handles synthetic reopeners correctly since all positions
-    // are relative to `remaining`, not the original text.
-    const ranges = findCodeBlockRanges(remaining);
-
-    // Find a split point around maxLen
-    let idx = remaining.lastIndexOf('\n\n', maxLen);
-    if (idx < maxLen * 0.3) idx = remaining.lastIndexOf('\n', maxLen);
-    if (idx < maxLen * 0.3) idx = maxLen;
-
-    const block = findContainingBlock(idx, ranges);
-
-    if (block) {
-      // Split point is inside a code block
-      if (block.open > 0 && block.open > maxLen * 0.3) {
-        // Retreat to just before the code block opening
-        const retreatIdx = remaining.lastIndexOf('\n', block.open);
-        idx = retreatIdx > maxLen * 0.3 ? retreatIdx : block.open;
-        chunks.push(remaining.slice(0, idx).trimEnd());
-        remaining = remaining.slice(idx).replace(/^\n+/, '');
-      } else {
-        // Block starts too early to retreat — split inside but close/reopen fence
-        const chunk = remaining.slice(0, idx).trimEnd() + '\n```';
-        chunks.push(chunk);
-        const reopener = '```' + block.lang + '\n';
-        remaining = reopener + remaining.slice(idx).replace(/^\n/, '');
-      }
-    } else {
-      chunks.push(remaining.slice(0, idx).trimEnd());
-      remaining = remaining.slice(idx).replace(/^\n+/, '');
-    }
-  }
-
-  if (remaining) chunks.push(remaining);
-  return chunks;
-}
-
-const CARD_MD_LIMIT = 4000;
-const CARD_SIZE_LIMIT = 25 * 1024; // Feishu limit ~30KB, 5KB safety margin
+// ─── Types ────────────────────────────────────────────────────
 
 export function extractTitleAndBody(text: string): {
   title: string;
@@ -2402,40 +2301,50 @@ export class StreamingCardController {
   }
 
   /**
-   * Split content into multiple cards on finalize (only when streaming card content exceeds CARD_SIZE_LIMIT).
-   * The first card (existing streaming card) gets frozen, subsequent cards are new.
+   * Split content into multiple cards on finalize (only when streaming card
+   * content exceeds CARD_SIZE_LIMIT). Reuses the shared buildCardBatch()
+   * builder so streaming finalize and static sendMessage produce visually
+   * identical results.
+   *
+   * The first card updates the existing streaming card in-place; subsequent
+   * cards are sent as new messages.
    */
   private async splitOnFinalize(
     finalState: 'completed' | 'aborted',
   ): Promise<void> {
     const backend = this.streamingBackend!;
-    const { title } = extractTitleAndBody(this.accumulatedText);
-    const chunks = splitCodeBlockSafe(this.accumulatedText, CARD_MD_LIMIT);
+    const status: CardStatus = finalState === 'aborted' ? 'warning' : 'done';
 
-    // How many chunks fit in the first card?
-    const MAX_ELEMENTS_PER_CARD = 45;
-    const fixedElements = 2; // note + margin
-    const maxChunksFirst = MAX_ELEMENTS_PER_CARD - fixedElements;
+    // Collect the same chrome that buildStructuredFinalCard uses
+    const toolCounts = new Map<string, number>();
+    for (const tc of this.toolCalls.values()) {
+      toolCounts.set(tc.name, (toolCounts.get(tc.name) ?? 0) + 1);
+    }
+    const toolCalls: ToolCallStat[] = Array.from(toolCounts, ([name, count]) => ({
+      name,
+      count,
+    }));
+    const thinking = this.thinkingText.trim() || undefined;
 
-    const firstChunks = chunks.slice(0, maxChunksFirst);
-    const firstText = firstChunks.join('\n\n');
+    const cards = buildCardBatch(this.accumulatedText || '...', {
+      status,
+      thinking,
+      footer: this.traceFooterLink(),
+      meta: {
+        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      },
+      chromePlacement: 'last',
+    });
 
-    // Use finalState if all content fits in the first card, otherwise freeze
-    const firstCardState =
-      chunks.length <= maxChunksFirst ? finalState : 'frozen';
-    const frozenCard = buildSchema2Card(firstText, firstCardState, '', title);
-    await backend.updateCardFull(frozenCard);
+    if (cards.length === 0) return;
 
-    // Create continuation cards
-    let remaining = chunks.slice(maxChunksFirst);
-    while (remaining.length > 0) {
-      const batch = remaining.slice(0, maxChunksFirst);
-      remaining = remaining.slice(maxChunksFirst);
-      const batchText = batch.join('\n\n');
-      const state = remaining.length === 0 ? finalState : 'frozen';
+    // First card: update the existing streaming card in-place
+    await backend.updateCardFull(cards[0]);
+
+    // Subsequent cards: create as new messages
+    for (let i = 1; i < cards.length; i++) {
       const contCard = new CardKitBackend(this.client);
-      const contCardJson = buildSchema2Card(batchText, state, '(续) ', title);
-      await contCard.createCard(contCardJson);
+      await contCard.createCard(cards[i]);
       const newMsgId = await contCard.sendCard(
         this.chatId,
         this.replyToMsgId,

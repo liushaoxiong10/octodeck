@@ -8,9 +8,10 @@ import {
 } from '../web-context.js';
 import type { AuthUser } from '../types.js';
 import type { RegisteredGroup } from '../types.js';
-import { getRegisteredGroup } from '../db.js';
+import { getRegisteredGroup, getSessionWorkspaceSessionId } from '../db.js';
 import { getSession, listOnlineRuntimesByProvider } from '../agent-link/registry.js';
 import { invokeRemoteTool } from '../agent-link/tool-rpc.js';
+import type { WorkspaceRepoSpec } from '../agent-link/protocol.js';
 import { logger } from '../logger.js';
 import {
   listFiles,
@@ -257,6 +258,31 @@ function deviceWorkspaceCwd(group: RegisteredGroup): string {
   return `octodeck-workspace://${group.folder}`;
 }
 
+function normalizeAgentId(value: unknown): string | null | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (trimmed === '__main__') return null;
+  if (!trimmed || trimmed.length > 128 || trimmed.includes('/') || trimmed.includes('\\')) return undefined;
+  return trimmed;
+}
+
+function deviceWorkspaceRepoForAgent(
+  group: RegisteredGroup,
+  agentId: string | null | undefined,
+): WorkspaceRepoSpec | undefined {
+  if (agentId === undefined) return undefined;
+  const scopeId = getSessionWorkspaceSessionId(group.folder, agentId);
+  if (!scopeId) return undefined;
+  return {
+    kind: 'workspace',
+    groupFolder: group.folder,
+    ...(agentId ? { agentId } : {}),
+    workdirMode: 'auto',
+    scope: 'session',
+    scopeId,
+  };
+}
+
 function resolveDeviceWorkspaceLinkId(group: RegisteredGroup): string | undefined {
   const raw = group.deviceLinkId || group.executionNode;
   if (typeof raw !== 'string') return undefined;
@@ -297,12 +323,13 @@ async function readDeviceWorkspaceFile(
   group: RegisteredGroup,
   relativePath: string,
   maxBytes: number,
+  agentId?: string | null,
 ): Promise<Buffer> {
   const result = await invokeDeviceWorkspaceTool(
     group,
     'Read',
     { file_path: normalizeRemoteRelativePath(relativePath), base64: true },
-    { maxOutputBytes: maxBytes },
+    { maxOutputBytes: maxBytes, agentId },
   );
   const encoded =
     typeof result?.contentBase64 === 'string' ? result.contentBase64 : '';
@@ -313,7 +340,7 @@ async function invokeDeviceWorkspaceTool(
   group: RegisteredGroup,
   toolName: string,
   input: Record<string, unknown>,
-  opts?: { timeoutMs?: number; maxOutputBytes?: number },
+  opts?: { timeoutMs?: number; maxOutputBytes?: number; agentId?: string | null },
 ) {
   const linkId = resolveDeviceWorkspaceLinkId(group);
   if (!linkId) throw new Error('Device link not configured');
@@ -324,6 +351,7 @@ async function invokeDeviceWorkspaceTool(
     toolName,
     input,
     cwd: deviceWorkspaceCwd(group),
+    workspaceRepo: deviceWorkspaceRepoForAgent(group, opts?.agentId),
     timeoutMs: opts?.timeoutMs ?? 60_000,
     maxOutputBytes: opts?.maxOutputBytes ?? 10 * 1024 * 1024,
   });
@@ -335,6 +363,7 @@ async function invokeDeviceWorkspaceTool(
 fileRoutes.get('/:jid/files', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
   const subPath = c.req.query('path') || '';
+  const agentId = normalizeAgentId(c.req.query('agentId'));
 
   const group = getRegisteredGroup(jid);
   if (!group) {
@@ -357,7 +386,7 @@ fileRoutes.get('/:jid/files', authMiddleware, async (c) => {
       const relativePath = normalizeRemoteRelativePath(subPath);
       const result = await invokeDeviceWorkspaceTool(group, 'LS', {
         path: relativePath || '.',
-      });
+      }, { agentId });
       const entries = Array.isArray(result?.entries)
         ? (result.entries as Array<Record<string, unknown>>)
         : [];
@@ -421,6 +450,7 @@ fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
   try {
     const body = await c.req.parseBody({ all: true });
     const targetPath = (typeof body.path === 'string' ? body.path : '') || '';
+    const agentId = normalizeAgentId(body.agentId);
     const files = body.files;
 
     if (!files) {
@@ -458,7 +488,7 @@ fileRoutes.post('/:jid/files', authMiddleware, async (c) => {
             file_path: relativeFilePath,
             contentBase64: buffer.toString('base64'),
           },
-          { timeoutMs: 120_000, maxOutputBytes: Math.max(buffer.length, 1024) },
+          { timeoutMs: 120_000, maxOutputBytes: Math.max(buffer.length, 1024), agentId },
         );
         uploadedFiles.push(file.name);
       }
@@ -620,12 +650,14 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, async (c) => {
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
+    const agentId = normalizeAgentId(c.req.query('agentId'));
     if (isDeviceWorkspaceFilesGroup(group)) {
       const safePath = normalizeRemoteRelativePath(relativePath);
       const data = await readDeviceWorkspaceFile(
         group,
         safePath,
         MAX_FILE_SIZE,
+        agentId,
       );
       const fileName = path.posix.basename(safePath);
       return new Response(data, {
@@ -740,12 +772,14 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, async (c) => {
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
+    const agentId = normalizeAgentId(c.req.query('agentId'));
     if (isDeviceWorkspaceFilesGroup(group)) {
       const safePath = normalizeRemoteRelativePath(relativePath);
       const data = await readDeviceWorkspaceFile(
         group,
         safePath,
         MAX_FILE_SIZE,
+        agentId,
       );
       const ext = path.posix.extname(safePath).slice(1).toLowerCase();
       const mimeType = MIME_MAP[ext] || 'application/octet-stream';
@@ -904,6 +938,7 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, async (c) => {
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
+    const agentId = normalizeAgentId(c.req.query('agentId'));
     if (isDeviceWorkspaceFilesGroup(group)) {
       const safePath = normalizeRemoteRelativePath(relativePath);
       const ext = path.posix.extname(safePath).slice(1).toLowerCase();
@@ -917,6 +952,7 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, async (c) => {
         group,
         safePath,
         10 * 1024 * 1024,
+        agentId,
       );
       return c.json({ content: data.toString('utf-8'), size: data.length });
     }
@@ -983,6 +1019,7 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
+    const agentId = normalizeAgentId(c.req.query('agentId'));
 
     // 禁止写入系统路径
     if (isSystemPath(relativePath)) {
@@ -1005,7 +1042,7 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
       await invokeDeviceWorkspaceTool(group, 'Write', {
         file_path: safePath,
         content: body.content,
-      });
+      }, { agentId });
       return c.json({ success: true });
     }
 
@@ -1097,6 +1134,7 @@ fileRoutes.delete('/:jid/files/:path', authMiddleware, async (c) => {
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
+    const agentId = normalizeAgentId(c.req.query('agentId'));
     if (isDeviceWorkspaceFilesGroup(group)) {
       const safePath = normalizeRemoteRelativePath(relativePath);
       if (!safePath || isSystemPath(safePath)) {
@@ -1104,7 +1142,7 @@ fileRoutes.delete('/:jid/files/:path', authMiddleware, async (c) => {
       }
       await invokeDeviceWorkspaceTool(group, 'Bash', {
         command: `rm -rf -- ${shellQuote(safePath)}`,
-      });
+      }, { agentId });
       return c.json({ success: true });
     }
     deleteFile(group.folder, relativePath, rootOverride);
@@ -1152,6 +1190,7 @@ fileRoutes.post('/:jid/directories', authMiddleware, async (c) => {
   try {
     const body = await c.req.json();
     const { path: parentPath, name } = body;
+    const agentId = normalizeAgentId(body.agentId);
 
     if (!name || typeof name !== 'string') {
       return c.json({ error: 'Directory name is required' }, 400);
@@ -1172,7 +1211,7 @@ fileRoutes.post('/:jid/directories', authMiddleware, async (c) => {
       }
       await invokeDeviceWorkspaceTool(group, 'Bash', {
         command: `mkdir -p -- ${shellQuote(safePath)}`,
-      });
+      }, { agentId });
       return c.json({ success: true });
     }
 

@@ -1,3 +1,5 @@
+github.com/beyond5959/acp-adapter v0.3.8 h1:qOZtrFq/wXs4ppr7FVbUpO8g4CmcJSRHH3u9ay+t9kw=
+github.com/beyond5959/acp-adapter v0.3.8/go.mod h1:cr4I+9+la75oUge+Pr97KlcdQrkwIG6VwWHbc9ALxSE=
 github.com/coder/acp-go-sdk v0.13.5 h1:LI9jq5xon7xslaYlnoktvTVyDlE37yIk2daT7N9ASYk=
 github.com/coder/acp-go-sdk v0.13.5/go.mod h1:yKzM/3R9uELp4+nBAwwtkS0aN1FOFjo11CNPy37yFko=
 github.com/coder/websocket v1.8.12 h1:5bUXkEPPIbewrnkU8LTCLVaxi4N4J8ahufH2vlo4NAo=

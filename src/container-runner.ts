@@ -277,6 +277,8 @@ export interface ContainerInput {
   remoteToolCwd?: string;
   /** Controls whether agent-runner may expose native local tools. */
   localToolPolicy?: 'none' | 'server' | 'device-remote' | 'container';
+  /** Per-workspace Claude Code permission mode. 'default' leaves SDK default approvals on. */
+  permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
   /** Base URL for agent-runner -> server tool bridge calls. */
   remoteToolServerUrl?: string;
   /** Runtime context audit bootstrap; agent-runner enriches it with SDK usage. */
@@ -611,6 +613,7 @@ export function buildVolumeMounts(
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
+  const agentAccessScope = group.agentAccessScope ?? 'all';
 
   // Per-user global memory directory:
   // Each user gets their own user-global/{userId}/ mounted as /workspace/global
@@ -634,7 +637,7 @@ export function buildVolumeMounts(
     });
   }
 
-  if (isAdminHome) {
+  if (isAdminHome && agentAccessScope === 'all') {
     // Admin home gets the entire project root mounted
     mounts.push({
       hostPath: projectRoot,
@@ -657,16 +660,15 @@ export function buildVolumeMounts(
     });
   }
 
-  // Memory directory: home containers write their own; non-home containers read owner's home memory
-  const memoryFolder = group.is_home
-    ? group.folder
-    : ownerHomeFolder || group.folder;
-  const memoryDir = path.join(DATA_DIR, 'memory', memoryFolder);
+  // Workspace memory local mirror: cloud is authoritative, but each workspace
+  // keeps a local copy under the mounted workspace for fast file-based lookup.
+  // The agent-runner also passes this directory via additionalDirectories.
+  const memoryDir = path.join(GROUPS_DIR, group.folder, '.octodeck', 'memory');
   mkdirForContainer(memoryDir);
   mounts.push({
     hostPath: memoryDir,
     containerPath: '/workspace/memory',
-    readonly: !group.is_home,
+    readonly: false,
   });
 
   // Per-group Claude sessions directory (isolated from other groups)
@@ -947,7 +949,7 @@ export function buildVolumeMounts(
   });
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
-  if (group.containerConfig?.additionalMounts) {
+  if (agentAccessScope === 'all' && group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
       group.containerConfig.additionalMounts,
       group.name,
@@ -1118,6 +1120,7 @@ export async function runContainerAgent(
               )
             : path.join(DATA_DIR, 'sessions', group.folder, '.claude'),
         }).audit,
+        permissionMode: group.permissionMode ?? 'bypassPermissions',
       };
       container.stdin.write(JSON.stringify(dockerInput));
       container.stdin.end();
@@ -1425,6 +1428,9 @@ export async function runHostAgent(
     }
   }
   let groupDir = group.customCwd || defaultGroupDir;
+  if ((group.agentAccessScope ?? 'all') === 'workspace') {
+    groupDir = defaultGroupDir;
+  }
   if (!path.isAbsolute(groupDir)) {
     return hostModeSetupError(`工作目录必须是绝对路径：${groupDir}`);
   }
@@ -1440,7 +1446,7 @@ export async function runHostAgent(
 
   // Runtime allowlist validation for custom CWD (defense-in-depth: web.ts validates at creation,
   // but re-check here in case allowlist was tightened or path was injected via DB)
-  if (group.customCwd) {
+  if (group.customCwd && (group.agentAccessScope ?? 'all') === 'all') {
     const allowlist = loadMountAllowlist();
     if (
       allowlist &&
@@ -1710,14 +1716,14 @@ export async function runHostAgent(
         fs.mkdirSync(legacyGlobalDir, { recursive: true });
         hostEnv['OCTODECK_WORKSPACE_GLOBAL'] = legacyGlobalDir;
       }
-      const memoryFolder = group.is_home
-        ? group.folder
-        : ownerHomeFolder || group.folder;
-      hostEnv['OCTODECK_WORKSPACE_MEMORY'] = path.join(
-        DATA_DIR,
+      const workspaceMemoryDir = path.join(
+        GROUPS_DIR,
+        group.folder,
+        '.octodeck',
         'memory',
-        memoryFolder,
       );
+      fs.mkdirSync(workspaceMemoryDir, { recursive: true });
+      hostEnv['OCTODECK_WORKSPACE_MEMORY'] = workspaceMemoryDir;
     }
 
     // Resolve symlinks so CLAUDE_CONFIG_DIR ends up as the real on-disk path.
@@ -1925,6 +1931,7 @@ export async function runHostAgent(
               : undefined),
         remoteToolServerUrl: hostEnv['OCTODECK_SERVER_URL'],
         contextAudit: hostClaudeContextPlan.audit,
+        permissionMode: group.permissionMode ?? 'bypassPermissions',
       };
       proc.stdin.write(JSON.stringify(hostInput));
       proc.stdin.end();

@@ -1601,7 +1601,6 @@ func buildEnv(cfg *Config, overrides map[string]string, runContext any) []string
 		_ = os.MkdirAll(root, 0o700)
 		base["OCTODECK_SESSION_DIR"] = root
 		providerDirs := map[string]string{
-			"CLAUDE_CONFIG_DIR":  filepath.Join(root, "claude"),
 			"CODEX_HOME":         filepath.Join(root, "codex"),
 			"TRAECLI_CONFIG_DIR": filepath.Join(root, "traecli"),
 			// traex 与 codex 调用约定一致，但应当独立其配置目录避免互覆盖。

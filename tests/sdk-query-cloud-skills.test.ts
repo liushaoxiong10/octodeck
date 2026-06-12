@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'octodeck-sdk-query-skills-'));
 const tmpDataDir = path.join(tmpRoot, 'data');
+const cloudMemoryMockState = vi.hoisted(() => ({ content: '' }));
 const queryCalls = vi.hoisted(() => [] as Array<{ args: any; claudeConfigDir?: string }>);
 const queryMock = vi.hoisted(() => vi.fn((args: any) => {
   queryCalls.push({ args, claudeConfigDir: process.env.CLAUDE_CONFIG_DIR });
@@ -18,6 +19,16 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   createSdkMcpServer: vi.fn((config) => config),
   query: queryMock,
   tool: vi.fn((name, description, inputSchema, handler) => ({ name, description, inputSchema, handler })),
+}));
+
+vi.mock('../src/memory-store.js', () => ({
+  appendCloudMemory: vi.fn(),
+  getCloudMemory: vi.fn(() => cloudMemoryMockState.content ? { content: cloudMemoryMockState.content } : null),
+  putCloudMemory: vi.fn((args: { content: string }) => {
+    cloudMemoryMockState.content = args.content;
+    return { content: args.content };
+  }),
+  searchCloudMemory: vi.fn(() => []),
 }));
 
 vi.mock('../src/config.js', async (importOriginal) => {
@@ -36,6 +47,7 @@ vi.mock('../src/runtime-config.js', () => ({
 describe('sdkQuery cloud skills', () => {
   beforeEach(() => {
     queryCalls.length = 0;
+    cloudMemoryMockState.content = '';
     queryMock.mockClear();
     fs.rmSync(tmpRoot, { recursive: true, force: true });
     fs.mkdirSync(tmpDataDir, { recursive: true });
@@ -53,5 +65,27 @@ describe('sdkQuery cloud skills', () => {
       expect.arrayContaining(['cloud_skill_search', 'cloud_skill_get']),
     );
     expect(queryCalls[0].claudeConfigDir).toBeUndefined();
+  });
+
+  test('injects user cloud global memory into Claude system prompt', async () => {
+    const { putCloudMemory } = await import('../src/memory-store.js');
+    putCloudMemory({
+      userId: 'alice',
+      memoryType: 'global',
+      path: 'CLAUDE.md',
+      content: '用户偏好：始终用中文简洁回答。',
+      source: 'test',
+      updatedBy: 'alice',
+    });
+
+    const { sdkQuery } = await import('../src/sdk-query.js');
+    await expect(sdkQuery('hello', { userId: 'alice' })).resolves.toBe('cloud skill ok');
+
+    expect(queryCalls[0].args.options.systemPrompt).toMatchObject({
+      type: 'preset',
+      preset: 'claude_code',
+    });
+    expect(queryCalls[0].args.options.systemPrompt.append).toContain('<cloud-global-memory>');
+    expect(queryCalls[0].args.options.systemPrompt.append).toContain('用户偏好：始终用中文简洁回答。');
   });
 });

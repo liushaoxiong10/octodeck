@@ -52,6 +52,7 @@ import {
 import { AgentLinkSession } from '../agent-link/session.js';
 import { requestProviderModels } from '../agent-link/model-rpc.js';
 import { requestProviderSkills } from '../agent-link/skills-rpc.js';
+import { AGENT_LINK_MAX_FRAME_BYTES } from '../agent-link/protocol.js';
 import {
   requestAgentDiscover,
   requestAgentSessionDelete,
@@ -511,7 +512,10 @@ export default agentLinkRoutes;
 
 // ─── WebSocket upgrade ──────────────────────────────────────────────
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({
+  noServer: true,
+  maxPayload: AGENT_LINK_MAX_FRAME_BYTES,
+});
 
 interface UpgradeRequest extends IncomingMessage {
   __agentLinkId?: string;

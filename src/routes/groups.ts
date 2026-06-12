@@ -29,6 +29,7 @@ import {
   getJidsByFolder,
   updateChatName,
   deleteSession,
+  deleteAllSessionsForFolder,
   getSession as getStoredSession,
   deleteChatHistory,
   deleteGroupData,
@@ -202,6 +203,8 @@ interface GroupPayloadItem {
   device_link_id?: string;
   agent_client_id?: string;
   agent_model?: string;
+  agent_access_scope?: 'all' | 'workspace';
+  permission_mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
   execution_mode: 'container' | 'host';
   custom_cwd?: string;
   repo_id?: string;
@@ -328,6 +331,8 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       device_link_id: isAdmin ? group.deviceLinkId : undefined,
       agent_client_id: isAdmin ? group.agentClientId : undefined,
       agent_model: isAdmin ? group.agentModel : undefined,
+      agent_access_scope: isAdmin ? group.agentAccessScope ?? 'all' : undefined,
+      permission_mode: isAdmin ? group.permissionMode ?? 'bypassPermissions' : undefined,
       execution_mode: group.executionMode || 'container',
       custom_cwd: isAdmin ? group.customCwd : undefined,
       repo_id: isAdmin ? group.repoId : undefined,
@@ -524,6 +529,8 @@ groupRoutes.post('/', authMiddleware, async (c) => {
   const repoDevicePath = validation.data.repo_device_path;
   const visibleRepoMode = validation.data.visible_repo_mode;
   const visibleRepoIds = validation.data.visible_repo_ids;
+  const agentAccessScope = validation.data.agent_access_scope ?? 'all';
+  const permissionMode = validation.data.permission_mode ?? 'bypassPermissions';
   const initSourcePath = validation.data.init_source_path;
   const initGitUrl = validation.data.init_git_url;
   const authUser = c.get('user') as AuthUser;
@@ -862,6 +869,8 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     agentClientId:
       runtimeProfile === 'device-cli-agent' ? agentClientId : undefined,
     agentModel,
+    agentAccessScope,
+    permissionMode,
     backend: runtimeProfile === 'device-cli-agent' ? backend : undefined,
     executionNode:
       runtimeProfile !== 'server-agent' ? effectiveExecutionNode : undefined,
@@ -946,6 +955,8 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       runtime_profile: group.runtimeProfile,
       device_link_id: group.deviceLinkId,
       agent_client_id: group.agentClientId,
+      agent_access_scope: group.agentAccessScope ?? 'all',
+      permission_mode: group.permissionMode ?? 'bypassPermissions',
       backend: group.backend,
       execution_mode: group.executionMode || 'host',
       member_role: 'owner',
@@ -985,6 +996,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     agent_model,
     execution_mode,
     backend,
+    agent_access_scope,
+    permission_mode,
     visible_repo_mode,
     visible_repo_ids,
     execution_node,
@@ -1002,6 +1015,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     agent_model === undefined &&
     execution_mode === undefined &&
     backend === undefined &&
+    agent_access_scope === undefined &&
+    permission_mode === undefined &&
     visible_repo_mode === undefined &&
     visible_repo_ids === undefined &&
     execution_node === undefined
@@ -1104,10 +1119,12 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     agent_client_id === undefined &&
     agent_model === undefined &&
     execution_mode === undefined &&
-      backend === undefined &&
-      visible_repo_mode === undefined &&
-      visible_repo_ids === undefined &&
-      execution_node === undefined;
+    backend === undefined &&
+    agent_access_scope === undefined &&
+    permission_mode === undefined &&
+    visible_repo_mode === undefined &&
+    visible_repo_ids === undefined &&
+    execution_node === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -1159,10 +1176,20 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     agent_model !== undefined ||
     execution_mode !== undefined ||
     backend !== undefined ||
+    agent_access_scope !== undefined ||
+    permission_mode !== undefined ||
     visible_repo_mode !== undefined ||
     visible_repo_ids !== undefined ||
     execution_node !== undefined
   ) {
+    const previousAgentModel = existing.agentModel?.trim() || '';
+    const nextAgentModel =
+      agent_model !== undefined
+        ? agent_model.trim()
+        : previousAgentModel;
+    const agentModelChanged =
+      agent_model !== undefined && nextAgentModel !== previousAgentModel;
+
     const nextVisibleRepoMode =
       visible_repo_mode !== undefined
         ? visible_repo_mode
@@ -1220,6 +1247,12 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         agent_model !== undefined
           ? agent_model.trim() || undefined
           : existing.agentModel,
+      agentAccessScope:
+        agent_access_scope !== undefined
+          ? agent_access_scope
+          : existing.agentAccessScope,
+      permissionMode:
+        permission_mode !== undefined ? permission_mode : existing.permissionMode,
       backend: backend !== undefined ? backend || undefined : existing.backend,
       executionNode:
         nextDeviceLinkId !== undefined
@@ -1230,6 +1263,47 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     setRegisteredGroup(jid, updated);
     if (name) updateChatName(jid, name);
     deps.getRegisteredGroups()[jid] = updated;
+
+    if (agentModelChanged) {
+      // 模型配置是运行会话级参数。Claude/ACP/Device CLI 的原生 session
+      // 往往会把创建时的 model 固定在会话内；如果只更新 DB 而继续复用
+      // OctoDeck/native session 或 warm runner，下一次实际 run 仍可能使用旧模型。
+      // 因此模型变更后必须清空该 workspace 下所有主/子 Agent session，
+      // 并停止 warm 进程，让下一次 run 用新 model 冷启动。
+      try {
+        deleteAllSessionsForFolder(existing.folder);
+        delete deps.getSessions()[existing.folder];
+
+        const siblingJids = getJidsByFolder(existing.folder);
+        const descendantJids = Array.from(
+          new Set(
+            siblingJids.flatMap((siblingJid) =>
+              deps.queue.listActiveDescendantJids(siblingJid),
+            ),
+          ),
+        );
+        await Promise.allSettled(
+          [...siblingJids, ...descendantJids].map((runJid) =>
+            deps.queue.stopGroup(runJid, { force: true }),
+          ),
+        );
+
+        logger.info(
+          {
+            jid,
+            folder: existing.folder,
+            previousAgentModel,
+            nextAgentModel,
+          },
+          'Group agent model changed; cleared sessions and stopped warm runners',
+        );
+      } catch (err) {
+        logger.warn(
+          { jid, folder: existing.folder, err },
+          'Failed to fully reset sessions after agent model change',
+        );
+      }
+    }
 
     const deviceDetached =
       existingDeviceLinkId &&

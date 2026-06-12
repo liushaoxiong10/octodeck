@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 
 import { buildAgentBackendFromClient, normalizeAgentClientBackendDef, resolveDeviceAgentClient } from '../src/backends/agent-client-adapter.js';
+import { applyAgentPermissionArgs, normalizePermissionModeForAgent } from '../src/backends/agent-permission-args.js';
 
 describe('agent client adapter', () => {
   test('builds backend config from discovered codex client without user supplied binary or argv', () => {
@@ -51,7 +52,7 @@ describe('agent client adapter', () => {
       '{model}',
       '--output-format',
       'stream-json',
-      '--dangerously-skip-permissions',
+      '--verbose',
       '--mcp-config',
       '__OCTODECK_AGENT_TEAM_MCP_CONFIG__',
     ]);
@@ -76,6 +77,91 @@ describe('agent client adapter', () => {
     expect(def.argvTemplate).toContain('{model}');
     expect(def.resumeArgvTemplate).toContain('{model}');
     expect(def.resumeArgvTemplate).toContain('{sessionId}');
+  });
+
+  test('persists selected no-approval permission mode for device clients', () => {
+    const def = buildAgentBackendFromClient({
+      id: 'mac-claude',
+      displayName: 'Mac Claude',
+      deviceLinkId: 'cl_1234567890abcdef',
+      agentClientId: 'claude-code',
+      discoveredClient: {
+        id: 'claude-code',
+        displayName: 'Claude Code',
+        binary: '/opt/homebrew/bin/claude',
+        permissionModes: ['default', 'acceptEdits', 'bypassPermissions'],
+      },
+      permissionMode: 'bypassPermissions',
+    });
+
+    expect(def.permissionMode).toBe('bypassPermissions');
+  });
+
+  test('adapts bypass permission mode to Claude Code argv', () => {
+    expect(
+      applyAgentPermissionArgs(
+        ['-p', 'hello', '--output-format', 'stream-json'],
+        'claude-code',
+        'bypassPermissions',
+      ),
+    ).toEqual([
+      '-p',
+      'hello',
+      '--output-format',
+      'stream-json',
+      '--permission-mode',
+      'bypassPermissions',
+    ]);
+  });
+
+  test('adapts bypass permission mode to Codex no-approval argv', () => {
+    expect(normalizePermissionModeForAgent('codex', 'bypassPermissions')).toBe('full-access');
+    expect(
+      applyAgentPermissionArgs(
+        ['exec', '--json', '--skip-git-repo-check', '-m', 'gpt-5-codex', 'hello'],
+        'codex',
+        'bypassPermissions',
+      ),
+    ).toEqual([
+      'exec',
+      '--json',
+      '--skip-git-repo-check',
+      '-m',
+      'gpt-5-codex',
+      '--sandbox',
+      'danger-full-access',
+      '--ask-for-approval',
+      'never',
+      'hello',
+    ]);
+  });
+
+  test('adapts bypass permission mode to TraeCLI yes argv', () => {
+    expect(
+      applyAgentPermissionArgs(
+        ['-p', 'hello', '--output-format=stream-json'],
+        'traecli',
+        'bypassPermissions',
+      ),
+    ).toEqual(['-p', 'hello', '--output-format=stream-json', '-y']);
+  });
+
+  test('rejects permission modes not reported by device clients', () => {
+    expect(() =>
+      buildAgentBackendFromClient({
+        id: 'mac-claude',
+        displayName: 'Mac Claude',
+        deviceLinkId: 'cl_1234567890abcdef',
+        agentClientId: 'claude-code',
+        discoveredClient: {
+          id: 'claude-code',
+          displayName: 'Claude Code',
+          binary: '/opt/homebrew/bin/claude',
+          permissionModes: ['default', 'acceptEdits'],
+        },
+        permissionMode: 'bypassPermissions',
+      }),
+    ).toThrow('不支持权限模式');
   });
 
   test('normalizes persisted Codex backend to native exec resume template', () => {
@@ -140,7 +226,6 @@ describe('agent client adapter', () => {
       'model.name={model}',
       '--output-format=stream-json',
       '--include-partial-messages',
-      '-y',
       '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
     ]);
   });
@@ -168,7 +253,6 @@ describe('agent client adapter', () => {
       'model.name={model}',
       '--output-format=stream-json',
       '--include-partial-messages',
-      '-y',
       '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
     ]);
     expect(def.outputProtocol).toBe('jsonline-stream-json');

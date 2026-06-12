@@ -4,11 +4,12 @@ import { useFileStore } from '../../stores/files';
 
 interface FileUploadZoneProps {
   groupJid: string;
+  agentId?: string | null;
   disabled?: boolean;
   disabledReason?: string;
 }
 
-export function FileUploadZone({ groupJid, disabled = false, disabledReason }: FileUploadZoneProps) {
+export function FileUploadZone({ groupJid, agentId, disabled = false, disabledReason }: FileUploadZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -36,7 +37,7 @@ export function FileUploadZone({ groupJid, disabled = false, disabledReason }: F
 
     const fileList = e.dataTransfer.files;
     if (fileList.length > 0) {
-      await uploadFiles(groupJid, Array.from(fileList));
+      await uploadFiles(groupJid, Array.from(fileList), undefined, agentId);
     }
   };
 
@@ -44,7 +45,7 @@ export function FileUploadZone({ groupJid, disabled = false, disabledReason }: F
     const fileList = e.target.files;
     if (disabled) return;
     if (fileList && fileList.length > 0) {
-      await uploadFiles(groupJid, Array.from(fileList));
+      await uploadFiles(groupJid, Array.from(fileList), undefined, agentId);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
@@ -53,7 +54,7 @@ export function FileUploadZone({ groupJid, disabled = false, disabledReason }: F
     const fileList = e.target.files;
     if (disabled) return;
     if (fileList && fileList.length > 0) {
-      await uploadFiles(groupJid, Array.from(fileList));
+      await uploadFiles(groupJid, Array.from(fileList), undefined, agentId);
       if (folderInputRef.current) folderInputRef.current.value = '';
     }
   };

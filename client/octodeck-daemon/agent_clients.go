@@ -70,10 +70,10 @@ var agentClientPermissionModes = map[string][]string{
 }
 
 var agentClientCapabilities = map[string][]string{
-	"claude-code": {"print", "stream-json", "mcp", "permissions", "tools", "session", "skills"},
-	"claude-acp":  {"acp", "jsonrpc", "mcp", "permissions", "tools", "session", "skills"},
+	"claude-code": {"print", "stream-json", "mcp", "permissions", "tools", "session", "skills", "system-prompt"},
+	"claude-acp":  {"acp", "jsonrpc", "mcp", "permissions", "tools", "session", "skills", "system-prompt"},
 	"codex":       {"exec", "jsonl", "tools", "sandbox", "approval-policy"},
-	"codex-acp":   {"acp", "jsonrpc", "mcp", "tools", "sandbox", "approval-policy", "session"},
+	"codex-acp":   {"acp", "jsonrpc", "mcp", "tools", "sandbox", "approval-policy", "session", "system-prompt"},
 	"traecli":     {"print", "plain-text", "permissions", "tools"},
 	"traecli-acp": {"acp", "jsonrpc", "mcp", "permissions", "tools", "session"},
 	"traex":       {"exec", "jsonl", "tools", "sandbox", "approval-policy"},
@@ -286,7 +286,19 @@ func supportsAgentClientCandidate(c agentClientCandidate, binary string) bool {
 			}
 		}
 	}
+	if supportsEmbeddedACPClientCandidate(c) {
+		return true
+	}
 	return false
+}
+
+func supportsEmbeddedACPClientCandidate(c agentClientCandidate) bool {
+	switch c.id {
+	case "claude-acp", "codex-acp":
+		return true
+	default:
+		return false
+	}
 }
 
 func mergeAgentClients(auto []AgentClientInfo, registry []AgentClientInfo) []AgentClientInfo {

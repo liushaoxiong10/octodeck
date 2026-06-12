@@ -23,6 +23,7 @@ import {
 import type { ContainerOutput } from '../container-runner.js';
 import type { StreamEvent } from '../stream-event.types.js';
 import { runViaAgentLink } from './agent-link-driver.js';
+import { applyAgentPermissionArgs } from './agent-permission-args.js';
 import type { BackendRunArgs } from './types.js';
 import {
   shouldDisableAgentTeamMcp,
@@ -58,6 +59,10 @@ export interface HostCliDriverConfig {
   envOverrides?: Record<string, string>;
   runtime?: 'local-device' | 'server-side';
   model?: string;
+  /** Device agent-runtime permission/sandbox mode, e.g. bypassPermissions / full-access. */
+  permissionMode?: string | null;
+  /** Discovered agent client id used to adapt permission args, e.g. claude-code / codex / traecli. */
+  agentClientId?: string | null;
   workdirMode?: 'auto' | 'custom';
   workdir?: string;
 }
@@ -343,6 +348,11 @@ export async function runHostCli(
     if (shouldDisableAgentTeamMcp(input, group.folder)) {
       argv = stripAgentTeamMcpConfigArgs(argv);
     }
+    argv = applyAgentPermissionArgs(
+      argv,
+      cfg.agentClientId ?? cfg.backendId,
+      group.permissionMode ?? cfg.permissionMode,
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {

@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useChatStore } from '../stores/chat';
 import { useAgentLinksStore } from '../stores/agentLinks';
 import { useCustomBackendsStore } from '../stores/customBackends';
 
 type ResetRuntimeProfile = 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent';
+type AgentAccessScope = 'all' | 'workspace';
+type AgentPermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
 
 function deviceIdFromExecutionTarget(target?: string): string {
   if (!target) return '';
@@ -17,6 +20,7 @@ function deviceIdFromExecutionTarget(target?: string): string {
 }
 
 export function useClearWorkspace() {
+  const navigate = useNavigate();
   const clearHistory = useChatStore((s) => s.clearHistory);
   const updateGroupConfig = useChatStore((s) => s.updateGroupConfig);
   const { links: devices, load: loadAgentLinks } = useAgentLinksStore();
@@ -26,18 +30,24 @@ export function useClearWorkspace() {
   const [resetRuntimeProfile, setResetRuntimeProfile] = useState<ResetRuntimeProfile>('server-agent');
   const [resetExecutionNode, setResetExecutionNode] = useState('');
   const [resetAgentBackendId, setResetAgentBackendId] = useState('');
+  const [resetAgentAccessScope, setResetAgentAccessScope] = useState<AgentAccessScope>('all');
+  const [resetPermissionMode, setResetPermissionMode] = useState<AgentPermissionMode>('bypassPermissions');
 
   const openClear = (jid: string, name: string) => {
     setClearState({ open: true, jid, name });
     setResetRuntimeProfile('server-agent');
     setResetExecutionNode('');
     setResetAgentBackendId('');
+    setResetAgentAccessScope('all');
+    setResetPermissionMode('bypassPermissions');
   };
   const closeClear = () => {
     setClearState({ open: false, jid: '', name: '' });
     setResetRuntimeProfile('server-agent');
     setResetExecutionNode('');
     setResetAgentBackendId('');
+    setResetAgentAccessScope('all');
+    setResetPermissionMode('bypassPermissions');
   };
 
   const currentGroup = useChatStore((s) => (clearState.jid ? s.groups[clearState.jid] : undefined));
@@ -54,6 +64,8 @@ export function useClearWorkspace() {
     const deviceId = deviceIdFromExecutionTarget(currentGroup.device_link_id ?? currentGroup.execution_node);
     setResetExecutionNode(profile === 'server-agent' ? '' : deviceId);
     setResetAgentBackendId(profile === 'device-cli-agent' ? currentGroup.backend ?? '' : '');
+    setResetAgentAccessScope(currentGroup.agent_access_scope ?? 'all');
+    setResetPermissionMode(currentGroup.permission_mode ?? 'bypassPermissions');
   }, [clearState.open, currentGroup?.folder]);
 
   const selectableAgentBackends = useMemo(() => {
@@ -93,6 +105,8 @@ export function useClearWorkspace() {
         const patch: Parameters<typeof updateGroupConfig>[1] = {
           runtime_profile: resetRuntimeProfile,
           backend: resetRuntimeProfile === 'device-cli-agent' ? selectedResetAgent?.id : 'claude-sdk',
+          agent_access_scope: resetAgentAccessScope,
+          permission_mode: resetPermissionMode,
         };
         if (!currentGroup?.is_home) {
           patch.execution_mode = 'host';
@@ -116,8 +130,12 @@ export function useClearWorkspace() {
           return;
         }
       }
-      const ok = await clearHistory(clearState.jid);
-      if (!ok) toast.error('重建工作区失败，请稍后重试');
+      const rebuilt = await clearHistory(clearState.jid);
+      if (!rebuilt) {
+        toast.error('重建工作区失败，请稍后重试');
+      } else {
+        navigate(`/chat/${rebuilt.folder}`, { replace: true });
+      }
       closeClear();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '重建工作区失败，请稍后重试');
@@ -142,5 +160,9 @@ export function useClearWorkspace() {
     setResetExecutionNode,
     resetAgentBackendId,
     setResetAgentBackendId,
+    resetAgentAccessScope,
+    setResetAgentAccessScope,
+    resetPermissionMode,
+    setResetPermissionMode,
   };
 }

@@ -24,7 +24,7 @@ import {
   AlertCircle,
   Copy,
 } from 'lucide-react';
-import { useFileStore, FileEntry, toBase64Url } from '../../stores/files';
+import { useFileStore, FileEntry, fileStateKey, toBase64Url } from '../../stores/files';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { useAgentLinksStore, type AgentLink } from '../../stores/agentLinks';
@@ -53,8 +53,10 @@ import type { ProvidersListResponse } from '../settings/types';
 
 interface FilePanelProps {
   groupJid: string;
+  agentId?: string | null;
   defaultPath?: string;
   onClose?: () => void;
+  agentConfigOnly?: boolean;
 }
 
 interface SystemSettingsForWorkspace {
@@ -65,6 +67,8 @@ interface ModelInfo {
   id: string;
   displayName?: string;
 }
+
+const MODEL_DISCOVERY_TIMEOUT_MS = 20_000;
 
 function isAgentLinkExecutionTarget(target: string | null | undefined): target is string {
   return !!target && (/^cl_[0-9a-f]{16}$/.test(target) || /^runtime:cl_[0-9a-f]{16}:[^:]+$/.test(target) || /^cl_[0-9a-f]{16}:[^:]+$/.test(target) || /^provider:[^:]+$/.test(target));
@@ -245,9 +249,11 @@ function formatSize(bytes: number): string {
   return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
 }
 
-function buildPreviewUrl(groupJid: string, filePath: string): string {
+function buildPreviewUrl(groupJid: string, filePath: string, agentId?: string | null): string {
+  const params = new URLSearchParams();
+  if (agentId) params.set('agentId', agentId);
   return withBasePath(
-    `/api/groups/${encodeURIComponent(groupJid)}/files/preview/${toBase64Url(filePath)}`,
+    `/api/groups/${encodeURIComponent(groupJid)}/files/preview/${toBase64Url(filePath)}${params.toString() ? `?${params}` : ''}`,
   );
 }
 
@@ -291,17 +297,19 @@ function MediaOverlay({
 
 function ImagePreview({
   groupJid,
+  agentId,
   file,
   onClose,
 }: {
   groupJid: string;
+  agentId?: string | null;
   file: FileEntry;
   onClose: () => void;
 }) {
   return (
     <MediaOverlay onClose={onClose} fileName={file.name}>
       <img
-        src={buildPreviewUrl(groupJid, file.path)}
+        src={buildPreviewUrl(groupJid, file.path, agentId)}
         alt={file.name}
         className="max-w-full max-h-full object-contain rounded-lg"
         onClick={(e) => e.stopPropagation()}
@@ -314,10 +322,12 @@ function ImagePreview({
 
 function TextEditor({
   groupJid,
+  agentId,
   file,
   onClose,
 }: {
   groupJid: string;
+  agentId?: string | null;
   file: FileEntry;
   onClose: () => void;
 }) {
@@ -345,7 +355,7 @@ function TextEditor({
     let cancelled = false;
     (async () => {
       setLoading(true);
-      const text = await getFileContent(groupJid, file.path);
+      const text = await getFileContent(groupJid, file.path, agentId);
       if (!cancelled && text !== null) {
         setContent(text);
       }
@@ -354,12 +364,12 @@ function TextEditor({
     return () => {
       cancelled = true;
     };
-  }, [groupJid, file.path, getFileContent]);
+  }, [groupJid, agentId, file.path, getFileContent]);
 
   const handleSave_ = async () => {
     if (!dirty || saving) return;
     setSaving(true);
-    const ok = await saveFileContent(groupJid, file.path, content);
+    const ok = await saveFileContent(groupJid, file.path, content, agentId);
     setSaving(false);
     if (ok) setDirty(false);
   };
@@ -435,10 +445,12 @@ function TextEditor({
 
 function MarkdownFileViewer({
   groupJid,
+  agentId,
   file,
   onClose,
 }: {
   groupJid: string;
+  agentId?: string | null;
   file: FileEntry;
   onClose: () => void;
 }) {
@@ -479,7 +491,7 @@ function MarkdownFileViewer({
     let cancelled = false;
     (async () => {
       setLoading(true);
-      const text = await getFileContent(groupJid, file.path);
+      const text = await getFileContent(groupJid, file.path, agentId);
       if (!cancelled && text !== null) {
         setContent(text);
         setEditContent(text);
@@ -489,12 +501,12 @@ function MarkdownFileViewer({
     return () => {
       cancelled = true;
     };
-  }, [groupJid, file.path, getFileContent]);
+  }, [groupJid, agentId, file.path, getFileContent]);
 
   const doSave = async () => {
     if (!dirty || saving || mode !== 'edit') return;
     setSaving(true);
-    const ok = await saveFileContent(groupJid, file.path, editContent);
+    const ok = await saveFileContent(groupJid, file.path, editContent, agentId);
     setSaving(false);
     if (ok) {
       setContent(editContent);
@@ -648,17 +660,19 @@ function MarkdownFileViewer({
 
 function PdfPreview({
   groupJid,
+  agentId,
   file,
   onClose,
 }: {
   groupJid: string;
+  agentId?: string | null;
   file: FileEntry;
   onClose: () => void;
 }) {
   return (
     <MediaOverlay onClose={onClose} fileName={file.name}>
       <iframe
-        src={buildPreviewUrl(groupJid, file.path)}
+        src={buildPreviewUrl(groupJid, file.path, agentId)}
         title={file.name}
         className="w-full h-full max-w-[90vw] max-h-[90vh] rounded-lg bg-white"
         onClick={(e) => e.stopPropagation()}
@@ -671,17 +685,19 @@ function PdfPreview({
 
 function VideoPreview({
   groupJid,
+  agentId,
   file,
   onClose,
 }: {
   groupJid: string;
+  agentId?: string | null;
   file: FileEntry;
   onClose: () => void;
 }) {
   return (
     <MediaOverlay onClose={onClose} fileName={file.name} bgOpacity="90">
       <video
-        src={buildPreviewUrl(groupJid, file.path)}
+        src={buildPreviewUrl(groupJid, file.path, agentId)}
         controls
         autoPlay
         className="max-w-[90vw] max-h-[90vh] rounded-lg"
@@ -695,10 +711,12 @@ function VideoPreview({
 
 function AudioPreview({
   groupJid,
+  agentId,
   file,
   onClose,
 }: {
   groupJid: string;
+  agentId?: string | null;
   file: FileEntry;
   onClose: () => void;
 }) {
@@ -730,7 +748,7 @@ function AudioPreview({
           </button>
         </div>
         <audio
-          src={buildPreviewUrl(groupJid, file.path)}
+          src={buildPreviewUrl(groupJid, file.path, agentId)}
           controls
           autoPlay
           className="w-full"
@@ -745,10 +763,12 @@ function AudioPreview({
 
 function GenericTextPreview({
   groupJid,
+  agentId,
   file,
   onClose,
 }: {
   groupJid: string;
+  agentId?: string | null;
   file: FileEntry;
   onClose: () => void;
 }) {
@@ -764,7 +784,7 @@ function GenericTextPreview({
     (async () => {
       setLoading(true);
       setLoadError(false);
-      const text = await getFileContent(groupJid, file.path);
+      const text = await getFileContent(groupJid, file.path, agentId);
       if (!cancelled) {
         if (text !== null) {
           setContent(text);
@@ -777,7 +797,7 @@ function GenericTextPreview({
     return () => {
       cancelled = true;
     };
-  }, [groupJid, file.path, getFileContent]);
+  }, [groupJid, agentId, file.path, getFileContent]);
 
   return createPortal(
     <div
@@ -835,7 +855,7 @@ function GenericTextPreview({
 
 // ─── Main FilePanel ─────────────────────────────────────────────
 
-export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
+export function FilePanel({ groupJid, agentId, defaultPath, onClose, agentConfigOnly = false }: FilePanelProps) {
   const {
     files,
     currentPath,
@@ -877,9 +897,12 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
   const [serverModelOptions, setServerModelOptions] = useState<ModelInfo[]>([]);
   const [cliModelOptions, setCliModelOptions] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const serverModelOptionsRef = useRef<ModelInfo[]>([]);
+  const cliModelOptionsRef = useRef<ModelInfo[]>([]);
 
-  const fileList = files[groupJid] || [];
-  const currentDir = currentPath[groupJid] || '';
+  const storeKey = fileStateKey(groupJid, agentId);
+  const fileList = files[storeKey] || [];
+  const currentDir = currentPath[storeKey] || '';
   const canEditRuntime = group?.editable === true;
   const isDeviceCliWorkspace = group?.runtime_profile === 'device-cli-agent';
 
@@ -916,9 +939,10 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
 
   const currentBackendId = group?.backend || defaultBackend;
   const selectedCustomBackend = customBackendById.get(currentBackendId);
-  const workspaceDeviceId = deviceIdFromExecutionTarget(group?.device_link_id ?? group?.execution_node);
-  const activeAgentClientId = group?.agent_client_id
-    ?? selectedCustomBackend?.agentClientId
+  const workspaceDeviceId = selectedCustomBackend?.deviceLinkId
+    ?? deviceIdFromExecutionTarget(group?.device_link_id ?? group?.execution_node);
+  const activeAgentClientId = selectedCustomBackend?.agentClientId
+    ?? group?.agent_client_id
     ?? (group?.execution_node ? agentClientIdFromExecutionTarget(group.execution_node) : undefined);
   const canOperateWorkspaceDirectory = !!workspaceDeviceId;
   const workspaceDirectoryDisabledReason = '工作区未绑定 Device，不能操作工作区目录。请先在 Agent 配置中选择 Device/Agent。';
@@ -930,6 +954,16 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
   }, [customBackends]);
 
   const fetchedModelOptions = isDeviceCliWorkspace ? cliModelOptions : serverModelOptions;
+
+  const updateServerModelOptions = useCallback((models: ModelInfo[]) => {
+    serverModelOptionsRef.current = models;
+    setServerModelOptions(models);
+  }, []);
+
+  const updateCliModelOptions = useCallback((models: ModelInfo[]) => {
+    cliModelOptionsRef.current = models;
+    setCliModelOptions(models);
+  }, []);
 
   const modelSuggestions = useMemo(() => {
     return [...new Set([
@@ -945,30 +979,40 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
     let cancelled = false;
     const loadServerModels = async () => {
       setModelsLoading(true);
+      let hasUsableFallback = false;
       try {
         const providersData = await api.get<ProvidersListResponse>('/api/config/claude/providers');
         const enabledProviders = (providersData.providers ?? []).filter((provider) => provider.enabled);
         const provider = enabledProviders.find((item) => item.id === selectedCustomBackend?.providerId)
           ?? enabledProviders[0];
         if (!provider) {
-          if (!cancelled) setServerModelOptions([]);
+          if (!cancelled) updateServerModelOptions([]);
           return;
         }
-        const fetched = await api.post<{ models: ModelInfo[]; provider?: { anthropicModel?: string } }>(
-          `/api/config/claude/providers/${encodeURIComponent(provider.id)}/models/fetch`,
-          {},
-        );
-        if (cancelled) return;
         const configuredModels: ModelInfo[] = [
           ...(provider.anthropicModel ? [{ id: provider.anthropicModel, displayName: provider.anthropicModel }] : []),
           ...(provider.models ?? []).map((model) => ({ id: model.id, displayName: model.displayName || model.id })),
         ];
+        hasUsableFallback = configuredModels.length > 0 || serverModelOptionsRef.current.length > 0;
+        // 先展示已保存的模型列表，再后台刷新。这样端点刷新偶发超时/失败时，
+        // 不会把已经可用的模型列表清空，也不会误弹“模型加载失败”。
+        if (!cancelled && configuredModels.length > 0) {
+          updateServerModelOptions(configuredModels.map((model) => ({ id: model.id, displayName: model.displayName ?? model.id })));
+        }
+        const fetched = await api.post<{ models: ModelInfo[]; provider?: { anthropicModel?: string } }>(
+          `/api/config/claude/providers/${encodeURIComponent(provider.id)}/models/fetch`,
+          {},
+          MODEL_DISCOVERY_TIMEOUT_MS,
+        );
+        if (cancelled) return;
         const models = fetched.models?.length ? fetched.models : configuredModels;
-        setServerModelOptions(models.map((model) => ({ id: model.id, displayName: model.displayName ?? model.id })));
+        updateServerModelOptions(models.map((model) => ({ id: model.id, displayName: model.displayName ?? model.id })));
       } catch (err) {
         if (!cancelled) {
-          setServerModelOptions([]);
-          showToast('加载模型失败', err instanceof Error ? err.message : '从服务端模型端点获取模型失败');
+          if (!hasUsableFallback) {
+            updateServerModelOptions([]);
+            showToast('加载模型失败', err instanceof Error ? err.message : '从服务端模型端点获取模型失败');
+          }
         }
       } finally {
         if (!cancelled) setModelsLoading(false);
@@ -977,19 +1021,22 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
 
     const loadCliModels = async () => {
       if (!workspaceDeviceId || !activeAgentClientId) {
-        setCliModelOptions([]);
+        updateCliModelOptions([]);
         return;
       }
       setModelsLoading(true);
       try {
         const data = await api.get<{ models: ModelInfo[] }>(
           `/api/agent-links/${encodeURIComponent(workspaceDeviceId)}/providers/${encodeURIComponent(activeAgentClientId)}/models`,
+          MODEL_DISCOVERY_TIMEOUT_MS,
         );
-        if (!cancelled) setCliModelOptions((data.models ?? []).map((model) => ({ id: model.id, displayName: model.displayName ?? model.id })));
+        if (!cancelled) updateCliModelOptions((data.models ?? []).map((model) => ({ id: model.id, displayName: model.displayName ?? model.id })));
       } catch (err) {
         if (!cancelled) {
-          setCliModelOptions([]);
-          showToast('加载模型失败', err instanceof Error ? err.message : '从 CLI 获取模型失败');
+          if (cliModelOptionsRef.current.length === 0) {
+            updateCliModelOptions([]);
+            showToast('加载模型失败', err instanceof Error ? err.message : '从 CLI 获取模型失败');
+          }
         }
       } finally {
         if (!cancelled) setModelsLoading(false);
@@ -1005,7 +1052,7 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [activeAgentClientId, canEditRuntime, group, isDeviceCliWorkspace, selectedCustomBackend?.providerId, workspaceDeviceId]);
+  }, [activeAgentClientId, canEditRuntime, groupJid, group?.editable, isDeviceCliWorkspace, selectedCustomBackend?.providerId, updateCliModelOptions, updateServerModelOptions, workspaceDeviceId]);
 
   const executionTargetOptions = useMemo(() => [
     ...uniqueProviderIds(agentLinks).map((providerId) => {
@@ -1093,28 +1140,53 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
     }
   };
 
+  const handlePermissionModeChange = async (
+    next: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan',
+  ) => {
+    if (!group || next === (group.permission_mode ?? 'bypassPermissions')) return;
+    setSavingRuntime(true);
+    try {
+      const ok = await updateGroupConfig(groupJid, { permission_mode: next });
+      if (ok) showToast('已更新', 'Agent 审批模式将在下一次执行生效');
+    } finally {
+      setSavingRuntime(false);
+    }
+  };
+
+  const handleAccessScopeChange = async (next: 'all' | 'workspace') => {
+    if (!group || next === (group.agent_access_scope ?? 'all')) return;
+    setSavingRuntime(true);
+    try {
+      const ok = await updateGroupConfig(groupJid, { agent_access_scope: next });
+      if (ok) showToast('已更新', 'Agent 访问范围将在下一次执行生效');
+    } finally {
+      setSavingRuntime(false);
+    }
+  };
+
   useEffect(() => {
-    if (groupJid) {
-      loadFiles(groupJid, defaultPath ?? '');
+    if (!agentConfigOnly && groupJid) {
+      loadFiles(groupJid, defaultPath ?? '', agentId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupJid, defaultPath]);
+  }, [agentConfigOnly, groupJid, agentId, defaultPath]);
 
   // Agent 运行期间定时刷新文件列表；结束时做最终刷新
   useEffect(() => {
+    if (agentConfigOnly) return;
     if (isStreaming) {
       prevStreamingRef.current = true;
       const timer = setInterval(() => {
-        loadFiles(groupJid, currentDir);
+        loadFiles(groupJid, currentDir, agentId);
       }, 5000);
       return () => clearInterval(timer);
     }
     // streaming 刚结束 → 最终刷新
     if (prevStreamingRef.current) {
       prevStreamingRef.current = false;
-      loadFiles(groupJid, currentDir);
+      loadFiles(groupJid, currentDir, agentId);
     }
-  }, [isStreaming, groupJid, currentDir, loadFiles]);
+  }, [agentConfigOnly, isStreaming, groupJid, agentId, currentDir, loadFiles]);
 
   const sortedFiles = useMemo(() => {
     return [...fileList].sort((a, b) => {
@@ -1130,16 +1202,16 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
 
   const handleNavigate = (index: number) => {
     if (index === -1) {
-      navigateTo(groupJid, '');
+      navigateTo(groupJid, '', agentId);
     } else {
-      navigateTo(groupJid, breadcrumbs.slice(0, index + 1).join('/'));
+      navigateTo(groupJid, breadcrumbs.slice(0, index + 1).join('/'), agentId);
     }
   };
 
   const handleItemClick = useCallback(
     (item: FileEntry) => {
       if (item.type === 'directory') {
-        navigateTo(groupJid, item.path);
+        navigateTo(groupJid, item.path, agentId);
         return;
       }
 
@@ -1159,12 +1231,14 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
         setPreview({ kind: 'text', file: item });
       }
     },
-    [groupJid, navigateTo],
+    [groupJid, agentId, navigateTo],
   );
 
   const handleDownload = (item: FileEntry) => {
     const encoded = toBase64Url(item.path);
-    const url = `/api/groups/${encodeURIComponent(groupJid)}/files/download/${encoded}`;
+    const params = new URLSearchParams();
+    if (agentId) params.set('agentId', agentId);
+    const url = `/api/groups/${encodeURIComponent(groupJid)}/files/download/${encoded}${params.toString() ? `?${params}` : ''}`;
     downloadFromUrl(url, item.name).catch((err) => {
       console.error('Download failed:', err);
       showToast(
@@ -1207,7 +1281,7 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
     }
     setDeleteLoading(true);
     try {
-      const ok = await deleteFile(groupJid, deleteModal.path);
+      const ok = await deleteFile(groupJid, deleteModal.path, agentId);
       if (ok) {
         setDeleteModal({ open: false, path: '', name: '', isDir: false });
       }
@@ -1217,7 +1291,7 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
   };
 
   const handleRefresh = () => {
-    loadFiles(groupJid, currentDir);
+    loadFiles(groupJid, currentDir, agentId);
   };
 
   const handleOpenLocalFolder = async () => {
@@ -1232,6 +1306,7 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
         `/api/groups/${encodeURIComponent(groupJid)}/files/open-directory`,
         {
           path: currentDir,
+          agentId,
         },
       );
     } catch (err) {
@@ -1265,12 +1340,182 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
     if (!name) return;
     setCreateDirLoading(true);
     try {
-      await createDirectory(groupJid, currentDir, name);
+      await createDirectory(groupJid, currentDir, name, agentId);
       setCreateDirModal(false);
     } finally {
       setCreateDirLoading(false);
     }
   };
+
+  const agentRuntimeLabel = group?.runtime_profile === 'device-cli-agent'
+    ? 'Device CLI'
+    : group?.runtime_profile === 'server-agent-device-tools'
+      ? 'Server + Device Tools'
+      : 'Server Agent';
+
+  const agentConfigContent = group ? (
+    <div className="px-4 py-3 space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-medium text-foreground">Agent 配置</div>
+        <div className="text-[11px] text-muted-foreground truncate">
+          {agentRuntimeLabel}
+        </div>
+      </div>
+
+      {!canEditRuntime && (
+        <div className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          当前工作区不可编辑 Agent 配置。
+        </div>
+      )}
+
+      {isDeviceCliWorkspace && (
+        <div className="space-y-1">
+          <Label className="text-[11px] text-muted-foreground">CLI Agent</Label>
+          <select
+            value={group.backend || ''}
+            disabled={!canEditRuntime || savingRuntime || selectableAgentBackends.length === 0}
+            onChange={(e) => handleBackendChange(e.target.value)}
+            className="h-8 px-2 text-xs border border-border rounded-md bg-background w-full"
+          >
+            {!group.backend && <option value="">请选择 Agent</option>}
+            {group.backend && !selectableAgentBackends.some((backend) => backend.id === group.backend) && (
+              <option value={group.backend}>{group.backend} · 当前配置</option>
+            )}
+            {selectableAgentBackends.map((backend) => (
+              <option key={backend.id} value={backend.id}>
+                {backend.displayName || backend.id} · {backend.agentClientId} · {backend.deviceLinkId}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {group.runtime_profile === 'server-agent-device-tools' && (
+        <div className="space-y-1">
+          <Label className="text-[11px] text-muted-foreground">执行 Runtime / Provider</Label>
+          <select
+            value={isAgentLinkExecutionTarget(group.execution_node) ? group.execution_node : ''}
+            disabled={!canEditRuntime || savingRuntime}
+            onChange={(e) => handleExecutionTargetChange(e.target.value)}
+            className="h-8 px-2 text-xs border border-border rounded-md bg-background w-full"
+          >
+            <option value="" disabled>未选择 Device</option>
+            {group.execution_node && !executionTargetOptions.some((target) => target.value === group.execution_node) && (
+              <option value={group.execution_node}>{targetSummary(group.execution_node)} · 当前配置</option>
+            )}
+            {executionTargetOptions.map((target) => (
+              <option key={target.value} value={target.value} disabled={target.disabled}>
+                {target.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div className="space-y-1">
+        <Label className="text-[11px] text-muted-foreground">模型</Label>
+        <div className="flex gap-2">
+          <select
+            value={modelSuggestions.includes(modelDraft.trim()) ? modelDraft.trim() : ''}
+            onChange={(e) => setModelDraft(e.target.value)}
+            disabled={!canEditRuntime || savingRuntime || modelsLoading || modelSuggestions.length === 0}
+            className="h-8 px-2 text-xs border border-border rounded-md bg-background min-w-0 flex-1"
+            title={isDeviceCliWorkspace ? '模型列表来自绑定 Device 的 Provider CLI' : '模型列表来自服务端模型端点'}
+          >
+            <option value="">
+              {modelsLoading
+                ? '加载模型中...'
+                : modelSuggestions.length === 0
+                  ? '暂无模型，可手动输入'
+                  : isDeviceCliWorkspace
+                    ? '从 CLI 模型选择'
+                    : '从服务端模型选择'}
+            </option>
+            {modelSuggestions.map((model) => <option key={model} value={model}>{model}</option>)}
+          </select>
+          <Input
+            value={modelDraft}
+            onChange={(e) => setModelDraft(e.target.value)}
+            list={`workspace-model-presets-${groupJid}`}
+            placeholder={selectedCustomBackend?.model || '输入模型 ID，留空使用默认'}
+            className="h-8 text-xs min-w-0 flex-1"
+            disabled={!canEditRuntime || savingRuntime}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handleModelSave}
+            disabled={!canEditRuntime || savingRuntime || (group.agent_model ?? '') === modelDraft.trim()}
+            className="h-8 px-2"
+          >
+            {savingRuntime ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
+          </Button>
+        </div>
+        <datalist id={`workspace-model-presets-${groupJid}`}>
+          {modelSuggestions.map((model) => <option key={model} value={model} />)}
+        </datalist>
+        <div className="text-[11px] text-muted-foreground">
+          当前生效：{group.agent_model || selectedCustomBackend?.model || '系统/Agent 默认'} · 列表来源：{isDeviceCliWorkspace ? 'Device CLI' : '服务端模型端点'}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1">
+          <Label className="text-[11px] text-muted-foreground">审批模式</Label>
+          <select
+            value={group.permission_mode ?? 'bypassPermissions'}
+            disabled={!canEditRuntime || savingRuntime}
+            onChange={(e) => handlePermissionModeChange(e.target.value as 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan')}
+            className="h-8 px-2 text-xs border border-border rounded-md bg-background w-full"
+          >
+            <option value="bypassPermissions">免审批</option>
+            <option value="default">默认审批</option>
+            <option value="acceptEdits">自动接受编辑</option>
+            <option value="plan">Plan</option>
+          </select>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-[11px] text-muted-foreground">访问范围</Label>
+          <select
+            value={group.agent_access_scope ?? 'all'}
+            disabled={!canEditRuntime || savingRuntime}
+            onChange={(e) => handleAccessScopeChange(e.target.value as 'all' | 'workspace')}
+            className="h-8 px-2 text-xs border border-border rounded-md bg-background w-full"
+          >
+            <option value="all">All</option>
+            <option value="workspace">Workspace</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  ) : (
+    <div className="flex items-center justify-center h-32 px-4 text-sm text-muted-foreground">
+      工作区不存在或尚未加载。
+    </div>
+  );
+
+  if (agentConfigOnly) {
+    return (
+      <div className="w-full h-full border-l border-border bg-background flex flex-col">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <h3 className="font-semibold text-foreground text-sm">Agent 配置</h3>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="text-muted-foreground hover:text-foreground transition-colors p-2 rounded-md hover:bg-muted cursor-pointer"
+              aria-label="关闭 Agent 配置面板"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          )}
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {agentConfigContent}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="w-full h-full border-l border-border bg-background flex flex-col">
@@ -1347,113 +1592,6 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
       {!canOperateWorkspaceDirectory && (
         <div className="px-4 py-2 border-b border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-xs text-amber-700 dark:text-amber-300">
           {workspaceDirectoryDisabledReason}
-        </div>
-      )}
-
-      {canEditRuntime && group && (
-        <div className="px-4 py-3 border-b border-border bg-card/50 space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <div className="text-xs font-medium text-foreground">Agent 配置</div>
-            <div className="text-[11px] text-muted-foreground truncate">
-              {group.runtime_profile === 'device-cli-agent'
-                ? 'Device CLI'
-                : group.runtime_profile === 'server-agent-device-tools'
-                  ? 'Server + Device Tools'
-                  : 'Server Agent'}
-            </div>
-          </div>
-
-          {isDeviceCliWorkspace && (
-            <div className="space-y-1">
-              <Label className="text-[11px] text-muted-foreground">CLI Agent</Label>
-              <select
-                value={group.backend || ''}
-                disabled={savingRuntime || selectableAgentBackends.length === 0}
-                onChange={(e) => handleBackendChange(e.target.value)}
-                className="h-8 px-2 text-xs border border-border rounded-md bg-background w-full"
-              >
-                {!group.backend && <option value="">请选择 Agent</option>}
-                {group.backend && !selectableAgentBackends.some((backend) => backend.id === group.backend) && (
-                  <option value={group.backend}>{group.backend} · 当前配置</option>
-                )}
-                {selectableAgentBackends.map((backend) => (
-                  <option key={backend.id} value={backend.id}>
-                    {backend.displayName || backend.id} · {backend.agentClientId} · {backend.deviceLinkId}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {group.runtime_profile === 'server-agent-device-tools' && (
-            <div className="space-y-1">
-              <Label className="text-[11px] text-muted-foreground">执行 Runtime / Provider</Label>
-              <select
-                value={isAgentLinkExecutionTarget(group.execution_node) ? group.execution_node : ''}
-                disabled={savingRuntime}
-                onChange={(e) => handleExecutionTargetChange(e.target.value)}
-                className="h-8 px-2 text-xs border border-border rounded-md bg-background w-full"
-              >
-                <option value="" disabled>未选择 Device</option>
-                {group.execution_node && !executionTargetOptions.some((target) => target.value === group.execution_node) && (
-                  <option value={group.execution_node}>{targetSummary(group.execution_node)} · 当前配置</option>
-                )}
-                {executionTargetOptions.map((target) => (
-                  <option key={target.value} value={target.value} disabled={target.disabled}>
-                    {target.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          <div className="space-y-1">
-            <Label className="text-[11px] text-muted-foreground">模型</Label>
-            <div className="flex gap-2">
-              <select
-                value={modelSuggestions.includes(modelDraft.trim()) ? modelDraft.trim() : ''}
-                onChange={(e) => setModelDraft(e.target.value)}
-                disabled={savingRuntime || modelsLoading || modelSuggestions.length === 0}
-                className="h-8 px-2 text-xs border border-border rounded-md bg-background min-w-0 flex-1"
-                title={isDeviceCliWorkspace ? '模型列表来自绑定 Device 的 Provider CLI' : '模型列表来自服务端模型端点'}
-              >
-                <option value="">
-                  {modelsLoading
-                    ? '加载模型中...'
-                    : modelSuggestions.length === 0
-                      ? '暂无模型，可手动输入'
-                      : isDeviceCliWorkspace
-                        ? '从 CLI 模型选择'
-                        : '从服务端模型选择'}
-                </option>
-                {modelSuggestions.map((model) => <option key={model} value={model}>{model}</option>)}
-              </select>
-              <Input
-                value={modelDraft}
-                onChange={(e) => setModelDraft(e.target.value)}
-                list={`workspace-model-presets-${groupJid}`}
-                placeholder={selectedCustomBackend?.model || '输入模型 ID，留空使用默认'}
-                className="h-8 text-xs min-w-0 flex-1"
-                disabled={savingRuntime}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleModelSave}
-                disabled={savingRuntime || (group.agent_model ?? '') === modelDraft.trim()}
-                className="h-8 px-2"
-              >
-                {savingRuntime ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
-              </Button>
-            </div>
-            <datalist id={`workspace-model-presets-${groupJid}`}>
-              {modelSuggestions.map((model) => <option key={model} value={model} />)}
-            </datalist>
-            <div className="text-[11px] text-muted-foreground">
-              当前生效：{group.agent_model || selectedCustomBackend?.model || '系统/Agent 默认'} · 列表来源：{isDeviceCliWorkspace ? 'Device CLI' : '服务端模型端点'}
-            </div>
-          </div>
         </div>
       )}
 
@@ -1598,7 +1736,7 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
           <FolderPlus className="w-4 h-4" />
           新建文件夹
         </Button>
-        <FileUploadZone groupJid={groupJid} disabled={!canOperateWorkspaceDirectory} disabledReason={workspaceDirectoryDisabledReason} />
+        <FileUploadZone groupJid={groupJid} agentId={agentId} disabled={!canOperateWorkspaceDirectory} disabledReason={workspaceDirectoryDisabledReason} />
       </div>
 
       {/* Create Directory Dialog */}
@@ -1667,25 +1805,25 @@ export function FilePanel({ groupJid, defaultPath, onClose }: FilePanelProps) {
 
       {/* Preview / Editor Overlays */}
       {preview?.kind === 'image' && (
-        <ImagePreview groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
+        <ImagePreview groupJid={groupJid} agentId={agentId} file={preview.file} onClose={() => setPreview(null)} />
       )}
       {preview?.kind === 'edit' && (
-        <TextEditor groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
+        <TextEditor groupJid={groupJid} agentId={agentId} file={preview.file} onClose={() => setPreview(null)} />
       )}
       {preview?.kind === 'markdown' && (
-        <MarkdownFileViewer groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
+        <MarkdownFileViewer groupJid={groupJid} agentId={agentId} file={preview.file} onClose={() => setPreview(null)} />
       )}
       {preview?.kind === 'pdf' && (
-        <PdfPreview groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
+        <PdfPreview groupJid={groupJid} agentId={agentId} file={preview.file} onClose={() => setPreview(null)} />
       )}
       {preview?.kind === 'video' && (
-        <VideoPreview groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
+        <VideoPreview groupJid={groupJid} agentId={agentId} file={preview.file} onClose={() => setPreview(null)} />
       )}
       {preview?.kind === 'audio' && (
-        <AudioPreview groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
+        <AudioPreview groupJid={groupJid} agentId={agentId} file={preview.file} onClose={() => setPreview(null)} />
       )}
       {preview?.kind === 'text' && (
-        <GenericTextPreview groupJid={groupJid} file={preview.file} onClose={() => setPreview(null)} />
+        <GenericTextPreview groupJid={groupJid} agentId={agentId} file={preview.file} onClose={() => setPreview(null)} />
       )}
     </div>
   );

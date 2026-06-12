@@ -11,6 +11,14 @@ export const AgentRuntimeProfileSchema = z.enum([
   'device-cli-agent',
 ]);
 
+export const AgentAccessScopeSchema = z.enum(['all', 'workspace']);
+export const AgentPermissionModeSchema = z.enum([
+  'default',
+  'acceptEdits',
+  'bypassPermissions',
+  'plan',
+]);
+
 export const TaskPatchSchema = z.object({
   chat_jid: z.string().min(1).optional(),
   prompt: z.string().optional(),
@@ -216,6 +224,8 @@ export const GroupCreateSchema = z.object({
   agent_model: z.string().max(256).optional(),
   backend: z.string().min(1).max(64).optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
+  agent_access_scope: AgentAccessScopeSchema.optional(),
+  permission_mode: AgentPermissionModeSchema.optional(),
   // Device target for native execution: built-in server device or connected octodeck-daemon device.
   execution_node: z.string().min(1).max(128).optional(),
   custom_cwd: z
@@ -417,6 +427,8 @@ export const GroupPatchSchema = z.object({
   agent_model: z.string().max(256).optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
   backend: z.string().min(1).max(64).nullable().optional(),
+  agent_access_scope: AgentAccessScopeSchema.optional(),
+  permission_mode: AgentPermissionModeSchema.optional(),
   visible_repo_mode: z.enum(['all', 'selected']).optional(),
   visible_repo_ids: z.array(z.string().min(1).max(128)).max(200).nullable().optional(),
   // 'server-local' | cl_xxx | runtime:cl_xxx:agentClient | provider:agentClient
@@ -504,6 +516,7 @@ const CustomBackendBaseShape = {
   env: z.record(z.string().max(256), z.string().max(4096)).optional(),
   runtime: z.enum(['local-device', 'server-side']).optional(),
   model: z.string().min(1).max(256).optional(),
+  permissionMode: z.string().min(1).max(64).nullable().optional(),
   supportsNativeSessions: z.boolean().optional(),
   sessionArgvTemplate: z.array(z.string().max(1000)).max(64).optional(),
   resumeArgvTemplate: z.array(z.string().max(1000)).min(1).max(64).optional(),
@@ -631,6 +644,7 @@ export const CustomBackendPatchSchema = z
     env: CustomBackendBaseShape.env,
     runtime: CustomBackendBaseShape.runtime,
     model: CustomBackendBaseShape.model,
+    permissionMode: CustomBackendBaseShape.permissionMode,
     supportsNativeSessions: CustomBackendBaseShape.supportsNativeSessions,
     sessionArgvTemplate: CustomBackendBaseShape.sessionArgvTemplate,
     resumeArgvTemplate: CustomBackendBaseShape.resumeArgvTemplate,

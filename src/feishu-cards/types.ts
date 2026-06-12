@@ -52,6 +52,13 @@ export interface AgentCardInput {
    * timezone. Omit (or 0) to skip the timestamp.
    */
   completedAtMs?: number;
+  /**
+   * If true, skip the optimizeMarkdownStyle() pass — the caller has already
+   * applied it (e.g. buildCardBatch pre-optimizes the full text before
+   * splitting into chunks, so per-card re-optimization would double-apply
+   * <br> spacing around code blocks and tables).
+   */
+  skipOptimize?: boolean;
 }
 
 /** Opaque JSON shape for a Feishu v2 card. Consumers stringify it for the SDK. */

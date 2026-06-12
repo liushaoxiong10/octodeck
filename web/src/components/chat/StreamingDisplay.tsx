@@ -6,7 +6,7 @@ import type { AgentInfo } from '../../types';
 import { EmojiAvatar } from '../common/EmojiAvatar';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { TodoProgressPanel } from './TodoProgressPanel';
-import { ToolActivityCard } from './ToolActivityCard';
+import { ToolActivityCard, ToolFlowCard, type ToolFlowEvent } from './ToolActivityCard';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { formatThinkingDuration } from '../../utils/thinking-duration';
 
@@ -386,6 +386,27 @@ function TracePanel({ streaming }: { streaming: import('../../stores/chat').Stre
   );
 }
 
+function toolFlowEventsFromStreaming(streaming: import('../../stores/chat').StreamingState): ToolFlowEvent[] {
+  return streaming.traceEvents
+    .filter((event) => event.kind === 'tool' || event.kind === 'skill')
+    .filter((event) => event.displayLevel !== 'debug')
+    .map((event) => ({
+      id: event.id,
+      title: event.title,
+      summary: event.summary,
+      detail: event.detail,
+      timestamp: event.timestamp,
+      status: event.title.includes('完成') ? 'tool_result' : event.title.includes('进度') ? 'tool_progress' : 'tool_call',
+      kind: event.kind,
+      toolName: event.toolName,
+      skillName: event.skillName,
+      toolUseId: event.toolUseId,
+      elapsedSeconds: event.elapsedSeconds,
+      toolInputSummary: event.toolInputSummary || event.summary,
+      toolInput: event.toolInput,
+    }));
+}
+
 /** Shared streaming content — used by both compact and chat modes to eliminate duplication. */
 function StreamingContent({
   streaming,
@@ -411,6 +432,7 @@ function StreamingContent({
   const askUserTools = streaming.activeTools.filter(
     t => t.toolName === 'AskUserQuestion' && t.toolInput
   );
+  const toolFlowEvents = toolFlowEventsFromStreaming(streaming);
 
   return (
     <>
@@ -473,20 +495,19 @@ function StreamingContent({
         </div>
       )}
 
-      {/* Active tools */}
-      {streaming.activeTools.length > 0 && (
+      {/* Tool call flow */}
+      {(cardTools.length > 0 || toolFlowEvents.length > 0) && (
+        <ToolFlowCard
+          events={toolFlowEvents}
+          activeTools={cardTools}
+          localElapsed={localElapsed}
+          defaultExpanded={cardTools.length > 0}
+        />
+      )}
+
+      {/* Permission/interactive tools */}
+      {askUserTools.length > 0 && (
         <div className="mb-2 space-y-1.5">
-          {cardTools.length > 0 && (
-            <div className="space-y-1.5">
-              {cardTools.map((tool) => (
-                <ToolActivityCard
-                  key={tool.toolUseId}
-                  tool={tool}
-                  localElapsed={localElapsed[tool.toolUseId]}
-                />
-              ))}
-            </div>
-          )}
           {askUserTools.map((tool) => (
             <AskUserQuestionCard key={tool.toolUseId} toolInput={tool.toolInput ?? {}} />
           ))}
@@ -596,51 +617,10 @@ export function StreamingDisplay({ groupJid, isWaiting, senderName: senderNamePr
   const userToggledThinkingRef = useRef(false);
   const [localElapsed, setLocalElapsed] = useState<Record<string, number>>({});
 
-  // Auto-clear stale waiting state to prevent UI getting stuck when agent
-  // process dies without sending a final message.
-  const lastStreamActivityRef = useRef(Date.now());
-  useEffect(() => {
-    // Reset activity timer whenever streaming state changes (i.e., new stream events)
-    if (streaming) {
-      lastStreamActivityRef.current = Date.now();
-    }
-  }, [streaming]);
-
-  useEffect(() => {
-    if (!isWaiting) return;
-    // Record the moment waiting starts
-    lastStreamActivityRef.current = Date.now();
-
-    const STALE_NO_DATA_MS = 60_000;   // 60s with no stream data at all
-    const STALE_WITH_DATA_MS = 180_000; // 3min since last stream event
-
-    const interval = setInterval(() => {
-      const elapsed = Date.now() - lastStreamActivityRef.current;
-      const state = useChatStore.getState();
-      const hasData = agentId
-        ? !!state.agentStreaming[agentId]
-        : !!state.streaming[groupJid];
-      const threshold = hasData ? STALE_WITH_DATA_MS : STALE_NO_DATA_MS;
-
-      if (elapsed > threshold) {
-        // Clear the stuck waiting state via clearStreaming (handles pendingThinking + SDK Task preservation)
-        useChatStore.getState().clearStreaming(groupJid);
-        if (agentId) {
-          // clearStreaming doesn't handle agent-specific state, clean it separately
-          useChatStore.setState(s => {
-            const nextStreaming = { ...s.agentStreaming };
-            delete nextStreaming[agentId];
-            return {
-              agentWaiting: { ...s.agentWaiting, [agentId]: false },
-              agentStreaming: nextStreaming,
-            };
-          });
-        }
-      }
-    }, 10_000); // check every 10s
-
-    return () => clearInterval(interval);
-  }, [isWaiting, groupJid, agentId]);
+  // Do not time out a waiting/streaming card from the client side. Long-running
+  // backend agents can legitimately be quiet for minutes; lifecycle events from
+  // the backend (final message, interruption, error) are the source of truth for
+  // clearing this state.
 
   // Auto-scroll thinking content (unless user scrolled up)
   useEffect(() => {

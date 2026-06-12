@@ -13,6 +13,13 @@ import (
 	"github.com/coder/websocket"
 )
 
+// Keep this aligned with src/agent-link/protocol.ts. 1MiB is too small for
+// AgentLink because memory.sync frames can contain ~1MB markdown files and JSON
+// escaping/header fields can push the wire payload above 1MiB; agent.run.result
+// can also carry up to the configured 100MiB max output plus JSON/backpressure
+// headroom.
+const agentLinkMaxFrameBytes = 256 * 1024 * 1024
+
 // wsClient owns a single websocket connection to the server. It's responsible
 // for:
 //   - hello handshake
@@ -73,7 +80,7 @@ func dial(ctx context.Context, cfg *Config) (*wsClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ws dial: %w", err)
 	}
-	conn.SetReadLimit(1 << 20) // 1 MiB
+	conn.SetReadLimit(agentLinkMaxFrameBytes)
 
 	c := &wsClient{cfg: cfg, conn: conn}
 	c.pool = newRunnerPool(0)
@@ -263,7 +270,7 @@ func (c *wsClient) handleDaemonUpdate(ctx context.Context, req *DaemonUpdateRequ
 			return
 		}
 		logDaemonUpdateSkip(req, fmt.Sprintf("server requested update current=%s latest=%s reason=%s", c.cfg.Version, latest, req.Reason))
-		if err := updateDaemonBinary(c.cfg, "", true); err != nil {
+		if err := updateDaemonBinaryGracefully(ctx, c.cfg, c.pool, "", true); err != nil {
 			_ = c.send(&ErrorFrame{Type: tError, Code: "daemon_update_failed", Message: err.Error(), Fatal: false})
 		}
 	}()
@@ -298,7 +305,9 @@ func (c *wsClient) handleWorkspaceCleanup(req *WorkspaceCleanupRequestFrame) {
 func (c *wsClient) buildPingFrame(id int64) *PingFrame {
 	running := c.pool.snapshot()
 	status := "idle"
-	if len(running) > 0 {
+	if c.pool.isDraining() {
+		status = "draining"
+	} else if len(running) > 0 {
 		status = "busy"
 	}
 	maxRuns := c.pool.maxConcurrentRuns()
@@ -311,14 +320,17 @@ func (c *wsClient) buildPingFrame(id int64) *PingFrame {
 		RunningRuns:       running,
 		MaxConcurrentRuns: maxRuns,
 		AvailableSlots:    available,
-		Runtimes:          buildRuntimeStatuses(c.cfg.LinkID, c.cfg.AgentClients, running, maxRuns, available),
+		Runtimes:          buildRuntimeStatuses(c.cfg.LinkID, c.cfg.AgentClients, running, maxRuns, available, status),
 	}
 }
 
-func buildRuntimeStatuses(linkID string, clients []AgentClientInfo, running []RunningRunInfo, maxRuns, available int) []RuntimeStatus {
+func buildRuntimeStatuses(linkID string, clients []AgentClientInfo, running []RunningRunInfo, maxRuns, available int, deviceStatus string) []RuntimeStatus {
 	out := make([]RuntimeStatus, 0, len(clients))
-	status := "idle"
-	if len(running) > 0 {
+	status := deviceStatus
+	if status == "" {
+		status = "idle"
+	}
+	if status == "idle" && len(running) > 0 {
 		status = "busy"
 	}
 	for _, client := range clients {

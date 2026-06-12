@@ -28,13 +28,13 @@ interface FileState {
   uploadProgress: UploadProgress | null;
   error: string | null;
 
-  loadFiles: (jid: string, path?: string) => Promise<void>;
-  uploadFiles: (jid: string, files: File[], basePath?: string) => Promise<boolean>;
-  deleteFile: (jid: string, filePath: string) => Promise<boolean>;
-  createDirectory: (jid: string, parentPath: string, name: string) => Promise<void>;
-  navigateTo: (jid: string, path: string) => void;
-  getFileContent: (jid: string, filePath: string) => Promise<string | null>;
-  saveFileContent: (jid: string, filePath: string, content: string) => Promise<boolean>;
+  loadFiles: (jid: string, path?: string, agentId?: string | null) => Promise<void>;
+  uploadFiles: (jid: string, files: File[], basePath?: string, agentId?: string | null) => Promise<boolean>;
+  deleteFile: (jid: string, filePath: string, agentId?: string | null) => Promise<boolean>;
+  createDirectory: (jid: string, parentPath: string, name: string, agentId?: string | null) => Promise<void>;
+  navigateTo: (jid: string, path: string, agentId?: string | null) => void;
+  getFileContent: (jid: string, filePath: string, agentId?: string | null) => Promise<string | null>;
+  saveFileContent: (jid: string, filePath: string, content: string, agentId?: string | null) => Promise<boolean>;
 }
 
 export function toBase64Url(str: string): string {
@@ -46,6 +46,14 @@ export function toBase64Url(str: string): string {
     .replace(/=+$/, '');
 }
 
+export function fileStateKey(jid: string, agentId?: string | null): string {
+  return agentId ? `${jid}#agent:${agentId}` : jid;
+}
+
+function addAgentParam(params: URLSearchParams, agentId?: string | null): void {
+  if (agentId) params.set('agentId', agentId);
+}
+
 export const useFileStore = create<FileState>((set, get) => ({
   files: {},
   currentPath: {},
@@ -54,20 +62,22 @@ export const useFileStore = create<FileState>((set, get) => ({
   uploadProgress: null,
   error: null,
 
-  loadFiles: async (jid: string, path?: string) => {
+  loadFiles: async (jid: string, path?: string, agentId?: string | null) => {
     set({ loading: true, error: null });
     try {
-      const targetPath = path !== undefined ? path : (get().currentPath[jid] || '');
+      const key = fileStateKey(jid, agentId);
+      const targetPath = path !== undefined ? path : (get().currentPath[key] || '');
       const params = new URLSearchParams();
       if (targetPath) params.set('path', targetPath);
+      addAgentParam(params, agentId);
 
       const data = await api.get<{ files: FileEntry[]; currentPath: string }>(
         `/api/groups/${encodeURIComponent(jid)}/files?${params}`
       );
 
       set((s) => ({
-        files: { ...s.files, [jid]: data.files },
-        currentPath: { ...s.currentPath, [jid]: data.currentPath },
+        files: { ...s.files, [key]: data.files },
+        currentPath: { ...s.currentPath, [key]: data.currentPath },
         loading: false,
       }));
     } catch (err) {
@@ -77,7 +87,7 @@ export const useFileStore = create<FileState>((set, get) => ({
     }
   },
 
-  uploadFiles: async (jid: string, files: File[], basePath?: string) => {
+  uploadFiles: async (jid: string, files: File[], basePath?: string, agentId?: string | null) => {
     if (files.length === 0) return false;
 
     const total = files.length;
@@ -87,7 +97,8 @@ export const useFileStore = create<FileState>((set, get) => ({
       uploadProgress: { total, completed: 0, currentFile: files[0].name, totalBytes, uploadedBytes: 0 },
     });
 
-    const targetBase = basePath !== undefined ? basePath : (get().currentPath[jid] || '');
+    const key = fileStateKey(jid, agentId);
+    const targetBase = basePath !== undefined ? basePath : (get().currentPath[key] || '');
     const apiUrl = `/api/groups/${encodeURIComponent(jid)}/files`;
     let uploadedBytes = 0;
 
@@ -114,6 +125,7 @@ export const useFileStore = create<FileState>((set, get) => ({
         const formData = new FormData();
         formData.append('files', file);
         if (uploadPath) formData.append('path', uploadPath);
+        if (agentId) formData.append('agentId', agentId);
 
         await apiFetch(apiUrl, {
           method: 'POST',
@@ -129,7 +141,7 @@ export const useFileStore = create<FileState>((set, get) => ({
       }
 
       // Reload file list
-      await get().loadFiles(jid, targetBase);
+      await get().loadFiles(jid, targetBase, agentId);
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to upload files';
@@ -141,13 +153,15 @@ export const useFileStore = create<FileState>((set, get) => ({
     }
   },
 
-  deleteFile: async (jid: string, filePath: string) => {
+  deleteFile: async (jid: string, filePath: string, agentId?: string | null) => {
     try {
       const encoded = toBase64Url(filePath);
-      await api.delete(`/api/groups/${encodeURIComponent(jid)}/files/${encoded}`);
+      const params = new URLSearchParams();
+      addAgentParam(params, agentId);
+      await api.delete(`/api/groups/${encodeURIComponent(jid)}/files/${encoded}${params.toString() ? `?${params}` : ''}`);
 
-      const currentPath = get().currentPath[jid] || '';
-      await get().loadFiles(jid, currentPath);
+      const currentPath = get().currentPath[fileStateKey(jid, agentId)] || '';
+      await get().loadFiles(jid, currentPath, agentId);
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to delete file';
@@ -157,14 +171,15 @@ export const useFileStore = create<FileState>((set, get) => ({
     }
   },
 
-  createDirectory: async (jid: string, parentPath: string, name: string) => {
+  createDirectory: async (jid: string, parentPath: string, name: string, agentId?: string | null) => {
     try {
       await api.post(`/api/groups/${encodeURIComponent(jid)}/directories`, {
         path: parentPath,
         name,
+        agentId,
       });
 
-      await get().loadFiles(jid, parentPath);
+      await get().loadFiles(jid, parentPath, agentId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to create directory';
       console.error('Failed to create directory:', err);
@@ -172,19 +187,22 @@ export const useFileStore = create<FileState>((set, get) => ({
     }
   },
 
-  navigateTo: (jid: string, path: string) => {
+  navigateTo: (jid: string, path: string, agentId?: string | null) => {
+    const key = fileStateKey(jid, agentId);
     set((s) => ({
-      currentPath: { ...s.currentPath, [jid]: path },
-      files: { ...s.files, [jid]: [] },
+      currentPath: { ...s.currentPath, [key]: path },
+      files: { ...s.files, [key]: [] },
     }));
-    get().loadFiles(jid, path);
+    get().loadFiles(jid, path, agentId);
   },
 
-  getFileContent: async (jid: string, filePath: string) => {
+  getFileContent: async (jid: string, filePath: string, agentId?: string | null) => {
     try {
       const encoded = toBase64Url(filePath);
+      const params = new URLSearchParams();
+      addAgentParam(params, agentId);
       const data = await api.get<{ content: string }>(
-        `/api/groups/${encodeURIComponent(jid)}/files/content/${encoded}`
+        `/api/groups/${encodeURIComponent(jid)}/files/content/${encoded}${params.toString() ? `?${params}` : ''}`
       );
       return data.content;
     } catch (err) {
@@ -195,10 +213,12 @@ export const useFileStore = create<FileState>((set, get) => ({
     }
   },
 
-  saveFileContent: async (jid: string, filePath: string, content: string) => {
+  saveFileContent: async (jid: string, filePath: string, content: string, agentId?: string | null) => {
     try {
       const encoded = toBase64Url(filePath);
-      await api.put(`/api/groups/${encodeURIComponent(jid)}/files/content/${encoded}`, { content });
+      const params = new URLSearchParams();
+      addAgentParam(params, agentId);
+      await api.put(`/api/groups/${encodeURIComponent(jid)}/files/content/${encoded}${params.toString() ? `?${params}` : ''}`, { content });
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to save file';

@@ -63,7 +63,7 @@ export async function apiFetch<T>(path: string, options?: RequestInit & { timeou
 }
 
 export const api = {
-  get: <T>(path: string) => apiFetch<T>(path),
+  get: <T>(path: string, timeoutMs?: number) => apiFetch<T>(path, timeoutMs ? { timeoutMs } : undefined),
   post: <T>(path: string, body?: unknown, timeoutMs?: number) => apiFetch<T>(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined, ...(timeoutMs ? { timeoutMs } : {}) }),
   put: <T>(path: string, body?: unknown) => apiFetch<T>(path, { method: 'PUT', body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body?: unknown) => apiFetch<T>(path, { method: 'PATCH', body: body ? JSON.stringify(body) : undefined }),

@@ -4,7 +4,7 @@ import { wsManager } from '../api/ws';
 import { useFileStore } from './files';
 import { useAuthStore } from './auth';
 import { showToast, notifyIfHidden, shouldEmitBackgroundTaskNotice, showNotificationPromptToast } from '../utils/toast';
-import { invalidateGroupCache, invalidateWorkspaceGroupCaches } from '../utils/pwaCache';
+import { invalidateGroupCache, invalidateGroupsListCache, invalidateWorkspaceGroupCaches } from '../utils/pwaCache';
 import {
   deleteAgentMessageSnapshot,
   deleteGroupMessageSnapshots,
@@ -30,7 +30,7 @@ export interface Message {
   turn_id?: string | null;
   session_id?: string | null;
   sdk_message_uuid?: string | null;
-  source_kind?: 'sdk_final' | 'sdk_send_message' | 'interrupt_partial' | 'tool_call' | 'tool_result' | 'tool_progress' | 'legacy' | null;
+  source_kind?: 'sdk_final' | 'sdk_send_message' | 'interrupt_partial' | 'tool_call' | 'tool_result' | 'tool_progress' | 'user_command' | 'scheduled_task_prompt' | 'legacy' | null;
   finalization_reason?: 'completed' | 'interrupted' | 'error' | null;
 }
 
@@ -54,8 +54,14 @@ export interface StreamingTraceEvent {
   summary?: string;
   detail?: string;
   taskId?: string;
+  toolName?: string;
   toolUseId?: string;
   parentToolUseId?: string | null;
+  skillName?: string;
+  toolInputSummary?: string;
+  toolInput?: Record<string, unknown>;
+  elapsedSeconds?: number;
+  statusText?: string;
   displayLevel?: StreamEvent['displayLevel'];
 }
 
@@ -258,10 +264,10 @@ interface ChatState {
   stopGroup: (jid: string) => Promise<boolean>;
   interruptQuery: (jid: string) => Promise<boolean>;
   resetSession: (jid: string, agentId?: string) => Promise<boolean>;
-  clearHistory: (jid: string) => Promise<boolean>;
+  clearHistory: (jid: string) => Promise<{ jid: string; folder: string } | null>;
   deleteMessage: (jid: string, messageId: string) => Promise<boolean>;
-  createFlow: (name: string, options?: { runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent'; device_link_id?: string; agent_client_id?: string; backend?: string; execution_mode?: 'container' | 'host'; execution_node?: string; custom_cwd?: string; repo_id?: string; repo_git_url?: string; repo_device_path?: string; visible_repo_mode?: 'all' | 'selected'; visible_repo_ids?: string[]; init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
-  updateGroupConfig: (jid: string, patch: Partial<Pick<GroupInfo, 'runtime_profile' | 'agent_model' | 'execution_mode' | 'visible_repo_mode' | 'visible_repo_ids'>> & { device_link_id?: string | null; agent_client_id?: string | null; backend?: string | null; execution_node?: string | null }) => Promise<boolean>;
+  createFlow: (name: string, options?: { runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent'; device_link_id?: string; agent_client_id?: string; backend?: string; execution_mode?: 'container' | 'host'; execution_node?: string; custom_cwd?: string; repo_id?: string; repo_git_url?: string; repo_device_path?: string; visible_repo_mode?: 'all' | 'selected'; visible_repo_ids?: string[]; agent_access_scope?: 'all' | 'workspace'; permission_mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan'; init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
+  updateGroupConfig: (jid: string, patch: Partial<Pick<GroupInfo, 'runtime_profile' | 'agent_model' | 'execution_mode' | 'visible_repo_mode' | 'visible_repo_ids' | 'agent_access_scope' | 'permission_mode'>> & { device_link_id?: string | null; agent_client_id?: string | null; backend?: string | null; execution_node?: string | null }) => Promise<boolean>;
   renameFlow: (jid: string, name: string) => Promise<void>;
   togglePin: (jid: string) => Promise<void>;
   deleteFlow: (jid: string) => Promise<void>;
@@ -363,10 +369,26 @@ function freezeStreamingState(state: StreamingState | undefined): StreamingState
  * Resolve the previous StreamingState for a new event, resetting if turnId changed.
  */
 function resolveStreamingPrev(current: StreamingState | undefined, event: StreamEvent): StreamingState {
-  if (current?.turnId && event.turnId && current.turnId !== event.turnId) {
+  const currentIdentity = current?.turnId
+    ? `turn:${current.turnId}`
+    : current?.sessionId
+      ? `session:${current.sessionId}`
+      : '';
+  const eventIdentity = event.turnId
+    ? `turn:${event.turnId}`
+    : event.sessionId
+      ? `session:${event.sessionId}`
+      : '';
+  if (currentIdentity && eventIdentity && currentIdentity !== eventIdentity) {
     return { ...DEFAULT_STREAMING_STATE, turnId: event.turnId, sessionId: event.sessionId };
   }
   return current || { ...DEFAULT_STREAMING_STATE };
+}
+
+function streamIdentityFromEvent(event: Pick<StreamEvent, 'turnId' | 'sessionId'>): string {
+  if (event.turnId) return `turn:${event.turnId}`;
+  if (event.sessionId) return `session:${event.sessionId}`;
+  return '';
 }
 
 const MAX_STREAMING_TEXT = 16000;
@@ -473,6 +495,8 @@ function restoreStreamingFromSession(chatJid: string): StreamingState | null {
 interface PendingDelta {
   texts: string[];
   thinkings: string[];
+  turnId?: string;
+  sessionId?: string;
   raf: number;
 }
 const pendingDeltas = new Map<string, PendingDelta>();
@@ -489,12 +513,19 @@ function flushPendingDelta(
 
   const mergedText = entry.texts.join('');
   const mergedThinking = entry.thinkings.join('');
+  const deltaEvent: StreamEvent = {
+    eventType: mergedText ? 'text_delta' : 'thinking_delta',
+    turnId: entry.turnId,
+    sessionId: entry.sessionId,
+  };
 
   if (agentId) {
     set((s) => {
       if (!s.agentStreaming[agentId] && s.agentWaiting[agentId] === false) return s;
-      const prev = s.agentStreaming[agentId] || { ...DEFAULT_STREAMING_STATE };
+      const prev = resolveStreamingPrev(s.agentStreaming[agentId], deltaEvent);
       const next = { ...prev };
+      if (entry.turnId) next.turnId = entry.turnId;
+      if (entry.sessionId) next.sessionId = entry.sessionId;
       if (mergedText) {
         const combined = prev.partialText + mergedText;
         next.partialText = combined.length > MAX_STREAMING_TEXT ? combined.slice(-MAX_STREAMING_TEXT) : combined;
@@ -513,8 +544,10 @@ function flushPendingDelta(
     set((s) => {
       if (!s.streaming[chatJid] && s.waiting[chatJid] === false) return s;
       if (s.streaming[chatJid]?.interrupted) return s;
-      const prev = s.streaming[chatJid] || { ...DEFAULT_STREAMING_STATE };
+      const prev = resolveStreamingPrev(s.streaming[chatJid], deltaEvent);
       const next = { ...prev };
+      if (entry.turnId) next.turnId = entry.turnId;
+      if (entry.sessionId) next.sessionId = entry.sessionId;
       if (mergedText) {
         const combined = prev.partialText + mergedText;
         next.partialText = combined.length > MAX_STREAMING_TEXT ? combined.slice(-MAX_STREAMING_TEXT) : combined;
@@ -765,8 +798,14 @@ function pushTrace(events: StreamingTraceEvent[], event: StreamEvent): Streaming
     summary: event.summary || event.taskSummary || event.statusText || event.toolInputSummary,
     detail: event.detail,
     taskId: event.taskId,
+    toolName: event.toolName,
     toolUseId: event.toolUseId,
     parentToolUseId: event.parentToolUseId,
+    skillName: event.skillName,
+    toolInputSummary: event.toolInputSummary,
+    toolInput: event.toolInput,
+    elapsedSeconds: event.elapsedSeconds,
+    statusText: event.statusText,
     displayLevel: event.displayLevel,
   };
   return [...events, item].slice(-MAX_TRACE_EVENTS);
@@ -902,6 +941,7 @@ function applyStreamEvent(
         isNested: event.isNested,
         skillName: event.skillName,
         toolInputSummary: event.toolInputSummary,
+        toolInput: event.toolInput,
       };
       next.activeTools = existing
         ? prev.activeTools.map(t => (t.toolUseId === toolUseId ? { ...t, ...tool } : t))
@@ -1482,12 +1522,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return { clearing: nextClearing, clearEpoch: nextEpoch };
       });
 
-      // Invalidate SW cache for this group so the next page load doesn't
-      // serve a stale messages/agents response from before the clear (#467).
-      void invalidateWorkspaceGroupCaches(affectedJids);
+      // Invalidate SW cache BEFORE reloading groups/messages. Otherwise the
+      // NetworkFirst SW may still hand us the old /api/groups payload whose
+      // folder points at the deleted workspace id, so the rebuilt workspace only
+      // appears after a hard refresh.
+      await invalidateWorkspaceGroupCaches(affectedJids);
       void Promise.allSettled(affectedJids.map((affectedJid) => deleteGroupMessageSnapshots(affectedJid)));
 
       set((s) => {
+        const nextGroups = { ...s.groups };
+        if (result.workspace_id) {
+          for (const affectedJid of affectedJids) {
+            if (nextGroups[affectedJid]) {
+              nextGroups[affectedJid] = {
+                ...nextGroups[affectedJid],
+                folder: result.workspace_id,
+              };
+            }
+          }
+        }
+
         // Delete the key entirely (not []==[]) so selectGroup/ChatView effect
         // will trigger loadMessages on re-entry
         const nextMessages = { ...s.messages };
@@ -1583,6 +1637,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
 
         return {
+          groups: nextGroups,
           messages: nextMessages,
           waiting: nextWaiting,
           hasMore: nextHasMore,
@@ -1616,14 +1671,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await get().loadAgents(jid, { force: true });
       // 重建工作区后刷新文件列表（工作目录已被清空）
       useFileStore.getState().loadFiles(jid);
-      return true;
+      return {
+        jid,
+        folder: result.workspace_id || get().groups[jid]?.folder || jid,
+      };
     } catch (err) {
       // Release clearing lock on failure
       set((s) => {
         const { [jid]: _, ...nextClearing } = s.clearing;
         return { clearing: nextClearing, error: err instanceof Error ? err.message : String(err) };
       });
-      return false;
+      return null;
     }
   },
 
@@ -1646,7 +1704,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  createFlow: async (name: string, options?: { runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent'; device_link_id?: string; agent_client_id?: string; backend?: string; execution_mode?: 'container' | 'host'; execution_node?: string; custom_cwd?: string; repo_id?: string; repo_git_url?: string; repo_device_path?: string; visible_repo_mode?: 'all' | 'selected'; visible_repo_ids?: string[]; init_source_path?: string; init_git_url?: string }) => {
+  createFlow: async (name: string, options?: { runtime_profile?: 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent'; device_link_id?: string; agent_client_id?: string; backend?: string; execution_mode?: 'container' | 'host'; execution_node?: string; custom_cwd?: string; repo_id?: string; repo_git_url?: string; repo_device_path?: string; visible_repo_mode?: 'all' | 'selected'; visible_repo_ids?: string[]; agent_access_scope?: 'all' | 'workspace'; permission_mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan'; init_source_path?: string; init_git_url?: string }) => {
     try {
       const body: Record<string, unknown> = { name };
       if (options?.runtime_profile) body.runtime_profile = options.runtime_profile;
@@ -1661,6 +1719,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (options?.repo_device_path) body.repo_device_path = options.repo_device_path;
       if (options?.visible_repo_mode) body.visible_repo_mode = options.visible_repo_mode;
       if (options?.visible_repo_ids) body.visible_repo_ids = options.visible_repo_ids;
+      if (options?.agent_access_scope) body.agent_access_scope = options.agent_access_scope;
+      if (options?.permission_mode) body.permission_mode = options.permission_mode;
       if (options?.init_source_path) body.init_source_path = options.init_source_path;
       if (options?.init_git_url) body.init_git_url = options.init_git_url;
 
@@ -1671,6 +1731,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         group: GroupInfo;
       }>('/api/groups', body, needsLongTimeout ? 120_000 : undefined);
       if (!data.success) return null;
+
+      await invalidateGroupsListCache();
 
       set((s) => ({
         groups: { ...s.groups, [data.jid]: data.group },
@@ -1774,6 +1836,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         `/api/groups/${encodeURIComponent(jid)}`,
         120_000,
       );
+      await invalidateWorkspaceGroupCaches([jid]);
       // Workspace 已删除，连带把该 jid 下所有 conversation agent 的 IDB 快照
       // 也清掉，避免 IDB 长期堆积孤儿条目。
       void deleteGroupMessageSnapshots(jid);
@@ -1875,14 +1938,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // ⓪ text_delta / thinking_delta — rAF batch for both agent and main conversation
     if ((event.eventType === 'text_delta' || event.eventType === 'thinking_delta') && (agentId || !event.parentToolUseId)) {
       const key = agentId ? `agent:${agentId}` : `main:${chatJid}`;
+      const eventIdentity = streamIdentityFromEvent(event);
       let entry = pendingDeltas.get(key);
+      if (entry) {
+        const entryIdentity = streamIdentityFromEvent(entry);
+        if (entryIdentity && eventIdentity && entryIdentity !== eventIdentity) {
+          cancelAnimationFrame(entry.raf);
+          flushPendingDelta(key, chatJid, agentId, set);
+          entry = undefined;
+        }
+      }
       if (entry) {
         // Already have a pending rAF — just accumulate
         if (event.eventType === 'text_delta') entry.texts.push(event.text || '');
         else entry.thinkings.push(event.text || '');
+        if (!entry.turnId && event.turnId) entry.turnId = event.turnId;
+        if (!entry.sessionId && event.sessionId) entry.sessionId = event.sessionId;
         return;
       }
-      entry = { texts: [], thinkings: [], raf: 0 };
+      entry = { texts: [], thinkings: [], turnId: event.turnId, sessionId: event.sessionId, raf: 0 };
       if (event.eventType === 'text_delta') entry.texts.push(event.text || '');
       else entry.thinkings.push(event.text || '');
       entry.raf = requestAnimationFrame(() => {

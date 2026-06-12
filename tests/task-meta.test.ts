@@ -171,4 +171,44 @@ describe('storeMessageDirect + task_id propagation', () => {
     expect(byId.get('m-D-2') == null).toBe(true);
     expect(byId.get('m-D-3')).toBe('t4');
   });
+
+  test('scenario E: getMessagesSince filters user_command rows but keeps scheduled task prompts', () => {
+    const chatJid = 'web:task-meta-E';
+    ensureChatExists(chatJid);
+    storeMessageDirect(
+      'm-E-1',
+      chatJid,
+      'user-10',
+      'Eve',
+      '/sw hidden from polling',
+      '2026-04-17T00:00:20.000Z',
+      false,
+      { meta: { sourceKind: 'user_command' } },
+    );
+    storeMessageDirect(
+      'm-E-2',
+      chatJid,
+      'system',
+      'scheduler',
+      'scheduled prompt remains processable',
+      '2026-04-17T00:00:21.000Z',
+      false,
+      { meta: { sourceKind: 'scheduled_task_prompt', taskId: 't5' } },
+    );
+    storeMessageDirect(
+      'm-E-3',
+      chatJid,
+      'user-10',
+      'Eve',
+      'regular message remains processable',
+      '2026-04-17T00:00:22.000Z',
+      false,
+    );
+
+    const rows = getMessagesSince(chatJid, EMPTY_CURSOR);
+    const ids = rows.map((r) => r.id);
+    expect(ids).not.toContain('m-E-1');
+    expect(ids).toEqual(['m-E-2', 'm-E-3']);
+    expect(rows[0].task_id).toBe('t5');
+  });
 });

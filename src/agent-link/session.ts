@@ -16,6 +16,7 @@ import type { WebSocket } from 'ws';
 
 import { logger } from '../logger.js';
 import {
+  AGENT_LINK_MAX_FRAME_BYTES,
   encodeFrame,
   HELLO_TIMEOUT_MS,
   HEARTBEAT_TIMEOUT_MS,
@@ -101,7 +102,16 @@ export class AgentLinkSession {
           ? data.toString('utf8')
           : String(data);
 
-    if (text.length > 1_048_576) {
+    const byteLength = Buffer.byteLength(text, 'utf8');
+    if (byteLength > AGENT_LINK_MAX_FRAME_BYTES) {
+      logger.warn(
+        {
+          linkId: this.linkId,
+          byteLength,
+          maxBytes: AGENT_LINK_MAX_FRAME_BYTES,
+        },
+        'agent-link inbound frame too large',
+      );
       this.sendError('protocol_violation', 'frame too large', true);
       this.close('frame_too_large');
       return;

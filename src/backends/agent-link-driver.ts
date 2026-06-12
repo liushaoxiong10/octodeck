@@ -42,6 +42,10 @@ import {
 } from '../agent-link/run-rpc.js';
 import type { BackendRunArgs } from './types.js';
 import type { HostCliDriverConfig } from './host-cli-driver.js';
+import {
+  applyAgentPermissionArgs,
+  normalizePermissionModeForAgent,
+} from './agent-permission-args.js';
 import { loadUserMcpServers } from '../mcp-utils.js';
 import { listManagedReposByUser } from '../db.js';
 import type { ManagedRepo } from '../types.js';
@@ -69,6 +73,34 @@ interface CocoEvent {
 }
 
 const TOOL_RESULT_NAME_BY_ID = new Map<string, string>();
+
+/**
+ * Try to extract a human-readable error message from a string that may be a
+ * JSON-RPC error object. Some ACP/MCP SDKs wrap transport errors in a
+ * JSON-RPC -32603 (Internal error) envelope with the real reason in `data.error`.
+ * Returns a clean, readable message instead of raw JSON.
+ */
+function extractErrorMessage(raw: string | null | undefined): string {
+  if (!raw) return '';
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('{')) return raw;
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    if (parsed.jsonrpc === '2.0' || typeof parsed.code === 'number') {
+      const message = typeof parsed.message === 'string' ? parsed.message : '';
+      const data = parsed.data as Record<string, unknown> | undefined;
+      const dataError =
+        data && typeof data.error === 'string' ? data.error : '';
+      if (dataError && message && dataError !== message) {
+        return `${message}: ${dataError}`;
+      }
+      return dataError || message || raw;
+    }
+  } catch {
+    // Not valid JSON — return as-is
+  }
+  return raw;
+}
 
 function compactJson(value: unknown, max = 2000): string | null {
   if (value === undefined || value === null) return null;
@@ -236,8 +268,67 @@ function nestedObjectFromPayload(
     : undefined;
 }
 
+function normalizeModelUsagePayload(
+  usage: Record<string, unknown>,
+): NonNullable<StreamEvent['usage']>['modelUsage'] | undefined {
+  const raw = nestedObjectFromPayload(usage, ['modelUsage', 'model_usage']);
+  if (!raw) return undefined;
+
+  const modelUsage: NonNullable<StreamEvent['usage']>['modelUsage'] = {};
+  for (const [model, value] of Object.entries(raw)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const item = value as Record<string, unknown>;
+    const num = (...keys: string[]) => {
+      for (const key of keys) {
+        const v = item[key];
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string' && v.trim() && Number.isFinite(Number(v))) {
+          return Number(v);
+        }
+      }
+      return 0;
+    };
+    modelUsage[model] = {
+      inputTokens: num(
+        'inputTokens',
+        'input_tokens',
+        'promptTokens',
+        'prompt_tokens',
+      ),
+      outputTokens: num(
+        'outputTokens',
+        'output_tokens',
+        'completionTokens',
+        'completion_tokens',
+      ),
+      cacheReadInputTokens: num(
+        'cacheReadInputTokens',
+        'cache_read_input_tokens',
+      ),
+      cacheCreationInputTokens: num(
+        'cacheCreationInputTokens',
+        'cache_creation_input_tokens',
+      ),
+      costUSD: num('costUSD', 'cost_usd', 'cost'),
+    };
+  }
+  return Object.keys(modelUsage).length > 0 ? modelUsage : undefined;
+}
+
+function firstStringFromPayload(
+  payload: Record<string, unknown>,
+  keys: string[],
+): string | undefined {
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
 function normalizeUsagePayload(
   payload: Record<string, unknown> | undefined,
+  fallbackModel?: string,
 ): StreamEvent['usage'] | undefined {
   const usage = nestedObjectFromPayload(payload, ['usage']) ?? payload;
   if (!usage) return undefined;
@@ -279,16 +370,40 @@ function normalizeUsagePayload(
     durationMs: num('durationMs', 'duration_ms'),
     numTurns: num('numTurns', 'num_turns'),
   };
+  const modelUsage = normalizeModelUsagePayload(usage);
+  if (modelUsage) {
+    return { ...normalized, modelUsage };
+  }
   if (!Object.values(normalized).some((value) => value > 0)) return undefined;
+  const model =
+    firstStringFromPayload(usage, ['model', 'modelId', 'model_id']) ??
+    fallbackModel;
+  if (model) {
+    return {
+      ...normalized,
+      modelUsage: {
+        [model]: {
+          inputTokens: normalized.inputTokens,
+          outputTokens: normalized.outputTokens,
+          cacheReadInputTokens: normalized.cacheReadInputTokens,
+          cacheCreationInputTokens: normalized.cacheCreationInputTokens,
+          costUSD: normalized.costUSD,
+        },
+      },
+    };
+  }
   return normalized;
 }
 
-function streamEventFromAgentRunFrame(frame: {
-  eventType: string;
-  text?: string;
-  sessionId?: string;
-  payload?: Record<string, unknown>;
-}): StreamEvent | null {
+function streamEventFromAgentRunFrame(
+  frame: {
+    eventType: string;
+    text?: string;
+    sessionId?: string;
+    payload?: Record<string, unknown>;
+  },
+  fallbackModel?: string,
+): StreamEvent | null {
   if (frame.eventType === 'tool_call' || frame.eventType === 'tool_use_start') {
     const input = valueFromPayload(frame.payload, [
       'input',
@@ -358,8 +473,12 @@ function streamEventFromAgentRunFrame(frame: {
       eventType: 'permission_request',
       sessionId: frame.sessionId,
       toolName,
-      title: toolName ? `Permission request: ${toolName}` : 'Permission request',
-      summary: toolName ? `Agent is requesting permission to use ${toolName}.` : 'Agent is requesting permission.',
+      title: toolName
+        ? `Permission request: ${toolName}`
+        : 'Permission request',
+      summary: toolName
+        ? `Agent is requesting permission to use ${toolName}.`
+        : 'Agent is requesting permission.',
       detail: compactJson(frame.payload) ?? undefined,
       rawEvent: frame.payload,
     };
@@ -368,7 +487,7 @@ function streamEventFromAgentRunFrame(frame: {
     return {
       eventType: 'usage',
       sessionId: frame.sessionId,
-      usage: normalizeUsagePayload(frame.payload),
+      usage: normalizeUsagePayload(frame.payload, fallbackModel),
       detail: compactJson(frame.payload) ?? undefined,
       rawEvent: frame.payload,
     };
@@ -482,7 +601,10 @@ function buildDeviceCliSystemPrompt(
     hasAgentOverride: !!input.agentId,
     ownerUserId: ownerUserId ?? '',
     cloudHash: cloudGlobalMemoryContent
-      ? crypto.createHash('sha256').update(cloudGlobalMemoryContent).digest('hex')
+      ? crypto
+          .createHash('sha256')
+          .update(cloudGlobalMemoryContent)
+          .digest('hex')
       : '',
   });
   if (deviceSystemPromptCache.has(cacheKey)) {
@@ -512,6 +634,7 @@ function buildDeviceCliSystemPrompt(
       `<skill-routing>\n${loadPromptFile('skill-routing.md')}\n</skill-routing>`,
       `<security>\n${securityRules}\n</security>`,
       `<memory-system>\n${memoryPrompt}\n</memory-system>`,
+      `<workspace-memory>\n当前 workspace 记忆的云端权威范围: cloud://session/session:${input.groupFolder}/...。如 device CLI 支持 OctoDeck memory MCP 工具,当前 workspace 的长期项目记忆必须通过 workspace_memory_* 或 cloud_memory_* 写入云端;本地文件记忆仅限当前会话。workspace 记忆本地副本路径为工作区下 .octodeck/memory,仅用于快捷检索。\n</workspace-memory>`,
       ...(cloudGlobalMemoryContent
         ? [
             `<cloud-global-memory>\n以下是该用户在 OctoDeck 云端的全局记忆 (cloud://global/global:${ownerUserId}/CLAUDE.md)。请将其作为长期记忆参考,在适当时遵循其中的偏好与约定。\n\n${cloudGlobalMemoryContent}\n</cloud-global-memory>`,
@@ -540,13 +663,30 @@ function buildDeviceCliSystemPrompt(
 function buildAgentRunPolicy(
   cfg: HostCliDriverConfig,
   input: BackendRunArgs['input'],
+  group: BackendRunArgs['group'],
+  agentClientId?: string,
   ownerUserId?: string,
 ): Record<string, unknown> {
   const policy: Record<string, unknown> = {};
   if (cfg.model) policy.model = cfg.model;
-  const systemPrompt = buildDeviceCliSystemPrompt(input, ownerUserId);
-  if (systemPrompt) policy.systemPrompt = systemPrompt;
+  const permissionMode = normalizePermissionModeForAgent(
+    agentClientId ?? cfg.agentClientId ?? cfg.backendId,
+    group.permissionMode ?? cfg.permissionMode,
+  );
+  if (permissionMode && permissionMode !== 'default') {
+    policy.permissionMode = permissionMode;
+  }
+  if (isStartingNewDeviceCliSession(input)) {
+    const systemPrompt = buildDeviceCliSystemPrompt(input, ownerUserId);
+    if (systemPrompt) policy.systemPrompt = systemPrompt;
+  }
   return policy;
+}
+
+function isStartingNewDeviceCliSession(
+  input: BackendRunArgs['input'],
+): boolean {
+  return !input.sessionId;
 }
 
 function appendClaudeCodeSystemPromptArg(
@@ -555,11 +695,45 @@ function appendClaudeCodeSystemPromptArg(
   input: BackendRunArgs['input'],
   ownerUserId?: string,
 ): string[] {
-  if (agentClientId !== 'claude-code') return argv;
+  if (agentClientId !== 'claude-code' && agentClientId !== 'claude-acp')
+    return argv;
+  if (!isStartingNewDeviceCliSession(input)) return argv;
   if (argv.includes('--append-system-prompt')) return argv;
   const systemPrompt = buildDeviceCliSystemPrompt(input, ownerUserId);
   if (!systemPrompt) return argv;
   return [...argv, '--append-system-prompt', systemPrompt];
+}
+
+function buildDeviceCliUserPromptWithSystemContext(
+  input: BackendRunArgs['input'],
+  ownerUserId?: string,
+): string {
+  if (!isStartingNewDeviceCliSession(input)) return input.prompt;
+  const systemPrompt = buildDeviceCliSystemPrompt(input, ownerUserId);
+  if (!systemPrompt) return input.prompt;
+  return [
+    '<octodeck-system-context>',
+    systemPrompt,
+    '</octodeck-system-context>',
+    '',
+    '<user-prompt>',
+    input.prompt,
+    '</user-prompt>',
+  ].join('\n');
+}
+
+function shouldInlineSystemPromptForLegacyDeviceCli(
+  agentClientId: string | undefined,
+): boolean {
+  // Claude Code has a native --append-system-prompt path. Other device CLIs
+  // (Codex / TraeCLI / custom clients) may ignore argv-level system prompt
+  // conventions, so inline OctoDeck system context into the user prompt to make
+  // cloud global memory visible consistently in legacy run.request mode.
+  return (
+    !!agentClientId &&
+    agentClientId !== 'claude-code' &&
+    agentClientId !== 'claude-acp'
+  );
 }
 
 type RemoteWorkspaceScope =
@@ -874,7 +1048,9 @@ function buildStableChatId(args: BackendRunArgs): string | undefined {
   if (input.chatJid && input.agentId) {
     return `${input.chatJid}#agent:${input.agentId}`;
   }
-  return input.chatJid || input.taskRunId || input.messageTaskId || group.folder;
+  return (
+    input.chatJid || input.taskRunId || input.messageTaskId || group.folder
+  );
 }
 
 function buildRemoteSessionScopeId(
@@ -943,7 +1119,12 @@ function buildRemoteEnv(
 
 function cancelReasonFromSignal(
   signal: AbortSignal | undefined,
-): 'user_abort' | 'server_shutdown' | 'link_replaced' | 'timeout' | 'group_deleted' {
+):
+  | 'user_abort'
+  | 'server_shutdown'
+  | 'link_replaced'
+  | 'timeout'
+  | 'group_deleted' {
   return signal?.reason === 'timeout' ? 'timeout' : 'user_abort';
 }
 
@@ -987,6 +1168,7 @@ async function runViaAgentRuntime(opts: {
     let logAccum = '';
     let lastStatusMessage = '';
     let lastSessionId: string | undefined = input.sessionId;
+    let usageEventSeen = false;
     let onAbort: (() => void) | undefined;
     const resolveOnce = (out: ContainerOutput): void => {
       if (settled) return;
@@ -1045,6 +1227,7 @@ async function runViaAgentRuntime(opts: {
             result?: string;
             error: string | null;
             sessionId?: string;
+            usage?: Record<string, unknown>;
             timedOut: boolean;
             durationMs: number;
           }
@@ -1091,6 +1274,24 @@ async function runViaAgentRuntime(opts: {
         return;
       }
       if (info.sessionId) lastSessionId = info.sessionId;
+      if (info.usage && !usageEventSeen) {
+        const usage = normalizeUsagePayload(info.usage, cfg.model);
+        if (usage) {
+          usageEventSeen = true;
+          await emitWrapped({
+            status: 'stream',
+            result: null,
+            newSessionId: lastSessionId,
+            streamEvent: {
+              eventType: 'usage',
+              sessionId: lastSessionId,
+              usage,
+              detail: compactJson(info.usage) ?? undefined,
+              rawEvent: info.usage,
+            },
+          });
+        }
+      }
       if (info.timedOut) {
         const out: ContainerOutput = {
           status: 'error',
@@ -1104,13 +1305,14 @@ async function runViaAgentRuntime(opts: {
       }
       const resultText =
         (info.result ?? textAccum.trimEnd()) || lastStatusMessage;
+      const cleanError = info.error ? extractErrorMessage(info.error) : '';
       const out: ContainerOutput = info.ok
         ? { status: 'success', result: resultText, newSessionId: lastSessionId }
         : {
             status: 'error',
-            result: resultText || info.error || `${cfg.backendId} 返回错误`,
+            result: resultText || cleanError || `${cfg.backendId} 返回错误`,
             error:
-              info.error || resultText || `${cfg.backendId} reported failure`,
+              cleanError || resultText || `${cfg.backendId} reported failure`,
             newSessionId: lastSessionId,
           };
       await emitWrapped(out);
@@ -1152,8 +1354,11 @@ async function runViaAgentRuntime(opts: {
           }
           return;
         }
-        const structuredEvent = streamEventFromAgentRunFrame(frame);
+        const structuredEvent = streamEventFromAgentRunFrame(frame, cfg.model);
         if (structuredEvent) {
+          if (structuredEvent.eventType === 'usage' && structuredEvent.usage) {
+            usageEventSeen = true;
+          }
           void emitWrapped({
             status: 'stream',
             result: null,
@@ -1198,6 +1403,7 @@ async function runViaAgentRuntime(opts: {
           result: result.result,
           error: result.error,
           sessionId: result.sessionId,
+          usage: result.usage,
           timedOut: result.timedOut,
           durationMs: result.durationMs,
         });
@@ -1227,7 +1433,8 @@ async function runViaAgentRuntime(opts: {
       folder: remoteWorkspaceFolder,
       ...workspaceMeta,
       scopeId:
-        workspaceMeta.scope === 'session' || workspaceMeta.scope === 'direct_session'
+        workspaceMeta.scope === 'session' ||
+        workspaceMeta.scope === 'direct_session'
           ? sessionScopeId
           : workspaceMeta.scopeId,
     };
@@ -1258,7 +1465,7 @@ async function runViaAgentRuntime(opts: {
       env: remoteEnv,
       timeoutMs,
       maxOutputBytes,
-      policy: buildAgentRunPolicy(cfg, input, group.created_by),
+      policy: buildAgentRunPolicy(cfg, input, group, agentClientId, group.created_by),
       context: runContext,
       remoteCwdPlaceholder: REMOTE_CWD_PLACEHOLDER,
       workspaceRepos: workspaceRepos.length > 0 ? workspaceRepos : undefined,
@@ -1317,9 +1524,11 @@ export async function runViaAgentLink(
       ? ''
       : group.folder;
   const groupDir =
-    group.customCwd ||
-    workspaceMeta.agentRoot ||
-    `${DEVICE_WORKSPACE_URI_PREFIX}${remoteWorkspaceFolder || group.folder}`;
+    (group.agentAccessScope ?? 'all') === 'workspace'
+      ? `${DEVICE_WORKSPACE_URI_PREFIX}${remoteWorkspaceFolder || group.folder}`
+      : group.customCwd ||
+        workspaceMeta.agentRoot ||
+        `${DEVICE_WORKSPACE_URI_PREFIX}${remoteWorkspaceFolder || group.folder}`;
   if (
     !path.isAbsolute(groupDir) &&
     !groupDir.startsWith(DEVICE_WORKSPACE_URI_PREFIX)
@@ -1399,8 +1608,13 @@ export async function runViaAgentLink(
   // 3. argv
   let argv: string[];
   try {
+    const promptForArgv = shouldInlineSystemPromptForLegacyDeviceCli(
+      resolvedTarget?.agentClientId,
+    )
+      ? buildDeviceCliUserPromptWithSystemContext(input, group.created_by)
+      : input.prompt;
     argv = cfg.buildArgv({
-      prompt: input.prompt,
+      prompt: promptForArgv,
       sessionId: input.sessionId,
       cwd: REMOTE_CWD_PLACEHOLDER,
       folder: group.folder,
@@ -1414,6 +1628,11 @@ export async function runViaAgentLink(
       resolvedTarget?.agentClientId,
       input,
       group.created_by,
+    );
+    argv = applyAgentPermissionArgs(
+      argv,
+      resolvedTarget?.agentClientId ?? cfg.agentClientId ?? cfg.backendId,
+      group.permissionMode ?? cfg.permissionMode,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

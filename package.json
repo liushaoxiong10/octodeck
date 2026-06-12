@@ -43,6 +43,10 @@
     "yaml": "^2.8.3",
     "zod": "^4.3.6"
   },
+  "overrides": {
+    "@whiskeysockets/eslint-config": "1.0.0",
+    "libsignal": "6.0.0"
+  },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^7.6.12",

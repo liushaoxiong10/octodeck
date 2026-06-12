@@ -456,14 +456,15 @@ type AgentPermissionDecisionFrame struct {
 }
 
 type ToolRequestFrame struct {
-	Type           frameType      `json:"type"`
-	ID             int64          `json:"id"`
-	RequestID      string         `json:"requestId"`
-	ToolName       string         `json:"toolName"`
-	Input          map[string]any `json:"input"`
-	Cwd            string         `json:"cwd"`
-	TimeoutMs      int64          `json:"timeoutMs"`
-	MaxOutputBytes int64          `json:"maxOutputBytes"`
+	Type           frameType          `json:"type"`
+	ID             int64              `json:"id"`
+	RequestID      string             `json:"requestId"`
+	ToolName       string             `json:"toolName"`
+	Input          map[string]any     `json:"input"`
+	Cwd            string             `json:"cwd"`
+	WorkspaceRepo  *WorkspaceRepoSpec `json:"workspaceRepo,omitempty"`
+	TimeoutMs      int64              `json:"timeoutMs"`
+	MaxOutputBytes int64              `json:"maxOutputBytes"`
 }
 
 type ToolCancelFrame struct {

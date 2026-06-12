@@ -27,6 +27,23 @@ import { getCloudSkill, listCloudSkillsByUser } from './db.js';
 // to prevent overlapping env writes from corrupting each other.
 let envLock: Promise<void> = Promise.resolve();
 
+function loadCloudGlobalMemoryForSystemPrompt(userId: string | undefined): string {
+  if (!userId) return '';
+  try {
+    return getCloudMemory({
+      userId,
+      memoryType: 'global',
+      path: 'CLAUDE.md',
+    })?.content?.trim() ?? '';
+  } catch (err) {
+    logger.warn(
+      { err: (err as Error).message?.slice(0, 200), userId },
+      'sdkQuery failed to load cloud global memory',
+    );
+    return '';
+  }
+}
+
 /**
  * Send a prompt to Claude and return the plain-text response.
  * Uses the provider configured in the web settings (not a separate CLI install).
@@ -65,6 +82,10 @@ export async function sdkQuery(
 
   try {
     const model = opts?.model || config.anthropicModel || undefined;
+    const cloudGlobalMemory = loadCloudGlobalMemoryForSystemPrompt(opts?.userId);
+    const systemPromptAppend = cloudGlobalMemory
+      ? `<cloud-global-memory>\n以下是该用户在 OctoDeck 云端的全局记忆 (cloud://global/global:${opts?.userId ?? ''}/CLAUDE.md)。请将其作为长期记忆参考,在适当时遵循其中的偏好与约定。\n\n${cloudGlobalMemory}\n</cloud-global-memory>`
+      : '';
     const cloudToolsMcp =
       opts?.userId &&
       typeof createSdkMcpServer === 'function' &&
@@ -88,6 +109,9 @@ export async function sdkQuery(
         allowedTools: [],
         permissionMode: 'bypassPermissions' as const,
         allowDangerouslySkipPermissions: true,
+        ...(systemPromptAppend
+          ? { systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: systemPromptAppend } }
+          : {}),
         ...(cloudToolsMcp
           ? { mcpServers: { octodeck_cloud_tools: cloudToolsMcp } }
           : {}),

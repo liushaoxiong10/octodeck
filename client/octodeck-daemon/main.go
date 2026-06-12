@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -27,7 +28,10 @@ import (
 func goos() string   { return runtime.GOOS }
 func goarch() string { return runtime.GOARCH }
 
-const daemonVersion = "octodeck-daemon/1.0.23"
+//go:embed VERSION
+var rawDaemonVersion string
+
+var daemonVersion = "octodeck-daemon/" + strings.TrimSpace(rawDaemonVersion)
 
 var daemonUpdateMu sync.Mutex
 
@@ -403,46 +407,105 @@ func printDebugACPMappings(out io.Writer, s daemonDebugSnapshot) {
 func updateDaemonBinary(cfg *Config, targetPath string, restart bool) error {
 	daemonUpdateMu.Lock()
 	defer daemonUpdateMu.Unlock()
+	_, err := updateDaemonBinaryLocked(cfg, targetPath, restart)
+	return err
+}
+
+func updateDaemonBinaryGracefully(ctx context.Context, cfg *Config, pool *runnerPool, targetPath string, restart bool) error {
+	daemonUpdateMu.Lock()
+	defer daemonUpdateMu.Unlock()
+
+	releaseDrain, err := waitForPoolIdleForUpdate(ctx, pool)
+	if err != nil {
+		return err
+	}
+	restartRequested := false
+	defer func() {
+		// If restart was successfully requested, keep the daemon in draining mode so
+		// no new run can sneak in between service restart request and process exit.
+		if !restartRequested && releaseDrain != nil {
+			releaseDrain()
+		}
+	}()
+
+	restartRequested, err = updateDaemonBinaryLocked(cfg, targetPath, restart)
+	return err
+}
+
+func waitForPoolIdleForUpdate(ctx context.Context, pool *runnerPool) (func(), error) {
+	if pool == nil {
+		return func() {}, nil
+	}
+	pool.setDraining(true)
+	release := func() { pool.setDraining(false) }
+
+	if active := pool.activeCount(); active == 0 {
+		return release, nil
+	}
+	log.Printf("octodeck-daemon: graceful update waiting for %d active run(s) to finish", pool.activeCount())
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	lastLog := time.Now()
+	for {
+		if active := pool.activeCount(); active == 0 {
+			log.Printf("octodeck-daemon: active runs finished; continuing graceful update")
+			return release, nil
+		}
+		select {
+		case <-ctx.Done():
+			release()
+			return nil, fmt.Errorf("wait for active runs before daemon update: %w", ctx.Err())
+		case <-ticker.C:
+			if time.Since(lastLog) >= 30*time.Second {
+				log.Printf("octodeck-daemon: graceful update still waiting for %d active run(s)", pool.activeCount())
+				lastLog = time.Now()
+			}
+		}
+	}
+}
+
+func updateDaemonBinaryLocked(cfg *Config, targetPath string, restart bool) (bool, error) {
 
 	var err error
 	if targetPath == "" {
 		targetPath, err = os.Executable()
 		if err != nil {
-			return fmt.Errorf("resolve current executable: %w", err)
+			return false, fmt.Errorf("resolve current executable: %w", err)
 		}
 	}
 	targetPath, err = filepath.Abs(targetPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	info, err := os.Stat(targetPath)
 	mode := os.FileMode(0o755)
 	if err == nil {
 		mode = info.Mode().Perm()
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("stat target binary: %w", err)
+		return false, fmt.Errorf("stat target binary: %w", err)
 	}
 	binURL := strings.TrimRight(cfg.Server, "/") +
 		"/api/daemon/octodeck-daemon-bin/" + runtime.GOOS + "/" + runtime.GOARCH
 	tmp := filepath.Join(filepath.Dir(targetPath), fmt.Sprintf(".octodeck-daemon.update.%d", os.Getpid()))
 	if err := downloadFile(binURL, tmp, mode); err != nil {
 		_ = os.Remove(tmp)
-		return err
+		return false, err
 	}
 	if err := os.Rename(tmp, targetPath); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("replace target binary: %w", err)
+		return false, fmt.Errorf("replace target binary: %w", err)
 	}
 	fmt.Printf("octodeck-daemon: updated %s from %s\n", targetPath, binURL)
 	if restart {
 		if err := restartDaemonService(); err != nil {
 			fmt.Fprintf(os.Stderr, "octodeck-daemon: updated but restart failed: %v\n", err)
 			fmt.Fprintln(os.Stderr, "octodeck-daemon: please restart the daemon manually")
-			return nil
+			return false, nil
 		}
 		fmt.Println("octodeck-daemon: restart requested")
+		return true, nil
 	}
-	return nil
+	return false, nil
 }
 
 type daemonVersionResponse struct {
@@ -482,7 +545,7 @@ func checkDaemonUpdate(ctx context.Context, cfg *Config) (string, bool, error) {
 	return latest, isNewerDaemonVersion(latest, cfg.Version), nil
 }
 
-func runAutoUpdate(ctx context.Context, cfg *Config) error {
+func runAutoUpdate(ctx context.Context, cfg *Config, pool *runnerPool) error {
 	if !autoUpdateEnabled(cfg) {
 		return nil
 	}
@@ -496,7 +559,7 @@ func runAutoUpdate(ctx context.Context, cfg *Config) error {
 		return nil
 	}
 	log.Printf("octodeck-daemon: auto update available current=%s latest=%s", cfg.Version, latest)
-	if err := updateDaemonBinary(cfg, "", true); err != nil {
+	if err := updateDaemonBinaryGracefully(ctx, cfg, pool, "", true); err != nil {
 		return fmt.Errorf("auto update to %s: %w", latest, err)
 	}
 	return nil
@@ -695,7 +758,7 @@ func runForever(ctx context.Context, cfg *Config) error {
 		if !autoUpdateAttempted {
 			autoUpdateAttempted = true
 			go func() {
-				if err := runAutoUpdate(ctx, cfg); err != nil {
+				if err := runAutoUpdate(ctx, cfg, client.pool); err != nil {
 					log.Printf("octodeck-daemon: auto update skipped: %v", err)
 				}
 			}()

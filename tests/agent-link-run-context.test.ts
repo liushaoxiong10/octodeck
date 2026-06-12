@@ -6,6 +6,7 @@ const listOnlineRuntimesByProviderMock = vi.hoisted(() => vi.fn(() => []));
 const registerRunMock = vi.hoisted(() => vi.fn());
 const unregisterRunMock = vi.hoisted(() => vi.fn());
 const listManagedReposByUserMock = vi.hoisted(() => vi.fn(() => []));
+const getCloudMemoryMock = vi.hoisted(() => vi.fn());
 const getSystemSettingsMock = vi.hoisted(() =>
   vi.fn(() => ({ containerTimeout: 1000, containerMaxOutputSize: 4096 })),
 );
@@ -32,6 +33,9 @@ vi.mock('../src/config.js', () => ({
 vi.mock('../src/db.js', () => ({
   listManagedReposByUser: listManagedReposByUserMock,
 }));
+vi.mock('../src/memory-store.js', () => ({
+  getCloudMemory: getCloudMemoryMock,
+}));
 
 describe('agent-link run context forwarding', () => {
   beforeEach(() => {
@@ -41,6 +45,8 @@ describe('agent-link run context forwarding', () => {
     listOnlineRuntimesByProviderMock.mockReturnValue([]);
     listManagedReposByUserMock.mockReset();
     listManagedReposByUserMock.mockReturnValue([]);
+    getCloudMemoryMock.mockReset();
+    getCloudMemoryMock.mockReturnValue(undefined);
     registerRunMock.mockClear();
     unregisterRunMock.mockClear();
   });
@@ -711,6 +717,9 @@ describe('agent-link run context forwarding', () => {
 
   test('runViaAgentLink forwards OctoDeck system prompt to device agent.run clients', async () => {
     const sent: any[] = [];
+    getCloudMemoryMock.mockReturnValue({
+      content: '用户偏好：回答要简洁，并优先使用中文。',
+    });
     getOnlineMetaMock.mockImplementation((linkId: string) =>
       linkId === 'cl_1234567890abcdef'
         ? { capabilities: ['agent.run'] }
@@ -752,6 +761,7 @@ describe('agent-link run context forwarding', () => {
         buildArgv: ({ prompt }) => [prompt],
         outputProtocol: 'jsonline-stream-json',
         model: 'sonnet',
+        permissionMode: 'bypassPermissions',
       },
       'runtime:cl_1234567890abcdef:claude-code',
     );
@@ -774,7 +784,7 @@ describe('agent-link run context forwarding', () => {
           workspaceId: 'device-claude',
         },
       },
-      policy: { model: 'sonnet' },
+      policy: { model: 'sonnet', permissionMode: 'bypassPermissions' },
     });
     expect(sent[0].policy.systemPrompt).toContain('<behavior>');
     expect(sent[0].policy.systemPrompt).toContain('<skill-routing>');
@@ -783,6 +793,77 @@ describe('agent-link run context forwarding', () => {
     expect(sent[0].policy.systemPrompt).toContain('<guidelines>');
     expect(sent[0].policy.systemPrompt).toContain('<channel-format>');
     expect(sent[0].policy.systemPrompt).toContain('飞书');
+    expect(sent[0].policy.systemPrompt).toContain('<cloud-global-memory>');
+    expect(sent[0].policy.systemPrompt).toContain(
+      '用户偏好：回答要简洁，并优先使用中文。',
+    );
+
+    registerRunMock.mock.calls.at(-1)?.[0].finish({
+      ok: true,
+      result: 'ok',
+      error: null,
+      timedOut: false,
+      durationMs: 1,
+    });
+    await promise;
+  });
+
+  test('runViaAgentLink only forwards OctoDeck system prompt to new device agent.run sessions', async () => {
+    const sent: any[] = [];
+    getCloudMemoryMock.mockReturnValue({
+      content: '全局记忆：仅新 session 注入。',
+    });
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef'
+        ? { capabilities: ['agent.run'] }
+        : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Device Claude Continued',
+          folder: 'device-claude-continued',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:claude-code',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: 'continue',
+          sessionId: 'native-session-1',
+          chatJid: 'web:device-claude-continued',
+          isHome: false,
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: 'mac-claude-code',
+        resolveBinary: () => '/usr/local/bin/claude',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+        model: 'sonnet',
+      },
+      'runtime:cl_1234567890abcdef:claude-code',
+    );
+
+    expect(sent[0]).toMatchObject({
+      type: 'agent.run.request',
+      input: { sessionId: 'native-session-1' },
+      policy: { model: 'sonnet' },
+    });
+    expect(sent[0].policy.systemPrompt).toBeUndefined();
 
     registerRunMock.mock.calls.at(-1)?.[0].finish({
       ok: true,
@@ -1329,9 +1410,8 @@ describe('agent-link run context forwarding', () => {
   // - 服务端不应把 final_result 再转成新的 stream event 推给 UI（避免和已经
   //   流过的 text_delta 重复），仅在累计 text 为空时作为兜底返回最终文本。
   test('final_result frames are accepted by protocol and act as text fallback', async () => {
-    const { AgentRunEventFrame, parseInboundFrame } = await import(
-      '../src/agent-link/protocol.js'
-    );
+    const { AgentRunEventFrame, parseInboundFrame } =
+      await import('../src/agent-link/protocol.js');
     const finalResultFrame = {
       type: 'agent.run.event',
       runId: 'r-final-result',
@@ -1358,9 +1438,8 @@ describe('agent-link run context forwarding', () => {
       },
     });
 
-    const { runViaAgentLink } = await import(
-      '../src/backends/agent-link-driver.js'
-    );
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
     const promise = runViaAgentLink(
       {
         group: {
@@ -1429,6 +1508,23 @@ describe('agent-link run context forwarding', () => {
     expect(result).toMatchObject({ status: 'success', result: '最终回答' });
   });
 
+  // 回归：device daemon 的 stderr / ACP 未识别通知会作为 eventType="log"
+  // 回传。protocol.ts 必须接受该帧，否则 AgentLinkSession 会按协议错误关闭
+  // ws，后续 text_delta / agent.run.result 无法送达，前端看起来一直没有响应。
+  test('agent.run.event log frames are accepted by protocol', async () => {
+    const { AgentRunEventFrame, parseInboundFrame } =
+      await import('../src/agent-link/protocol.js');
+    const logFrame = {
+      type: 'agent.run.event',
+      runId: 'r-log-event',
+      eventType: 'log',
+      text: 'debug line from daemon stderr',
+      payload: { stream: 'stderr' },
+    };
+    expect(AgentRunEventFrame.safeParse(logFrame).success).toBe(true);
+    expect(parseInboundFrame(JSON.stringify(logFrame)).ok).toBe(true);
+  });
+
   test('runViaAgentLink appends OctoDeck system prompt to legacy device Claude CLI argv', async () => {
     const sent: any[] = [];
     getSessionMock.mockReturnValue({
@@ -1480,6 +1576,175 @@ describe('agent-link run context forwarding', () => {
     expect(sent[0].argv[appendIdx + 1]).toContain('<behavior>');
     expect(sent[0].argv[appendIdx + 1]).toContain('<skill-routing>');
     expect(sent[0].argv[appendIdx + 1]).toContain('<memory-system>');
+
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await promise;
+  });
+
+  test('runViaAgentLink does not append OctoDeck system prompt to continued legacy Claude sessions', async () => {
+    const sent: any[] = [];
+    getCloudMemoryMock.mockReturnValue({
+      content: '全局记忆：只应在新 session 注入。',
+    });
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Legacy Device Claude Continued',
+          folder: 'legacy-device-claude-continued',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:claude-code',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: 'continue',
+          sessionId: 'native-session-1',
+          chatJid: 'web:legacy-device-claude-continued',
+          isHome: false,
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: 'mac-claude-code',
+        resolveBinary: () => '/usr/local/bin/claude',
+        buildArgv: ({ prompt }) => ['-p', prompt],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:claude-code',
+    );
+
+    expect(sent[0].argv).not.toContain('--append-system-prompt');
+    expect(sent[0].argv).toEqual(['-p', 'continue']);
+
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await promise;
+  });
+
+  test('runViaAgentLink inlines cloud global memory for legacy non-Claude device CLIs', async () => {
+    const sent: any[] = [];
+    getCloudMemoryMock.mockReturnValue({
+      content: '全局记忆：用户常用项目是 OctoDeck。',
+    });
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Legacy Device TraeCLI',
+          folder: 'legacy-device-traecli',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:traecli',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: '今天做什么？',
+          chatJid: 'web:legacy-device-traecli',
+          isHome: false,
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: 'mac-traecli',
+        resolveBinary: () => '/usr/local/bin/traecli',
+        buildArgv: ({ prompt }) => [
+          '-p',
+          prompt,
+          '--output-format=stream-json',
+        ],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:traecli',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'run.request' });
+    expect(sent[0].argv[1]).toContain('<octodeck-system-context>');
+    expect(sent[0].argv[1]).toContain('<cloud-global-memory>');
+    expect(sent[0].argv[1]).toContain('全局记忆：用户常用项目是 OctoDeck。');
+    expect(sent[0].argv[1]).toContain('<user-prompt>\n今天做什么？');
+
+    registerRunMock.mock.calls
+      .at(-1)?.[0]
+      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await promise;
+  });
+
+  test('runViaAgentLink does not inline cloud global memory for continued non-Claude device CLI sessions', async () => {
+    const sent: any[] = [];
+    getCloudMemoryMock.mockReturnValue({
+      content: '全局记忆：不应重复注入。',
+    });
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Legacy Device TraeCLI Continued',
+          folder: 'legacy-device-traecli-continued',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:traecli',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: '继续',
+          sessionId: 'native-session-1',
+          chatJid: 'web:legacy-device-traecli-continued',
+          isHome: false,
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: 'mac-traecli',
+        resolveBinary: () => '/usr/local/bin/traecli',
+        buildArgv: ({ prompt }) => [
+          '-p',
+          prompt,
+          '--output-format=stream-json',
+        ],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:traecli',
+    );
+
+    expect(sent[0].argv[1]).toBe('继续');
+    expect(sent[0].argv[1]).not.toContain('<cloud-global-memory>');
 
     registerRunMock.mock.calls
       .at(-1)?.[0]

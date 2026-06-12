@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestToolRunnerReadAndWrite(t *testing.T) {
@@ -323,4 +324,101 @@ func TestAutoUpdateDefaultsEnabledAndCanBeDisabled(t *testing.T) {
 	if autoUpdateEnabled(&Config{AutoUpdate: &disabled}) {
 		t.Fatal("expected explicit autoUpdate=false to disable auto updates")
 	}
+}
+
+func TestGracefulDaemonUpdateWaitsForActiveRunsAndDrains(t *testing.T) {
+	pool := newRunnerPool(0)
+	if !pool.reserve("run-1") {
+		t.Fatal("expected initial run reservation")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		releaseDrain, err := waitForPoolIdleForUpdate(context.Background(), pool)
+		if err == nil && releaseDrain != nil {
+			releaseDrain()
+		}
+		done <- err
+	}()
+
+	waitUntil(t, time.Second, func() bool { return pool.isDraining() })
+	if pool.reserve("run-2") {
+		t.Fatal("expected draining pool to reject new runs")
+	}
+	pool.release("run-1")
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("waitForPoolIdleForUpdate returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for graceful update idle wait")
+	}
+	if pool.isDraining() {
+		t.Fatal("expected caller release to clear draining state")
+	}
+	if !pool.reserve("run-3") {
+		t.Fatal("expected reservations to resume after releasing drain")
+	}
+}
+
+func TestGracefulDaemonUpdateCancelReleasesDrain(t *testing.T) {
+	pool := newRunnerPool(0)
+	if !pool.reserve("run-1") {
+		t.Fatal("expected initial run reservation")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		releaseDrain, err := waitForPoolIdleForUpdate(ctx, pool)
+		if err == nil && releaseDrain != nil {
+			releaseDrain()
+		}
+		done <- err
+	}()
+
+	waitUntil(t, time.Second, func() bool { return pool.isDraining() })
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected cancellation error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for cancelled graceful update")
+	}
+	if pool.isDraining() {
+		t.Fatal("expected cancellation to clear draining state")
+	}
+	pool.release("run-1")
+	if !pool.reserve("run-2") {
+		t.Fatal("expected reservations to resume after cancellation")
+	}
+}
+
+func TestRuntimeStatusesReflectDrainingState(t *testing.T) {
+	statuses := buildRuntimeStatuses(
+		"cl_123",
+		[]AgentClientInfo{{ID: "claude-code", DisplayName: "Claude Code"}},
+		nil,
+		0,
+		0,
+		"draining",
+	)
+	if len(statuses) != 1 || statuses[0].Status != "draining" {
+		t.Fatalf("expected draining runtime status, got %#v", statuses)
+	}
+}
+
+func waitUntil(t *testing.T, timeout time.Duration, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("condition not met within %s", timeout)
 }

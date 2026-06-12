@@ -41,6 +41,12 @@ export type AgentRuntimeProfile =
 export type ConversationSource = 'manual' | 'feishu_thread';
 export type ConversationNavMode = 'horizontal' | 'vertical_threads';
 export type ImBindingMode = 'single_context' | 'thread_map';
+export type AgentAccessScope = 'all' | 'workspace';
+export type AgentPermissionMode =
+  | 'default'
+  | 'acceptEdits'
+  | 'bypassPermissions'
+  | 'plan';
 
 /** 飞书消息的话题/线程元数据，用于 thread_map 路由 */
 export interface FeishuMessageMeta {
@@ -98,6 +104,10 @@ export interface RegisteredGroup {
   agentClientId?: string;
   /** Per-workspace model override passed to the selected Agent backend. */
   agentModel?: string;
+  /** Filesystem access scope for future agent runs. */
+  agentAccessScope?: AgentAccessScope;
+  /** Per-workspace approval / permission mode for agent runs. */
+  permissionMode?: AgentPermissionMode;
   /**
    * 命令执行节点。
    *   - undefined / 'server-local' → server 进程内 spawn（沿用旧逻辑）

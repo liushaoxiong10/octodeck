@@ -189,6 +189,58 @@ const MAX_MEMORY_FILE_SIZE = 512 * 1024; // 512KB per file
 const MAX_MEMORY_APPEND_SIZE = 16 * 1024; // 16KB per append
 const MEMORY_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
+function normalizeMemoryRelativePath(input: string): string {
+  const normalized = input.replace(/\\/g, '/').trim().replace(/^\/+/, '');
+  if (!normalized || normalized.includes('\0')) {
+    throw new Error('Invalid memory path');
+  }
+  const parts = normalized.split('/');
+  if (parts.some((part) => !part || part === '.' || part === '..')) {
+    throw new Error('Invalid memory path');
+  }
+  return normalized;
+}
+
+function writeWorkspaceMemoryMirror(ctx: McpContext, memory: any): void {
+  if (!memory || typeof memory.path !== 'string' || typeof memory.content !== 'string') return;
+  const relativePath = normalizeMemoryRelativePath(memory.path);
+  const target = path.resolve(ctx.workspaceMemory, relativePath);
+  const root = path.resolve(ctx.workspaceMemory);
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    throw new Error('Invalid memory mirror path');
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, memory.content, 'utf-8');
+}
+
+function shouldMirrorWorkspaceMemory(ctx: McpContext, memory: any): boolean {
+  return Boolean(
+    memory &&
+    memory.memoryType === 'session' &&
+    (memory.groupFolder === ctx.groupFolder || memory.scopeKey === `session:${ctx.groupFolder}`),
+  );
+}
+
+async function syncWorkspaceMemoryMirror(ctx: McpContext): Promise<{ synced: number }> {
+  const data = await invokeCloudMemory(ctx, {
+    operation: 'list',
+    memoryType: 'session',
+    groupFolder: ctx.groupFolder,
+    limit: 500,
+  });
+  const memories: any[] = Array.isArray(data?.memories) ? data.memories : [];
+  let synced = 0;
+  for (const memory of memories) {
+    try {
+      writeWorkspaceMemoryMirror(ctx, memory);
+      synced += 1;
+    } catch {
+      // Skip invalid/unsafe paths from old data without failing agent startup/tool call.
+    }
+  }
+  return { synced };
+}
+
 function collectMemoryFiles(
   baseDir: string,
   out: string[],
@@ -658,6 +710,9 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
             operation: 'append', memoryType: args.memory_type, path: args.path,
             content: args.content, groupFolder: args.group_folder,
           });
+          if (shouldMirrorWorkspaceMemory(ctx, data.memory)) {
+            writeWorkspaceMemoryMirror(ctx, data.memory);
+          }
           return { content: [{ type: 'text' as const, text: JSON.stringify(data.memory, null, 2) }] };
         } catch (err) {
           return { content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }], isError: true };
@@ -680,6 +735,9 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
             operation: 'update', memoryType: args.memory_type, path: args.path,
             content: args.content, groupFolder: args.group_folder, expectedRevision: args.expected_revision,
           });
+          if (shouldMirrorWorkspaceMemory(ctx, data.memory)) {
+            writeWorkspaceMemoryMirror(ctx, data.memory);
+          }
           return { content: [{ type: 'text' as const, text: JSON.stringify(data.memory, null, 2) }] };
         } catch (err) {
           return { content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }], isError: true };
@@ -721,6 +779,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
       async (args) => {
         try {
           const data = await invokeCloudMemory(ctx, { operation: 'append', memoryType: 'session', groupFolder: ctx.groupFolder, path: args.path, content: args.content });
+          writeWorkspaceMemoryMirror(ctx, data.memory);
           return { content: [{ type: 'text' as const, text: JSON.stringify(data.memory, null, 2) }] };
         } catch (err) {
           return { content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }], isError: true };
@@ -734,6 +793,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
       async (args) => {
         try {
           const data = await invokeCloudMemory(ctx, { operation: 'update', memoryType: 'session', groupFolder: ctx.groupFolder, path: args.path, content: args.content, expectedRevision: args.expected_revision });
+          writeWorkspaceMemoryMirror(ctx, data.memory);
           return { content: [{ type: 'text' as const, text: JSON.stringify(data.memory, null, 2) }] };
         } catch (err) {
           return { content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }], isError: true };
@@ -2023,6 +2083,7 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
               path: `memory/${date}.md`,
               content: normalizedContent,
             });
+            writeWorkspaceMemoryMirror(ctx, data.memory);
             const revision = data?.memory?.revision;
             return {
               content: [
@@ -2045,6 +2106,24 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
               ],
               isError: true,
             };
+          }
+        },
+      ),
+    );
+  }
+
+  if (!ctx.disableMemoryLayer) {
+    tools.push(
+      tool(
+        'workspace_memory_sync_local',
+        '将当前 workspace 的云端记忆同步到本地工作区副本 /workspace/memory，用于快捷检索。通常无需手动调用，写入工具会自动同步对应文件。',
+        {},
+        async () => {
+          try {
+            const result = await syncWorkspaceMemoryMirror(ctx);
+            return toolJson(result);
+          } catch (err) {
+            return toolError(err);
           }
         },
       ),

@@ -57,4 +57,38 @@ describe('tool role messages', () => {
     expect(stage?.type).toBe('tool_message');
     expect(stage?.payload).toMatchObject({ role: 'tool', sourceKind: 'tool_call' });
   });
+
+  test('reopening an archived chat clears archived flag for new history flows', () => {
+    db.ensureChatExists('web:main');
+    db.storeMessageDirect(
+      'old-msg',
+      'web:main',
+      'user-1',
+      'User',
+      'old conversation',
+      '2026-06-04T10:00:00.000Z',
+      false,
+      { meta: { role: 'user', sessionId: 'old-session' } },
+    );
+    db.deleteChatHistory('web:main');
+
+    // 主工作区清空/重置后会复用同一个 JID 发起新会话。
+    // ensureChatExists 必须解除 chats.archived_at，否则历史页会把新会话误标记为已归档。
+    db.ensureChatExists('web:main');
+    db.storeMessageDirect(
+      'new-msg',
+      'web:main',
+      'user-1',
+      'User',
+      'new conversation',
+      '2026-06-04T11:00:00.000Z',
+      false,
+      { meta: { role: 'user', sessionId: 'new-session' } },
+    );
+
+    const [flow] = db.listSystemHistoryFlows({ type: 'message', limit: 10 });
+    expect(flow?.summary).toBe('new conversation');
+    expect(flow?.archivedAt).toBeNull();
+    expect(flow?.stages[0]?.payload).toMatchObject({ archivedAt: null });
+  });
 });

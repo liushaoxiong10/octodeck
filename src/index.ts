@@ -818,10 +818,80 @@ function resolveEffectiveGroup(group: RegisteredGroup): {
   effectiveGroup: RegisteredGroup;
   isHome: boolean;
 } {
+  const inheritRuntimeConfig = (
+    source: RegisteredGroup,
+    home: RegisteredGroup,
+  ): RegisteredGroup => ({
+    ...source,
+    containerConfig: home.containerConfig ?? source.containerConfig,
+    executionMode: home.executionMode,
+    customCwd: home.customCwd || source.customCwd,
+    runtimeProfile: home.runtimeProfile ?? source.runtimeProfile,
+    deviceLinkId: home.deviceLinkId ?? source.deviceLinkId,
+    agentClientId: home.agentClientId ?? source.agentClientId,
+    agentModel: home.agentModel ?? source.agentModel,
+    agentAccessScope: home.agentAccessScope ?? source.agentAccessScope,
+    permissionMode: home.permissionMode ?? source.permissionMode,
+    backend: home.backend ?? source.backend,
+    executionNode: home.executionNode ?? source.executionNode,
+    visibleRepoMode: home.visibleRepoMode ?? source.visibleRepoMode,
+    visibleRepoIds: home.visibleRepoIds ?? source.visibleRepoIds,
+    repoId: home.repoId ?? source.repoId,
+    repoGitUrl: home.repoGitUrl ?? source.repoGitUrl,
+    repoMainBranch: home.repoMainBranch ?? source.repoMainBranch,
+    repoDevicePath: home.repoDevicePath ?? source.repoDevicePath,
+    created_by: source.created_by || home.created_by,
+    is_home: true,
+  });
+
+  const resolveTargetRuntimeGroup = (): RegisteredGroup | null => {
+    if (group.target_agent_id) {
+      const agent = getAgent(group.target_agent_id);
+      const targetJid = agent?.chat_jid;
+      if (!targetJid) return null;
+      const targetGroup = registeredGroups[targetJid] ?? getRegisteredGroup(targetJid);
+      if (targetGroup && !registeredGroups[targetJid]) {
+        registeredGroups[targetJid] = targetGroup;
+      }
+      return targetGroup ?? null;
+    }
+
+    if (group.target_main_jid) {
+      const targetJid = resolveWorkspaceJid(group.target_main_jid);
+      if (!targetJid) return null;
+      const targetGroup = registeredGroups[targetJid] ?? getRegisteredGroup(targetJid);
+      if (targetGroup && !registeredGroups[targetJid]) {
+        registeredGroups[targetJid] = targetGroup;
+      }
+      return targetGroup ?? null;
+    }
+
+    return null;
+  };
+
   // If the group already has an explicit binding, keep it — do NOT overwrite it by searching for is_home
   // This fixes the bug where binding an IM group to a non-home workspace would lose the binding on restart
   if (group.target_agent_id || group.target_main_jid) {
-    // Still inherit runtime properties (executionMode/customCwd/created_by) from home sibling
+    // For IM-bound groups, runtime policy must come from the bound workspace,
+    // not from the IM group's own folder/home sibling. Otherwise platform
+    // settings like agent_model/backend/device target can differ from the model
+    // actually used at run time when a Feishu group is bound to another workspace.
+    const targetGroup = resolveTargetRuntimeGroup();
+    if (targetGroup) {
+      return {
+        effectiveGroup: {
+          ...targetGroup,
+          created_by: targetGroup.created_by || group.created_by,
+          is_home: true,
+        },
+        isHome: true,
+      };
+    }
+
+    // Still inherit runtime properties from home sibling. IM-bound / virtual
+    // groups usually do not carry workspace runtime policy fields themselves;
+    // without this, platform settings like permissionMode/backend/device target
+    // are silently lost when executing through those groups.
     if (!group.is_home) {
       const siblingJids = getJidsByFolder(group.folder);
       for (const jid of siblingJids) {
@@ -829,13 +899,7 @@ function resolveEffectiveGroup(group: RegisteredGroup): {
         if (sibling && !registeredGroups[jid]) registeredGroups[jid] = sibling;
         if (sibling?.is_home) {
           return {
-            effectiveGroup: {
-              ...group,
-              executionMode: sibling.executionMode,
-              customCwd: sibling.customCwd || group.customCwd,
-              created_by: group.created_by || sibling.created_by,
-              is_home: true,
-            },
+            effectiveGroup: inheritRuntimeConfig(group, sibling),
             isHome: true,
           };
         }
@@ -853,13 +917,7 @@ function resolveEffectiveGroup(group: RegisteredGroup): {
     if (sibling && !registeredGroups[jid]) registeredGroups[jid] = sibling;
     if (sibling?.is_home) {
       return {
-        effectiveGroup: {
-          ...group,
-          executionMode: sibling.executionMode,
-          customCwd: sibling.customCwd || group.customCwd,
-          created_by: group.created_by || sibling.created_by,
-          is_home: true,
-        },
+        effectiveGroup: inheritRuntimeConfig(group, sibling),
         isHome: true,
       };
     }
@@ -900,6 +958,28 @@ function resolveOwnerHomeFolder(group: RegisteredGroup): string {
 }
 
 /**
+ * Resolve the user that owns a run's usage. Device/Daemon (Agent Link) runs
+ * frequently execute through an effective group with no created_by, which would
+ * otherwise attribute usage to a 'system' owner and hide it from the per-user
+ * usage page. Fall back to the originating chat group, then any sibling group
+ * that shares the workspace folder.
+ */
+function resolveUsageOwnerId(
+  effectiveGroup: RegisteredGroup,
+  chatJid: string,
+): string | undefined {
+  const direct =
+    effectiveGroup.created_by || registeredGroups[chatJid]?.created_by;
+  if (direct) return direct;
+  const siblingJids = getJidsByFolder(effectiveGroup.folder);
+  for (const jid of siblingJids) {
+    const sibling = registeredGroups[jid] ?? getRegisteredGroup(jid);
+    if (sibling?.created_by) return sibling.created_by;
+  }
+  return undefined;
+}
+
+/**
  * Write usage records from a usage event to the database.
  * Handles both modelUsage (per-model breakdown) and legacy flat format.
  * When modelUsage is present, per-model cache tokens are read directly from each model entry.
@@ -930,8 +1010,8 @@ function writeUsageRecords(opts: {
   };
 }): void {
   const { userId, groupFolder, messageId, agentId, usage } = opts;
-  if (usage.modelUsage) {
-    const models = Object.entries(usage.modelUsage);
+  const models = usage.modelUsage ? Object.entries(usage.modelUsage) : [];
+  if (models.length > 0) {
     for (const [model, mu] of models) {
       insertUsageRecord({
         userId,
@@ -949,23 +1029,62 @@ function writeUsageRecords(opts: {
         source: 'agent',
       });
     }
-  } else {
-    insertUsageRecord({
-      userId,
-      groupFolder,
-      agentId,
-      messageId,
-      model: 'unknown',
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      cacheReadInputTokens: usage.cacheReadInputTokens,
-      cacheCreationInputTokens: usage.cacheCreationInputTokens,
-      costUSD: usage.costUSD,
-      durationMs: usage.durationMs,
-      numTurns: usage.numTurns,
-      source: 'agent',
-    });
+    return;
   }
+
+  insertUsageRecord({
+    userId,
+    groupFolder,
+    agentId,
+    messageId,
+    model: 'unknown',
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cacheReadInputTokens: usage.cacheReadInputTokens,
+    cacheCreationInputTokens: usage.cacheCreationInputTokens,
+    costUSD: usage.costUSD,
+    durationMs: usage.durationMs,
+    numTurns: usage.numTurns,
+    source: 'agent',
+  });
+}
+
+type StreamUsage = NonNullable<StreamEvent['usage']>;
+
+function usageTotalsForBilling(usage: StreamUsage): {
+  inputTokens: number;
+  outputTokens: number;
+  costUSD: number;
+  hasBillableUsage: boolean;
+} {
+  let inputTokens = Number(usage.inputTokens) || 0;
+  let outputTokens = Number(usage.outputTokens) || 0;
+  let costUSD = Number(usage.costUSD) || 0;
+
+  // Device CLI / ACP agents may report per-model usage only, with the root
+  // aggregate fields left at 0. Aggregate modelUsage so billing/monthly usage
+  // cards and quota token counters still include those runs.
+  if (usage.modelUsage && Object.keys(usage.modelUsage).length > 0) {
+    const modelTotals = Object.values(usage.modelUsage).reduce(
+      (acc, item) => {
+        acc.inputTokens += Number(item.inputTokens) || 0;
+        acc.outputTokens += Number(item.outputTokens) || 0;
+        acc.costUSD += Number(item.costUSD) || 0;
+        return acc;
+      },
+      { inputTokens: 0, outputTokens: 0, costUSD: 0 },
+    );
+    if (inputTokens <= 0) inputTokens = modelTotals.inputTokens;
+    if (outputTokens <= 0) outputTokens = modelTotals.outputTokens;
+    if (costUSD <= 0) costUSD = modelTotals.costUSD;
+  }
+
+  return {
+    inputTokens,
+    outputTokens,
+    costUSD,
+    hasBillableUsage: inputTokens > 0 || outputTokens > 0 || costUSD > 0,
+  };
 }
 
 /**
@@ -2275,17 +2394,52 @@ async function handleSpawnCommand(
       now,
       false,
       {
+        sourceJid: sourceImJid,
         meta: { sourceKind: 'user_command' },
       },
     );
     broadcastNewMessage(homeChatJid, {
       id: cmdId,
       chat_jid: homeChatJid,
+      source_jid: sourceImJid,
       sender: userId,
       sender_name: senderName,
       content: `/sw ${message}`,
       timestamp: now,
       is_from_me: false,
+      source_kind: 'user_command',
+    });
+
+    // Also add a durable, non-user system marker in the Web main chat.  The
+    // compact /sw command card above can be missed if the user is looking for
+    // agent output rather than commands; this marker makes IM-started parallel
+    // tasks visible immediately without entering the agent polling loop.
+    const statusId = crypto.randomUUID();
+    const shortId = agentId.slice(0, 4);
+    const statusContent = `system_info:⚡ 并行任务已启动 [${shortId}]：${truncatedName}`;
+    storeMessageDirect(
+      statusId,
+      homeChatJid,
+      '__system__',
+      'system',
+      statusContent,
+      now,
+      true,
+      {
+        sourceJid: sourceImJid,
+        meta: { sourceKind: 'user_command' },
+      },
+    );
+    broadcastNewMessage(homeChatJid, {
+      id: statusId,
+      chat_jid: homeChatJid,
+      source_jid: sourceImJid,
+      sender: '__system__',
+      sender_name: 'system',
+      content: statusContent,
+      timestamp: now,
+      is_from_me: true,
+      source_kind: 'user_command',
     });
   }
 
@@ -3440,16 +3594,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // Persist token usage to the latest agent message + usage_records
             if (se.eventType === 'usage' && se.usage) {
               try {
+                const usageTotals = usageTotalsForBilling(se.usage);
                 updateLatestMessageTokenUsage(
                   chatJid,
                   JSON.stringify(se.usage),
                   lastReplyMsgId,
-                  se.usage.costUSD,
+                  usageTotals.costUSD,
                 );
+
+                const ownerGroup = registeredGroups[chatJid];
+                const usageOwnerId =
+                  resolveUsageOwnerId(effectiveGroup, chatJid) ||
+                  ownerGroup?.created_by ||
+                  effectiveGroup.created_by;
 
                 // Write to usage_records + usage_daily_summary
                 writeUsageRecords({
-                  userId: effectiveGroup.created_by || 'system',
+                  userId: usageOwnerId || 'system',
                   groupFolder: effectiveGroup.folder,
                   messageId: lastReplyMsgId,
                   usage: se.usage,
@@ -3459,37 +3620,38 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                   {
                     chatJid,
                     msgId: lastReplyMsgId,
-                    costUSD: se.usage.costUSD,
-                    inputTokens: se.usage.inputTokens,
+                    costUSD: usageTotals.costUSD,
+                    inputTokens: usageTotals.inputTokens,
                   },
                   'Token usage persisted',
                 );
 
                 // Update billing monthly usage
-                const ownerGroup = registeredGroups[chatJid];
-                if (ownerGroup?.created_by && se.usage.costUSD) {
+                if (usageOwnerId && usageTotals.hasBillableUsage) {
                   try {
                     const effective = updateUsage(
-                      ownerGroup.created_by,
-                      se.usage.costUSD,
-                      se.usage.inputTokens || 0,
-                      se.usage.outputTokens || 0,
+                      usageOwnerId,
+                      usageTotals.costUSD,
+                      usageTotals.inputTokens,
+                      usageTotals.outputTokens,
                     );
-                    deductUsageCost(
-                      ownerGroup.created_by,
-                      se.usage.costUSD,
-                      lastReplyMsgId || chatJid,
-                      effective,
-                    );
+                    if (usageTotals.costUSD > 0) {
+                      deductUsageCost(
+                        usageOwnerId,
+                        usageTotals.costUSD,
+                        lastReplyMsgId || chatJid,
+                        effective,
+                      );
+                    }
                     // Broadcast real-time billing update to the user
-                    const owner = getUserById(ownerGroup.created_by);
+                    const owner = getUserById(usageOwnerId);
                     if (owner && owner.role !== 'admin') {
                       const freshAccess = checkBillingAccessFresh(
-                        ownerGroup.created_by,
+                        usageOwnerId,
                         owner.role,
                       );
                       if (freshAccess.usage) {
-                        broadcastBillingUpdate(ownerGroup.created_by, {
+                        broadcastBillingUpdate(usageOwnerId, {
                           ...freshAccess,
                         });
                       }
@@ -4297,6 +4459,7 @@ async function runAgent(
           isAdminHome,
           images,
           messageTaskId,
+          permissionMode: group.permissionMode ?? 'bypassPermissions',
         },
         onProcess: onProcessCb,
         onOutput: wrappedOnOutput,
@@ -6855,24 +7018,49 @@ async function processAgentConversation(
         output.streamEvent.usage
       ) {
         try {
+          const usageTotals = usageTotalsForBilling(output.streamEvent.usage);
           updateLatestMessageTokenUsage(
             virtualChatJid,
             JSON.stringify(output.streamEvent.usage),
             lastAgentReplyMsgId,
+            usageTotals.costUSD,
           );
 
           // Write to usage_records + usage_daily_summary
           // Sub-Agent 的 effectiveGroup 可能没有 created_by，从父群组继承
           writeUsageRecords({
             userId:
-              effectiveGroup.created_by ||
-              registeredGroups[chatJid]?.created_by ||
-              'system',
+              resolveUsageOwnerId(effectiveGroup, chatJid) || 'system',
             groupFolder: effectiveGroup.folder,
             agentId,
             messageId: lastAgentReplyMsgId,
             usage: output.streamEvent.usage,
           });
+
+          const usageOwnerId = resolveUsageOwnerId(effectiveGroup, chatJid);
+          if (usageOwnerId && usageTotals.hasBillableUsage) {
+            const effective = updateUsage(
+              usageOwnerId,
+              usageTotals.costUSD,
+              usageTotals.inputTokens,
+              usageTotals.outputTokens,
+            );
+            if (usageTotals.costUSD > 0) {
+              deductUsageCost(
+                usageOwnerId,
+                usageTotals.costUSD,
+                lastAgentReplyMsgId || virtualChatJid,
+                effective,
+              );
+            }
+            const owner = getUserById(usageOwnerId);
+            if (owner && owner.role !== 'admin') {
+              const freshAccess = checkBillingAccessFresh(usageOwnerId, owner.role);
+              if (freshAccess.usage) {
+                broadcastBillingUpdate(usageOwnerId, { ...freshAccess });
+              }
+            }
+          }
         } catch (err) {
           logger.warn(
             { err, chatJid, agentId },
@@ -6980,6 +7168,12 @@ async function processAgentConversation(
           },
           agentId,
         );
+
+        // Clear the server-side streaming snapshot for the agent virtual JID.
+        // Otherwise a web reconnect receives a stale stream_snapshot
+        // (web:<folder>#agent:<id>) and the Agent tab can re-enter
+        // "generating" even though the final message has already been stored.
+        clearStreamingSnapshot(virtualChatJid);
 
         // Async LLM title upgrade after the first substantive reply.
         if (isFirstReply && agent.kind === 'conversation') {
@@ -7152,6 +7346,7 @@ async function processAgentConversation(
       agentId,
       agentName: agent.name,
       images: imagesForAgent,
+      permissionMode: effectiveGroup.permissionMode ?? 'bypassPermissions',
     };
 
     // Write tasks/groups snapshots
@@ -7320,6 +7515,7 @@ async function processAgentConversation(
           },
           agentId,
         );
+        clearStreamingSnapshot(virtualChatJid);
         commitCursor();
       } catch (err) {
         logger.warn(
@@ -7371,6 +7567,7 @@ async function processAgentConversation(
           },
           agentId,
         );
+        clearStreamingSnapshot(virtualChatJid);
         // Fallback: send accumulated streaming text to IM when output.result is null
         // (agent-runner streams all text via text_delta, never sets result field)
         logger.info({
@@ -8633,10 +8830,10 @@ function buildResolveEffectiveChatJid(): (
       group.target_main_jid &&
       getChannelType(chatJid) === 'feishu' &&
       messageMeta &&
-      (messageMeta?.threadId || messageMeta?.rootId || messageMeta?.messageId)
+      (messageMeta?.threadId || messageMeta?.rootId)
     ) {
       const threadContextId =
-        messageMeta.threadId || messageMeta.rootId || messageMeta.messageId;
+        messageMeta.threadId || messageMeta.rootId;
       if (!threadContextId) return null;
       const workspaceJid = resolveWorkspaceJid(group.target_main_jid);
       if (!workspaceJid) {

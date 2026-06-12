@@ -43,11 +43,21 @@ export function buildAgentBackendFromClient(input: {
   maxOutputBytes?: number;
   runtime?: 'local-device' | 'server-side';
   model?: string;
+  permissionMode?: string | null;
   providerId?: string | null;
   workdirMode?: 'auto' | 'custom';
   workdir?: string;
   agentMdId?: string | null;
 }): CustomBackendDef {
+  if (
+    input.permissionMode &&
+    input.discoveredClient.permissionModes?.length &&
+    !input.discoveredClient.permissionModes.includes(input.permissionMode)
+  ) {
+    throw new Error(
+      `Agent client ${input.discoveredClient.id} 不支持权限模式: ${input.permissionMode}`,
+    );
+  }
   const template = templateForAgentClient(input.discoveredClient.id);
   return {
     id: input.id,
@@ -65,6 +75,7 @@ export function buildAgentBackendFromClient(input: {
     maxOutputBytes: input.maxOutputBytes,
     runtime: input.runtime,
     model: input.model,
+    permissionMode: input.permissionMode,
     providerId: input.providerId,
     workdirMode: input.workdirMode,
     workdir: input.workdir,
@@ -114,7 +125,7 @@ function templateForAgentClient(
           '{model}',
           '--output-format',
           'stream-json',
-          '--dangerously-skip-permissions',
+          '--verbose',
           '--mcp-config',
           '__OCTODECK_AGENT_TEAM_MCP_CONFIG__',
         ],
@@ -160,7 +171,6 @@ function templateForAgentClient(
           'model.name={model}',
           '--output-format=stream-json',
           '--include-partial-messages',
-          '-y',
           '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
         ],
         outputProtocol: 'jsonline-stream-json',

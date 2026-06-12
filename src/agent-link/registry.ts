@@ -46,8 +46,20 @@ import {
   failAgentRuntimeRequestsForLink,
 } from './agent-runtime-rpc.js';
 import { AgentLinkSession } from './session.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 
-export const LATEST_DAEMON_VERSION = 'octodeck-daemon/1.0.23';
+function loadDaemonVersion(): string {
+  // src/agent-link/registry.ts and dist/agent-link/registry.js both sit two
+  // levels below the repo (or image) root that holds client/octodeck-daemon/VERSION.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const versionPath = resolve(here, '../../client/octodeck-daemon/VERSION');
+  const raw = readFileSync(versionPath, 'utf8').trim();
+  return `octodeck-daemon/${raw}`;
+}
+
+export const LATEST_DAEMON_VERSION = loadDaemonVersion();
 
 export interface OnlineLinkInfo {
   linkId: string;

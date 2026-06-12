@@ -10,7 +10,7 @@ import { ContainerEnvPanel } from './ContainerEnvPanel';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { PromptDialog } from '@/components/common/PromptDialog';
-import { ArrowLeft, FolderOpen, Link, MessageSquare, Monitor, Moon, MoreHorizontal, PanelRightClose, PanelRightOpen, Puzzle, Server, Sun, Terminal, Users, Variable, X } from 'lucide-react';
+import { ArrowLeft, FolderOpen, Link, MessageSquare, Monitor, Moon, MoreHorizontal, PanelRightClose, PanelRightOpen, Puzzle, Server, Settings2, Sun, Terminal, Users, Variable, X } from 'lucide-react';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useTheme } from '../../hooks/useTheme';
 import { cn } from '@/lib/utils';
@@ -33,6 +33,7 @@ const MAIN_BINDING = '__main__' as const;
 
 const SIDEBAR_TABS = [
   { id: 'files' as const, icon: FolderOpen, label: '文件管理' },
+  { id: 'agent-config' as const, icon: Settings2, label: 'Agent 配置' },
   { id: 'env' as const, icon: Variable, label: '环境变量' },
   { id: 'skills' as const, icon: Puzzle, label: '工作区 Skills' },
   { id: 'mcp' as const, icon: Server, label: '工作区 MCP' },
@@ -47,7 +48,7 @@ const TERMINAL_MAX_RATIO = 0.7;
 // Stable empty references to avoid infinite re-render loops in Zustand selectors
 const EMPTY_AGENTS: import('../../types').AgentInfo[] = [];
 
-type SidebarTab = 'files' | 'env' | 'skills' | 'mcp' | 'members';
+type SidebarTab = 'files' | 'agent-config' | 'env' | 'skills' | 'mcp' | 'members';
 
 /**
  * 聊天窗口打开文件面板时的默认起点：
@@ -301,6 +302,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     (activeAgentTab ? activeAgentStreamingSessionId : mainStreamingSessionId) ||
     latestVisibleSessionId,
   );
+  const filePanelAgentId = group?.runtime_profile ? (activeAgentTab ?? '__main__') : activeAgentTab;
+  const filePanelInitialPath = filePanelAgentId ? '' : filePanelDefaultPath;
   const isTopicWorkspace =
     group?.conversation_nav_mode === 'vertical_threads' ||
     agents.some((a) => a.source_kind === 'feishu_thread');
@@ -563,6 +566,11 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const openMobileFiles = () => {
     setMobileActionsOpen(false);
     setMobilePanel('files');
+  };
+
+  const openMobileAgentConfig = () => {
+    setMobileActionsOpen(false);
+    setMobilePanel('agent-config');
   };
 
   const openMobileEnv = () => {
@@ -830,7 +838,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           ) : (
             <>
               <MessageList
-                key={`main-${groupJid}-${urlSessionId || 'all'}`}
+                key={`main-${groupJid}`}
                 messages={groupMessages || []}
                 loading={loading}
                 hasMore={hasMoreMessages}
@@ -889,7 +897,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           {/* Tab content */}
           <div className="flex-1 overflow-hidden min-h-0">
             {sidebarTab === 'files' ? (
-              <FilePanel groupJid={groupJid} defaultPath={filePanelDefaultPath} />
+              <FilePanel groupJid={groupJid} agentId={filePanelAgentId} defaultPath={filePanelInitialPath} />
+            ) : sidebarTab === 'agent-config' ? (
+              <FilePanel groupJid={groupJid} agentConfigOnly />
             ) : sidebarTab === 'env' ? (
               <ContainerEnvPanel groupJid={groupJid} />
             ) : sidebarTab === 'skills' ? (
@@ -945,7 +955,24 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           <div className="flex-1 overflow-hidden h-[calc(80dvh-56px)]">
             <FilePanel
               groupJid={groupJid}
-              defaultPath={filePanelDefaultPath}
+              agentId={filePanelAgentId}
+              defaultPath={filePanelInitialPath}
+              onClose={() => setMobilePanel(null)}
+            />
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      {/* Mobile: agent config sheet */}
+      <Sheet open={mobilePanel === 'agent-config'} onOpenChange={(v) => !v && setMobilePanel(null)}>
+        <SheetContent side="bottom" className="h-[80dvh] p-0">
+          <SheetHeader className="px-4 pt-4 pb-2">
+            <SheetTitle>Agent 配置</SheetTitle>
+          </SheetHeader>
+          <div className="flex-1 overflow-hidden h-[calc(80dvh-56px)]">
+            <FilePanel
+              groupJid={groupJid}
+              agentConfigOnly
               onClose={() => setMobilePanel(null)}
             />
           </div>
@@ -1038,6 +1065,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors cursor-pointer text-foreground text-sm"
             >
               工作区文件
+            </button>
+            <button
+              onClick={openMobileAgentConfig}
+              className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors cursor-pointer text-foreground text-sm"
+            >
+              Agent 配置
             </button>
             <button
               onClick={openMobileEnv}

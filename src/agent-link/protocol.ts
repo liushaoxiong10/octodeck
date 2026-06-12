@@ -271,6 +271,7 @@ export const ToolRequestFrame = z.object({
   toolName: z.string().max(64),
   input: z.unknown(),
   cwd: z.string(),
+  workspaceRepo: WorkspaceRepoSpecSchema.optional(),
   timeoutMs: z.number().int().positive(),
   maxOutputBytes: z.number().int().positive(),
 });
@@ -411,6 +412,10 @@ export const AgentRunEventFrame = z.object({
     'permission_request',
     'session',
     'usage',
+    // device daemon 会把 stderr / 无法结构化识别的 CLI/ACP 通知归一化为
+    // log 事件；服务端收到后只写入 run log，不会作为 UI stream event 下发。
+    // 这里必须接受该事件，否则 zod 校验失败会关闭 AgentLink ws，导致后续
+    // text_delta / agent.run.result 丢失，前端表现为 device CLI 无响应。
     'log',
     // 'final_result' 由 daemon 在解析 stream-json 中的 {"type":"result"} 时
     // 发出（agent_runtime.go normalizeAgentJSONLineFrames 第 3 段）。
@@ -673,6 +678,13 @@ export function encodeFrame(frame: OutboundFrame): string {
   return JSON.stringify(frame);
 }
 
+// AgentLink frames can legitimately carry sizeable payloads: memory.sync may
+// include ~1MB markdown files (JSON escaping can push the wire frame over 1MiB),
+// tool/agent events can include structured payloads, and agent.run.result may
+// carry up to the configured 100MiB max output plus JSON escaping/backpressure
+// headroom. Keep this aligned with
+// client/octodeck-daemon/ws.go.
+export const AGENT_LINK_MAX_FRAME_BYTES = 256 * 1024 * 1024;
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 export const HEARTBEAT_TIMEOUT_MS = 90_000; // 3 missed pings
 export const HELLO_TIMEOUT_MS = 5_000;

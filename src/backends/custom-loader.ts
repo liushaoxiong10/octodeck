@@ -261,6 +261,7 @@ export function upsertCustomBackend(
     binary: def.binary,
     runtime: def.runtime ?? null,
     model: def.model ?? null,
+    permissionMode: def.permissionMode ?? null,
     providerId: def.providerId ?? null,
     workdirMode: def.workdirMode ?? null,
     workdir: def.workdir ?? null,

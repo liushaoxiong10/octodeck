@@ -78,6 +78,10 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
     setResetExecutionNode,
     resetAgentBackendId,
     setResetAgentBackendId,
+    resetAgentAccessScope,
+    setResetAgentAccessScope,
+    resetPermissionMode,
+    setResetPermissionMode,
   } = useClearWorkspace();
 
   const {
@@ -528,6 +532,24 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
                   <p className="text-xs text-muted-foreground mt-1">工作区会绑定到这个已定义 Agent，后续会使用它的模型、参数和会话能力。</p>
                 </div>
               ) : null}
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground mb-1">审批模式</label>
+                  <select value={resetPermissionMode} onChange={(e) => setResetPermissionMode(e.target.value as typeof resetPermissionMode)} disabled={clearLoading} className="h-9 w-full px-3 text-sm border border-border rounded-md bg-background">
+                    <option value="bypassPermissions">免审批</option>
+                    <option value="default">默认审批</option>
+                    <option value="acceptEdits">自动接受编辑</option>
+                    <option value="plan">Plan</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground mb-1">访问范围</label>
+                  <select value={resetAgentAccessScope} onChange={(e) => setResetAgentAccessScope(e.target.value as typeof resetAgentAccessScope)} disabled={clearLoading} className="h-9 w-full px-3 text-sm border border-border rounded-md bg-background">
+                    <option value="all">All</option>
+                    <option value="workspace">Workspace</option>
+                  </select>
+                </div>
+              </div>
               {resetRuntimeProfile !== 'server-agent' ? (
                 <div className="flex items-start gap-2 p-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg">
                   <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />

@@ -56,6 +56,15 @@ func discoverProviderModels(ctx context.Context, providerID string) ([]ModelInfo
 		}
 	}
 	if foundClient == nil {
+		for _, client := range clients {
+			if client.Provider == providerID {
+				c := client
+				foundClient = &c
+				break
+			}
+		}
+	}
+	if foundClient == nil {
 		return nil, fmt.Errorf("provider not found on device: %s", providerID)
 	}
 
@@ -83,7 +92,29 @@ func discoverProviderModels(ctx context.Context, providerID string) ([]ModelInfo
 	if models, err := tryCliModelsJSON(ctx, foundClient.Binary); err == nil && len(models) > 0 {
 		return models, nil
 	}
+	if providerID == "claude-code" || providerID == "claude-acp" {
+		if models := readClaudeSettingsModels(); len(models) > 0 {
+			return models, nil
+		}
+	}
 
+	if models := defaultProviderModels(providerID); len(models) > 0 {
+		return models, nil
+	}
+
+	switch providerID {
+	case "traecli", "traecli-acp":
+		// Older/enterprise traecli builds may require login or a network call for
+		// `models --json`; do not fail the chat page just because discovery failed.
+		// The current configured model is still included by the web selector, and
+		// users can type a custom model manually.
+		return []ModelInfo{{ID: "default", DisplayName: "Default (CLI configured)"}}, nil
+	default:
+		return []ModelInfo{{ID: "default", DisplayName: "Default"}}, nil
+	}
+}
+
+func defaultProviderModels(providerID string) []ModelInfo {
 	switch providerID {
 	case "claude-code", "claude-acp":
 		return []ModelInfo{
@@ -91,25 +122,14 @@ func discoverProviderModels(ctx context.Context, providerID string) ([]ModelInfo
 			{ID: "claude-opus-4-1", DisplayName: "Claude Opus 4.1"},
 			{ID: "sonnet", DisplayName: "Sonnet (CLI alias)"},
 			{ID: "opus", DisplayName: "Opus (CLI alias)"},
-		}, nil
-	case "codex", "codex-acp":
+		}
+	case "codex", "codex-acp", "traex", "traex-acp":
 		return []ModelInfo{
 			{ID: "gpt-5", DisplayName: "GPT-5"},
 			{ID: "gpt-5-codex", DisplayName: "GPT-5 Codex"},
-		}, nil
-	case "traecli", "traecli-acp":
-		// traecli 本身就支持 models --json；如果 tryCliModelsJSON 已经返回过这里
-		// 不会到达。保留这条以便在 tryCliModelsJSON 因超时之类失败时不至于
-		// 退回到 default 占位。
-		return discoverTraeCliModels(ctx, foundClient.Binary)
-	case "traex", "traex-acp":
-		// traex 与 codex 调用约定一致，沿用 codex 的 GPT-5 系列默认模型列表。
-		return []ModelInfo{
-			{ID: "gpt-5", DisplayName: "GPT-5"},
-			{ID: "gpt-5-codex", DisplayName: "GPT-5 Codex"},
-		}, nil
+		}
 	default:
-		return []ModelInfo{{ID: "default", DisplayName: "Default"}}, nil
+		return nil
 	}
 }
 
@@ -478,4 +498,59 @@ func parseTraeCliModelsJSON(out []byte) ([]ModelInfo, error) {
 		models = append(models, ModelInfo{ID: id, DisplayName: displayName})
 	}
 	return models, nil
+}
+
+
+// readClaudeSettingsModels parses ~/.claude/settings.json and surfaces the
+// ANTHROPIC_*_MODEL env entries as model picker options. The official claude
+// CLI does not ship a `models --json` command; users instead pin the active
+// models through these env vars (e.g. on internal proxies that route between
+// Kimi/MiniMax/GLM/etc.). Without this, the picker only sees the daemon's
+// hardcoded default list and the user's real selection is hidden.
+//
+// Recognized keys (Claude Code convention):
+//   - ANTHROPIC_MODEL                 -> default
+//   - ANTHROPIC_DEFAULT_SONNET_MODEL  -> sonnet alias target
+//   - ANTHROPIC_DEFAULT_OPUS_MODEL    -> opus alias target
+//   - ANTHROPIC_DEFAULT_HAIKU_MODEL   -> haiku alias target
+func readClaudeSettingsModels() []ModelInfo {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		return nil
+	}
+	var wrapper struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return nil
+	}
+	if len(wrapper.Env) == 0 {
+		return nil
+	}
+	ordered := []struct {
+		key, label string
+	}{
+		{"ANTHROPIC_MODEL", "Default"},
+		{"ANTHROPIC_DEFAULT_OPUS_MODEL", "Opus"},
+		{"ANTHROPIC_DEFAULT_SONNET_MODEL", "Sonnet"},
+		{"ANTHROPIC_DEFAULT_HAIKU_MODEL", "Haiku"},
+	}
+	seen := map[string]struct{}{}
+	out := make([]ModelInfo, 0, len(ordered))
+	for _, entry := range ordered {
+		id := strings.TrimSpace(wrapper.Env[entry.key])
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, ModelInfo{ID: id, DisplayName: fmt.Sprintf("%s (%s)", id, entry.label)})
+	}
+	return out
 }

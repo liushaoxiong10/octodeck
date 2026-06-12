@@ -65,6 +65,14 @@ export function GroupDetail({ group }: GroupDetailProps) {
   const [savingBackend, setSavingBackend] = useState(false);
   const canEditBackend = group.editable === true;
 
+  const [currentAccessScope, setCurrentAccessScope] = useState<'all' | 'workspace'>(
+    group.agent_access_scope ?? 'all',
+  );
+  const [currentPermissionMode, setCurrentPermissionMode] = useState<'default' | 'acceptEdits' | 'bypassPermissions' | 'plan'>(
+    group.permission_mode ?? 'bypassPermissions',
+  );
+  const [savingPermissions, setSavingPermissions] = useState(false);
+
   // Execution Device selection (<device_id>)
   const { links: agentLinks, load: loadAgentLinks } = useAgentLinksStore();
   const [currentExecNode, setCurrentExecNode] = useState<string>(
@@ -102,6 +110,43 @@ export function GroupDetail({ group }: GroupDetailProps) {
   useEffect(() => {
     setCurrentBackend(group.backend ?? '');
   }, [group.backend, group.jid]);
+
+  useEffect(() => {
+    setCurrentAccessScope(group.agent_access_scope ?? 'all');
+    setCurrentPermissionMode(group.permission_mode ?? 'bypassPermissions');
+  }, [group.agent_access_scope, group.permission_mode, group.jid]);
+
+  const handleAccessScopeChange = async (next: 'all' | 'workspace') => {
+    if (next === currentAccessScope) return;
+    setSavingPermissions(true);
+    try {
+      await api.patch(`/api/groups/${encodeURIComponent(group.jid)}`, {
+        agent_access_scope: next,
+      });
+      setCurrentAccessScope(next);
+      toast.success('Agent 访问范围已更新，下一次执行生效');
+    } catch (err) {
+      toast.error(getErrorMessage(err, '更新 Agent 访问范围失败'));
+    } finally {
+      setSavingPermissions(false);
+    }
+  };
+
+  const handlePermissionModeChange = async (next: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan') => {
+    if (next === currentPermissionMode) return;
+    setSavingPermissions(true);
+    try {
+      await api.patch(`/api/groups/${encodeURIComponent(group.jid)}`, {
+        permission_mode: next,
+      });
+      setCurrentPermissionMode(next);
+      toast.success('Agent 审批模式已更新，下一次执行生效');
+    } catch (err) {
+      toast.error(getErrorMessage(err, '更新 Agent 审批模式失败'));
+    } finally {
+      setSavingPermissions(false);
+    }
+  };
 
   useEffect(() => {
     if (!canEditBackend) return;
@@ -259,6 +304,46 @@ export function GroupDetail({ group }: GroupDetailProps) {
             {currentBackend
               ? `当前：${currentBackend}`
               : `跟随系统默认（${defaultBackend}）`}
+          </div>
+        </div>
+      )}
+
+      {/* Agent permissions */}
+      {canEditBackend && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <div className="text-xs text-muted-foreground mb-1">Agent 访问范围</div>
+            <select
+              value={currentAccessScope}
+              disabled={savingPermissions}
+              onChange={(e) => handleAccessScopeChange(e.target.value as 'all' | 'workspace')}
+              className="h-9 px-3 text-sm border border-border rounded-md bg-transparent w-full max-w-xs"
+            >
+              <option value="all">All · 可访问完整运行环境</option>
+              <option value="workspace">Workspace · 限当前工作区</option>
+            </select>
+            <div className="text-xs text-muted-foreground mt-1">
+              {currentAccessScope === 'workspace'
+                ? '限制到当前 workspace 目录，忽略自定义 CWD/额外挂载。'
+                : '保留现有全量运行环境访问能力。'}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs text-muted-foreground mb-1">Agent 审批模式</div>
+            <select
+              value={currentPermissionMode}
+              disabled={savingPermissions}
+              onChange={(e) => handlePermissionModeChange(e.target.value as 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan')}
+              className="h-9 px-3 text-sm border border-border rounded-md bg-transparent w-full max-w-xs"
+            >
+              <option value="bypassPermissions">免审批（自动允许工具）</option>
+              <option value="default">默认（按 Agent 默认审批）</option>
+              <option value="acceptEdits">自动接受编辑</option>
+              <option value="plan">Plan（计划/只读优先）</option>
+            </select>
+            <div className="text-xs text-muted-foreground mt-1">
+              当前：{currentPermissionMode}
+            </div>
           </div>
         </div>
       )}

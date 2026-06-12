@@ -54,6 +54,5 @@ tests/
 # Misc
 nohup.out
 *.tsbuildinfo
-package-lock.json
 bun.lock
 bun.lockb

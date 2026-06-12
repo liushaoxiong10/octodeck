@@ -20,6 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/beyond5959/acp-adapter/pkg/claudeacp"
+	"github.com/beyond5959/acp-adapter/pkg/codexacp"
 	acpsdk "github.com/coder/acp-go-sdk"
 )
 
@@ -51,6 +53,40 @@ type runtimeRPCMessage struct {
 type runtimeRPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+}
+
+// runtimeRPCErrorString formats a JSON-RPC error into a single readable string
+// that includes both the message and any details from the data field.
+// This ensures transport-disconnect messages buried in data.error are
+// visible to error-detection functions like isACPTransportDisconnect.
+func runtimeRPCErrorString(e *runtimeRPCError) string {
+	if e == nil {
+		return ""
+	}
+	msg := e.Message
+	if e.Data != nil {
+		if dataMap, ok := e.Data.(map[string]any); ok {
+			if inner, ok := dataMap["error"].(string); ok && inner != "" {
+				if msg != "" {
+					msg = msg + ": " + inner
+				} else {
+					msg = inner
+				}
+			}
+		}
+		// Fallback: append JSON of data if it carries useful info and message is generic
+		if msg == "Internal error" || msg == "" {
+			if dataJSON, err := json.Marshal(e.Data); err == nil && len(dataJSON) > 2 {
+				if msg != "" {
+					msg = msg + " " + string(dataJSON)
+				} else {
+					msg = string(dataJSON)
+				}
+			}
+		}
+	}
+	return msg
 }
 
 func newAgentRuntimeSupervisor(cfg *Config, pool *runnerPool, send func(any) error) *agentRuntimeSupervisor {
@@ -321,7 +357,7 @@ func (s *agentRuntimeSupervisor) readLoop(r io.Reader) {
 			s.mu.Unlock()
 			if ch != nil {
 				if msg.Error != nil {
-					ch <- errors.New(msg.Error.Message)
+					ch <- errors.New(runtimeRPCErrorString(msg.Error))
 				} else {
 					ch <- nil
 				}
@@ -1173,6 +1209,24 @@ type customHTTPAdapter struct {
 	entry AgentRegistryEntry
 }
 
+func promptWithSystemContext(req *AgentRunRequestFrame, includeSystemContext bool) string {
+	if req == nil || !includeSystemContext || strings.TrimSpace(req.Policy.SystemPrompt) == "" {
+		if req == nil {
+			return ""
+		}
+		return req.Input.Prompt
+	}
+	return strings.Join([]string{
+		"<octodeck-system-context>",
+		req.Policy.SystemPrompt,
+		"</octodeck-system-context>",
+		"",
+		"<user-prompt>",
+		req.Input.Prompt,
+		"</user-prompt>",
+	}, "\n")
+}
+
 func (a *claudeCodeAdapter) BuildRunCommand(cfg *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
 	argv := []string{"-p", req.Input.Prompt, "--output-format", "stream-json", "--verbose"}
 	if req.Input.SessionID != "" {
@@ -1184,7 +1238,7 @@ func (a *claudeCodeAdapter) BuildRunCommand(cfg *Config, req *AgentRunRequestFra
 	if req.Policy.Model != "" {
 		argv = append(argv, "--model", req.Policy.Model)
 	}
-	if req.Policy.SystemPrompt != "" {
+	if req.Input.SessionID == "" && req.Policy.SystemPrompt != "" {
 		argv = append(argv, "--append-system-prompt", req.Policy.SystemPrompt)
 	}
 	if len(req.Policy.AllowedTools) > 0 {
@@ -1201,16 +1255,30 @@ func (a *claudeCodeAdapter) BuildRunCommand(cfg *Config, req *AgentRunRequestFra
 	return argv, true, nil
 }
 
+func normalizeCodexPermissionMode(mode string) string {
+	switch strings.TrimSpace(mode) {
+	case "bypassPermissions", "dangerously-skip-permissions", "no-approval", "auto-approve", "full-access":
+		return "danger-full-access"
+	default:
+		return mode
+	}
+}
+
 func (a *codexAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
+	prompt := promptWithSystemContext(req, req.Input.SessionID == "")
 	if req.Input.SessionID != "" {
 		argv := []string{"exec", "resume", "--json", "--skip-git-repo-check"}
 		if req.Policy.Model != "" {
 			argv = append(argv, "-m", req.Policy.Model)
 		}
 		if req.Policy.PermissionMode != "" {
-			argv = append(argv, "--sandbox", req.Policy.PermissionMode)
+			mode := normalizeCodexPermissionMode(req.Policy.PermissionMode)
+			argv = append(argv, "--sandbox", mode)
+			if mode == "danger-full-access" {
+				argv = append(argv, "--ask-for-approval", "never")
+			}
 		}
-		argv = append(argv, req.Input.SessionID, req.Input.Prompt)
+		argv = append(argv, req.Input.SessionID, prompt)
 		return argv, true, nil
 	}
 	argv := []string{"exec", "--json", "--skip-git-repo-check"}
@@ -1218,9 +1286,13 @@ func (a *codexAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]
 		argv = append(argv, "-m", req.Policy.Model)
 	}
 	if req.Policy.PermissionMode != "" {
-		argv = append(argv, "--sandbox", req.Policy.PermissionMode)
+		mode := normalizeCodexPermissionMode(req.Policy.PermissionMode)
+		argv = append(argv, "--sandbox", mode)
+		if mode == "danger-full-access" {
+			argv = append(argv, "--ask-for-approval", "never")
+		}
 	}
-	argv = append(argv, req.Input.Prompt)
+	argv = append(argv, prompt)
 	return argv, true, nil
 }
 
@@ -1231,7 +1303,10 @@ func (a *traecliAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) (
 	// evt["message"]["content"] and be extracted a second time by section 6
 	// of normalizeAgentJSONLineFrames, causing duplicated output. The daemon
 	// internally assembles finalText from the streamed deltas anyway.
-	argv := []string{"-p", req.Input.Prompt, "--output-format=stream-json", "-y"}
+	argv := []string{"-p", promptWithSystemContext(req, req.Input.SessionID == ""), "--output-format=stream-json"}
+	if shouldAutoApprovePermission(req.Policy) {
+		argv = append(argv, "-y")
+	}
 	if req.Input.SessionID != "" {
 		argv = append(argv, "--resume="+req.Input.SessionID)
 	}
@@ -1246,7 +1321,75 @@ func (a *acpAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]st
 }
 
 func (a *acpAdapter) RunDirect(ctx context.Context, cfg *Config, req *AgentRunRequestFrame, emit func(AgentRunEventFrame)) (AgentRunResultFrame, error) {
-	return a.runACPAgent(ctx, cfg, req, emit)
+	result, err := a.runACPAgent(ctx, cfg, req, emit)
+	if err == nil || !isACPTransportDisconnect(err) || ctx.Err() != nil {
+		return result, err
+	}
+
+	processKey := acpSessionProcessKey(req)
+	logACPRetry(emit, req, fmt.Sprintf("ACP transport disconnected before response (%s); restarting agent process and retrying with the persisted session\n", err.Error()))
+	stopLiveACPProcess(processKey)
+	result, err = a.runACPAgent(ctx, cfg, req, emit)
+	if err == nil || !isACPTransportDisconnect(err) || ctx.Err() != nil {
+		return result, err
+	}
+
+	// A second transport disconnect usually means the native ACP session itself
+	// is stale/corrupt (common after macOS sleep or a provider CLI crash). Drop the
+	// daemon-side mapping and retry once with a fresh native ACP session while
+	// keeping the OctoDeck conversation/workspace identity unchanged via metadata.
+	deleteACPSessionRecordByKey(cfg, processKey)
+	stopLiveACPProcess(processKey)
+	freshReq := *req
+	freshReq.Input = req.Input
+	freshReq.Input.SessionID = ""
+	logACPRetry(emit, req, fmt.Sprintf("ACP transport disconnected again (%s); dropping persisted ACP session and retrying with a fresh session\n", err.Error()))
+	return a.runACPAgent(ctx, cfg, &freshReq, emit)
+}
+
+func logACPRetry(emit func(AgentRunEventFrame), req *AgentRunRequestFrame, text string) {
+	if emit == nil || req == nil {
+		return
+	}
+	emit(AgentRunEventFrame{
+		Type:      tAgentRunEvent,
+		RunID:     req.RunID,
+		AgentID:   req.AgentID,
+		EventType: "log",
+		Text:      text,
+		At:        formatTime(time.Now()),
+	})
+}
+
+func isACPTransportDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	// Direct transport-error phrases
+	if strings.Contains(msg, "peer disconnected before response") ||
+		strings.Contains(msg, "peer disconnected") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "use of closed") ||
+		strings.Contains(msg, "unexpected eof") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "transport error") {
+		return true
+	}
+	// JSON-RPC internal error (-32603) that wraps a transport disconnect.
+	// Some SDKs surface the real reason inside data.error of an Internal error.
+	if strings.Contains(msg, "-32603") || strings.Contains(msg, `"internal error"`) {
+		if strings.Contains(msg, "disconnect") ||
+			strings.Contains(msg, "transport") ||
+			strings.Contains(msg, "broken pipe") ||
+			strings.Contains(msg, "eof") {
+			return true
+		}
+	}
+	return false
 }
 
 func acpConversationID(req *AgentRunRequestFrame) string {
@@ -1274,7 +1417,11 @@ func acpConversationID(req *AgentRunRequestFrame) string {
 
 func acpSessionProcessKey(req *AgentRunRequestFrame) string {
 	conversationID := acpConversationID(req)
-	digest := sha256.Sum256([]byte(req.AgentID + "\x00" + req.Cwd + "\x00" + conversationID))
+	// ACP agents can pin the model and system instructions at native session
+	// creation time. Include both in the warm-process/session key so a platform
+	// model change or cloud-global-memory/system-prompt change cannot silently
+	// reuse an ACP process/session that was created with stale instructions.
+	digest := sha256.Sum256([]byte(req.AgentID + "\x00" + req.Cwd + "\x00" + conversationID + "\x00" + req.Policy.Model + "\x00" + req.Policy.SystemPrompt))
 	return fmt.Sprintf("%s:%x", safePathSegment(req.AgentID), digest[:12])
 }
 
@@ -1341,6 +1488,27 @@ func writeACPSessionRecord(cfg *Config, rec acpSessionMapRecord) error {
 	return os.WriteFile(path, raw, 0o600)
 }
 
+func deleteACPSessionRecordByKey(cfg *Config, key string) bool {
+	if key == "" {
+		return false
+	}
+	acpSessionMapMu.Lock()
+	defer acpSessionMapMu.Unlock()
+	data := readACPSessionMapLocked(cfg)
+	if _, ok := data.Records[key]; !ok {
+		return false
+	}
+	delete(data.Records, key)
+	path := acpSessionMapPath(cfg)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return true
+	}
+	if raw, err := json.MarshalIndent(data, "", "  "); err == nil {
+		_ = os.WriteFile(path, raw, 0o600)
+	}
+	return true
+}
+
 func deleteACPSessionRecords(cfg *Config, agentID, sessionID string) int {
 	if agentID == "" || sessionID == "" {
 		return 0
@@ -1380,7 +1548,7 @@ func stopLiveACPProcess(key string) {
 }
 
 func (p *acpSessionProcess) alive() bool {
-	if p == nil || p.cmd == nil || p.client == nil {
+	if p == nil || p.client == nil {
 		return false
 	}
 	select {
@@ -1413,6 +1581,9 @@ func (p *acpSessionProcess) stop() {
 	if p.stdin != nil {
 		_ = p.stdin.Close()
 	}
+	if p.cancel != nil {
+		p.cancel()
+	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
 	}
@@ -1436,6 +1607,9 @@ func (a *acpAdapter) getOrStartACPProcess(ctx context.Context, cfg *Config, req 
 		delete(acpProcesses, key)
 	}
 	acpProcessesMu.Unlock()
+	if a.usesEmbeddedACPAdapter() {
+		return a.startEmbeddedACPProcess(ctx, cfg, req, initSessionID, emit)
+	}
 
 	args := append([]string(nil), a.client.Args...)
 	env := req.Env
@@ -1445,6 +1619,7 @@ func (a *acpAdapter) getOrStartACPProcess(ctx context.Context, cfg *Config, req 
 		}
 		env = mergeStringMaps(a.entry.Env, req.Env)
 	}
+	args = normalizeACPServerArgs(a.client.Binary, args, req.Policy)
 	cmd := exec.Command(a.client.Binary, args...)
 	cmd.Dir = req.Cwd
 	cmd.Env = buildAgentEnv(cfg, req.AgentID, env, req.Context)
@@ -1498,6 +1673,247 @@ func (a *acpAdapter) getOrStartACPProcess(ctx context.Context, cfg *Config, req 
 	return proc, &initResult, nil
 }
 
+func (a *acpAdapter) usesEmbeddedACPAdapter() bool {
+	if a == nil {
+		return false
+	}
+	switch a.client.ID {
+	case "claude-acp", "codex-acp":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *acpAdapter) supportsNativeSystemPrompt() bool {
+	return a != nil && a.usesEmbeddedACPAdapter()
+}
+
+func (a *acpAdapter) acpPromptText(req *AgentRunRequestFrame, createdNewSession bool) string {
+	return promptWithSystemContext(req, createdNewSession && !a.supportsNativeSystemPrompt())
+}
+
+func (a *acpAdapter) startEmbeddedACPProcess(ctx context.Context, cfg *Config, req *AgentRunRequestFrame, initSessionID string, emit func(AgentRunEventFrame)) (*acpSessionProcess, *acpsdk.InitializeResponse, error) {
+	key := acpSessionProcessKey(req)
+	serverStdin, clientStdin := io.Pipe()
+	clientStdout, serverStdout := io.Pipe()
+	stderrReader, stderrWriter := io.Pipe()
+	bridge := &acpSDKClientBridge{req: req}
+	client := acpsdk.NewClientSideConnection(bridge, clientStdin, clientStdout)
+	runCtx, cancel := context.WithCancel(context.Background())
+	proc := &acpSessionProcess{key: key, agentID: req.AgentID, cwd: req.Cwd, stdin: clientStdin, client: client, done: make(chan error, 1), sessionID: initSessionID, cancel: cancel}
+	bridge.dispatch = proc.dispatch
+	var logSent atomic.Int64
+	go pumpAgentLog(stderrReader, req, &logSent, emit)
+	go func() {
+		defer func() {
+			_ = serverStdin.Close()
+			_ = serverStdout.Close()
+			_ = stderrWriter.Close()
+			acpRemoveProcess(key, proc)
+		}()
+		var err error
+		switch a.client.ID {
+		case "claude-acp":
+			err = claudeacp.RunStdio(runCtx, a.embeddedClaudeRuntimeConfig(req), serverStdin, serverStdout, stderrWriter)
+		case "codex-acp":
+			err = codexacp.RunStdio(runCtx, a.embeddedCodexRuntimeConfig(req), serverStdin, serverStdout, stderrWriter)
+		default:
+			err = fmt.Errorf("unsupported embedded ACP adapter: %s", a.client.ID)
+		}
+		proc.done <- err
+		close(proc.done)
+	}()
+
+	initResult, err := client.Initialize(ctx, acpsdk.InitializeRequest{
+		ProtocolVersion: acpsdk.ProtocolVersionNumber,
+		ClientInfo:      &acpsdk.Implementation{Name: "octodeck-daemon", Version: daemonVersion},
+		ClientCapabilities: acpsdk.ClientCapabilities{
+			Fs: acpsdk.FileSystemCapabilities{ReadTextFile: false, WriteTextFile: false},
+		},
+	})
+	if err != nil {
+		proc.stop()
+		return nil, nil, err
+	}
+	acpProcessesMu.Lock()
+	if existing := acpProcesses[key]; existing != nil && existing.alive() {
+		acpProcessesMu.Unlock()
+		proc.stop()
+		return existing, nil, nil
+	}
+	acpProcesses[key] = proc
+	acpProcessesMu.Unlock()
+	return proc, &initResult, nil
+}
+
+func (a *acpAdapter) embeddedClaudeRuntimeConfig(req *AgentRunRequestFrame) claudeacp.RuntimeConfig {
+	config := claudeacp.DefaultRuntimeConfig()
+	config.ClaudeBin = a.client.Binary
+	if req != nil {
+		profile := claudeacp.ProfileConfig{}
+		if strings.TrimSpace(req.Policy.Model) != "" {
+			model := strings.TrimSpace(req.Policy.Model)
+			config.DefaultModel = model
+			config.AvailableModels = append(config.AvailableModels, config.DefaultModel)
+			profile.Model = model
+		}
+		profile.SystemInstructions = strings.TrimSpace(req.Policy.SystemPrompt)
+		if profile.Model != "" || profile.SystemInstructions != "" {
+			config.Profiles = map[string]claudeacp.ProfileConfig{"octodeck": profile}
+			config.DefaultProfile = "octodeck"
+		}
+		config.SkipPerms = shouldAutoApprovePermission(req.Policy)
+		if len(req.Policy.AllowedTools) > 0 {
+			config.AllowedTools = strings.Join(req.Policy.AllowedTools, ",")
+		}
+	}
+	config.LogLevel = firstNonEmpty(os.Getenv("ACP_ADAPTER_LOG_LEVEL"), os.Getenv("LOG_LEVEL"), "info")
+	config.TraceJSON = parseBoolEnv(os.Getenv("ACP_ADAPTER_TRACE_JSON"), false)
+	config.TraceJSONFile = firstNonEmpty(os.Getenv("ACP_ADAPTER_TRACE_JSON_FILE"), os.Getenv("TRACE_JSON_FILE"), "trace-jsonl.log")
+	config.PatchApplyMode = firstNonEmpty(os.Getenv("ACP_ADAPTER_PATCH_APPLY_MODE"), os.Getenv("PATCH_APPLY_MODE"), "appserver")
+	return config
+}
+
+func (a *acpAdapter) embeddedCodexRuntimeConfig(req *AgentRunRequestFrame) codexacp.RuntimeConfig {
+	config := codexacp.DefaultRuntimeConfig()
+	config.AppServerCommand = a.client.Binary
+	config.AppServerArgs = []string{"app-server", "-c", "model_reasoning_summary=\"detailed\""}
+	if raw := strings.TrimSpace(os.Getenv("CODEX_APP_SERVER_ARGS")); raw != "" {
+		config.AppServerArgs = strings.Fields(raw)
+	}
+	config.LogLevel = firstNonEmpty(os.Getenv("ACP_ADAPTER_LOG_LEVEL"), os.Getenv("LOG_LEVEL"), "info")
+	config.TraceJSON = parseBoolEnv(os.Getenv("ACP_ADAPTER_TRACE_JSON"), false)
+	config.TraceJSONFile = firstNonEmpty(os.Getenv("ACP_ADAPTER_TRACE_JSON_FILE"), os.Getenv("TRACE_JSON_FILE"), "trace-jsonl.log")
+	config.PatchApplyMode = firstNonEmpty(os.Getenv("ACP_ADAPTER_PATCH_APPLY_MODE"), os.Getenv("PATCH_APPLY_MODE"), "appserver")
+	config.RetryTurnOnCrash = parseBoolEnv(os.Getenv("RETRY_TURN_ON_CRASH"), true)
+	config.InitialAuthMode = detectCodexAuthMode()
+	if req != nil && (strings.TrimSpace(req.Policy.Model) != "" || strings.TrimSpace(req.Policy.SystemPrompt) != "" || strings.TrimSpace(req.Policy.PermissionMode) != "") {
+		config.Profiles = map[string]codexacp.ProfileConfig{
+			"octodeck": {Model: strings.TrimSpace(req.Policy.Model), Sandbox: normalizeCodexPermissionMode(req.Policy.PermissionMode), SystemInstructions: strings.TrimSpace(req.Policy.SystemPrompt)},
+		}
+		config.DefaultProfile = "octodeck"
+	}
+	return config
+}
+
+func detectCodexAuthMode() string {
+	if strings.TrimSpace(os.Getenv("CODEX_API_KEY")) != "" {
+		return "codex_api_key"
+	}
+	if strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) != "" {
+		return "openai_api_key"
+	}
+	if parseBoolEnv(os.Getenv("CHATGPT_SUBSCRIPTION_ACTIVE"), true) {
+		return "chatgpt_subscription"
+	}
+	return ""
+}
+
+func parseBoolEnv(raw string, fallback bool) bool {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	case "":
+		return fallback
+	default:
+		return fallback
+	}
+}
+
+func normalizeACPServerArgs(binary string, args []string, policy AgentRunPolicy) []string {
+	normalized := append([]string(nil), args...)
+	name := filepath.Base(binary)
+	if len(normalized) == 1 && normalized[0] == "acp" && requiresACPServeSubcommand(name) {
+		normalized = append(normalized, "serve")
+	}
+	normalized = injectACPModelArgs(name, normalized, policy)
+	if !shouldAutoApprovePermission(policy) {
+		return normalized
+	}
+	return injectACPBypassArgs(name, normalized)
+}
+
+// injectACPModelArgs forwards the platform-selected model to the trae CLI ACP
+// server. trae's ACP server does not honor the model carried via
+// session/new meta, so without this flag the agent silently uses its own
+// default model instead of the one the user picked. Mirrors the stdio path's
+// "-c model.name=..." override.
+func injectACPModelArgs(binaryName string, args []string, policy AgentRunPolicy) []string {
+	model := strings.TrimSpace(policy.Model)
+	if model == "" {
+		return args
+	}
+	switch binaryName {
+	case "coco", "traecli", "traex":
+		// traex/coco/traecli all override config via `-c key=value`; the model
+		// key is `model.name` for coco and `model` for traex, so we keep them
+		// separate below.
+		key := "model.name"
+		if binaryName == "traex" {
+			key = "model"
+		}
+		if acpHasConfigOverride(args, key) {
+			return args
+		}
+		return append([]string{"-c", key + "=" + model}, args...)
+	}
+	return args
+}
+
+// acpHasConfigOverride checks whether an existing -c/--config k=v already sets
+// the requested key, so we don't double-inject.
+func acpHasConfigOverride(args []string, key string) bool {
+	prefix := key + "="
+	for i, v := range args {
+		if v == "-c" || v == "--config" {
+			if i+1 < len(args) && strings.HasPrefix(args[i+1], prefix) {
+				return true
+			}
+		}
+		if strings.HasPrefix(v, "-c=") && strings.HasPrefix(v[3:], prefix) {
+			return true
+		}
+		if strings.HasPrefix(v, "--config=") && strings.HasPrefix(v[len("--config="):], prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// injectACPBypassArgs prepends the agent-specific bypass flag so the
+// platform-side bypassPermissions / full-access setting actually reaches the
+// device CLI. trae does NOT round-trip permission requests through ACP
+// session/request_permission, so the daemon-side acpSDKClientBridge
+// auto-allow path never fires for trae; the flag must be set at process
+// spawn time. Both flags are global and must precede the acp subcommand.
+func injectACPBypassArgs(binaryName string, args []string) []string {
+	switch binaryName {
+	case "coco", "traecli":
+		if containsString(args, "-y") || containsString(args, "--yolo") {
+			return args
+		}
+		return append([]string{"--yolo"}, args...)
+	case "traex":
+		if containsString(args, "--dangerously-bypass-approvals-and-sandbox") || containsString(args, "-y") {
+			return args
+		}
+		return append([]string{"--dangerously-bypass-approvals-and-sandbox"}, args...)
+	}
+	return args
+}
+
+func requiresACPServeSubcommand(binaryName string) bool {
+	switch binaryName {
+	case "coco", "traecli", "traex":
+		return true
+	default:
+		return false
+	}
+}
+
 func prepareAgentRuntimeMCPConfig(cfg *Config, req *AgentRunRequestFrame, cwd string) error {
 	switch req.AgentID {
 	case "claude-code":
@@ -1514,7 +1930,7 @@ func prepareAgentRuntimeMCPConfig(cfg *Config, req *AgentRunRequestFrame, cwd st
 }
 
 func (a *plainCLIAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
-	return []string{req.Input.Prompt}, false, nil
+	return []string{promptWithSystemContext(req, req.Input.SessionID == "")}, false, nil
 }
 
 func (a *customStdioAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
@@ -1522,8 +1938,9 @@ func (a *customStdioAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFram
 	if len(args) == 0 {
 		args = []string{"{{prompt}}"}
 	}
+	prompt := promptWithSystemContext(req, req.Input.SessionID == "")
 	replacer := strings.NewReplacer(
-		"{{prompt}}", req.Input.Prompt,
+		"{{prompt}}", prompt,
 		"{{sessionId}}", req.Input.SessionID,
 		"{{cwd}}", req.Cwd,
 		"{{model}}", req.Policy.Model,
@@ -1673,7 +2090,7 @@ func readA2AAgentResult(ctx context.Context, r io.Reader, req *AgentRunRequestFr
 		}
 		if msg.ID != nil {
 			if msg.Error != nil {
-				m := msg.Error.Message
+				m := runtimeRPCErrorString(msg.Error)
 				return AgentRunResultFrame{OK: false, Error: &m, ErrorInfo: &AgentRunError{Code: "a2a_error", Message: m}}, nil
 			}
 			var direct AgentRunResultFrame
@@ -1823,6 +2240,7 @@ type acpSessionProcess struct {
 	client    *acpsdk.ClientSideConnection
 	done      chan error
 	sessionID string
+	cancel    context.CancelFunc
 
 	runMu   sync.Mutex
 	mu      sync.Mutex
@@ -1922,6 +2340,11 @@ func (b *acpSDKClientBridge) SessionUpdate(_ context.Context, params acpsdk.Sess
 }
 
 func (b *acpSDKClientBridge) RequestPermission(_ context.Context, params acpsdk.RequestPermissionRequest) (acpsdk.RequestPermissionResponse, error) {
+	if b != nil && b.req != nil && shouldAutoApprovePermission(b.req.Policy) {
+		if optionID, ok := selectACPPermissionApprovalOption(params.Options); ok {
+			return acpsdk.RequestPermissionResponse{Outcome: acpsdk.NewRequestPermissionOutcomeSelected(optionID)}, nil
+		}
+	}
 	payload := acpSDKPayload(params)
 	requestID := permissionRequestID(payload)
 	if requestID == "" {
@@ -1930,6 +2353,33 @@ func (b *acpSDKClientBridge) RequestPermission(_ context.Context, params acpsdk.
 	}
 	b.emit(AgentRunEventFrame{Type: tAgentRunEvent, RunID: b.req.RunID, AgentID: b.req.AgentID, EventType: "permission_request", Payload: payload, At: formatTime(time.Now())})
 	return acpsdk.RequestPermissionResponse{Outcome: acpsdk.NewRequestPermissionOutcomeCancelled()}, nil
+}
+
+func shouldAutoApprovePermission(policy AgentRunPolicy) bool {
+	mode := strings.ToLower(strings.TrimSpace(policy.PermissionMode))
+	switch mode {
+	case "bypasspermissions", "full-access", "dangerously-skip-permissions", "no-approval", "auto-approve":
+		return true
+	default:
+		return false
+	}
+}
+
+func selectACPPermissionApprovalOption(options []acpsdk.PermissionOption) (acpsdk.PermissionOptionId, bool) {
+	for _, want := range []acpsdk.PermissionOptionKind{acpsdk.PermissionOptionKindAllowAlways, acpsdk.PermissionOptionKindAllowOnce} {
+		for _, option := range options {
+			if option.Kind == want && option.OptionId != "" {
+				return option.OptionId, true
+			}
+		}
+	}
+	for _, option := range options {
+		label := strings.ToLower(string(option.OptionId) + " " + option.Name + " " + string(option.Kind))
+		if option.OptionId != "" && (strings.Contains(label, "allow") || strings.Contains(label, "approve") || strings.Contains(label, "accept")) {
+			return option.OptionId, true
+		}
+	}
+	return "", false
 }
 
 func (b *acpSDKClientBridge) ReadTextFile(context.Context, acpsdk.ReadTextFileRequest) (acpsdk.ReadTextFileResponse, error) {
@@ -2120,6 +2570,55 @@ func (a *acpAdapter) runACPAgent(ctx context.Context, cfg *Config, req *AgentRun
 	defer proc.runMu.Unlock()
 	defer proc.setHandler(nil)
 
+	mcpServers := acpSDKMCPServers(cfg, req.Env)
+	desiredSessionID := ""
+	createdNewSession := false
+	if rec, ok := lookupACPSessionRecord(cfg, processKey); ok && rec.SessionID != "" {
+		// The daemon owns the chat-id -> native ACP session mapping. Prefer the
+		// persisted local mapping over any server-provided sessionId so a workspace-
+		// level/stale id cannot override the chat-specific session once established.
+		desiredSessionID = rec.SessionID
+	}
+	if desiredSessionID == "" {
+		desiredSessionID = req.Input.SessionID
+	}
+	if proc.sessionID != "" {
+		sessionID = proc.sessionID
+	} else if desiredSessionID != "" {
+		// The daemon starts a fresh ACP process for each OctoDeck turn. For
+		// continuity across processes we must load the persisted ACP session first;
+		// session/resume is only a fallback for agents that support reconnecting to
+		// an already-live session.
+		if initResult != nil && initResult.AgentCapabilities.LoadSession {
+			if _, err := proc.client.LoadSession(ctx, acpsdk.LoadSessionRequest{Cwd: req.Cwd, SessionId: acpsdk.SessionId(desiredSessionID), McpServers: mcpServers, Meta: map[string]any{"runId": req.RunID, "octodeckConversationId": conversationID, "policy": req.Policy}}); err == nil {
+				sessionID = desiredSessionID
+			}
+		}
+		if sessionID == "" && initResult != nil && initResult.AgentCapabilities.SessionCapabilities.Resume != nil {
+			if _, err := proc.client.ResumeSession(ctx, acpsdk.ResumeSessionRequest{Cwd: req.Cwd, SessionId: acpsdk.SessionId(desiredSessionID), McpServers: mcpServers, Meta: map[string]any{"runId": req.RunID, "octodeckConversationId": conversationID, "policy": req.Policy}}); err == nil {
+				sessionID = desiredSessionID
+			}
+		}
+	}
+	if sessionID == "" {
+		created, err := proc.client.NewSession(ctx, acpsdk.NewSessionRequest{Cwd: req.Cwd, McpServers: mcpServers, Meta: map[string]any{"octodeckSessionId": req.Input.SessionID, "octodeckConversationId": conversationID, "runId": req.RunID, "policy": req.Policy}})
+		if err != nil {
+			return AgentRunResultFrame{}, err
+		}
+		createdNewSession = true
+		sessionID = string(created.SessionId)
+	}
+	if sessionID == "" {
+		sessionID = req.RunID
+	}
+	proc.sessionID = sessionID
+	_ = writeACPSessionRecord(cfg, agentSessionMapRecord(processKey, conversationID, a.client, req, sessionID))
+
+	// Attach the stream handler only for the actual prompt turn. Some ACP servers
+	// (notably macOS traecli/coco) emit historical assistant messages while
+	// session/load rehydrates an existing conversation. Treating those replayed
+	// snapshots as fresh text_delta events makes OctoDeck resend every previous
+	// assistant reply on each new user turn.
 	proc.setHandler(func(frame *AgentRunEventFrame) {
 		if frame == nil {
 			return
@@ -2144,49 +2643,7 @@ func (a *acpAdapter) runACPAgent(ctx context.Context, cfg *Config, req *AgentRun
 		}
 		emit(*frame)
 	})
-
-	mcpServers := acpSDKMCPServers(cfg, req.Env)
-	desiredSessionID := ""
-	if rec, ok := lookupACPSessionRecord(cfg, processKey); ok && rec.SessionID != "" {
-		// The daemon owns the chat-id -> native ACP session mapping. Prefer the
-		// persisted local mapping over any server-provided sessionId so a workspace-
-		// level/stale id cannot override the chat-specific session once established.
-		desiredSessionID = rec.SessionID
-	}
-	if desiredSessionID == "" {
-		desiredSessionID = req.Input.SessionID
-	}
-	if proc.sessionID != "" {
-		sessionID = proc.sessionID
-	} else if desiredSessionID != "" {
-		// The daemon starts a fresh ACP process for each OctoDeck turn. For
-		// continuity across processes we must load the persisted ACP session first;
-		// session/resume is only a fallback for agents that support reconnecting to
-		// an already-live session.
-		if initResult != nil && initResult.AgentCapabilities.LoadSession {
-			if _, err := proc.client.LoadSession(ctx, acpsdk.LoadSessionRequest{Cwd: req.Cwd, SessionId: acpsdk.SessionId(desiredSessionID), McpServers: mcpServers, Meta: map[string]any{"runId": req.RunID, "octodeckConversationId": conversationID}}); err == nil {
-				sessionID = desiredSessionID
-			}
-		}
-		if sessionID == "" && initResult != nil && initResult.AgentCapabilities.SessionCapabilities.Resume != nil {
-			if _, err := proc.client.ResumeSession(ctx, acpsdk.ResumeSessionRequest{Cwd: req.Cwd, SessionId: acpsdk.SessionId(desiredSessionID), McpServers: mcpServers, Meta: map[string]any{"runId": req.RunID, "octodeckConversationId": conversationID}}); err == nil {
-				sessionID = desiredSessionID
-			}
-		}
-	}
-	if sessionID == "" {
-		created, err := proc.client.NewSession(ctx, acpsdk.NewSessionRequest{Cwd: req.Cwd, McpServers: mcpServers, Meta: map[string]any{"octodeckSessionId": req.Input.SessionID, "octodeckConversationId": conversationID, "runId": req.RunID}})
-		if err != nil {
-			return AgentRunResultFrame{}, err
-		}
-		sessionID = string(created.SessionId)
-	}
-	if sessionID == "" {
-		sessionID = req.RunID
-	}
-	proc.sessionID = sessionID
-	_ = writeACPSessionRecord(cfg, agentSessionMapRecord(processKey, conversationID, a.client, req, sessionID))
-	promptResult, promptErr := proc.client.Prompt(ctx, acpsdk.PromptRequest{SessionId: acpsdk.SessionId(sessionID), Prompt: []acpsdk.ContentBlock{acpsdk.TextBlock(req.Input.Prompt)}, Meta: map[string]any{"policy": req.Policy, "context": req.Context, "octodeckConversationId": conversationID, "runId": req.RunID}})
+	promptResult, promptErr := proc.client.Prompt(ctx, acpsdk.PromptRequest{SessionId: acpsdk.SessionId(sessionID), Prompt: []acpsdk.ContentBlock{acpsdk.TextBlock(a.acpPromptText(req, createdNewSession))}, Meta: map[string]any{"policy": req.Policy, "context": req.Context, "octodeckConversationId": conversationID, "runId": req.RunID}})
 	if promptErr == nil {
 		if promptResult.Usage != nil {
 			finalMu.Lock()
@@ -2199,6 +2656,9 @@ func (a *acpAdapter) runACPAgent(ctx context.Context, cfg *Config, req *AgentRun
 	if promptErr != nil {
 		msg := promptErr.Error()
 		errPtr = &msg
+		if isACPTransportDisconnect(promptErr) {
+			return AgentRunResultFrame{}, promptErr
+		}
 	}
 	return AgentRunResultFrame{OK: errPtr == nil, Result: finalText, Error: errPtr, SessionID: sessionID, Usage: finalUsage, TimedOut: timedOut, DurationMs: time.Since(started).Milliseconds()}, nil
 }
@@ -2248,7 +2708,7 @@ func (c *acpClient) call(ctx context.Context, method string, params any) (json.R
 	select {
 	case msg := <-ch:
 		if msg.Error != nil {
-			return msg.Result, errors.New(msg.Error.Message)
+			return msg.Result, errors.New(runtimeRPCErrorString(msg.Error))
 		}
 		return msg.Result, nil
 	case <-c.closed:

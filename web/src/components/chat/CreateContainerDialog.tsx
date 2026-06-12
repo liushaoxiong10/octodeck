@@ -41,6 +41,8 @@ interface CreateContainerDialogProps {
 }
 
 type RuntimeProfile = 'server-agent' | 'server-agent-device-tools' | 'device-cli-agent';
+type AgentAccessScope = 'all' | 'workspace';
+type AgentPermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
 
 export function CreateContainerDialog({
   open,
@@ -55,6 +57,8 @@ export function CreateContainerDialog({
   const [agentBackendId, setAgentBackendId] = useState('');
   const [hostRepoMode, setHostRepoMode] = useState<'all' | 'repo'>('all');
   const [selectedRepoId, setSelectedRepoId] = useState('');
+  const [agentAccessScope, setAgentAccessScope] = useState<AgentAccessScope>('all');
+  const [permissionMode, setPermissionMode] = useState<AgentPermissionMode>('bypassPermissions');
 
   const createFlow = useChatStore((s) => s.createFlow);
   const canHostExec = useAuthStore((s) => s.user?.role === 'admin');
@@ -125,6 +129,8 @@ export function CreateContainerDialog({
     setAgentBackendId('');
     setHostRepoMode('all');
     setSelectedRepoId('');
+    setAgentAccessScope('all');
+    setPermissionMode('bypassPermissions');
   };
 
   const handleClose = () => {
@@ -144,6 +150,8 @@ export function CreateContainerDialog({
       }
       const options: Parameters<typeof createFlow>[1] = {};
       options.runtime_profile = runtimeProfile;
+      options.agent_access_scope = agentAccessScope;
+      options.permission_mode = permissionMode;
       if (runtimeProfile !== 'server-agent') {
         if (!executionNode) {
           toast.error('请选择执行 Device');
@@ -286,6 +294,33 @@ export function CreateContainerDialog({
                         </p>
                       </div>
                     </label>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-sm font-medium mb-2">审批模式</label>
+                    <select
+                      value={permissionMode}
+                      onChange={(e) => setPermissionMode(e.target.value as AgentPermissionMode)}
+                      className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+                    >
+                      <option value="bypassPermissions">免审批</option>
+                      <option value="default">默认审批</option>
+                      <option value="acceptEdits">自动接受编辑</option>
+                      <option value="plan">Plan</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2">访问范围</label>
+                    <select
+                      value={agentAccessScope}
+                      onChange={(e) => setAgentAccessScope(e.target.value as AgentAccessScope)}
+                      className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+                    >
+                      <option value="all">All</option>
+                      <option value="workspace">Workspace</option>
+                    </select>
                   </div>
                 </div>
 

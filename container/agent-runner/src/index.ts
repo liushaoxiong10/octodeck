@@ -85,15 +85,23 @@ const MEMORY_FLUSH_ALLOWED_TOOLS = [
   'mcp__octodeck__memory_search',
   'mcp__octodeck__memory_get',
   'mcp__octodeck__memory_append',
-  'Read',  // 读取全局 CLAUDE.md 当前内容
-  'Edit',  // 编辑全局 CLAUDE.md（永久记忆）
+  'mcp__octodeck__workspace_memory_search',
+  'mcp__octodeck__workspace_memory_get',
+  'mcp__octodeck__workspace_memory_append',
+  'mcp__octodeck__workspace_memory_update',
+  'mcp__octodeck__workspace_memory_sync_local',
+  'mcp__octodeck__cloud_memory_search',
+  'mcp__octodeck__cloud_memory_get',
+  'mcp__octodeck__cloud_memory_append',
+  'mcp__octodeck__cloud_memory_update',
+  'Read',  // 读取 /workspace/memory 本地副本做快捷检索
 ];
 
 // Memory flush 期间禁用的工具（disallowedTools 会从模型上下文中完全移除这些工具）
 // 注意：allowedTools 仅控制自动审批，不限制工具可见性；
 //       bypassPermissions 模式下所有工具都自动通过，所以必须用 disallowedTools 来限制
 const MEMORY_FLUSH_DISALLOWED_TOOLS = [
-  'Bash', 'Write', 'WebSearch', 'WebFetch', 'Glob', 'Grep',
+  'Bash', 'Write', 'Edit', 'WebSearch', 'WebFetch', 'Glob', 'Grep',
   'Task', 'TaskOutput', 'TaskStop',
   'TeamCreate', 'TeamDelete', 'SendMessage',
   'TodoWrite', 'ToolSearch', 'Skill', 'NotebookEdit',
@@ -1059,6 +1067,75 @@ async function fetchCloudGlobalMemory(
   }
 }
 
+function normalizeMemoryRelativePath(input: string): string {
+  const normalized = input.replace(/\\/g, '/').trim().replace(/^\/+/, '');
+  if (!normalized || normalized.includes('\0')) {
+    throw new Error('Invalid memory path');
+  }
+  const parts = normalized.split('/');
+  if (parts.some((part) => !part || part === '.' || part === '..')) {
+    throw new Error('Invalid memory path');
+  }
+  return normalized;
+}
+
+function writeWorkspaceMemoryMirror(memory: any): void {
+  if (!memory || typeof memory.path !== 'string' || typeof memory.content !== 'string') return;
+  const relativePath = normalizeMemoryRelativePath(memory.path);
+  const root = path.resolve(WORKSPACE_MEMORY);
+  const target = path.resolve(root, relativePath);
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    throw new Error('Invalid workspace memory mirror path');
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, memory.content, 'utf-8');
+}
+
+async function syncWorkspaceMemoryMirrorFromCloud(
+  ownerUserId: string | undefined,
+  groupFolder: string,
+  agentToolToken: string,
+  serverBaseUrl: string,
+): Promise<void> {
+  if (!ownerUserId || !agentToolToken || !groupFolder) return;
+  try {
+    fs.mkdirSync(WORKSPACE_MEMORY, { recursive: true });
+    const url = `${serverBaseUrl.replace(/\/$/, '')}/api/cloud-memory/tool`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${agentToolToken}`,
+      },
+      body: JSON.stringify({
+        userId: ownerUserId,
+        operation: 'list',
+        memoryType: 'session',
+        groupFolder,
+        limit: 500,
+      }),
+    });
+    if (!res.ok) {
+      log(`syncWorkspaceMemoryMirrorFromCloud: HTTP ${res.status}`);
+      return;
+    }
+    const data: any = await res.json().catch(() => ({}));
+    const memories = Array.isArray(data?.memories) ? data.memories : [];
+    let synced = 0;
+    for (const memory of memories) {
+      try {
+        writeWorkspaceMemoryMirror(memory);
+        synced += 1;
+      } catch (err) {
+        log(`skip workspace memory mirror ${memory?.path ?? ''}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (synced > 0) log(`Synced ${synced} workspace memory mirror file(s)`);
+  } catch (err) {
+    log(`syncWorkspaceMemoryMirrorFromCloud error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** 读取用户配置的 MCP servers（stdio/http/sse 类型） */
 function loadUserMcpServers(): Record<string, unknown> {
   // 禁用记忆层模式下 CLAUDE_CONFIG_DIR 指向 ~/.claude/，OctoDeck 管理的 per-user MCP
@@ -1415,6 +1492,10 @@ async function runQuery(
     const remoteDisallowedTools = shouldDisableNativeLocalTools
       ? Array.from(new Set([...(disallowedTools || []), ...REMOTE_LOCAL_TOOL_NAMES]))
       : disallowedTools;
+    const requestedPermissionMode = (containerInput as any).permissionMode || 'bypassPermissions';
+    const sdkPermissionMode = requestedPermissionMode === 'default'
+      ? undefined
+      : requestedPermissionMode;
     const q = query({
       prompt: stream,
       options: {
@@ -1428,8 +1509,10 @@ async function runQuery(
         allowedTools,
         ...(remoteDisallowedTools && { disallowedTools: remoteDisallowedTools }),
         thinking: { type: 'adaptive' as const, display: 'summarized' as const },
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
+        ...(sdkPermissionMode ? { permissionMode: sdkPermissionMode } : {}),
+        ...(sdkPermissionMode === 'bypassPermissions'
+          ? { allowDangerouslySkipPermissions: true }
+          : {}),
         agentProgressSummaries: true,
         settingSources: ['project', 'user'],
         skills: 'all',
@@ -1913,6 +1996,14 @@ async function main(): Promise<void> {
         mcpToolsConfig.serverBaseUrl,
       )
     : '';
+  if (!disableMemoryLayer) {
+    await syncWorkspaceMemoryMirrorFromCloud(
+      containerInput.ownerUserId,
+      containerInput.groupFolder,
+      mcpToolsConfig.agentToolToken,
+      mcpToolsConfig.serverBaseUrl,
+    );
+  }
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
 
   // Clean up stale sentinels from previous container runs.
@@ -2151,10 +2242,11 @@ async function main(): Promise<void> {
         const today = new Date().toISOString().split('T')[0];
         const flushPrompt = [
           '上下文压缩前记忆刷新。',
-          '**优先检查全局记忆**：先 Read /workspace/global/CLAUDE.md，如果有「待记录」字段且你已获知对应信息（用户身份、偏好、常用项目等），用 Edit 工具立即填写。',
-          '用户明确要求记住的内容，以及下次对话仍可能用到的信息，也写入全局记忆。',
-          `然后使用 memory_append 将时效性记忆保存到 memory/${today}.md（今日进展、临时决策、待办等）。`,
-          '如需确认上下文，可先用 memory_search/memory_get 查阅。',
+          '**只写云端权威记忆**：不要直接编辑 /workspace/global、/workspace/memory 或工作区内 CLAUDE.md。',
+          '用户长期偏好/身份/明确要求“记住”的内容写入 cloud_memory_append/update（memory_type=global）。',
+          `当前 workspace 的项目进展、决策、约定、待办写入 workspace_memory_append，建议路径 memory/${today}.md。`,
+          'workspace_memory_* 写入后会自动把云端内容同步到 /workspace/memory 本地副本，用于快捷检索。',
+          '如需确认上下文，可先用 memory_search/memory_get 或 workspace_memory_search/workspace_memory_get 查阅。',
           '如果没有值得保存的内容，回复一个字：OK。',
         ].join(' ');
 

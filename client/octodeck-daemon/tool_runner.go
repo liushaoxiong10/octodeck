@@ -188,6 +188,15 @@ func (r *toolRunner) execute(parent context.Context, req *ToolRequestFrame) *Too
 }
 
 func (r *toolRunner) normalizeCwd(req *ToolRequestFrame) error {
+	if req.WorkspaceRepo != nil {
+		normalizeWorkspaceRepoSpecScope(req.WorkspaceRepo, req.WorkspaceRepo.AgentID)
+		cwd, err := resolveWorkspaceReposRunCwd(context.Background(), r.cfg, []*WorkspaceRepoSpec{req.WorkspaceRepo})
+		if err != nil {
+			return err
+		}
+		req.Cwd = cwd
+		return nil
+	}
 	if strings.HasPrefix(req.Cwd, deviceWorkspaceURIPrefix) {
 		folder := strings.TrimPrefix(req.Cwd, deviceWorkspaceURIPrefix)
 		cwd, err := ensureNamedWorkspaceDir(r.cfg, folder)

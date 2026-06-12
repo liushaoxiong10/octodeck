@@ -28,9 +28,16 @@ import {
   buildStreamingPanels,
   buildStatusBannerText,
   statusHeadline,
+  extractTitle,
   CARD_ELEMENT_IDS,
   type StreamingPanelsInit,
 } from './sections.js';
+import {
+  CARD_MD_LIMIT,
+  CARD_SIZE_LIMIT,
+  MAX_BODY_ELEMENTS_PER_CARD,
+  splitCodeBlockSafe,
+} from './length.js';
 
 /** Per-platform typewriter tuning — mobile feels faster, PC breathes more. */
 const STREAMING_CONFIG = {
@@ -41,9 +48,16 @@ const STREAMING_CONFIG = {
 
 export function buildAgentReplyCard(input: AgentCardInput): FeishuCardV2 {
   // Apply Feishu-friendly markdown transformation once, up front.
-  const optimizedText = optimizeMarkdownStyle(input.text, 2);
+  // Skip if the caller has already optimized the text (e.g. buildCardBatch
+  // pre-optimizes the full text before splitting, so each chunk doesn't
+  // get double-optimized — which would double <br> spacing around code blocks).
+  const optimizedText = input.skipOptimize
+    ? input.text
+    : optimizeMarkdownStyle(input.text, 2);
   const optimizedThinking = input.thinking
-    ? optimizeMarkdownStyle(input.thinking, 2)
+    ? input.skipOptimize
+      ? input.thinking
+      : optimizeMarkdownStyle(input.thinking, 2)
     : undefined;
 
   const explicitTitle = input.title?.trim();
@@ -252,4 +266,152 @@ export function buildStreamingAgentCard(
       ],
     },
   };
+}
+
+// ─── Multi-card batch builder (shared across streaming + static paths) ──────
+
+export interface CardBatchOptions {
+  /** Override auto-extracted title. */
+  title?: string;
+  /** Title prefix for continuation cards (default: "(续) "). */
+  continuationPrefix?: string;
+  /**
+   * Which card gets the metadata / thinking / tools / footer chrome.
+   *   - "last" (default): only the final card shows meta/footer
+   *   - "first": only the first card shows meta/footer
+   *   - "all": every card shows meta/footer (spammy, not recommended)
+   */
+  chromePlacement?: 'first' | 'last' | 'all';
+  /** Max body markdown elements per card (default: from length.ts). */
+  maxBodyElements?: number;
+}
+
+/**
+ * Build a batch of Feishu cards from a (potentially very long) reply text.
+ *
+ * Splits the text across multiple cards when it would overflow a single card
+ * (either by element count or by total JSON byte size). Every chunk is
+ * code-block-safe — no fence is ever cut in half.
+ *
+ * Usage:
+ *   const cards = buildCardBatch(longText, { status: 'done', meta, footer });
+ *   for (const card of cards) await sendFeishuCard(chatId, card);
+ */
+export function buildCardBatch(
+  text: string,
+  opts: Partial<Omit<AgentCardInput, 'text'>> & CardBatchOptions = {},
+): FeishuCardV2[] {
+  const {
+    status = 'done',
+    title: explicitTitle,
+    titlePrefix,
+    continuationPrefix = '(续) ',
+    chromePlacement = 'last',
+    maxBodyElements = MAX_BODY_ELEMENTS_PER_CARD,
+    ...restInput
+  } = opts;
+
+  const optimized = optimizeMarkdownStyle(text.trim(), 2);
+  if (!optimized) {
+    return [buildAgentReplyCard({ ...restInput, status, text: '', title: explicitTitle, titlePrefix })];
+  }
+
+  // 1. Slice into code-block-safe chunks of ~CARD_MD_LIMIT chars each
+  const chunks = splitCodeBlockSafe(optimized, CARD_MD_LIMIT);
+
+  // 2. Group chunks into cards (each card has at most maxBodyElements chunks)
+  const cardChunkGroups: string[][] = [];
+  for (let i = 0; i < chunks.length; i += maxBodyElements) {
+    cardChunkGroups.push(chunks.slice(i, i + maxBodyElements));
+  }
+
+  // 3. Determine the unified title (for consistent header across cards)
+  const unifiedTitle = explicitTitle ?? extractTitle(text).title;
+
+  // 4. Build each card
+  const cards: FeishuCardV2[] = cardChunkGroups.map((group, idx) => {
+    const isFirst = idx === 0;
+    const isLast = idx === cardChunkGroups.length - 1;
+    const cardText = group.join('\n\n');
+
+    const hasChrome =
+      chromePlacement === 'all' ||
+      (chromePlacement === 'first' && isFirst) ||
+      (chromePlacement === 'last' && isLast);
+
+    // Header title: first card uses titlePrefix + title,
+    // continuation cards use continuationPrefix + title.
+    const cardTitle = unifiedTitle;
+    const cardTitlePrefix = isFirst ? titlePrefix : continuationPrefix + (titlePrefix ?? '');
+
+    const cardInput: AgentCardInput = {
+      ...restInput,
+      status,
+      text: cardText,
+      title: cardTitle,
+      titlePrefix: cardTitlePrefix,
+      meta: hasChrome ? restInput.meta : undefined,
+      thinking: hasChrome ? restInput.thinking : undefined,
+      footer: hasChrome ? restInput.footer : undefined,
+      completedAtMs: hasChrome ? restInput.completedAtMs : undefined,
+      skipOptimize: true, // text is already optimized above
+    };
+
+    return buildAgentReplyCard(cardInput);
+  });
+
+  // 5. Byte-size safety: if the *last* card still exceeds CARD_SIZE_LIMIT
+  //    (e.g. due to heavy chrome), fall back to splitting it further.
+  //    This is iterative and conservative — only runs when truly needed.
+  const sizedCards: FeishuCardV2[] = [];
+  for (let i = 0; i < cards.length; i++) {
+    const card = cards[i];
+    const size = Buffer.byteLength(JSON.stringify(card), 'utf-8');
+    if (size <= CARD_SIZE_LIMIT) {
+      sizedCards.push(card);
+      continue;
+    }
+    // Oversized: halve the chunk count and rebuild this card's group
+    // (plus re-check; this is rare so a single re-split is enough)
+    const group = cardChunkGroups[i];
+    const half = Math.max(1, Math.floor(group.length / 2));
+    const halfGroups = [group.slice(0, half), group.slice(half)].filter((g) => g.length > 0);
+    for (const hg of halfGroups) {
+      sizedCards.push(
+        buildAgentReplyCard({
+          ...restInput,
+          status,
+          text: hg.join('\n\n'),
+          title: unifiedTitle,
+          titlePrefix: i === 0 ? titlePrefix : continuationPrefix + (titlePrefix ?? ''),
+          // When we split an oversized card, chrome stays on the last sub-card
+          // of the original group (approximation — better than losing content).
+          meta: undefined,
+          thinking: undefined,
+          footer: undefined,
+          completedAtMs: undefined,
+          skipOptimize: true, // text is already optimized
+        }),
+      );
+    }
+    // If this was supposed to be the chrome card, move chrome to the last sub-card
+    if (chromePlacement === 'last' && i === cards.length - 1) {
+      const lastIdx = sizedCards.length - 1;
+      const lastCardText = halfGroups[halfGroups.length - 1].join('\n\n');
+      sizedCards[lastIdx] = buildAgentReplyCard({
+        ...restInput,
+        status,
+        text: lastCardText,
+        title: unifiedTitle,
+        titlePrefix: continuationPrefix + (titlePrefix ?? ''),
+        meta: restInput.meta,
+        thinking: restInput.thinking,
+        footer: restInput.footer,
+        completedAtMs: restInput.completedAtMs,
+        skipOptimize: true,
+      });
+    }
+  }
+
+  return sizedCards;
 }

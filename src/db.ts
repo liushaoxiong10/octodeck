@@ -163,6 +163,7 @@ function stmts() {
         `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, attachments, task_id
          FROM messages
          WHERE chat_jid = ? AND (timestamp > ? OR (timestamp = ? AND id > ?)) AND is_from_me = 0
+         AND COALESCE(source_kind, '') != 'user_command'
          ORDER BY timestamp ASC, id ASC`,
       ),
       getExpiredSessionIds: db.prepare(
@@ -1332,6 +1333,8 @@ function initializeSqliteDatabase(
   ensureColumn('registered_groups', 'device_link_id', 'TEXT');
   ensureColumn('registered_groups', 'agent_client_id', 'TEXT');
   ensureColumn('registered_groups', 'agent_model', 'TEXT');
+  ensureColumn('registered_groups', 'agent_access_scope', 'TEXT');
+  ensureColumn('registered_groups', 'permission_mode', 'TEXT');
   // Phase 5.1: per-group execution node (server-local | <agent_link_id>)
   ensureColumn('registered_groups', 'execution_node', 'TEXT');
   ensureColumn('agent_links', 'agent_clients', "TEXT NOT NULL DEFAULT '[]'");
@@ -3082,7 +3085,11 @@ function normalizeMessageRow(
  */
 export function ensureChatExists(chatJid: string): void {
   db.prepare(
-    `INSERT OR IGNORE INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)`,
+    `INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
+     ON CONFLICT(jid) DO UPDATE SET
+       last_message_time = MAX(last_message_time, excluded.last_message_time),
+       archived_at = NULL,
+       archive_reason = NULL`,
   ).run(chatJid, chatJid, new Date().toISOString());
 }
 
@@ -3464,6 +3471,60 @@ export function insertUsageRecord(record: {
       record.cacheCreationInputTokens,
       record.costUSD,
     );
+  })();
+}
+
+/**
+ * Repair usage records that were written without a real owner (historically
+ * possible for Device/Daemon agent runs when the effective group did not carry
+ * created_by). Rebuild the daily summary from usage_records so /api/usage
+ * immediately reflects the corrected owner mapping.
+ */
+export function repairSystemUsageRecordOwners(): number {
+  return db.transaction(() => {
+    const result = db
+      .prepare(
+        `
+        UPDATE usage_records
+        SET user_id = (
+          SELECT rg.created_by
+          FROM registered_groups rg
+          WHERE rg.created_by IS NOT NULL
+            AND (rg.folder = usage_records.group_folder OR rg.jid = usage_records.group_folder)
+          ORDER BY CASE WHEN rg.folder = usage_records.group_folder THEN 0 ELSE 1 END
+          LIMIT 1
+        )
+        WHERE (user_id IS NULL OR user_id = '' OR user_id = 'system')
+          AND EXISTS (
+            SELECT 1
+            FROM registered_groups rg
+            WHERE rg.created_by IS NOT NULL
+              AND (rg.folder = usage_records.group_folder OR rg.jid = usage_records.group_folder)
+          )
+        `,
+      )
+      .run();
+
+    if ((result.changes ?? 0) > 0) {
+      db.exec(`
+        DELETE FROM usage_daily_summary;
+        INSERT INTO usage_daily_summary (user_id, model, date,
+          total_input_tokens, total_output_tokens,
+          total_cache_read_tokens, total_cache_creation_tokens,
+          total_cost_usd, request_count, updated_at)
+        SELECT
+          user_id,
+          model,
+          date(created_at, 'localtime'),
+          SUM(input_tokens), SUM(output_tokens),
+          SUM(cache_read_input_tokens), SUM(cache_creation_input_tokens),
+          SUM(cost_usd), COUNT(*), datetime('now')
+        FROM usage_records
+        GROUP BY user_id, model, date(created_at, 'localtime')
+      `);
+    }
+
+    return result.changes ?? 0;
   })();
 }
 
@@ -5315,6 +5376,8 @@ type RegisteredGroupRow = {
   device_link_id: string | null;
   agent_client_id: string | null;
   agent_model: string | null;
+  agent_access_scope: string | null;
+  permission_mode: string | null;
   backend: string | null;
   execution_node: string | null;
 };
@@ -5373,6 +5436,17 @@ function parseGroupRow(
     deviceLinkId: row.device_link_id ?? undefined,
     agentClientId: row.agent_client_id ?? undefined,
     agentModel: row.agent_model ?? undefined,
+    agentAccessScope:
+      row.agent_access_scope === 'all' || row.agent_access_scope === 'workspace'
+        ? row.agent_access_scope
+        : undefined,
+    permissionMode:
+      row.permission_mode === 'default' ||
+      row.permission_mode === 'acceptEdits' ||
+      row.permission_mode === 'bypassPermissions' ||
+      row.permission_mode === 'plan'
+        ? row.permission_mode
+        : undefined,
     backend: row.backend ?? undefined,
     executionNode: row.execution_node ?? undefined,
   };
@@ -5411,8 +5485,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, repo_id, repo_git_url, repo_main_branch, repo_device_path, visible_repo_mode, visible_repo_ids, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist, runtime_profile, device_link_id, agent_client_id, agent_model, backend, execution_node)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, repo_id, repo_git_url, repo_main_branch, repo_device_path, visible_repo_mode, visible_repo_ids, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist, runtime_profile, device_link_id, agent_client_id, agent_model, agent_access_scope, permission_mode, backend, execution_node)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -5452,6 +5526,8 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.deviceLinkId ?? null,
     group.agentClientId ?? null,
     group.agentModel ?? null,
+    group.agentAccessScope ?? null,
+    group.permissionMode ?? null,
     group.backend ?? null,
     group.executionNode ?? null,
   );

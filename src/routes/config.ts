@@ -1423,7 +1423,10 @@ function generateCustomBackendId(): string {
   throw new Error('Failed to generate unique agent id');
 }
 
-function requireOwnedAgentLink(linkId: string | null | undefined, user: AuthUser): AgentLink {
+function requireOwnedAgentLink(
+  linkId: string | null | undefined,
+  user: AuthUser,
+): AgentLink {
   if (!linkId) throw new Error('Device not found');
   const link = getAgentLinkById(linkId);
   if (!link || link.userId !== user.id || link.revokedAt) {
@@ -1432,10 +1435,22 @@ function requireOwnedAgentLink(linkId: string | null | undefined, user: AuthUser
   return link;
 }
 
-function optionalOwnedAgentLinkId(linkId: string | null | undefined, user: AuthUser): string | null {
+function optionalOwnedAgentLinkId(
+  linkId: string | null | undefined,
+  user: AuthUser,
+): string | null {
   if (!linkId) return null;
   requireOwnedAgentLink(linkId, user);
   return linkId;
+}
+
+function enableBackendByDefault(backendId: string): void {
+  const settings = getSystemSettings();
+  if (settings.allowedBackends.includes(backendId)) return;
+  saveSystemSettings({
+    ...settings,
+    allowedBackends: [...settings.allowedBackends, backendId],
+  });
 }
 
 configRoutes.get(
@@ -1491,6 +1506,7 @@ configRoutes.post(
               maxOutputBytes: validation.data.maxOutputBytes,
               runtime: validation.data.runtime,
               model: validation.data.model,
+              permissionMode: validation.data.permissionMode,
               providerId: validation.data.providerId ?? null,
               workdirMode,
               workdir,
@@ -1511,6 +1527,7 @@ configRoutes.post(
             env: validation.data.env,
             runtime: validation.data.runtime,
             model: validation.data.model,
+            permissionMode: validation.data.permissionMode,
             providerId: validation.data.providerId ?? null,
             workdirMode,
             workdir,
@@ -1522,6 +1539,7 @@ configRoutes.post(
             agentMdId: validation.data.agentMdId ?? null,
           };
       const def = upsertCustomBackend(payload, user.username);
+      enableBackendByDefault(def.id);
       return c.json(def, 201);
     } catch (err) {
       const msg =
@@ -1577,6 +1595,7 @@ configRoutes.patch(
               maxOutputBytes: merged.maxOutputBytes,
               runtime: merged.runtime,
               model: merged.model,
+              permissionMode: merged.permissionMode,
               providerId: merged.providerId ?? null,
               workdirMode,
               workdir,

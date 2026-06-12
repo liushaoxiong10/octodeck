@@ -25,6 +25,7 @@ import {
   putCloudMemory,
   searchCloudMemory,
   syncClientAgentMemory,
+  listCloudMemories,
   type CloudMemoryType,
 } from '../memory-store.js';
 
@@ -48,6 +49,7 @@ interface MemoryHttpBody {
   content?: string;
   query?: string;
   expectedRevision?: number;
+  limit?: number;
 }
 
 interface CloudSkillToolBody {
@@ -162,6 +164,20 @@ export async function handleCloudMemoryToolHttpRequest(
 
   try {
     switch (body.operation) {
+      case 'list': {
+        const limit = Math.max(1, Math.min(body.limit ?? 200, 500));
+        const memories = listCloudMemories(body.userId).filter((memory) => {
+          if (body.memoryType && memory.memoryType !== body.memoryType)
+            return false;
+          if (body.groupFolder && memory.groupFolder !== body.groupFolder)
+            return false;
+          if (body.deviceLinkId && memory.deviceLinkId !== body.deviceLinkId)
+            return false;
+          if (body.agentId && memory.agentId !== body.agentId) return false;
+          return true;
+        });
+        return jsonResponse({ memories: memories.slice(0, limit) });
+      }
       case 'search':
         if (!body.query) return jsonResponse({ error: 'query_required' }, 400);
         return jsonResponse({

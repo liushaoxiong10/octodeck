@@ -46,9 +46,10 @@ export const cocoBackend: AgentBackend = {
   run: (args) =>
     runHostCli(args, {
       backendId: 'coco',
+      agentClientId: 'traecli',
       resolveBinary: resolveCocoBinary,
       buildArgv: (ctx) => {
-        const argv = ['-p', ctx.prompt, '--output-format=stream-json', '-y'];
+        const argv = ['-p', ctx.prompt, '--output-format=stream-json'];
         if (ctx.sessionId) argv.push(`--resume=${ctx.sessionId}`);
         return argv;
       },

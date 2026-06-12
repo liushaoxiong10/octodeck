@@ -15,6 +15,7 @@ export interface CustomBackendDef {
   env?: Record<string, string>;
   runtime?: 'local-device' | 'server-side';
   model?: string;
+  permissionMode?: string | null;
   supportsNativeSessions?: boolean;
   sessionArgvTemplate?: string[];
   resumeArgvTemplate?: string[];

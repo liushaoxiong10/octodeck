@@ -4,6 +4,7 @@ import { Message, useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { MessageBubble } from './MessageBubble';
 import { StreamingDisplay } from './StreamingDisplay';
+import { ToolFlowCard, type ToolFlowEvent } from './ToolActivityCard';
 import { EmojiAvatar } from '../common/EmojiAvatar';
 import { ErrorBoundary } from '../common';
 import { Loader2, ChevronUp, ChevronDown, AlertTriangle, Square, Code2, Zap, BookOpen, Wrench } from 'lucide-react';
@@ -33,6 +34,7 @@ type FlatItem =
   | { type: 'divider'; content: string }
   | { type: 'spawn'; content: string }
   | { type: 'error'; content: string }
+  | { type: 'tool-flow'; content: ToolFlowEvent[] }
   | { type: 'message'; content: Message };
 
 // Intl.DateTimeFormat construction is expensive; reuse one instance across all
@@ -49,6 +51,39 @@ const quickPrompts = [
   { icon: BookOpen, title: '技术概念', desc: '用简单的语言解释一个技术概念' },
   { icon: Wrench, title: '调试问题', desc: '帮我定位和修复一个 Bug' },
 ];
+
+function toolStatusFromMessage(message: Message): string {
+  if (message.source_kind === 'tool_result') return 'tool_result';
+  if (message.source_kind === 'tool_progress') return 'tool_progress';
+  return 'tool_call';
+}
+
+function toolSummaryFromContent(content: string): string {
+  const normalized = content.replace(/\s+/g, ' ').trim();
+  if (!normalized) return '无输出';
+  return normalized.length > 180 ? `${normalized.slice(0, 180)}…` : normalized;
+}
+
+function toolMessageToFlowEvent(message: Message): ToolFlowEvent {
+  const title = message.sender_name || 'Tool';
+  return {
+    id: message.id,
+    title,
+    summary: toolSummaryFromContent(message.content),
+    detail: message.content,
+    timestamp: message.timestamp,
+    status: toolStatusFromMessage(message),
+    kind: 'tool',
+    toolName: title,
+    toolUseId: message.sdk_message_uuid || message.turn_id || message.id,
+  };
+}
+
+function toolFlowGroupKey(message: Message): string {
+  const session = message.session_id || '';
+  const turn = message.turn_id || '';
+  return session || turn ? `${session}#${turn}` : '__legacy_tool_flow__';
+}
 
 export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrigger, groupJid, isWaiting, onInterrupt, agentId, onSend }: MessageListProps) {
   const { mode: displayMode } = useDisplayMode();
@@ -115,7 +150,24 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
     const items: FlatItem[] = [];
     Object.entries(grouped).forEach(([date, msgs]) => {
       items.push({ type: 'date', content: date });
-      msgs.forEach((msg) => {
+      for (let index = 0; index < msgs.length; index += 1) {
+        const msg = msgs[index];
+        if (msg.role === 'tool') {
+          const flow: ToolFlowEvent[] = [];
+          const flowKey = toolFlowGroupKey(msg);
+          let cursor = index;
+          while (
+            cursor < msgs.length &&
+            msgs[cursor].role === 'tool' &&
+            toolFlowGroupKey(msgs[cursor]) === flowKey
+          ) {
+            flow.push(toolMessageToFlowEvent(msgs[cursor]));
+            cursor += 1;
+          }
+          items.push({ type: 'tool-flow', content: flow });
+          index = cursor - 1;
+          continue;
+        }
         if (msg.sender === '__system__') {
           if (msg.content === 'context_reset') {
             items.push({ type: 'divider', content: '上下文已清除' });
@@ -136,7 +188,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
         } else {
           items.push({ type: 'message', content: msg });
         }
-      });
+      }
     });
     return items;
   }, [messages]);
@@ -155,6 +207,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
         case 'divider': return `div-${index}`;
         case 'spawn': return `spawn-${index}`;
         case 'error': return `err-${index}`;
+        case 'tool-flow': return `tool-flow-${item.content.map((event) => event.id).join('-')}`;
         case 'message': return item.content.id;
       }
     },
@@ -166,6 +219,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
         case 'divider':
         case 'spawn':
         case 'error': return 56;
+        case 'tool-flow': return Math.max(64, Math.min(320, item.content.length * 48 + 32));
         case 'message': {
           const len = item.content.content.length;
           if (item.content.is_from_me) {
@@ -490,6 +544,25 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
               );
             }
 
+            if (item.type === 'tool-flow') {
+              return (
+                <div
+                  key={virtualItem.key}
+                  ref={virtualizer.measureElement}
+                  data-index={virtualItem.index}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    transform: `translateY(${virtualItem.start}px)`,
+                  }}
+                >
+                  <ToolFlowCard events={item.content} title="工具调用流" />
+                </div>
+              );
+            }
+
             const message = item.content;
             const showTime = true;
 
@@ -514,7 +587,7 @@ export function MessageList({ messages, loading, hasMore, onLoadMore, scrollTrig
           })}
         </div>
 
-        {messages.length === 0 && !loading && (
+        {messages.length === 0 && !loading && !isWaiting && (
           <div className="absolute inset-0 flex flex-col items-center justify-center px-6">
             <div className="max-w-lg w-full space-y-8">
               {/* Welcome header */}

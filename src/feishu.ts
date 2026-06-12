@@ -22,7 +22,8 @@ import {
   getStreamingSession,
 } from './feishu-streaming-card.js';
 import { optimizeMarkdownStyle } from './feishu-markdown-style.js';
-import { buildAgentReplyCard } from './feishu-cards/builder.js';
+import { buildAgentReplyCard, buildCardBatch } from './feishu-cards/builder.js';
+import { CARD_SIZE_LIMIT } from './feishu-cards/length.js';
 import {
   evaluateMentionGate,
   isBotMentioned,
@@ -134,6 +135,9 @@ const WS_RECONNECT_MIN_INTERVAL_MS = 30_000;
 const BACKFILL_LOOKBACK_MS = 5 * 60 * 1000;
 const BACKFILL_PAGE_SIZE = 50;
 const BACKFILL_MAX_PAGES_PER_CHAT = 5;
+// 飞书 WS 偶发静默漏推（尤其话题群）时，连接状态可能仍显示在线。
+// 在线状态下也做低频补偿回填，避免 @bot 消息永久丢失。
+const BACKFILL_CONNECTED_INTERVAL_MS = 60_000;
 // 启动期 bot info 拉取的最大重试次数（指数退避 1s/2s/4s）
 const BOT_INFO_FETCH_MAX_ATTEMPTS = 4;
 // botOpenId 缺失时 lazy refetch 的最小间隔，避免对 OAPI 高频骚扰
@@ -224,6 +228,20 @@ function buildFeishuRouteTarget(
 
 function feishuRouteToJid(target: FeishuRouteTarget): string {
   return `feishu:${target.raw}`;
+}
+
+function appendMentionFallbackFromText(
+  mentions: FeishuMentionLike[] | undefined,
+  text: string,
+  botMentionName: string,
+): FeishuMentionLike[] | undefined {
+  const name = botMentionName.trim();
+  if (!name || !text.includes(`@${name}`)) return mentions;
+  const next = mentions ? [...mentions] : [];
+  if (!next.some((mention) => mention.name?.trim() === name)) {
+    next.push({ name });
+  }
+  return next;
 }
 
 /**
@@ -564,6 +582,7 @@ export function createFeishuConnection(
   let lastWsStateConnected = false;
   let disconnectedChecks = 0;
   let disconnectedSince: number | null = null;
+  let lastConnectedBackfillAt = 0;
   let healthTimer: NodeJS.Timeout | null = null;
   // botOpenId 自愈状态：lastBotInfoFetchAt 防止 lazy refetch 高频骚扰 OAPI；
   // botInfoRefetchInFlight 防止并发拉取
@@ -1052,6 +1071,12 @@ export function createFeishuConnection(
         }
       }
 
+      const effectiveMentions = appendMentionFallbackFromText(
+        mentions,
+        text,
+        botMentionName,
+      );
+
       const normalizedChatType = normalizeFeishuChatType(chatType);
       const chatJid = `feishu:${chatId}`;
       const rootMessageId = rootId || messageId;
@@ -1216,7 +1241,7 @@ export function createFeishuConnection(
             chatJid,
             cmdBody,
             senderOpenId,
-            mentions,
+            effectiveMentions,
           );
           logger.info(
             {
@@ -1266,7 +1291,7 @@ export function createFeishuConnection(
         if (
           isBotMentioned(
             botOpenId,
-            mentions as MentionGateMention[] | undefined,
+            effectiveMentions as MentionGateMention[] | undefined,
             {
               botUserId,
               botMentionNames: botMentionName ? [botMentionName] : undefined,
@@ -1300,7 +1325,7 @@ export function createFeishuConnection(
           normalizedChatType === 'group' &&
           shouldProcessGroupMessage &&
           !shouldProcessGroupMessage(chatJid, senderOpenId) &&
-          mentions?.length &&
+          effectiveMentions?.length &&
           !hasBotMentionIdentity()
         ) {
           await ensureBotOpenIdFresh('mention-gate-precheck', true);
@@ -1311,7 +1336,7 @@ export function createFeishuConnection(
           botOpenId,
           botUserId,
           botMentionNames: botMentionName ? [botMentionName] : undefined,
-          mentions: mentions as MentionGateMention[] | undefined,
+          mentions: effectiveMentions as MentionGateMention[] | undefined,
           chatJid,
           senderOpenId,
           shouldProcessGroupMessage,
@@ -1580,6 +1605,51 @@ export function createFeishuConnection(
     }
   }
 
+  async function syncKnownGroups(reason = 'manual'): Promise<void> {
+    if (!client) {
+      logger.debug('Feishu client not initialized, skip group sync');
+      return;
+    }
+    try {
+      let pageToken: string | undefined;
+      let hasMore = true;
+      let count = 0;
+
+      while (hasMore) {
+        const res = await client.im.v1.chat.list({
+          params: {
+            page_size: 100,
+            page_token: pageToken,
+          },
+        });
+
+        const items = res.data?.items || [];
+        for (const chat of items) {
+          if (chat.chat_id && chat.name) {
+            updateChatName(`feishu:${chat.chat_id}`, chat.name);
+            knownChatIds.add(chat.chat_id);
+            const chatType = (chat as { chat_type?: string }).chat_type;
+            if (chatType) {
+              chatTypeById.set(
+                chat.chat_id,
+                normalizeFeishuChatType(chatType) || chatType,
+              );
+            }
+            count++;
+          }
+        }
+
+        hasMore = res.data?.has_more || false;
+        pageToken = res.data?.page_token;
+      }
+
+      setLastGroupSync();
+      logger.info({ reason, count }, 'Feishu group sync completed');
+    } catch (err) {
+      logger.error({ err, reason }, 'Failed to sync Feishu groups');
+    }
+  }
+
   async function reconnectWebSocket(reason: string): Promise<void> {
     if (reconnecting || !connectOptions) return;
     reconnecting = true;
@@ -1615,6 +1685,7 @@ export function createFeishuConnection(
       lastWsStateConnected = true;
       logger.info({ reason }, 'Feishu WebSocket reconnected');
       connectOptions.onReady();
+      await syncKnownGroups('reconnect');
       // 先执行 backfill（需要读取 disconnectedSince 确定回填起点），完成后再重置
       await runBackfill('reconnect');
       disconnectedSince = null;
@@ -1637,6 +1708,11 @@ export function createFeishuConnection(
         logger.info('Feishu WebSocket is back online');
         await runBackfill('recovered');
         disconnectedSince = null;
+      }
+      const now = Date.now();
+      if (now - lastConnectedBackfillAt >= BACKFILL_CONNECTED_INTERVAL_MS) {
+        lastConnectedBackfillAt = now;
+        await runBackfill('connected-watchdog');
       }
       lastWsStateConnected = true;
       return;
@@ -1677,6 +1753,7 @@ export function createFeishuConnection(
       disconnectedChecks = 0;
       disconnectedSince = null;
       reconnectRequestedAt = Date.now();
+      lastConnectedBackfillAt = 0;
       reconnecting = false;
       backfillRunning = false;
 
@@ -1806,6 +1883,7 @@ export function createFeishuConnection(
         lastWsStateConnected = true;
         disconnectedSince = null;
         startHealthMonitor();
+        await syncKnownGroups('connect');
         onReady();
         return true;
       } catch (err) {
@@ -1882,16 +1960,46 @@ export function createFeishuConnection(
           const postContent = buildPostMdFallback(text);
           await sendToFeishu(chatId, 'post', postContent);
         } else {
-          const card = buildInteractiveCard(text);
-          const content = JSON.stringify(card);
-          try {
-            await sendToFeishu(chatId, 'interactive', content);
-          } catch (err) {
-            logger.warn(
-              { err, chatId },
-              'Feishu interactive send failed, fallback to post+md',
-            );
-            await sendToFeishu(chatId, 'post', buildPostMdFallback(text));
+          // Build a batch of 1..N cards (auto-split when content is too long
+          // for a single card, code-block-safe). Same builder is used by the
+          // streaming card finalize path — visual output is identical.
+          const cards = buildCardBatch(text, { status: 'done' });
+
+          if (cards.length === 1) {
+            // Single card — same as the old path
+            const content = JSON.stringify(cards[0]);
+            try {
+              await sendToFeishu(chatId, 'interactive', content);
+            } catch (err) {
+              logger.warn(
+                { err, chatId },
+                'Feishu interactive send failed, fallback to post+md',
+              );
+              await sendToFeishu(chatId, 'post', buildPostMdFallback(text));
+            }
+          } else {
+            // Multi-card batch — send each card as a separate message.
+            // If any card fails, fall back to post+md for the whole thing
+            // (better a single long post than a partial batch).
+            try {
+              for (const card of cards) {
+                await sendToFeishu(
+                  chatId,
+                  'interactive',
+                  JSON.stringify(card),
+                );
+              }
+              logger.debug(
+                { chatId, cardCount: cards.length },
+                'Sent multi-card Feishu reply batch',
+              );
+            } catch (err) {
+              logger.warn(
+                { err, chatId, cardCount: cards.length },
+                'Feishu multi-card batch send failed, fallback to post+md',
+              );
+              await sendToFeishu(chatId, 'post', buildPostMdFallback(text));
+            }
           }
         }
         logger.debug({ chatId }, 'Sent Feishu card message');
@@ -2121,39 +2229,7 @@ export function createFeishuConnection(
     },
 
     async syncGroups(): Promise<void> {
-      if (!client) {
-        logger.debug('Feishu client not initialized, skip group sync');
-        return;
-      }
-      try {
-        let pageToken: string | undefined;
-        let hasMore = true;
-
-        while (hasMore) {
-          const res = await client.im.v1.chat.list({
-            params: {
-              page_size: 100,
-              page_token: pageToken,
-            },
-          });
-
-          const items = res.data?.items || [];
-          for (const chat of items) {
-            if (chat.chat_id && chat.name) {
-              updateChatName(`feishu:${chat.chat_id}`, chat.name);
-              knownChatIds.add(chat.chat_id);
-            }
-          }
-
-          hasMore = res.data?.has_more || false;
-          pageToken = res.data?.page_token;
-        }
-
-        setLastGroupSync();
-        logger.info('Feishu group sync completed');
-      } catch (err) {
-        logger.error({ err }, 'Failed to sync Feishu groups');
-      }
+      await syncKnownGroups('manual');
     },
 
     getLarkClient(): lark.Client | null {

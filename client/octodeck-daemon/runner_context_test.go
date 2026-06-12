@@ -56,6 +56,45 @@ func TestRunnerInjectsContextEnvAndStdin(t *testing.T) {
 	}
 }
 
+func TestBuildEnvDoesNotOverrideClaudeConfigDir(t *testing.T) {
+	home := t.TempDir()
+	oldClaudeConfigDir, hadClaudeConfigDir := os.LookupEnv("CLAUDE_CONFIG_DIR")
+	if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if hadClaudeConfigDir {
+			_ = os.Setenv("CLAUDE_CONFIG_DIR", oldClaudeConfigDir)
+		} else {
+			_ = os.Unsetenv("CLAUDE_CONFIG_DIR")
+		}
+	})
+	t.Setenv("HOME", home)
+
+	env := envSliceToMap(buildEnv(&Config{SessionDir: t.TempDir()}, nil, map[string]any{"group": map[string]any{"folder": "device-claude"}}))
+	if got := env["HOME"]; got != home {
+		t.Fatalf("expected HOME to be inherited so Claude can load local login state, got %q", got)
+	}
+	if got, ok := env["CLAUDE_CONFIG_DIR"]; ok {
+		t.Fatalf("CLAUDE_CONFIG_DIR must not be session-isolated because it hides local Claude login config, got %q", got)
+	}
+	if got := env["CODEX_HOME"]; got == "" {
+		t.Fatalf("expected non-Claude provider homes to remain session-isolated: %#v", env)
+	}
+}
+
+func envSliceToMap(env []string) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, item := range env {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
 func TestNormalizeAgentJSONLineCapturesToolEvents(t *testing.T) {
 	callLine := `{"type":"assistant","session_id":"sess-1","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"pwd"}}]}}`
 	eventType, text, sessionID, payload := normalizeAgentJSONLine(callLine)

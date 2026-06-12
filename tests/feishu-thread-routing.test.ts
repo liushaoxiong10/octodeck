@@ -107,3 +107,13 @@ describe('Feishu mention gate precheck', () => {
     expect(source).toContain('hasBotMentionIdentity()');
   });
 });
+
+describe('Feishu thread_map routing guard', () => {
+  test('does not turn a bare group @ message into a synthetic Feishu thread', () => {
+    const source = readFileSync('src/index.ts', 'utf8');
+    expect(source).toContain('(messageMeta?.threadId || messageMeta?.rootId)');
+    expect(source).not.toContain(
+      'messageMeta.threadId || messageMeta.rootId || messageMeta.messageId',
+    );
+  });
+});

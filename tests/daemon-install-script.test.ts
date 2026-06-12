@@ -15,7 +15,7 @@ describe('daemon install script', () => {
     expect(script).toContain("LINK_ID='cl_1234567890abcdef'");
     expect(script).toContain("TOKEN='tok_secret'");
     expect(script).toContain(
-      'BIN_URL="${SERVER}/api/daemon/octodeck-daemon-bin"',
+      'BIN_URL="${SERVER}/api/daemon/octodeck-daemon-bin/${DETECT_OS}/${DETECT_ARCH}"',
     );
     expect(script).toContain('OCTODECK_HOME="${HOME}/.octodeck"');
     expect(script).toContain('INSTALL_DIR="${OCTODECK_HOME}/daemon"');

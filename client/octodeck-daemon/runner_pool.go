@@ -21,8 +21,9 @@ type runEntry struct {
 
 // runnerPool keeps track of currently running children.
 type runnerPool struct {
-	mu   sync.Mutex
-	runs map[string]*runEntry // runId → entry
+	mu       sync.Mutex
+	runs     map[string]*runEntry // runId → entry
+	draining bool                 // true while daemon is waiting to restart for a graceful update
 	// maxRuns <= 0 means unlimited concurrent runs.
 	maxRuns int
 }
@@ -35,6 +36,9 @@ func newRunnerPool(max int) *runnerPool {
 func (p *runnerPool) reserve(runID string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.draining {
+		return false
+	}
 	if _, exists := p.runs[runID]; exists {
 		return false
 	}
@@ -93,6 +97,24 @@ func (p *runnerPool) release(runID string) {
 	delete(p.runs, runID)
 }
 
+func (p *runnerPool) setDraining(draining bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.draining = draining
+}
+
+func (p *runnerPool) isDraining() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.draining
+}
+
+func (p *runnerPool) activeCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.runs)
+}
+
 // cancelRun signals the given run to stop. Returns true if found.
 func (p *runnerPool) cancelRun(runID string) bool {
 	p.mu.Lock()
@@ -149,6 +171,9 @@ func (p *runnerPool) snapshot() []RunningRunInfo {
 func (p *runnerPool) availableSlots() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.draining {
+		return 0
+	}
 	if p.maxRuns <= 0 {
 		return 0
 	}

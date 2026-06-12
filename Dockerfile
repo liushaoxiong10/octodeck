@@ -29,7 +29,9 @@ WORKDIR /app
 
 # Copy package.json files first for better layer caching
 COPY package.json ./
+COPY package-lock.json ./
 COPY web/package.json ./web/
+COPY web/package-lock.json ./web/
 COPY container/agent-runner/package.json ./container/agent-runner/
 
 # Configure npm to use taobao registry
@@ -69,7 +71,7 @@ RUN npm run build:all
 #     darwin/amd64, darwin/arm64, linux/amd64, linux/arm64
 #   产物固定输出到 /app/client/octodeck-daemon/dist/octodeck-daemon-{os}-{arch}
 # -----------------------------------------------------------------------------
-FROM golang:1.23-bookworm AS daemon-builder
+FROM golang:1.24-bookworm AS daemon-builder
 
 WORKDIR /src
 
@@ -139,6 +141,7 @@ COPY --from=builder /app/config ./config
 # Copy Go daemon binaries (4 platforms + legacy single-binary fallback)
 COPY --from=daemon-builder /out/octodeck-daemon ./client/octodeck-daemon/octodeck-daemon
 COPY --from=daemon-builder /out/dist/         ./client/octodeck-daemon/dist/
+COPY client/octodeck-daemon/VERSION ./client/octodeck-daemon/VERSION
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \

@@ -6,12 +6,31 @@ import {
   getUsageDailySummary,
   getUsageModels,
   getUsageUsers,
+  repairSystemUsageRecordOwners,
 } from '../db.js';
 import type { AuthUser } from '../types.js';
+import { logger } from '../logger.js';
 
 const usage = new Hono<{ Variables: Variables }>();
 
 usage.use('*', authMiddleware);
+
+let ownerRepairRan = false;
+
+function ensureUsageOwnersRepaired(): void {
+  if (ownerRepairRan) return;
+  ownerRepairRan = true;
+  // Rebuilds usage_daily_summary from usage_records, which can be slow on large
+  // datasets. Run it off the request path so the first /usage page load doesn't
+  // block long enough to trip the frontend request timeout.
+  setImmediate(() => {
+    try {
+      repairSystemUsageRecordOwners();
+    } catch (err) {
+      logger.error({ err }, 'repairSystemUsageRecordOwners failed');
+    }
+  });
+}
 
 /**
  * Resolve userId for queries:
@@ -34,6 +53,7 @@ function resolveUserId(
  * Fixes: token KPI (uses modelUsage data) + timezone (local date grouping).
  */
 usage.get('/stats', (c) => {
+  ensureUsageOwnersRepaired();
   const user = c.get('user') as AuthUser;
   const daysParam = c.req.query('days');
   const days = daysParam
@@ -66,6 +86,7 @@ usage.get('/stats', (c) => {
  * Returns list of all models that have usage data.
  */
 usage.get('/models', (c) => {
+  ensureUsageOwnersRepaired();
   const models = getUsageModels();
   return c.json({ models });
 });
@@ -75,6 +96,7 @@ usage.get('/models', (c) => {
  * Returns list of users that have usage data. Admin only.
  */
 usage.get('/users', (c) => {
+  ensureUsageOwnersRepaired();
   const user = c.get('user') as AuthUser;
   if (user.role !== 'admin') {
     return c.json({ users: [{ id: user.id, username: user.username }] });

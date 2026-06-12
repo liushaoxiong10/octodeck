@@ -2,13 +2,14 @@ import crypto from 'crypto';
 
 import { logger } from '../logger.js';
 import type { AgentLinkSession } from './session.js';
-import type { ToolEventFrame, ToolResultFrame } from './protocol.js';
+import type { ToolEventFrame, ToolResultFrame, WorkspaceRepoSpec } from './protocol.js';
 
 export interface RemoteToolInvokeOptions {
   linkId: string;
   toolName: string;
   input: unknown;
   cwd: string;
+  workspaceRepo?: WorkspaceRepoSpec;
   timeoutMs: number;
   maxOutputBytes: number;
   onEvent?: (frame: ToolEventFrame) => void;
@@ -64,6 +65,7 @@ export function invokeRemoteTool(
       toolName: opts.toolName,
       input: opts.input,
       cwd: opts.cwd,
+      workspaceRepo: opts.workspaceRepo,
       timeoutMs: opts.timeoutMs,
       maxOutputBytes: opts.maxOutputBytes,
     });

@@ -16,6 +16,8 @@ export interface GroupInfo {
   device_link_id?: string;
   agent_client_id?: string;
   agent_model?: string;
+  agent_access_scope?: 'all' | 'workspace';
+  permission_mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
   execution_mode?: 'container' | 'host';
   custom_cwd?: string;
   repo_id?: string;
