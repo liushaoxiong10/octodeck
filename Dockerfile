@@ -29,9 +29,7 @@ WORKDIR /app
 
 # Copy package.json files first for better layer caching
 COPY package.json ./
-COPY package-lock.json ./
 COPY web/package.json ./web/
-COPY web/package-lock.json ./web/
 COPY container/agent-runner/package.json ./container/agent-runner/
 
 # Configure npm to use taobao registry
