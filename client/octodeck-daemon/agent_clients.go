@@ -298,7 +298,7 @@ func supportsAgentClientCandidate(c agentClientCandidate, binary string) bool {
 
 func supportsEmbeddedACPClientCandidate(c agentClientCandidate) bool {
 	switch c.id {
-	case "claude-acp", "codex-acp":
+	case "claude-acp", "codex-acp", "traex-acp":
 		return true
 	default:
 		return false

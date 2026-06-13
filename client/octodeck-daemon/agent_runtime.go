@@ -1724,7 +1724,7 @@ func (a *acpAdapter) usesEmbeddedACPAdapter() bool {
 		return false
 	}
 	switch a.client.ID {
-	case "claude-acp", "codex-acp":
+	case "claude-acp", "codex-acp", "traex-acp":
 		return true
 	default:
 		return false
@@ -1764,6 +1764,8 @@ func (a *acpAdapter) startEmbeddedACPProcess(ctx context.Context, cfg *Config, r
 			err = claudeacp.RunStdio(runCtx, a.embeddedClaudeRuntimeConfig(req), serverStdin, serverStdout, stderrWriter)
 		case "codex-acp":
 			err = codexacp.RunStdio(runCtx, a.embeddedCodexRuntimeConfig(req), serverStdin, serverStdout, stderrWriter)
+		case "traex-acp":
+			err = codexacp.RunStdio(runCtx, a.embeddedTraexRuntimeConfig(req), serverStdin, serverStdout, stderrWriter)
 		default:
 			err = fmt.Errorf("unsupported embedded ACP adapter: %s", a.client.ID)
 		}
@@ -1834,6 +1836,30 @@ func (a *acpAdapter) embeddedCodexRuntimeConfig(req *AgentRunRequestFrame) codex
 	config.PatchApplyMode = firstNonEmpty(os.Getenv("ACP_ADAPTER_PATCH_APPLY_MODE"), os.Getenv("PATCH_APPLY_MODE"), "appserver")
 	config.RetryTurnOnCrash = parseBoolEnv(os.Getenv("RETRY_TURN_ON_CRASH"), true)
 	config.InitialAuthMode = detectCodexAuthMode()
+	if req != nil && (strings.TrimSpace(req.Policy.Model) != "" || strings.TrimSpace(req.Policy.SystemPrompt) != "" || strings.TrimSpace(req.Policy.PermissionMode) != "") {
+		config.Profiles = map[string]codexacp.ProfileConfig{
+			"octodeck": {Model: strings.TrimSpace(req.Policy.Model), Sandbox: normalizeCodexPermissionMode(req.Policy.PermissionMode), SystemInstructions: strings.TrimSpace(req.Policy.SystemPrompt)},
+		}
+		config.DefaultProfile = "octodeck"
+	}
+	return config
+}
+
+// embeddedTraexRuntimeConfig 复用 codexacp 桥接，将 traex app-server 的
+// codex_app_server v2 通知翻译成 ACP session/update。traex 二进制内部使用与
+// codex 同一族的 `codex_app_server_protocol`，因此可以直接复用 codexacp.RunStdio。
+func (a *acpAdapter) embeddedTraexRuntimeConfig(req *AgentRunRequestFrame) codexacp.RuntimeConfig {
+	config := codexacp.DefaultRuntimeConfig()
+	config.AppServerCommand = a.client.Binary
+	config.AppServerArgs = []string{"app-server"}
+	if raw := strings.TrimSpace(os.Getenv("TRAEX_APP_SERVER_ARGS")); raw != "" {
+		config.AppServerArgs = strings.Fields(raw)
+	}
+	config.LogLevel = firstNonEmpty(os.Getenv("ACP_ADAPTER_LOG_LEVEL"), os.Getenv("LOG_LEVEL"), "info")
+	config.TraceJSON = parseBoolEnv(os.Getenv("ACP_ADAPTER_TRACE_JSON"), false)
+	config.TraceJSONFile = firstNonEmpty(os.Getenv("ACP_ADAPTER_TRACE_JSON_FILE"), os.Getenv("TRACE_JSON_FILE"), "trace-jsonl.log")
+	config.PatchApplyMode = firstNonEmpty(os.Getenv("ACP_ADAPTER_PATCH_APPLY_MODE"), os.Getenv("PATCH_APPLY_MODE"), "appserver")
+	config.RetryTurnOnCrash = parseBoolEnv(os.Getenv("RETRY_TURN_ON_CRASH"), true)
 	if req != nil && (strings.TrimSpace(req.Policy.Model) != "" || strings.TrimSpace(req.Policy.SystemPrompt) != "" || strings.TrimSpace(req.Policy.PermissionMode) != "") {
 		config.Profiles = map[string]codexacp.ProfileConfig{
 			"octodeck": {Model: strings.TrimSpace(req.Policy.Model), Sandbox: normalizeCodexPermissionMode(req.Policy.PermissionMode), SystemInstructions: strings.TrimSpace(req.Policy.SystemPrompt)},
