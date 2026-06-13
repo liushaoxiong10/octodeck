@@ -776,6 +776,7 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 	var finalText string
 	var finalResultFallback string
 	var sessionID string
+	var finalUsage map[string]any
 	pumpStdoutDone := make(chan struct{})
 	pumpStderrDone := make(chan struct{})
 	go func() {
@@ -799,6 +800,13 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 			}
 			if frame.SessionID != "" {
 				sessionID = frame.SessionID
+			}
+			if frame.EventType == "usage" {
+				if usage := acpUsageFromPayload(frame.Payload); usage != nil {
+					textMu.Lock()
+					finalUsage = usage
+					textMu.Unlock()
+				}
 			}
 			if frame.EventType == "permission_request" {
 				requestID := permissionRequestID(frame.Payload)
@@ -847,7 +855,7 @@ func (rt *agentRuntimeProcess) runAgent(parent context.Context, out io.Writer, r
 		_ = writeACPSessionRecord(rt.cfg, agentSessionMapRecord(processKey, conversationID, *client, req, sessionID))
 	}
 	errPtr := (*string)(nil)
-	rt.notify(out, "agent.run.result", AgentRunResultFrame{Type: tAgentRunResult, RunID: req.RunID, AgentID: req.AgentID, OK: true, Result: finalText, Error: errPtr, SessionID: sessionID, TimedOut: timedOut, DurationMs: time.Since(started).Milliseconds()})
+	rt.notify(out, "agent.run.result", AgentRunResultFrame{Type: tAgentRunResult, RunID: req.RunID, AgentID: req.AgentID, OK: true, Result: finalText, Error: errPtr, SessionID: sessionID, Usage: finalUsage, TimedOut: timedOut, DurationMs: time.Since(started).Milliseconds()})
 }
 
 func (rt *agentRuntimeProcess) resolveCwd(ctx context.Context, req *AgentRunRequestFrame) (string, error) {
@@ -3483,7 +3491,11 @@ func normalizeAgentJSONLineFrames(line string) []AgentRunEventFrame {
 	// up (chunks + full result). Use a separate event type so the accumulator
 	// can only pick this up as a fallback when no streaming text was seen.
 	if result, ok := evt["result"].(string); ok && result != "" {
-		return []AgentRunEventFrame{{EventType: "final_result", Text: result, SessionID: sessionID, Payload: evt}}
+		frames := []AgentRunEventFrame{{EventType: "final_result", Text: result, SessionID: sessionID, Payload: evt}}
+		if usage := acpUsageFromPayload(evt); usage != nil {
+			frames = append(frames, AgentRunEventFrame{EventType: "usage", SessionID: sessionID, Payload: evt})
+		}
+		return frames
 	}
 
 	// --- 4. standalone thinking fields at top level ---
