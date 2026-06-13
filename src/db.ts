@@ -1335,6 +1335,7 @@ function initializeSqliteDatabase(
   ensureColumn('registered_groups', 'agent_model', 'TEXT');
   ensureColumn('registered_groups', 'agent_access_scope', 'TEXT');
   ensureColumn('registered_groups', 'permission_mode', 'TEXT');
+  ensureColumn('registered_groups', 'system_prompt', 'TEXT');
   // Phase 5.1: per-group execution node (server-local | <agent_link_id>)
   ensureColumn('registered_groups', 'execution_node', 'TEXT');
   ensureColumn('agent_links', 'agent_clients', "TEXT NOT NULL DEFAULT '[]'");
@@ -5378,6 +5379,7 @@ type RegisteredGroupRow = {
   agent_model: string | null;
   agent_access_scope: string | null;
   permission_mode: string | null;
+  system_prompt: string | null;
   backend: string | null;
   execution_node: string | null;
 };
@@ -5447,6 +5449,7 @@ function parseGroupRow(
       row.permission_mode === 'plan'
         ? row.permission_mode
         : undefined,
+    systemPrompt: row.system_prompt ?? undefined,
     backend: row.backend ?? undefined,
     executionNode: row.execution_node ?? undefined,
   };
@@ -5485,8 +5488,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, repo_id, repo_git_url, repo_main_branch, repo_device_path, visible_repo_mode, visible_repo_ids, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist, runtime_profile, device_link_id, agent_client_id, agent_model, agent_access_scope, permission_mode, backend, execution_node)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, repo_id, repo_git_url, repo_main_branch, repo_device_path, visible_repo_mode, visible_repo_ids, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, owner_im_id, mcp_mode, selected_mcps, conversation_source, conversation_nav_mode, binding_mode, feishu_chat_mode, feishu_group_message_type, sender_allowlist, runtime_profile, device_link_id, agent_client_id, agent_model, agent_access_scope, permission_mode, system_prompt, backend, execution_node)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -5528,6 +5531,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.agentModel ?? null,
     group.agentAccessScope ?? null,
     group.permissionMode ?? null,
+    group.systemPrompt?.trim() || null,
     group.backend ?? null,
     group.executionNode ?? null,
   );

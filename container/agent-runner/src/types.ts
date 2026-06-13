@@ -49,6 +49,8 @@ export interface ContainerInput {
   agentToolToken?: string;
   /** Native local tool policy for the SDK runner. */
   localToolPolicy?: 'none' | 'server' | 'device-remote' | 'container';
+  /** Per-workspace system prompt appended to every agent run. */
+  workspaceSystemPrompt?: string;
   /** Server base URL used by remote MCP tools to call /api/agent-link/tool. */
   remoteToolServerUrl?: string;
   /** Runtime context audit bootstrap from the host/container launcher. */

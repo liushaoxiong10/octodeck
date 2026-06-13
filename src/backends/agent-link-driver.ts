@@ -616,6 +616,7 @@ function getChannelFromJid(jid: string | undefined): string | null {
 
 function buildDeviceCliSystemPrompt(
   input: BackendRunArgs['input'],
+  group: BackendRunArgs['group'],
   ownerUserId?: string,
 ): string | undefined {
   const channel = getChannelFromJid(input.currentSourceJid || input.chatJid);
@@ -641,8 +642,12 @@ function buildDeviceCliSystemPrompt(
 
   const cacheKey = JSON.stringify({
     isHome: !!input.isHome,
+    groupFolder: input.groupFolder,
     channel,
     hasAgentOverride: !!input.agentId,
+    workspacePromptHash: group.systemPrompt
+      ? crypto.createHash('sha256').update(group.systemPrompt).digest('hex')
+      : '',
     ownerUserId: ownerUserId ?? '',
     cloudHash: cloudGlobalMemoryContent
       ? crypto
@@ -693,6 +698,11 @@ function buildDeviceCliSystemPrompt(
             `<agent-override>\n${loadPromptFile('agent-override.md')}\n</agent-override>`,
           ]
         : []),
+      ...(group.systemPrompt?.trim()
+        ? [
+            `<workspace-system-prompt>\n${group.systemPrompt.trim()}\n</workspace-system-prompt>`,
+          ]
+        : []),
     ];
 
     deviceSystemPromptCache.set(cacheKey, pieces.join('\n'));
@@ -721,7 +731,7 @@ function buildAgentRunPolicy(
     policy.permissionMode = permissionMode;
   }
   if (isStartingNewDeviceCliSession(input)) {
-    const systemPrompt = buildDeviceCliSystemPrompt(input, ownerUserId);
+    const systemPrompt = buildDeviceCliSystemPrompt(input, group, ownerUserId);
     if (systemPrompt) policy.systemPrompt = systemPrompt;
   }
   return policy;
@@ -737,23 +747,25 @@ function appendClaudeCodeSystemPromptArg(
   argv: string[],
   agentClientId: string | undefined,
   input: BackendRunArgs['input'],
+  group: BackendRunArgs['group'],
   ownerUserId?: string,
 ): string[] {
   if (agentClientId !== 'claude-code' && agentClientId !== 'claude-acp')
     return argv;
   if (!isStartingNewDeviceCliSession(input)) return argv;
   if (argv.includes('--append-system-prompt')) return argv;
-  const systemPrompt = buildDeviceCliSystemPrompt(input, ownerUserId);
+  const systemPrompt = buildDeviceCliSystemPrompt(input, group, ownerUserId);
   if (!systemPrompt) return argv;
   return [...argv, '--append-system-prompt', systemPrompt];
 }
 
 function buildDeviceCliUserPromptWithSystemContext(
   input: BackendRunArgs['input'],
+  group: BackendRunArgs['group'],
   ownerUserId?: string,
 ): string {
   if (!isStartingNewDeviceCliSession(input)) return input.prompt;
-  const systemPrompt = buildDeviceCliSystemPrompt(input, ownerUserId);
+  const systemPrompt = buildDeviceCliSystemPrompt(input, group, ownerUserId);
   if (!systemPrompt) return input.prompt;
   return [
     '<octodeck-system-context>',
@@ -1655,7 +1667,7 @@ export async function runViaAgentLink(
     const promptForArgv = shouldInlineSystemPromptForLegacyDeviceCli(
       resolvedTarget?.agentClientId,
     )
-      ? buildDeviceCliUserPromptWithSystemContext(input, group.created_by)
+      ? buildDeviceCliUserPromptWithSystemContext(input, group, group.created_by)
       : input.prompt;
     argv = cfg.buildArgv({
       prompt: promptForArgv,
@@ -1671,6 +1683,7 @@ export async function runViaAgentLink(
       argv,
       resolvedTarget?.agentClientId,
       input,
+      group,
       group.created_by,
     );
     argv = applyAgentPermissionArgs(

@@ -18,6 +18,7 @@ export const AgentPermissionModeSchema = z.enum([
   'bypassPermissions',
   'plan',
 ]);
+const MAX_WORKSPACE_SYSTEM_PROMPT_LEN = 20_000;
 
 export const TaskPatchSchema = z.object({
   chat_jid: z.string().min(1).optional(),
@@ -226,6 +227,10 @@ export const GroupCreateSchema = z.object({
   execution_mode: z.enum(['container', 'host']).optional(),
   agent_access_scope: AgentAccessScopeSchema.optional(),
   permission_mode: AgentPermissionModeSchema.optional(),
+  system_prompt: z
+    .string()
+    .max(MAX_WORKSPACE_SYSTEM_PROMPT_LEN)
+    .optional(),
   // Device target for native execution: built-in server device or connected octodeck-daemon device.
   execution_node: z.string().min(1).max(128).optional(),
   custom_cwd: z
@@ -429,6 +434,11 @@ export const GroupPatchSchema = z.object({
   backend: z.string().min(1).max(64).nullable().optional(),
   agent_access_scope: AgentAccessScopeSchema.optional(),
   permission_mode: AgentPermissionModeSchema.optional(),
+  system_prompt: z
+    .string()
+    .max(MAX_WORKSPACE_SYSTEM_PROMPT_LEN)
+    .nullable()
+    .optional(),
   visible_repo_mode: z.enum(['all', 'selected']).optional(),
   visible_repo_ids: z.array(z.string().min(1).max(128)).max(200).nullable().optional(),
   // 'server-local' | cl_xxx | runtime:cl_xxx:agentClient | provider:agentClient

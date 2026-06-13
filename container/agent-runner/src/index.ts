@@ -1400,6 +1400,12 @@ async function runQuery(
     ...(containerInput.agentId
       ? [{ name: 'agent-override.md', text: CONVERSATION_AGENT_BLOCK }]
       : []),
+    ...(containerInput.workspaceSystemPrompt?.trim()
+      ? [{
+          name: 'workspace-system-prompt',
+          text: `<workspace-system-prompt>\n${containerInput.workspaceSystemPrompt.trim()}\n</workspace-system-prompt>`,
+        }]
+      : []),
     ...(containerInput.localToolPolicy === 'none'
       ? [{ name: 'server-agent-no-execution', text: SERVER_AGENT_NO_EXECUTION_GUIDANCE }]
       : []),

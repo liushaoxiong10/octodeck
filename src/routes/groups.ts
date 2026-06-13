@@ -205,6 +205,7 @@ interface GroupPayloadItem {
   agent_model?: string;
   agent_access_scope?: 'all' | 'workspace';
   permission_mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+  system_prompt?: string;
   execution_mode: 'container' | 'host';
   custom_cwd?: string;
   repo_id?: string;
@@ -314,14 +315,18 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
     const latest = latestByJid.get(jid);
     const memberInfo = !isHome ? getMemberInfo(group.folder) : null;
     const isShared = memberInfo ? memberInfo.count > 1 : false;
+    const canModifyThisGroup = canModifyGroup(
+      { id: user.id, role: user.role },
+      { ...group, jid },
+    );
 
     result[jid] = {
       name: group.name,
       folder: group.folder,
       added_at: group.added_at,
       kind: isHome ? 'home' : isWeb ? 'web' : 'feishu',
-      editable: isWeb,
-      deletable: isWeb && !isHome,
+      editable: canModifyThisGroup && isWeb,
+      deletable: canModifyThisGroup && isWeb && !isHome,
       lastMessage: latest?.content,
       lastMessageTime:
         latest?.timestamp ||
@@ -333,6 +338,7 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       agent_model: isAdmin ? group.agentModel : undefined,
       agent_access_scope: isAdmin ? group.agentAccessScope ?? 'all' : undefined,
       permission_mode: isAdmin ? group.permissionMode ?? 'bypassPermissions' : undefined,
+      system_prompt: canModifyThisGroup ? group.systemPrompt : undefined,
       execution_mode: group.executionMode || 'container',
       custom_cwd: isAdmin ? group.customCwd : undefined,
       repo_id: isAdmin ? group.repoId : undefined,
@@ -531,6 +537,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
   const visibleRepoIds = validation.data.visible_repo_ids;
   const agentAccessScope = validation.data.agent_access_scope ?? 'all';
   const permissionMode = validation.data.permission_mode ?? 'bypassPermissions';
+  const systemPrompt = validation.data.system_prompt?.trim() || undefined;
   const initSourcePath = validation.data.init_source_path;
   const initGitUrl = validation.data.init_git_url;
   const authUser = c.get('user') as AuthUser;
@@ -871,6 +878,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     agentModel,
     agentAccessScope,
     permissionMode,
+    systemPrompt,
     backend: runtimeProfile === 'device-cli-agent' ? backend : undefined,
     executionNode:
       runtimeProfile !== 'server-agent' ? effectiveExecutionNode : undefined,
@@ -957,6 +965,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       agent_client_id: group.agentClientId,
       agent_access_scope: group.agentAccessScope ?? 'all',
       permission_mode: group.permissionMode ?? 'bypassPermissions',
+      system_prompt: group.systemPrompt,
       backend: group.backend,
       execution_mode: group.executionMode || 'host',
       member_role: 'owner',
@@ -998,6 +1007,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     backend,
     agent_access_scope,
     permission_mode,
+    system_prompt,
     visible_repo_mode,
     visible_repo_ids,
     execution_node,
@@ -1017,6 +1027,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     backend === undefined &&
     agent_access_scope === undefined &&
     permission_mode === undefined &&
+    system_prompt === undefined &&
     visible_repo_mode === undefined &&
     visible_repo_ids === undefined &&
     execution_node === undefined
@@ -1122,6 +1133,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     backend === undefined &&
     agent_access_scope === undefined &&
     permission_mode === undefined &&
+    system_prompt === undefined &&
     visible_repo_mode === undefined &&
     visible_repo_ids === undefined &&
     execution_node === undefined;
@@ -1178,6 +1190,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     backend !== undefined ||
     agent_access_scope !== undefined ||
     permission_mode !== undefined ||
+    system_prompt !== undefined ||
     visible_repo_mode !== undefined ||
     visible_repo_ids !== undefined ||
     execution_node !== undefined
@@ -1253,6 +1266,10 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
           : existing.agentAccessScope,
       permissionMode:
         permission_mode !== undefined ? permission_mode : existing.permissionMode,
+      systemPrompt:
+        system_prompt !== undefined
+          ? system_prompt?.trim() || undefined
+          : existing.systemPrompt,
       backend: backend !== undefined ? backend || undefined : existing.backend,
       executionNode:
         nextDeviceLinkId !== undefined
