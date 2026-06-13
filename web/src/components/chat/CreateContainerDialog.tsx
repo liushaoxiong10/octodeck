@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { useAgentLinksStore } from '../../stores/agentLinks';
@@ -59,6 +60,7 @@ export function CreateContainerDialog({
   const [selectedRepoId, setSelectedRepoId] = useState('');
   const [agentAccessScope, setAgentAccessScope] = useState<AgentAccessScope>('all');
   const [permissionMode, setPermissionMode] = useState<AgentPermissionMode>('bypassPermissions');
+  const [systemPrompt, setSystemPrompt] = useState('');
 
   const createFlow = useChatStore((s) => s.createFlow);
   const canHostExec = useAuthStore((s) => s.user?.role === 'admin');
@@ -131,6 +133,7 @@ export function CreateContainerDialog({
     setSelectedRepoId('');
     setAgentAccessScope('all');
     setPermissionMode('bypassPermissions');
+    setSystemPrompt('');
   };
 
   const handleClose = () => {
@@ -152,6 +155,8 @@ export function CreateContainerDialog({
       options.runtime_profile = runtimeProfile;
       options.agent_access_scope = agentAccessScope;
       options.permission_mode = permissionMode;
+      const trimmedSystemPrompt = systemPrompt.trim();
+      if (trimmedSystemPrompt) options.system_prompt = trimmedSystemPrompt;
       if (runtimeProfile !== 'server-agent') {
         if (!executionNode) {
           toast.error('请选择执行 Device');
@@ -321,6 +326,21 @@ export function CreateContainerDialog({
                       <option value="all">All</option>
                       <option value="workspace">Workspace</option>
                     </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2">工作区系统提示词</label>
+                  <Textarea
+                    value={systemPrompt}
+                    onChange={(e) => setSystemPrompt(e.target.value)}
+                    placeholder="输入后会作为系统提示词带给该工作区的所有 Agent"
+                    rows={5}
+                    maxLength={20000}
+                    className="resize-y"
+                  />
+                  <div className="text-xs text-muted-foreground mt-1">
+                    {systemPrompt.length}/20000
                   </div>
                 </div>
 

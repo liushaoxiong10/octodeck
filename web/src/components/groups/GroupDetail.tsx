@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { BookOpen } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
 import { GroupInfo } from '../../stores/groups';
 import { api } from '../../api/client';
 import { useAgentLinksStore } from '../../stores/agentLinks';
@@ -72,6 +73,9 @@ export function GroupDetail({ group }: GroupDetailProps) {
     group.permission_mode ?? 'bypassPermissions',
   );
   const [savingPermissions, setSavingPermissions] = useState(false);
+  const [systemPrompt, setSystemPrompt] = useState(group.system_prompt ?? '');
+  const [savedSystemPrompt, setSavedSystemPrompt] = useState(group.system_prompt ?? '');
+  const [savingSystemPrompt, setSavingSystemPrompt] = useState(false);
 
   // Execution Device selection (<device_id>)
   const { links: agentLinks, load: loadAgentLinks } = useAgentLinksStore();
@@ -116,6 +120,11 @@ export function GroupDetail({ group }: GroupDetailProps) {
     setCurrentPermissionMode(group.permission_mode ?? 'bypassPermissions');
   }, [group.agent_access_scope, group.permission_mode, group.jid]);
 
+  useEffect(() => {
+    setSystemPrompt(group.system_prompt ?? '');
+    setSavedSystemPrompt(group.system_prompt ?? '');
+  }, [group.system_prompt, group.jid]);
+
   const handleAccessScopeChange = async (next: 'all' | 'workspace') => {
     if (next === currentAccessScope) return;
     setSavingPermissions(true);
@@ -145,6 +154,23 @@ export function GroupDetail({ group }: GroupDetailProps) {
       toast.error(getErrorMessage(err, '更新 Agent 审批模式失败'));
     } finally {
       setSavingPermissions(false);
+    }
+  };
+
+  const handleSystemPromptSave = async () => {
+    setSavingSystemPrompt(true);
+    try {
+      const next = systemPrompt.trim();
+      await api.patch(`/api/groups/${encodeURIComponent(group.jid)}`, {
+        system_prompt: next,
+      });
+      setSystemPrompt(next);
+      setSavedSystemPrompt(next);
+      toast.success('工作区系统提示词已更新，下一次执行生效');
+    } catch (err) {
+      toast.error(getErrorMessage(err, '更新工作区系统提示词失败'));
+    } finally {
+      setSavingSystemPrompt(false);
     }
   };
 
@@ -344,6 +370,33 @@ export function GroupDetail({ group }: GroupDetailProps) {
             <div className="text-xs text-muted-foreground mt-1">
               当前：{currentPermissionMode}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Workspace system prompt */}
+      {group.editable && (
+        <div>
+          <div className="text-xs text-muted-foreground mb-1">工作区系统提示词</div>
+          <Textarea
+            value={systemPrompt}
+            onChange={(e) => setSystemPrompt(e.target.value)}
+            placeholder="输入后会作为系统提示词带给该工作区的所有 Agent"
+            rows={6}
+            maxLength={20000}
+            className="resize-y text-sm"
+          />
+          <div className="mt-2 flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={handleSystemPromptSave}
+              disabled={savingSystemPrompt || systemPrompt.trim() === savedSystemPrompt.trim()}
+            >
+              {savingSystemPrompt ? '保存中...' : '保存提示词'}
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {systemPrompt.length}/20000 · 下一次执行生效
+            </span>
           </div>
         </div>
       )}

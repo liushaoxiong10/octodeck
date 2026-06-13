@@ -108,6 +108,8 @@ export interface RegisteredGroup {
   agentAccessScope?: AgentAccessScope;
   /** Per-workspace approval / permission mode for agent runs. */
   permissionMode?: AgentPermissionMode;
+  /** Per-workspace system prompt appended to every agent run in this workspace. */
+  systemPrompt?: string;
   /**
    * 命令执行节点。
    *   - undefined / 'server-local' → server 进程内 spawn（沿用旧逻辑）

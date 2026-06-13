@@ -279,6 +279,8 @@ export interface ContainerInput {
   localToolPolicy?: 'none' | 'server' | 'device-remote' | 'container';
   /** Per-workspace Claude Code permission mode. 'default' leaves SDK default approvals on. */
   permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+  /** Per-workspace system prompt appended to every agent run. */
+  workspaceSystemPrompt?: string;
   /** Base URL for agent-runner -> server tool bridge calls. */
   remoteToolServerUrl?: string;
   /** Runtime context audit bootstrap; agent-runner enriches it with SDK usage. */
@@ -1121,6 +1123,7 @@ export async function runContainerAgent(
             : path.join(DATA_DIR, 'sessions', group.folder, '.claude'),
         }).audit,
         permissionMode: group.permissionMode ?? 'bypassPermissions',
+        workspaceSystemPrompt: group.systemPrompt,
       };
       container.stdin.write(JSON.stringify(dockerInput));
       container.stdin.end();
@@ -1932,6 +1935,7 @@ export async function runHostAgent(
         remoteToolServerUrl: hostEnv['OCTODECK_SERVER_URL'],
         contextAudit: hostClaudeContextPlan.audit,
         permissionMode: group.permissionMode ?? 'bypassPermissions',
+        workspaceSystemPrompt: group.systemPrompt,
       };
       proc.stdin.write(JSON.stringify(hostInput));
       proc.stdin.end();
