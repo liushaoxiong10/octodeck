@@ -40,10 +40,13 @@ var supportedAgentClients = []agentClientCandidate{
 	{id: "codex", displayName: "Codex CLI", command: "codex"},
 	{id: "traecli-acp", displayName: "TraeCLI (ACP)", command: "traecli", provider: "traecli", transport: "acp", args: []string{"acp"}, probeArgs: [][]string{{"acp", "--help"}, {"--help"}}},
 	{id: "traecli", displayName: "TraeCLI", command: "traecli"},
-	// traex: 本地的另一个 agent CLI 二进制，调用约定与 codex 一致（exec --json）。
-	// 优先尝试 ACP，失败 fallback 到 codex 风格 stream-json。
-	{id: "traex-acp", displayName: "Traex (ACP)", command: "traex", provider: "traex", transport: "acp", args: []string{"acp"}, probeArgs: [][]string{{"acp", "--help"}, {"--help"}}},
-	{id: "traex", displayName: "Traex", command: "traex", provider: "traex"},
+	// traex 0.200.9+ 已切换到 codex_app_server_protocol v2 schema，stdio 下
+	// `exec --json` 输出的 thread.* / turn.* / item.* 事件不在 daemon 的
+	// JSONL 解析白名单内，会导致前端拿不到 text_delta，"消息未响应"。
+	// traex 原生支持 `acp serve`（ACP transport），acpAdapter 已经覆盖完整的
+	// session / turn / tool_call / permission 链路，因此默认只发布 traex-acp，
+	// 不再回退到 stdio 路径，避免按钮可点但消息不返回。
+	{id: "traex-acp", displayName: "Traex", command: "traex", provider: "traex", transport: "acp", args: []string{"acp"}, probeArgs: [][]string{{"acp", "--help"}, {"--help"}}},
 }
 
 var agentClientVersionArgs = map[string][]string{

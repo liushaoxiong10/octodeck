@@ -647,8 +647,10 @@ func TestNormalizeACPServerArgsInjectsBypassForTrae(t *testing.T) {
 	}{
 		{name: "coco bypass prepends --yolo before acp serve", binary: "/opt/homebrew/bin/coco", input: []string{"acp"}, mode: "bypassPermissions", want: "--yolo acp serve"},
 		{name: "traecli bypass prepends --yolo before acp serve", binary: "/opt/homebrew/bin/traecli", input: []string{"acp"}, mode: "bypassPermissions", want: "--yolo acp serve"},
-		{name: "traex bypass prepends bypass flag before acp serve", binary: "/usr/local/bin/traex", input: []string{"acp"}, mode: "full-access", want: "--dangerously-bypass-approvals-and-sandbox acp serve"},
-		{name: "traex bypass keeps existing acp serve order", binary: "/usr/local/bin/traex", input: []string{"acp", "serve"}, mode: "bypassPermissions", want: "--dangerously-bypass-approvals-and-sandbox acp serve"},
+		{name: "traex bypass prepends native permission-mode before acp serve", binary: "/usr/local/bin/traex", input: []string{"acp"}, mode: "bypassPermissions", want: "--permission-mode bypass_permissions acp serve"},
+		{name: "traex full-access maps to danger sandbox before acp serve", binary: "/usr/local/bin/traex", input: []string{"acp"}, mode: "full-access", want: "--sandbox danger-full-access acp serve"},
+		{name: "traex read-only maps to sandbox before acp serve", binary: "/usr/local/bin/traex", input: []string{"acp"}, mode: "read-only", want: "--sandbox read-only acp serve"},
+		{name: "traex workspace-write maps to sandbox keeping serve order", binary: "/usr/local/bin/traex", input: []string{"acp", "serve"}, mode: "workspace-write", want: "--sandbox workspace-write acp serve"},
 		{name: "default mode does not inject", binary: "/opt/homebrew/bin/coco", input: []string{"acp"}, mode: "default", want: "acp serve"},
 		{name: "claude is unaffected", binary: "/usr/local/bin/claude", input: []string{"acp"}, mode: "bypassPermissions", want: "acp"},
 	}
@@ -669,7 +671,7 @@ func TestNormalizeACPServerArgsDoesNotDoubleInject(t *testing.T) {
 	}{
 		{binary: "/opt/homebrew/bin/coco", input: []string{"--yolo", "acp", "serve"}},
 		{binary: "/opt/homebrew/bin/traecli", input: []string{"-y", "acp", "serve"}},
-		{binary: "/usr/local/bin/traex", input: []string{"--dangerously-bypass-approvals-and-sandbox", "acp"}},
+		{binary: "/usr/local/bin/traex", input: []string{"--permission-mode", "bypass_permissions", "acp"}},
 	}
 	for _, tc := range cases {
 		got := normalizeACPServerArgs(tc.binary, tc.input, AgentRunPolicy{PermissionMode: "bypassPermissions"})
@@ -722,11 +724,11 @@ func TestNormalizeACPServerArgsInjectsModelForTrae(t *testing.T) {
 			want:   "-c model=doubao-1.5-pro acp serve",
 		},
 		{
-			name:   "traex model + bypass orders model after bypass",
+			name:   "traex model + bypass orders model after permission-mode",
 			binary: "/usr/local/bin/traex",
 			input:  []string{"acp", "serve"},
 			policy: AgentRunPolicy{Model: "claude-sonnet-4-6", PermissionMode: "bypassPermissions"},
-			want:   "--dangerously-bypass-approvals-and-sandbox -c model=claude-sonnet-4-6 acp serve",
+			want:   "--permission-mode bypass_permissions -c model=claude-sonnet-4-6 acp serve",
 		},
 		{
 			name:   "traex preserves pre-existing -c model override",
@@ -912,11 +914,11 @@ func TestDeviceAdaptersApplyNoApprovalPermissionArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	traexJoined := strings.Join(traexArgv, " ")
-	if !strings.HasPrefix(traexJoined, "--dangerously-bypass-approvals-and-sandbox exec ") {
-		t.Fatalf("traex no-approval argv should start with bypass flag: %#v", traexArgv)
+	if !strings.HasPrefix(traexJoined, "--permission-mode bypass_permissions exec ") {
+		t.Fatalf("traex no-approval argv should start with native permission-mode flag: %#v", traexArgv)
 	}
-	if strings.Contains(traexJoined, "--sandbox") || strings.Contains(traexJoined, "--ask-for-approval") {
-		t.Fatalf("traex no-approval argv should not use codex permission flags: %#v", traexArgv)
+	if strings.Contains(traexJoined, "--ask-for-approval") || strings.Contains(traexJoined, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("traex no-approval argv should not use codex/danger permission flags: %#v", traexArgv)
 	}
 	fullAccessTraexArgv, _, err := (&traexAdapter{}).BuildRunCommand(nil, &AgentRunRequestFrame{
 		Input:  AgentRunInput{Prompt: "hello"},
@@ -925,8 +927,8 @@ func TestDeviceAdaptersApplyNoApprovalPermissionArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(strings.Join(fullAccessTraexArgv, " "), "--dangerously-bypass-approvals-and-sandbox exec ") {
-		t.Fatalf("traex full-access argv should start with bypass flag: %#v", fullAccessTraexArgv)
+	if !strings.HasPrefix(strings.Join(fullAccessTraexArgv, " "), "--sandbox danger-full-access exec ") {
+		t.Fatalf("traex full-access argv should start with sandbox flag: %#v", fullAccessTraexArgv)
 	}
 
 	defaultTraeReq := &AgentRunRequestFrame{Input: AgentRunInput{Prompt: "hello"}}

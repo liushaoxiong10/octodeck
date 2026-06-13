@@ -56,8 +56,8 @@ func agentMemorySources(home string, clients []AgentClientInfo) []agentMemorySou
 			add(client.ID, filepath.Join(home, ".codex", "AGENTS.md"))
 		case "traecli":
 			add(client.ID, filepath.Join(home, ".trae", "AGENTS.md"))
-		case "traex":
-			// traex 与 codex 调用约定一致，使用 ~/.traex/AGENTS.md 作为外部记忆源。
+		case "traex", "traex-acp":
+			// traex / traex-acp 共用 ~/.traex/AGENTS.md 作为外部记忆源。
 			add(client.ID, filepath.Join(home, ".traex", "AGENTS.md"))
 		}
 	}

@@ -137,7 +137,7 @@ describe('agent client adapter', () => {
   });
 
   test('adapts bypass permission mode to TraeX no-approval argv', () => {
-    expect(normalizePermissionModeForAgent('traex', 'bypassPermissions')).toBe('full-access');
+    expect(normalizePermissionModeForAgent('traex', 'bypassPermissions')).toBe('bypassPermissions');
     expect(
       applyAgentPermissionArgs(
         ['exec', '--json', '--skip-git-repo-check', '-m', 'doubao-1.5-pro', 'hello'],
@@ -145,7 +145,8 @@ describe('agent client adapter', () => {
         'bypassPermissions',
       ),
     ).toEqual([
-      '--dangerously-bypass-approvals-and-sandbox',
+      '--permission-mode',
+      'bypass_permissions',
       'exec',
       '--json',
       '--skip-git-repo-check',
@@ -153,6 +154,18 @@ describe('agent client adapter', () => {
       'doubao-1.5-pro',
       'hello',
     ]);
+  });
+
+  test('adapts sandbox permission modes to TraeX --sandbox argv', () => {
+    expect(
+      applyAgentPermissionArgs(['exec', '--json', 'hello'], 'traex', 'read-only'),
+    ).toEqual(['--sandbox', 'read-only', 'exec', '--json', 'hello']);
+    expect(
+      applyAgentPermissionArgs(['exec', '--json', 'hello'], 'traex', 'workspace-write'),
+    ).toEqual(['--sandbox', 'workspace-write', 'exec', '--json', 'hello']);
+    expect(
+      applyAgentPermissionArgs(['exec', '--json', 'hello'], 'traex', 'full-access'),
+    ).toEqual(['--sandbox', 'danger-full-access', 'exec', '--json', 'hello']);
   });
 
   test('adapts bypass permission mode to TraeCLI yes argv', () => {

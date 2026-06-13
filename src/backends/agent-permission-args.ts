@@ -24,7 +24,7 @@ export function normalizePermissionModeForAgent(
   const mode = permissionMode?.trim();
   if (!mode || mode === 'default') return undefined;
   const family = agentFamily(agentClientId);
-  if (family === 'codex' || family === 'traex') {
+  if (family === 'codex') {
     switch (mode) {
       case 'bypassPermissions':
       case 'dangerously-skip-permissions':
@@ -35,7 +35,39 @@ export function normalizePermissionModeForAgent(
         return mode;
     }
   }
+  if (family === 'traex') {
+    // traex 区分「审批预设」(--permission-mode) 与「沙箱策略」(--sandbox)，
+    // 这里只把各种免审批别名归一到 bypassPermissions，其余模式原样保留。
+    switch (mode) {
+      case 'dangerously-skip-permissions':
+      case 'no-approval':
+      case 'auto-approve':
+        return 'bypassPermissions';
+      default:
+        return mode;
+    }
+  }
   return mode;
+}
+
+// traex 把 OctoDeck 的权限模式映射到自身原生的根级参数：
+//   bypassPermissions -> --permission-mode bypass_permissions（免审批，保留沙箱）
+//   read-only / workspace-write / full-access -> --sandbox <policy>（沙箱级别）
+// 这些都是根级参数，必须置于 exec / acp 等子命令之前。
+function traexPermissionArgs(mode: string): string[] {
+  switch (mode) {
+    case 'bypassPermissions':
+      return ['--permission-mode', 'bypass_permissions'];
+    case 'read-only':
+      return ['--sandbox', 'read-only'];
+    case 'workspace-write':
+      return ['--sandbox', 'workspace-write'];
+    case 'full-access':
+    case 'danger-full-access':
+      return ['--sandbox', 'danger-full-access'];
+    default:
+      return [];
+  }
 }
 
 export function applyAgentPermissionArgs(
@@ -73,9 +105,11 @@ export function applyAgentPermissionArgs(
   }
 
   if (family === 'traex') {
-    if (mode !== 'full-access' && mode !== 'danger-full-access') return argv;
-    if (hasArg(argv, '--dangerously-bypass-approvals-and-sandbox')) return argv;
-    return ['--dangerously-bypass-approvals-and-sandbox', ...argv];
+    if (hasArg(argv, '--permission-mode', '--sandbox', '--dangerously-bypass-approvals-and-sandbox', '-y'))
+      return argv;
+    const extra = traexPermissionArgs(mode);
+    if (extra.length === 0) return argv;
+    return [...extra, ...argv];
   }
 
   return argv;

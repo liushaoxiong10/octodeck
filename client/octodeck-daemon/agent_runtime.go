@@ -1296,12 +1296,28 @@ func (a *codexAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]
 	return argv, true, nil
 }
 
+// traexPermissionPrefix maps an OctoDeck permission mode to traex's native
+// root-level CLI flags (--permission-mode / --sandbox). These must appear
+// before the exec/acp subcommand. bypassPermissions skips approvals while
+// keeping the OS sandbox; the sandbox modes select the filesystem policy.
+func traexPermissionPrefix(permissionMode string) []string {
+	switch strings.TrimSpace(permissionMode) {
+	case "bypassPermissions", "dangerously-skip-permissions", "no-approval", "auto-approve":
+		return []string{"--permission-mode", "bypass_permissions"}
+	case "read-only":
+		return []string{"--sandbox", "read-only"}
+	case "workspace-write":
+		return []string{"--sandbox", "workspace-write"}
+	case "full-access", "danger-full-access":
+		return []string{"--sandbox", "danger-full-access"}
+	default:
+		return []string{}
+	}
+}
+
 func (a *traexAdapter) BuildRunCommand(_ *Config, req *AgentRunRequestFrame) ([]string, bool, error) {
 	prompt := promptWithSystemContext(req, req.Input.SessionID == "")
-	prefix := []string{}
-	if req.Policy.PermissionMode != "" && normalizeCodexPermissionMode(req.Policy.PermissionMode) == "danger-full-access" {
-		prefix = append(prefix, "--dangerously-bypass-approvals-and-sandbox")
-	}
+	prefix := traexPermissionPrefix(req.Policy.PermissionMode)
 	if req.Input.SessionID != "" {
 		argv := append(prefix, "exec", "resume", "--json", "--skip-git-repo-check")
 		if req.Policy.Model != "" {
@@ -1852,6 +1868,11 @@ func normalizeACPServerArgs(binary string, args []string, policy AgentRunPolicy)
 		normalized = append(normalized, "serve")
 	}
 	normalized = injectACPModelArgs(name, normalized, policy)
+	// traex maps every permission mode to its native root-level flags
+	// (--permission-mode / --sandbox), so it bypasses the auto-approve gate.
+	if name == "traex" {
+		return injectTraexACPPermissionArgs(normalized, policy)
+	}
 	if !shouldAutoApprovePermission(policy) {
 		return normalized
 	}
@@ -1918,13 +1939,25 @@ func injectACPBypassArgs(binaryName string, args []string) []string {
 			return args
 		}
 		return append([]string{"--yolo"}, args...)
-	case "traex":
-		if containsString(args, "--dangerously-bypass-approvals-and-sandbox") || containsString(args, "-y") {
-			return args
-		}
-		return append([]string{"--dangerously-bypass-approvals-and-sandbox"}, args...)
 	}
 	return args
+}
+
+// injectTraexACPPermissionArgs prepends traex's native root-level permission
+// flags so the platform-side permission mode reaches the device CLI. trae does
+// NOT round-trip permission requests through ACP session/request_permission, so
+// the daemon-side auto-allow path never fires for trae; the flags must be set
+// at process spawn time and must precede the acp subcommand.
+func injectTraexACPPermissionArgs(args []string, policy AgentRunPolicy) []string {
+	if containsString(args, "--permission-mode") || containsString(args, "--sandbox") ||
+		containsString(args, "--dangerously-bypass-approvals-and-sandbox") || containsString(args, "-y") {
+		return args
+	}
+	prefix := traexPermissionPrefix(policy.PermissionMode)
+	if len(prefix) == 0 {
+		return args
+	}
+	return append(prefix, args...)
 }
 
 func requiresACPServeSubcommand(binaryName string) bool {
