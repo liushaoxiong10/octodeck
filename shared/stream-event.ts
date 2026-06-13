@@ -14,7 +14,7 @@ export type StreamEventType =
   | 'tool_use_start' | 'tool_use_end' | 'tool_progress'
   | 'hook_started' | 'hook_progress' | 'hook_response'
   | 'task_start' | 'task_progress' | 'task_updated' | 'task_notification'
-  | 'permission_denied' | 'memory_recall' | 'compact_boundary'
+  | 'permission_denied' | 'permission_request' | 'memory_recall' | 'compact_boundary'
   | 'notification' | 'prompt_suggestion' | 'raw_sdk_event'
   | 'context_audit'
   | 'todo_update'
