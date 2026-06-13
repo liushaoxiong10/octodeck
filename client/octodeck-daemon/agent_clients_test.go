@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"strings"
 	"testing"
 	"time"
@@ -542,6 +543,77 @@ func TestSingleShotResultOnlyUsesFinalResultFallback(t *testing.T) {
 	}
 	if effective != "42" {
 		t.Fatalf("effective final text missing for single-shot CLI: got %q", effective)
+	}
+}
+
+func TestPumpAgentStdoutUsageCanBeAttachedToFinalResult(t *testing.T) {
+	req := &AgentRunRequestFrame{
+		RunID:          "run-usage",
+		AgentID:        "traecli",
+		MaxOutputBytes: 4096,
+	}
+	lines := strings.Join([]string{
+		`{"type":"content_block_delta","delta":{"type":"text_delta","text":"done"},"session_id":"sess-usage"}`,
+		`{"type":"message_stop","usage":{"input_tokens":12,"output_tokens":3,"cache_read_input_tokens":4},"session_id":"sess-usage"}`,
+	}, "\n") + "\n"
+
+	var sent atomic.Int64
+	var finalText string
+	var sessionID string
+	var finalUsage map[string]any
+	pumpAgentStdout(context.Background(), strings.NewReader(lines), req, true, &sent, func(frame AgentRunEventFrame) {
+		if frame.EventType == "text_delta" {
+			finalText += frame.Text
+		}
+		if frame.SessionID != "" {
+			sessionID = frame.SessionID
+		}
+		if frame.EventType == "usage" {
+			finalUsage = acpUsageFromPayload(frame.Payload)
+		}
+	})
+
+	if finalText != "done" {
+		t.Fatalf("expected text delta to be captured, got %q", finalText)
+	}
+	if sessionID != "sess-usage" {
+		t.Fatalf("expected session id, got %q", sessionID)
+	}
+	if finalUsage == nil {
+		t.Fatalf("expected usage payload")
+	}
+	if got := finalUsage["input_tokens"]; got != float64(12) {
+		t.Fatalf("expected input_tokens=12, got %#v", got)
+	}
+	if got := finalUsage["output_tokens"]; got != float64(3) {
+		t.Fatalf("expected output_tokens=3, got %#v", got)
+	}
+	if got := finalUsage["cache_read_input_tokens"]; got != float64(4) {
+		t.Fatalf("expected cache_read_input_tokens=4, got %#v", got)
+	}
+}
+
+func TestNormalizeAgentJSONLineFramesResultCarriesUsage(t *testing.T) {
+	line := `{"type":"result","result":"done","session_id":"sess-result","usage":{"input_tokens":20,"output_tokens":5}}`
+	frames := normalizeAgentJSONLineFrames(line)
+	if len(frames) != 2 {
+		t.Fatalf("expected final_result and usage frames, got %d: %#v", len(frames), frames)
+	}
+	if frames[0].EventType != "final_result" || frames[0].Text != "done" {
+		t.Fatalf("expected first frame to be final_result, got %#v", frames[0])
+	}
+	if frames[1].EventType != "usage" || frames[1].SessionID != "sess-result" {
+		t.Fatalf("expected second frame to be usage, got %#v", frames[1])
+	}
+	usage := acpUsageFromPayload(frames[1].Payload)
+	if usage == nil {
+		t.Fatalf("expected usage payload from result frame")
+	}
+	if got := usage["input_tokens"]; got != float64(20) {
+		t.Fatalf("expected input_tokens=20, got %#v", got)
+	}
+	if got := usage["output_tokens"]; got != float64(5) {
+		t.Fatalf("expected output_tokens=5, got %#v", got)
 	}
 }
 
