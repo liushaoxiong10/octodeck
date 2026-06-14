@@ -3486,13 +3486,13 @@ export function repairSystemUsageRecordOwners(): number {
     const result = db
       .prepare(
         `
-        UPDATE usage_records
+        UPDATE usage_records AS ur
         SET user_id = (
           SELECT rg.created_by
           FROM registered_groups rg
           WHERE rg.created_by IS NOT NULL
-            AND (rg.folder = usage_records.group_folder OR rg.jid = usage_records.group_folder)
-          ORDER BY CASE WHEN rg.folder = usage_records.group_folder THEN 0 ELSE 1 END
+            AND (rg.folder = ur.group_folder OR rg.jid = ur.group_folder)
+          ORDER BY CASE WHEN rg.folder = ur.group_folder THEN 0 ELSE 1 END
           LIMIT 1
         )
         WHERE (user_id IS NULL OR user_id = '' OR user_id = 'system')
@@ -3500,33 +3500,204 @@ export function repairSystemUsageRecordOwners(): number {
             SELECT 1
             FROM registered_groups rg
             WHERE rg.created_by IS NOT NULL
-              AND (rg.folder = usage_records.group_folder OR rg.jid = usage_records.group_folder)
+              AND (rg.folder = ur.group_folder OR rg.jid = ur.group_folder)
           )
         `,
       )
       .run();
 
     if ((result.changes ?? 0) > 0) {
-      db.exec(`
-        DELETE FROM usage_daily_summary;
-        INSERT INTO usage_daily_summary (user_id, model, date,
-          total_input_tokens, total_output_tokens,
-          total_cache_read_tokens, total_cache_creation_tokens,
-          total_cost_usd, request_count, updated_at)
-        SELECT
-          user_id,
-          model,
-          date(created_at, 'localtime'),
-          SUM(input_tokens), SUM(output_tokens),
-          SUM(cache_read_input_tokens), SUM(cache_creation_input_tokens),
-          SUM(cost_usd), COUNT(*), datetime('now')
-        FROM usage_records
-        GROUP BY user_id, model, date(created_at, 'localtime')
-      `);
+      rebuildUsageDailySummary();
     }
 
     return result.changes ?? 0;
   })();
+}
+
+function rebuildUsageDailySummary(): void {
+  db.exec(`
+    DELETE FROM usage_daily_summary;
+    INSERT INTO usage_daily_summary (user_id, model, date,
+      total_input_tokens, total_output_tokens,
+      total_cache_read_tokens, total_cache_creation_tokens,
+      total_cost_usd, request_count, updated_at)
+    SELECT
+      user_id,
+      model,
+      date(created_at, 'localtime'),
+      SUM(input_tokens), SUM(output_tokens),
+      SUM(cache_read_input_tokens), SUM(cache_creation_input_tokens),
+      SUM(cost_usd), COUNT(*), datetime('now')
+    FROM usage_records
+    GROUP BY user_id, model, date(created_at, 'localtime')
+  `);
+}
+
+/**
+ * Backfill usage_records from messages.token_usage for rows missed by older
+ * daemon/device paths. This is intentionally idempotent: message_id + model is
+ * treated as the natural key for records derived from a stored message.
+ */
+export function backfillMissingUsageRecordsFromMessages(): number {
+  return db.transaction(() => {
+    const modelUsageResult = db
+      .prepare(
+        `
+        INSERT INTO usage_records (id, user_id, group_folder, agent_id, message_id, model,
+          input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+          cost_usd, duration_ms, num_turns, source, created_at)
+        SELECT
+          lower(hex(randomblob(16))),
+          COALESCE(rg.created_by, 'system'),
+          COALESCE(rg.folder, m.chat_jid),
+          COALESCE(rg.agent_client_id, rg.backend, rg.execution_node),
+          m.id,
+          COALESCE(jme.key, 'unknown'),
+          COALESCE(json_extract(jme.value, '$.inputTokens'), json_extract(jme.value, '$.input_tokens'), 0),
+          COALESCE(json_extract(jme.value, '$.outputTokens'), json_extract(jme.value, '$.output_tokens'), 0),
+          COALESCE(json_extract(jme.value, '$.cacheReadInputTokens'), json_extract(jme.value, '$.cache_read_input_tokens'), 0),
+          COALESCE(json_extract(jme.value, '$.cacheCreationInputTokens'), json_extract(jme.value, '$.cache_creation_input_tokens'), 0),
+          COALESCE(json_extract(jme.value, '$.costUSD'), json_extract(jme.value, '$.cost_usd'), 0),
+          COALESCE(json_extract(m.token_usage, '$.durationMs'), json_extract(m.token_usage, '$.duration_ms'), 0),
+          COALESCE(json_extract(m.token_usage, '$.numTurns'), json_extract(m.token_usage, '$.num_turns'), 0),
+          'agent',
+          m.timestamp
+        FROM messages m
+          JOIN json_each(json_extract(m.token_usage, '$.modelUsage')) jme
+          LEFT JOIN registered_groups rg ON rg.jid = m.chat_jid
+        WHERE m.token_usage IS NOT NULL
+          AND json_type(m.token_usage, '$.modelUsage') = 'object'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM usage_records ur
+            WHERE ur.message_id = m.id
+              AND ur.model = COALESCE(jme.key, 'unknown')
+          )
+        `,
+      )
+      .run();
+
+    const legacyResult = db
+      .prepare(
+        `
+        INSERT INTO usage_records (id, user_id, group_folder, agent_id, message_id, model,
+          input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+          cost_usd, duration_ms, num_turns, source, created_at)
+        SELECT
+          lower(hex(randomblob(16))),
+          COALESCE(rg.created_by, 'system'),
+          COALESCE(rg.folder, m.chat_jid),
+          COALESCE(rg.agent_client_id, rg.backend, rg.execution_node),
+          m.id,
+          COALESCE(json_extract(m.token_usage, '$.model'), json_extract(m.token_usage, '$.modelId'), json_extract(m.token_usage, '$.model_id'), 'legacy-unknown'),
+          COALESCE(json_extract(m.token_usage, '$.inputTokens'), json_extract(m.token_usage, '$.input_tokens'), 0),
+          COALESCE(json_extract(m.token_usage, '$.outputTokens'), json_extract(m.token_usage, '$.output_tokens'), 0),
+          COALESCE(json_extract(m.token_usage, '$.cacheReadInputTokens'), json_extract(m.token_usage, '$.cache_read_input_tokens'), 0),
+          COALESCE(json_extract(m.token_usage, '$.cacheCreationInputTokens'), json_extract(m.token_usage, '$.cache_creation_input_tokens'), 0),
+          COALESCE(json_extract(m.token_usage, '$.costUSD'), json_extract(m.token_usage, '$.cost_usd'), 0),
+          COALESCE(json_extract(m.token_usage, '$.durationMs'), json_extract(m.token_usage, '$.duration_ms'), 0),
+          COALESCE(json_extract(m.token_usage, '$.numTurns'), json_extract(m.token_usage, '$.num_turns'), 0),
+          'agent',
+          m.timestamp
+        FROM messages m
+          LEFT JOIN registered_groups rg ON rg.jid = m.chat_jid
+        WHERE m.token_usage IS NOT NULL
+          AND (json_type(m.token_usage, '$.modelUsage') IS NULL
+               OR json_type(m.token_usage, '$.modelUsage') != 'object')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM usage_records ur
+            WHERE ur.message_id = m.id
+              AND ur.model = COALESCE(json_extract(m.token_usage, '$.model'), json_extract(m.token_usage, '$.modelId'), json_extract(m.token_usage, '$.model_id'), 'legacy-unknown')
+          )
+        `,
+      )
+      .run();
+
+    const changes =
+      (modelUsageResult.changes ?? 0) + (legacyResult.changes ?? 0);
+    if (changes > 0) rebuildUsageDailySummary();
+    return changes;
+  })();
+}
+
+function usageSourceExpr(): string {
+  return `
+    COALESCE(
+      NULLIF(ur.agent_id, ''),
+      (
+        SELECT COALESCE(rg.agent_client_id, rg.backend, rg.execution_node)
+        FROM registered_groups rg
+        WHERE rg.folder = ur.group_folder
+          AND (rg.agent_client_id IS NOT NULL OR rg.backend IS NOT NULL OR rg.execution_node IS NOT NULL)
+        ORDER BY
+          CASE WHEN rg.execution_mode = 'host' THEN 0 ELSE 1 END,
+          rg.added_at DESC
+        LIMIT 1
+      ),
+      NULLIF(ur.source, ''),
+      'agent'
+    )
+  `;
+}
+
+/**
+ * Get usage aggregated by execution source. This powers the usage page's
+ * daemon/CLI visibility without changing the date/model daily summary table.
+ */
+export function getUsageSourceStats(
+  days: number,
+  userId?: string,
+  modelFilter?: string,
+): Array<{
+  source: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  cost_usd: number;
+  request_count: number;
+}> {
+  const sinceDate = toLocalDateString(new Date(Date.now() - days * 86400000));
+  const conditions: string[] = ["date(ur.created_at, 'localtime') >= ?"];
+  const params: unknown[] = [sinceDate];
+
+  if (userId) {
+    conditions.push('ur.user_id = ?');
+    params.push(userId);
+  }
+  if (modelFilter) {
+    conditions.push('ur.model = ?');
+    params.push(modelFilter);
+  }
+
+  const sourceExpr = usageSourceExpr();
+  return db
+    .prepare(
+      `
+      SELECT
+        ${sourceExpr} as source,
+        COALESCE(SUM(ur.input_tokens), 0) as input_tokens,
+        COALESCE(SUM(ur.output_tokens), 0) as output_tokens,
+        COALESCE(SUM(ur.cache_read_input_tokens), 0) as cache_read_tokens,
+        COALESCE(SUM(ur.cache_creation_input_tokens), 0) as cache_creation_tokens,
+        COALESCE(SUM(ur.cost_usd), 0) as cost_usd,
+        COUNT(*) as request_count
+      FROM usage_records ur
+      WHERE ${conditions.join(' AND ')}
+      GROUP BY source
+      ORDER BY request_count DESC, input_tokens + output_tokens DESC
+    `,
+    )
+    .all(...params) as Array<{
+    source: string;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_creation_tokens: number;
+    cost_usd: number;
+    request_count: number;
+  }>;
 }
 
 /**

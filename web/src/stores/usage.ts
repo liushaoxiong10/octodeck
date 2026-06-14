@@ -24,6 +24,16 @@ export interface UsageBreakdown {
   request_count: number;
 }
 
+export interface UsageSourceBreakdown {
+  source: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  cost_usd: number;
+  request_count: number;
+}
+
 export interface DataRange {
   from: string;
   to: string;
@@ -38,6 +48,7 @@ export interface UsageUser {
 interface UsageState {
   summary: UsageSummary | null;
   breakdown: UsageBreakdown[];
+  sourceBreakdown: UsageSourceBreakdown[];
   dataRange: DataRange | null;
   days: number;
   loading: boolean;
@@ -60,6 +71,7 @@ interface UsageState {
 export const useUsageStore = create<UsageState>((set, get) => ({
   summary: null,
   breakdown: [],
+  sourceBreakdown: [],
   dataRange: null,
   days: 7,
   loading: false,
@@ -81,12 +93,14 @@ export const useUsageStore = create<UsageState>((set, get) => ({
       const data = await api.get<{
         summary: UsageSummary;
         breakdown: UsageBreakdown[];
+        sourceBreakdown?: UsageSourceBreakdown[];
         days: number;
         dataRange: DataRange | null;
       }>(`/api/usage/stats?${params.toString()}`);
       set({
         summary: data.summary,
         breakdown: data.breakdown,
+        sourceBreakdown: data.sourceBreakdown ?? [],
         dataRange: data.dataRange,
         loading: false,
         error: null,

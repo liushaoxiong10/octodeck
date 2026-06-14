@@ -60,15 +60,28 @@ interface CocoEvent {
   session_id?: string;
   result?: string;
   is_error?: boolean;
+  usage?: Record<string, unknown>;
+  response_meta?: {
+    usage?: Record<string, unknown>;
+  };
   name?: string;
   id?: string;
   tool_use_id?: string;
   input?: unknown;
   content?: unknown;
-  delta?: { role?: string; content?: string };
+  delta?: {
+    role?: string;
+    content?: string;
+    response_meta?: {
+      usage?: Record<string, unknown>;
+    };
+  };
   message?: {
     role?: string;
     content?: string | Array<Record<string, unknown>>;
+    response_meta?: {
+      usage?: Record<string, unknown>;
+    };
   };
 }
 
@@ -107,6 +120,17 @@ function compactJson(value: unknown, max = 2000): string | null {
   const text =
     typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function usagePayloadFromCocoEvent(
+  evt: CocoEvent,
+): Record<string, unknown> | undefined {
+  return (
+    evt.usage ??
+    evt.response_meta?.usage ??
+    evt.delta?.response_meta?.usage ??
+    evt.message?.response_meta?.usage
+  );
 }
 
 function summarizeToolInput(input: unknown): string | undefined {
@@ -1718,6 +1742,8 @@ export async function runViaAgentLink(
     let stdoutAccum = '';
     let stderrAccum = '';
     let lastStatusMessage = '';
+    let finalUsage: Record<string, unknown> | undefined;
+    let usageEventSeen = false;
     const state: ParseState = {
       finalResultText: null,
       finalIsError: false,
@@ -1782,8 +1808,13 @@ export async function runViaAgentLink(
         const evt = parseEvent(line);
         if (evt) {
           if (evt.session_id) state.lastSessionId = evt.session_id;
+          const usagePayload = usagePayloadFromCocoEvent(evt);
+          if (usagePayload) finalUsage = usagePayload;
           const structuredEvent = streamEventFromCocoEvent(evt);
           if (structuredEvent) {
+            if (structuredEvent.eventType === 'usage' && structuredEvent.usage) {
+              usageEventSeen = true;
+            }
             void emitWrapped({
               status: 'stream',
               result: null,
@@ -1824,6 +1855,7 @@ export async function runViaAgentLink(
             signal: string | null;
             timedOut: boolean;
             durationMs: number;
+            usage?: Record<string, unknown>;
           }
         | { kind: 'fail'; reason: string },
     ): Promise<void> => {
@@ -1870,6 +1902,28 @@ export async function runViaAgentLink(
       }
 
       const { exitCode, signal, timedOut, durationMs } = info;
+
+      if (info.kind === 'result' && info.usage) {
+        finalUsage = info.usage;
+      }
+      if (finalUsage && !usageEventSeen) {
+        const usage = normalizeUsagePayload(finalUsage, cfg.model);
+        if (usage) {
+          usageEventSeen = true;
+          await emitWrapped({
+            status: 'stream',
+            result: null,
+            newSessionId: state.lastSessionId,
+            streamEvent: {
+              eventType: 'usage',
+              sessionId: state.lastSessionId,
+              usage,
+              detail: compactJson(finalUsage) ?? undefined,
+              rawEvent: finalUsage,
+            },
+          });
+        }
+      }
 
       if (timedOut) {
         const out: ContainerOutput = {

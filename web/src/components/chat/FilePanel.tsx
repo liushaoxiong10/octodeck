@@ -894,6 +894,9 @@ export function FilePanel({ groupJid, agentId, defaultPath, onClose, agentConfig
   const [defaultBackend, setDefaultBackend] = useState('claude-sdk');
   const [savingRuntime, setSavingRuntime] = useState(false);
   const [modelDraft, setModelDraft] = useState('');
+  const [systemPromptDraft, setSystemPromptDraft] = useState(group?.system_prompt ?? '');
+  const [savedSystemPrompt, setSavedSystemPrompt] = useState(group?.system_prompt ?? '');
+  const [savingSystemPrompt, setSavingSystemPrompt] = useState(false);
   const [serverModelOptions, setServerModelOptions] = useState<ModelInfo[]>([]);
   const [cliModelOptions, setCliModelOptions] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -909,6 +912,12 @@ export function FilePanel({ groupJid, agentId, defaultPath, onClose, agentConfig
   useEffect(() => {
     setModelDraft(group?.agent_model ?? '');
   }, [group?.agent_model, groupJid]);
+
+  useEffect(() => {
+    const next = group?.system_prompt ?? '';
+    setSystemPromptDraft(next);
+    setSavedSystemPrompt(next);
+  }, [group?.system_prompt, groupJid]);
 
   useEffect(() => {
     if (!canEditRuntime) return;
@@ -1161,6 +1170,23 @@ export function FilePanel({ groupJid, agentId, defaultPath, onClose, agentConfig
       if (ok) showToast('已更新', 'Agent 访问范围将在下一次执行生效');
     } finally {
       setSavingRuntime(false);
+    }
+  };
+
+  const handleSystemPromptSave = async () => {
+    if (!group) return;
+    const next = systemPromptDraft.trim();
+    if (next === savedSystemPrompt.trim()) return;
+    setSavingSystemPrompt(true);
+    try {
+      const ok = await updateGroupConfig(groupJid, { system_prompt: next });
+      if (ok) {
+        setSystemPromptDraft(next);
+        setSavedSystemPrompt(next);
+        showToast('已更新', '工作区系统提示词将在下一次执行生效');
+      }
+    } finally {
+      setSavingSystemPrompt(false);
     }
   };
 
@@ -1488,6 +1514,36 @@ export function FilePanel({ groupJid, agentId, defaultPath, onClose, agentConfig
           </select>
         </div>
       </div>
+
+      {canEditRuntime && (
+        <div className="space-y-1">
+          <Label className="text-[11px] text-muted-foreground">工作区系统提示词</Label>
+          <Textarea
+            value={systemPromptDraft}
+            onChange={(e) => setSystemPromptDraft(e.target.value)}
+            placeholder="输入后会作为系统提示词带给该工作区的所有 Agent"
+            rows={5}
+            maxLength={20000}
+            disabled={savingSystemPrompt}
+            className="resize-y text-xs"
+          />
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] text-muted-foreground">
+              {systemPromptDraft.length}/20000 · 下一次执行生效
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleSystemPromptSave}
+              disabled={savingSystemPrompt || systemPromptDraft.trim() === savedSystemPrompt.trim()}
+              className="h-7 px-2 text-xs"
+            >
+              {savingSystemPrompt ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
+              保存提示词
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   ) : (
     <div className="flex items-center justify-center h-32 px-4 text-sm text-muted-foreground">

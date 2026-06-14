@@ -3612,6 +3612,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 writeUsageRecords({
                   userId: usageOwnerId || 'system',
                   groupFolder: effectiveGroup.folder,
+                  agentId:
+                    effectiveGroup.agentClientId ||
+                    effectiveGroup.backend ||
+                    effectiveGroup.executionNode ||
+                    undefined,
                   messageId: lastReplyMsgId,
                   usage: se.usage,
                 });

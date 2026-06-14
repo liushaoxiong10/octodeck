@@ -413,6 +413,28 @@ describe('buildAgentReplyCard', () => {
     expect(countTag(card, 'collapsible_panel')).toBe(0);
   });
 
+  test('code block spacing stays compact before following paragraph', () => {
+    const text = [
+      '前文',
+      '',
+      '```ts',
+      'const x = 1;',
+      '```',
+      '',
+      '后文',
+    ].join('\n');
+    const card = buildAgentReplyCard({ status: 'done', text });
+    const body = card.body as { elements: Array<Record<string, unknown>> };
+    const main = body.elements.find(
+      (e) => e.element_id === CARD_ELEMENT_IDS.MAIN_CONTENT,
+    );
+    expect(main?.content).toBe(
+      ['前文', '<br>', '```ts', 'const x = 1;', '```', '<br>', '后文'].join(
+        '\n',
+      ),
+    );
+  });
+
   test('single-line reply → no header and keeps text in body', () => {
     const card = buildAgentReplyCard({ status: 'done', text: 'short reply' });
     expect(card.header).toBeUndefined();

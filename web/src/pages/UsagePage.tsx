@@ -54,7 +54,7 @@ function formatCost(usd: number): string {
 
 export function UsagePage() {
   const {
-    summary, breakdown, dataRange, days, loading, error,
+    summary, breakdown, sourceBreakdown, dataRange, days, loading, error,
     loadStats, setDays, loadFilters,
     selectedUserId, selectedModel, availableModels, availableUsers,
     setSelectedUserId, setSelectedModel,
@@ -150,6 +150,18 @@ export function UsagePage() {
       .filter((m) => m.tokens > 0 || m.cost > 0)
       .sort((a, b) => b.cost - a.cost);
   }, [breakdown]);
+
+  const sourceData = useMemo(() => {
+    return sourceBreakdown
+      .map((row) => ({
+        source: row.source || 'agent',
+        cost: row.cost_usd,
+        tokens: calcTotalTokens(row),
+        requests: row.request_count,
+      }))
+      .filter((row) => row.tokens > 0 || row.cost > 0 || row.requests > 0)
+      .sort((a, b) => b.requests - a.requests || b.tokens - a.tokens);
+  }, [sourceBreakdown]);
 
   // Cache hit rate
   const cacheHitRate = useMemo(() => {
@@ -442,6 +454,40 @@ export function UsagePage() {
                       </tbody>
                     </table>
                   </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Source Breakdown */}
+            {sourceData.length > 0 && (
+              <Card>
+                <CardContent>
+                  <h2 className="text-lg font-semibold text-foreground mb-4">执行来源分布</h2>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-border">
+                      <thead>
+                        <tr>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground uppercase">来源</th>
+                          <th className="px-3 py-2 text-right text-xs font-medium text-muted-foreground uppercase">请求</th>
+                          <th className="px-3 py-2 text-right text-xs font-medium text-muted-foreground uppercase">Token</th>
+                          <th className="px-3 py-2 text-right text-xs font-medium text-muted-foreground uppercase">费用</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {sourceData.map((row, i) => (
+                          <tr key={row.source} className="hover:bg-muted/50">
+                            <td className="px-3 py-2 text-sm text-foreground">
+                              <span className="inline-block w-3 h-3 rounded-full mr-2" style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }} />
+                              {row.source}
+                            </td>
+                            <td className="px-3 py-2 text-sm text-right text-muted-foreground">{row.requests}</td>
+                            <td className="px-3 py-2 text-sm text-right text-muted-foreground">{formatTokens(row.tokens)}</td>
+                            <td className="px-3 py-2 text-sm text-right text-foreground font-medium">{formatCost(row.cost)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </CardContent>
               </Card>

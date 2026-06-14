@@ -66,7 +66,10 @@ function _optimizeMarkdownStyle(text: string, cardVersion = 2): string {
 
     // ── 5. Restore code blocks with <br> wrapping ──────────────────
     codeBlocks.forEach((block, i) => {
-      r = r.replace(`${MARK}${i}___`, `\n<br>\n${block}\n<br>\n`);
+      r = r.replace(
+        new RegExp(`\\n*${MARK}${i}___\\n*`, 'g'),
+        `\n<br>\n${block}\n<br>\n`,
+      );
     });
   } else {
     // ── 5. Restore code blocks (no <br>) ───────────────────────────

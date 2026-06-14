@@ -2,9 +2,11 @@ import { Hono } from 'hono';
 import type { Variables } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
 import {
+  backfillMissingUsageRecordsFromMessages,
   getUsageDailyStats,
   getUsageDailySummary,
   getUsageModels,
+  getUsageSourceStats,
   getUsageUsers,
   repairSystemUsageRecordOwners,
 } from '../db.js';
@@ -25,6 +27,7 @@ function ensureUsageOwnersRepaired(): void {
   // block long enough to trip the frontend request timeout.
   setImmediate(() => {
     try {
+      backfillMissingUsageRecordsFromMessages();
       repairSystemUsageRecordOwners();
     } catch (err) {
       logger.error({ err }, 'repairSystemUsageRecordOwners failed');
@@ -65,6 +68,7 @@ usage.get('/stats', (c) => {
 
   const summary = getUsageDailySummary(days, userId, model);
   const breakdown = getUsageDailyStats(days, userId, model);
+  const sourceBreakdown = getUsageSourceStats(days, userId, model);
 
   // Compute actual data range for frontend display
   const dates = breakdown.map((r) => r.date);
@@ -78,7 +82,7 @@ usage.get('/stats', (c) => {
         }
       : null;
 
-  return c.json({ summary, breakdown, days, dataRange });
+  return c.json({ summary, breakdown, sourceBreakdown, days, dataRange });
 });
 
 /**

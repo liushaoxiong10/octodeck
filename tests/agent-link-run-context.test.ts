@@ -1311,6 +1311,105 @@ describe('agent-link run context forwarding', () => {
     ).toMatchObject({ toolName: 'Bash', toolUseId: 'tool-legacy' });
   });
 
+  test('runViaAgentLink emits usage from legacy device stream-json result frames', async () => {
+    const sent: any[] = [];
+    const outputs: any[] = [];
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Legacy Device Usage',
+          folder: 'legacy-device-usage',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'cl_1234567890abcdef',
+          created_by: 'u1',
+        } as any,
+        input: { prompt: 'hello', chatJid: 'web:legacy-device-usage' } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+        onOutput: vi.fn(async (output) => outputs.push(output)),
+      },
+      {
+        backendId: 'device-traecli',
+        model: 'Kimi-K2.6',
+        resolveBinary: () => '/usr/local/bin/traecli',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'cl_1234567890abcdef',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'run.request' });
+    const controller = registerRunMock.mock.calls.at(-1)?.[0] as any;
+    controller.onChunk(
+      'stdout',
+      [
+        JSON.stringify({
+          type: 'assistant',
+          session_id: 'sess-legacy-usage',
+          message: {
+            content: 'done',
+            response_meta: {
+              usage: {
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                prompt_token_details: { cached_tokens: 3 },
+              },
+            },
+          },
+        }),
+        JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          session_id: 'sess-legacy-usage',
+          result: 'done',
+          is_error: false,
+          num_turns: 1,
+          duration_ms: 1234,
+          usage: {
+            input_tokens: 159675,
+            output_tokens: 630,
+            cache_read_input_tokens: 108544,
+          },
+        }),
+        '',
+      ].join('\n'),
+    );
+    controller.finish({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      durationMs: 1234,
+    });
+
+    await promise;
+    const usageEvent = outputs
+      .map((output) => output.streamEvent)
+      .find((event) => event?.eventType === 'usage');
+    expect(usageEvent?.usage).toMatchObject({
+      inputTokens: 159675,
+      outputTokens: 630,
+      cacheReadInputTokens: 108544,
+      modelUsage: {
+        'Kimi-K2.6': {
+          inputTokens: 159675,
+          outputTokens: 630,
+          cacheReadInputTokens: 108544,
+        },
+      },
+    });
+  });
+
   test('agent runtime tool results keep toolName by toolUseId', async () => {
     const sent: any[] = [];
     const outputs: any[] = [];
