@@ -1860,6 +1860,9 @@ func (a *acpAdapter) embeddedTraexRuntimeConfig(req *AgentRunRequestFrame) codex
 	config.TraceJSONFile = firstNonEmpty(os.Getenv("ACP_ADAPTER_TRACE_JSON_FILE"), os.Getenv("TRACE_JSON_FILE"), "trace-jsonl.log")
 	config.PatchApplyMode = firstNonEmpty(os.Getenv("ACP_ADAPTER_PATCH_APPLY_MODE"), os.Getenv("PATCH_APPLY_MODE"), "appserver")
 	config.RetryTurnOnCrash = parseBoolEnv(os.Getenv("RETRY_TURN_ON_CRASH"), true)
+	// TraeX owns its auth/login state. codexacp's default empty auth mode would
+	// make the bridge reject session/new before traex app-server can handle it.
+	config.InitialAuthMode = "traex_cli"
 	if req != nil && (strings.TrimSpace(req.Policy.Model) != "" || strings.TrimSpace(req.Policy.SystemPrompt) != "" || strings.TrimSpace(req.Policy.PermissionMode) != "") {
 		config.Profiles = map[string]codexacp.ProfileConfig{
 			"octodeck": {Model: strings.TrimSpace(req.Policy.Model), Sandbox: normalizeCodexPermissionMode(req.Policy.PermissionMode), SystemInstructions: strings.TrimSpace(req.Policy.SystemPrompt)},

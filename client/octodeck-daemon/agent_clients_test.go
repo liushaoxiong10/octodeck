@@ -828,6 +828,34 @@ func TestNormalizeACPServerArgsModelDoesNotDoubleInject(t *testing.T) {
 	}
 }
 
+func TestEmbeddedTraexRuntimeConfigBypassesCodexAuthGate(t *testing.T) {
+	adapter := &acpAdapter{
+		baseAgentAdapter: baseAgentAdapter{
+			client: AgentClientInfo{ID: "traex-acp", Binary: "/usr/local/bin/traex"},
+		},
+	}
+
+	cfg := adapter.embeddedTraexRuntimeConfig(&AgentRunRequestFrame{
+		AgentID: "traex-acp",
+		Policy: AgentRunPolicy{Model: "doubao-1.5-pro"},
+	})
+
+	if cfg.AppServerCommand != "/usr/local/bin/traex" {
+		t.Fatalf("expected traex app-server command, got %q", cfg.AppServerCommand)
+	}
+	if strings.Join(cfg.AppServerArgs, " ") != "app-server" {
+		t.Fatalf("expected traex app-server args, got %#v", cfg.AppServerArgs)
+	}
+	if cfg.InitialAuthMode == "" {
+		t.Fatalf("traex ACP must set a non-empty auth mode so codexacp does not reject session/new before traex runs")
+	}
+	if strings.Contains(strings.ToLower(cfg.InitialAuthMode), "codex") ||
+		strings.Contains(strings.ToLower(cfg.InitialAuthMode), "openai") ||
+		strings.Contains(strings.ToLower(cfg.InitialAuthMode), "chatgpt") {
+		t.Fatalf("traex ACP auth mode must not expose Codex auth semantics, got %q", cfg.InitialAuthMode)
+	}
+}
+
 func TestPromptWithSystemContextWrapsGlobalMemory(t *testing.T) {
 	req := &AgentRunRequestFrame{
 		Input:  AgentRunInput{Prompt: "用户问题"},
