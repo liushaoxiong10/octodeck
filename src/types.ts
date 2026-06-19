@@ -100,7 +100,7 @@ export interface RegisteredGroup {
   backend?: string; // Agent 后端选择（默认走 SystemSettings.defaultBackend，最终回退 'claude-sdk'）
   /** Device used by server-agent-device-tools or device-cli-agent. */
   deviceLinkId?: string;
-  /** Agent client to launch on device-cli-agent, e.g. claude-code/codex/traecli. */
+  /** Agent client to launch on device-cli-agent, e.g. claude-code/codex/. */
   agentClientId?: string;
   /** Per-workspace model override passed to the selected Agent backend. */
   agentModel?: string;
@@ -183,7 +183,7 @@ export interface RepoKnowledgeRun {
   status: RepoKnowledgeRunStatus;
   sourceKind?: string;
   executionDeviceLinkId?: string;
-  /** agent.run.request 所使用的 client id（claude-code/traecli 等） */
+  /** agent.run.request 所使用的 client id（claude-code/ 等） */
   agentClientId?: string;
   /** 一次性上传 token（仅对 creator 展示一次，服务端内部存 hash） */
   uploadTokenHash?: string;
@@ -252,7 +252,7 @@ export interface AgentLink {
     displayName: string;
     binary: string;
     version?: string;
-    family?: 'claude' | 'codex' | 'traecli' | 'traex';
+    family?: 'claude' | 'codex' | 'traex';
     provider?: string;
     transport?: 'stdio' | 'acp' | 'a2a' | 'http';
     permissionModes?: string[];

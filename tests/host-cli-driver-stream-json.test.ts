@@ -50,7 +50,7 @@ describe('host CLI stream-json protocol', () => {
     expect(parsed.repo).toEqual(parsed.runRepo);
   });
 
-  test('emits TraeCLI stream_event deltas as OctoDeck text_delta events', async () => {
+  test('emits stream_event deltas as OctoDeck text_delta events', async () => {
     const outputs: any[] = [];
     const script = [
       `console.log(JSON.stringify({type:'system',subtype:'init',session_id:'sess-1'}));`,
@@ -79,7 +79,7 @@ describe('host CLI stream-json protocol', () => {
         },
       },
       {
-        backendId: 'fake-traecli',
+        backendId: 'fake-stream-json-cli',
         resolveBinary: () => process.execPath,
         buildArgv: () => ['-e', script],
         outputProtocol: 'jsonline-stream-json',

@@ -14,7 +14,7 @@ import (
 
 // PersistentStoreFileName is the on-disk file holding the conversation→session
 // map. It replaces the four per-family `agent-session-map.json` files (one per
-// claude/codex/traecli/traex sub-package, all writing the same path with
+// claude/codex/traex sub-package, all writing the same path with
 // different in-memory mutexes — a quiet correctness hazard).
 //
 // The new layout keys records by ConversationID, the platform-stable id the

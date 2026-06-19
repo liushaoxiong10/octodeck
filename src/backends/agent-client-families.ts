@@ -1,6 +1,6 @@
 import type { CustomBackendDef } from './dynamic.js';
 
-export type AgentClientFamily = 'claude' | 'codex' | 'traecli' | 'traex';
+export type AgentClientFamily = 'claude' | 'codex' | 'traex';
 
 export type AgentClientTemplate = Pick<
   CustomBackendDef,
@@ -21,7 +21,6 @@ export function inferAgentClientFamily(
   for (const value of candidates) {
     if (value === 'claude' || value === 'claude-code' || value.includes('claude')) return 'claude';
     if (value === 'codex' || value.includes('codex')) return 'codex';
-    if (value === 'traecli' || value.includes('traecli') || value === 'coco') return 'traecli';
     if (value === 'traex' || value.includes('traex')) return 'traex';
   }
   return undefined;
@@ -67,21 +66,6 @@ const CODEX_TEMPLATE: AgentClientTemplate = {
   ],
 };
 
-const TRAECLI_TEMPLATE: AgentClientTemplate = {
-  argvTemplate: [
-    '-p',
-    '{prompt}',
-    '-c',
-    'model.name={model}',
-    '--output-format=stream-json',
-    '--include-partial-messages',
-    '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
-  ],
-  outputProtocol: 'jsonline-stream-json',
-  supportsNativeSessions: true,
-  sessionArgvTemplate: ['--resume={sessionId}'],
-};
-
 const TRAEX_TEMPLATE: AgentClientTemplate = {
   argvTemplate: [
     'exec',
@@ -113,8 +97,6 @@ export function templateForAgentClientFamily(
       return CLAUDE_TEMPLATE;
     case 'codex':
       return CODEX_TEMPLATE;
-    case 'traecli':
-      return TRAECLI_TEMPLATE;
     case 'traex':
       return TRAEX_TEMPLATE;
   }
@@ -137,7 +119,7 @@ export function transportForAgentClient(
   const normalizedHint = (familyHint || '').toLowerCase().trim();
   if (normalizedId.includes('acp') || normalizedHint.includes('acp')) return 'acp';
   const family = inferAgentClientFamily(id, familyHint);
-  if (family === 'traecli' || family === 'traex') return 'acp';
+  if (family === 'traex') return 'acp';
   if (family === 'claude' || family === 'codex') return 'stdio';
   return undefined;
 }

@@ -187,16 +187,6 @@ describe('agent client adapter', () => {
     ).toEqual(['--sandbox', 'danger-full-access', 'exec', '--json', 'hello']);
   });
 
-  test('adapts bypass permission mode to TraeCLI yes argv', () => {
-    expect(
-      applyAgentPermissionArgs(
-        ['-p', 'hello', '--output-format=stream-json'],
-        'traecli',
-        'bypassPermissions',
-      ),
-    ).toEqual(['-p', 'hello', '--output-format=stream-json', '-y']);
-  });
-
   test('rejects permission modes not reported by device clients', () => {
     expect(() =>
       buildAgentBackendFromClient({
@@ -253,33 +243,20 @@ describe('agent client adapter', () => {
     ]);
   });
 
-  test('uses TraeCLI documented print mode and model config override', () => {
-    const def = buildAgentBackendFromClient({
-      id: 'device-traecli',
-      displayName: 'Device TraeCLI',
-      deviceLinkId: 'cl_1234567890abcdef',
-      agentClientId: 'traecli',
-      discoveredClient: {
-        id: 'traecli',
-        displayName: 'TraeCLI',
-        binary: '/Users/me/.local/bin/traecli',
-      },
-      model: 'GPT-5.4',
-    });
-
-    expect(def.outputProtocol).toBe('jsonline-stream-json');
-    expect(def.supportsNativeSessions).toBe(true);
-    expect(def.agentClientTransport).toBe('acp');
-    expect(def.sessionArgvTemplate).toEqual(['--resume={sessionId}']);
-    expect(def.argvTemplate).toEqual([
-      '-p',
-      '{prompt}',
-      '-c',
-      'model.name={model}',
-      '--output-format=stream-json',
-      '--include-partial-messages',
-      '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
-    ]);
+  test('rejects TraeCLI clients after support removal', () => {
+    expect(() =>
+      buildAgentBackendFromClient({
+        id: 'device-traecli',
+        displayName: 'Device TraeCLI',
+        deviceLinkId: 'cl_1234567890abcdef',
+        agentClientId: 'traecli',
+        discoveredClient: {
+          id: 'traecli',
+          displayName: 'TraeCLI',
+          binary: '/Users/me/.local/bin/traecli',
+        },
+      }),
+    ).toThrow('不支持的 Agent client: traecli');
   });
 
   test('uses family metadata to select independent templates', () => {
@@ -293,18 +270,6 @@ describe('agent client adapter', () => {
         family: 'codex',
         displayName: 'Codex ACP',
         binary: '/usr/local/bin/codex',
-      },
-    });
-    const traecli = buildAgentBackendFromClient({
-      id: 'device-traecli-acp',
-      displayName: 'Device TraeCLI ACP',
-      deviceLinkId: 'cl_1234567890abcdef',
-      agentClientId: 'traecli-acp',
-      discoveredClient: {
-        id: 'traecli-acp',
-        family: 'traecli',
-        displayName: 'TraeCLI ACP',
-        binary: '/usr/local/bin/traecli',
       },
     });
     const traex = buildAgentBackendFromClient({
@@ -321,7 +286,6 @@ describe('agent client adapter', () => {
     });
 
     expect(codex.resumeArgvTemplate?.slice(0, 2)).toEqual(['exec', 'resume']);
-    expect(traecli.argvTemplate).toContain('model.name={model}');
     expect(traex.argvTemplate).toEqual([
       'exec',
       '--json',
@@ -332,7 +296,7 @@ describe('agent client adapter', () => {
     ]);
   });
 
-  test('normalizes persisted TraeCLI backend using legacy --model argv', () => {
+  test('leaves persisted TraeCLI backend unchanged after support removal', () => {
     const def = normalizeAgentClientBackendDef({
       id: 'device-traecli',
       displayName: 'Device TraeCLI',
@@ -348,19 +312,10 @@ describe('agent client adapter', () => {
       agentClientId: 'traecli',
     });
 
-    expect(def.argvTemplate).toEqual([
-      '-p',
-      '{prompt}',
-      '-c',
-      'model.name={model}',
-      '--output-format=stream-json',
-      '--include-partial-messages',
-      '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
-    ]);
-    expect(def.outputProtocol).toBe('jsonline-stream-json');
-    expect(def.supportsNativeSessions).toBe(true);
-    expect(def.sessionArgvTemplate).toEqual(['--resume={sessionId}']);
-    expect(def.agentClientTransport).toBe('acp');
+    expect(def.argvTemplate).toEqual(['-p', '{prompt}', '--model', '{model}']);
+    expect(def.outputProtocol).toBe('plain-text');
+    expect(def.supportsNativeSessions).toBeUndefined();
+    expect(def.agentClientTransport).toBeUndefined();
   });
 
   test('rejects clients not reported by the selected device', () => {

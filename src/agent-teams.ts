@@ -1018,7 +1018,7 @@ export function isAbstractAgentTeamDefinition(team: AgentTeamInput): boolean {
     'claude-code',
     'claude code',
     'codex cli',
-    'traecli',
+    '',
     'provider:',
     'model:',
     'command:',

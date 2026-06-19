@@ -43,8 +43,7 @@ var _ agentcore.OutputParser = (*Agent)(nil)
 //
 // This is the family-private implementation of OutputParser; daemon-main
 // simply does `if p, ok := agent.(OutputParser); ok { p.ParseLine(line) }`
-// without knowing whether the underlying agent is claude / codex / traecli
-// / traex.
+// without knowing whether the underlying agent is claude / codex / traex.
 func (a *Agent) ParseLine(line string) []proto.AgentRunEventFrame {
 	var evt map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &evt); err != nil {

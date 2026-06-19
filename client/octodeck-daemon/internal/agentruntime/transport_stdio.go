@@ -138,7 +138,7 @@ func RunStdio(
 
 	// Fallback to the trailing result-event payload for single-shot CLIs that
 	// don't emit streaming text_delta chunks. When both streaming chunks and
-	// a trailing result event exist (streaming CLIs like traecli), the
+	// a trailing result event exist, the
 	// streaming text already represents the complete answer so we keep only
 	// the streaming copy to avoid duplication.
 	textMu.Lock()

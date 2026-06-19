@@ -49,7 +49,7 @@ export interface InstallSkillOptions {
   target?: 'cloud' | 'device' | 'device-agent-workspace';
   deviceLinkId?: string;
   agentId?: string;
-  sourceProvider?: 'claude' | 'codex' | 'traecli';
+  sourceProvider?: 'claude' | 'codex';
   selectedSkillIds?: string[];
 }
 

@@ -58,7 +58,7 @@ export default function CustomBackendList() {
         <div>
           <h3 className="text-sm font-semibold text-foreground">Agent</h3>
           <p className="text-xs text-muted-foreground mt-0.5">
-            把任意 CLI（codex / aider / coco fork…）注册成 OctoDeck Agent。
+            把任意 CLI（codex / aider / custom tools…）注册成 OctoDeck Agent。
             可选择服务端本机或指定设备运行；保存即生效。
           </p>
         </div>

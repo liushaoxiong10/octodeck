@@ -4,7 +4,7 @@
 // 主流程，无需让 inventory / agentruntime 再认识具体 family 字面量。
 package agentclient
 
-// Info 描述一个本机可用的 agent client（如 claude / codex / traecli / traex
+// Info 描述一个本机可用的 agent client（如 claude / codex / traex
 // 及其 ACP 子模式）。daemon 在握手 / 心跳帧里把它上报给服务端，作为前端 UI
 // 选择 provider 与 transport 的依据。
 //

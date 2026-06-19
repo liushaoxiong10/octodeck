@@ -5,11 +5,11 @@ import {
 } from './agent-client-families.js';
 
 export interface DiscoveredAgentClient {
-  id: 'claude-code' | 'codex' | 'traecli' | string;
+  id: 'claude-code' | 'codex' | string;
   displayName: string;
   binary: string;
   version?: string;
-  family?: 'claude' | 'codex' | 'traecli' | 'traex' | string;
+  family?: 'claude' | 'codex' | 'traex' | string;
   transport?: 'stdio' | 'acp' | 'a2a' | 'http' | string;
   permissionModes?: string[];
   capabilities?: string[];

@@ -138,12 +138,14 @@ describe('device-backed agent backend', () => {
     }
   });
 
-  test('does not expose TraeCLI/coco as a builtin backend', async () => {
+  test('does not expose TraeCLI as a builtin backend', async () => {
     const { listBackends, isBuiltinBackend } = await import('../src/backends/registry.js');
     const backendIds = listBackends().map((backend) => backend.id);
 
     expect(backendIds).toContain('claude-sdk');
+    expect(backendIds).not.toContain('traecli');
     expect(backendIds).not.toContain('coco');
+    expect(isBuiltinBackend('traecli')).toBe(false);
     expect(isBuiltinBackend('coco')).toBe(false);
   });
 
@@ -219,9 +221,9 @@ describe('device-backed agent backend', () => {
   test('routes custom backend runs through the selected device when deviceLinkId is set', async () => {
     const { buildDynamicBackend } = await import('../src/backends/dynamic.js');
     const backend = buildDynamicBackend({
-      id: 'mac-coco',
-      displayName: 'Mac Coco',
-      binary: 'coco',
+      id: 'mac-custom-cli',
+      displayName: 'Mac Custom CLI',
+      binary: 'custom-cli',
       argvTemplate: ['-p', '{prompt}'],
       outputProtocol: 'plain-text',
       supportsHost: true,
@@ -248,9 +250,9 @@ describe('device-backed agent backend', () => {
     runViaAgentLinkMock.mockClear();
 
     const backend = buildDynamicBackend({
-      id: 'mac-coco',
-      displayName: 'Mac Coco',
-      binary: 'coco',
+      id: 'mac-custom-cli',
+      displayName: 'Mac Custom CLI',
+      binary: 'custom-cli',
       argvTemplate: ['-p', '{prompt}'],
       outputProtocol: 'plain-text',
       supportsHost: true,
@@ -313,9 +315,9 @@ describe('device-backed agent backend', () => {
     runViaAgentLinkMock.mockClear();
 
     const backend = buildDynamicBackend({
-      id: 'mac-traecli',
-      displayName: 'Mac TraeCLI',
-      binary: 'traecli',
+      id: 'mac-custom-cli',
+      displayName: 'Mac Custom CLI',
+      binary: 'custom-cli',
       argvTemplate: ['-p', '{prompt}', '--output-format=stream-json', '-y'],
       sessionArgvTemplate: ['--resume={sessionId}'],
       outputProtocol: 'jsonline-stream-json',
@@ -337,14 +339,14 @@ describe('device-backed agent backend', () => {
     });
 
     const cfg = runViaAgentLinkMock.mock.calls[0][1];
-    expect(cfg.buildArgv({ prompt: 'hello', sessionId: 'sess-123', cwd: '/tmp/demo', folder: 'demo', backendId: 'mac-traecli' })).toEqual([
+    expect(cfg.buildArgv({ prompt: 'hello', sessionId: 'sess-123', cwd: '/tmp/demo', folder: 'demo', backendId: 'mac-custom-cli' })).toEqual([
       '-p',
       'hello',
       '--output-format=stream-json',
       '-y',
       '--resume=sess-123',
     ]);
-    expect(cfg.buildArgv({ prompt: 'hello', cwd: '/tmp/demo', folder: 'demo', backendId: 'mac-traecli' })).toEqual([
+    expect(cfg.buildArgv({ prompt: 'hello', cwd: '/tmp/demo', folder: 'demo', backendId: 'mac-custom-cli' })).toEqual([
       '-p',
       'hello',
       '--output-format=stream-json',

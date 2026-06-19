@@ -96,7 +96,7 @@ func (a *Agent) Run(ctx context.Context, req *proto.AgentRunRequestFrame, stdin 
 func (a *Agent) SupportsNativeSystemPrompt() bool { return false }
 
 // MemoryPath implements agentruntime.MemorySource. TraeX shares the TRAE
-// home layout with traecli; user-level long-form instructions live under
+// home layout; user-level long-form instructions live under
 // ~/.trae/AGENTS.md rather than a separate ~/.traex tree.
 func (a *Agent) MemoryPath(home string) string {
 	if strings.TrimSpace(home) == "" {

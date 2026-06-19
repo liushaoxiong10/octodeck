@@ -92,7 +92,7 @@ describe('agent-link run context forwarding', () => {
         onProcess: vi.fn(),
       },
       {
-        backendId: 'coco',
+        backendId: 'custom-cli',
         resolveBinary: () => '/bin/echo',
         buildArgv: ({ prompt, cwd }) => [prompt, `--cwd=${cwd}`],
         outputProtocol: 'plain-text',
@@ -106,10 +106,10 @@ describe('agent-link run context forwarding', () => {
         kind: 'git',
         gitUrl: 'https://github.com/acme/project.git',
         groupFolder: 'repo-demo',
-        agentId: 'coco',
+        agentId: 'custom-cli',
         scope: 'session',
         scopeId: expect.stringMatching(
-          /^octodeck-repo-demo-coco-[a-f0-9]{12}$/,
+          /^octodeck-repo-demo-custom-cli-[a-f0-9]{12}$/,
         ),
       },
       remoteCwdPlaceholder: '__OCTODECK_REMOTE_CWD__',
@@ -151,7 +151,7 @@ describe('agent-link run context forwarding', () => {
           added_at: '2026-01-01T00:00:00.000Z',
           executionMode: 'host',
           executionNode: 'cl_1234567890abcdef',
-          backend: 'coco',
+          backend: 'custom-cli',
           is_home: true,
           created_by: 'u1',
         } as any,
@@ -173,7 +173,7 @@ describe('agent-link run context forwarding', () => {
         onProcess: vi.fn(),
       },
       {
-        backendId: 'coco',
+        backendId: 'custom-cli',
         resolveBinary: () => '/bin/echo',
         buildArgv: ({ prompt }) => [prompt],
         outputProtocol: 'plain-text',
@@ -183,14 +183,14 @@ describe('agent-link run context forwarding', () => {
 
     expect(sent[0]).toMatchObject({
       type: 'run.request',
-      backendId: 'coco',
+      backendId: 'custom-cli',
       context: {
-        backendId: 'coco',
+        backendId: 'custom-cli',
         executionMode: 'host',
         input: { prompt: 'hello', sessionId: 'sess-1', agentId: 'agent-1' },
         group: {
           folder: 'demo',
-          backend: 'coco',
+          backend: 'custom-cli',
           executionNode: 'cl_1234567890abcdef',
         },
       },
@@ -281,7 +281,7 @@ describe('agent-link run context forwarding', () => {
       repoGitUrl: 'https://github.com/acme/project.git',
     } as any;
     const cfg = {
-      backendId: 'coco',
+      backendId: 'custom-cli',
       resolveBinary: () => '/bin/echo',
       buildArgv: ({ prompt }: any) => [prompt],
       outputProtocol: 'plain-text' as const,
@@ -358,7 +358,7 @@ describe('agent-link run context forwarding', () => {
       repoDevicePath: '/Users/me/work/project',
     } as any;
     const cfg = {
-      backendId: 'mac-traecli',
+      backendId: 'mac-custom-cli',
       resolveBinary: () => '/bin/echo',
       buildArgv: ({ prompt }) => [prompt],
       outputProtocol: 'plain-text' as const,
@@ -405,15 +405,15 @@ describe('agent-link run context forwarding', () => {
 
     expect(sent[0].workspaceRepo).toMatchObject({
       groupFolder: 'flow-mq3z0g6r-d007b379',
-      agentId: 'mac-traecli',
+      agentId: 'mac-custom-cli',
       scope: 'session',
       scopeId: expect.stringMatching(
-        /^octodeck-flow-mq3z0g6r-d007b379-mac-traecli-[a-f0-9]{12}$/,
+        /^octodeck-flow-mq3z0g6r-d007b379-mac-custom-cli-[a-f0-9]{12}$/,
       ),
     });
     expect(sent[1].workspaceRepo).toMatchObject({
       groupFolder: 'flow-mq3z0g6r-d007b379',
-      agentId: 'mac-traecli',
+      agentId: 'mac-custom-cli',
       scope: 'session',
       scopeId: sent[0].workspaceRepo.scopeId,
     });
@@ -440,10 +440,10 @@ describe('agent-link run context forwarding', () => {
 
     expect(sent[2].workspaceRepo).toMatchObject({
       groupFolder: 'flow-mq3z0g6r-d007b379',
-      agentId: 'mac-traecli',
+      agentId: 'mac-custom-cli',
       scope: 'session',
       scopeId: expect.stringMatching(
-        /^octodeck-flow-mq3z0g6r-d007b379-mac-traecli-[a-f0-9]{12}$/,
+        /^octodeck-flow-mq3z0g6r-d007b379-mac-custom-cli-[a-f0-9]{12}$/,
       ),
     });
     expect(sent[2].workspaceRepo.scopeId).toBe(sent[0].workspaceRepo.scopeId);
@@ -501,73 +501,6 @@ describe('agent-link run context forwarding', () => {
     await promise;
   });
 
-  test('runViaAgentLink forwards TraeCLI Agent Team MCP setup marker to daemon client sessions', async () => {
-    const sent: any[] = [];
-    getSessionMock.mockReturnValue({
-      state: 'open',
-      send(frame: any) {
-        sent.push(frame);
-        return true;
-      },
-    });
-
-    const { runViaAgentLink } =
-      await import('../src/backends/agent-link-driver.js');
-    const { normalizeAgentClientBackendDef } =
-      await import('../src/backends/agent-client-adapter.js');
-    const backendDef = normalizeAgentClientBackendDef({
-      id: 'mac-coco-gpt',
-      displayName: 'Mac Coco GPT',
-      binary: '/Users/me/.local/bin/traecli',
-      argvTemplate: ['-p', '{prompt}', '-c', 'model.name={model}'],
-      outputProtocol: 'plain-text',
-      supportsHost: true,
-      supportsContainer: false,
-      usesProviderPool: false,
-      runtime: 'local-device',
-      model: 'GPT-5.5',
-      deviceLinkId: 'cl_1234567890abcdef',
-      agentClientId: 'traecli',
-    });
-
-    const promise = runViaAgentLink(
-      {
-        group: {
-          name: 'Home',
-          folder: 'main',
-          added_at: '2026-01-01T00:00:00.000Z',
-          executionMode: 'host',
-          executionNode: 'cl_1234567890abcdef',
-        } as any,
-        input: { prompt: '看看工具', chatJid: 'web:main' } as any,
-        executionMode: 'host',
-        onProcess: vi.fn(),
-      },
-      {
-        backendId: backendDef.id,
-        resolveBinary: () => backendDef.binary,
-        buildArgv: ({ prompt, cwd }) =>
-          backendDef.argvTemplate.map((arg) =>
-            arg
-              .replace('{prompt}', prompt)
-              .replace('{cwd}', cwd)
-              .replace('{model}', backendDef.model ?? ''),
-          ),
-        outputProtocol: backendDef.outputProtocol,
-      },
-      'cl_1234567890abcdef',
-    );
-
-    expect(sent[0].argv).toContain(
-      '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
-    );
-
-    registerRunMock.mock.calls
-      .at(-1)?.[0]
-      .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
-    await promise;
-  });
-
   test('runViaAgentLink gives scheduled background jobs a long default timeout', async () => {
     const sent: any[] = [];
     getSessionMock.mockReturnValue({
@@ -597,7 +530,7 @@ describe('agent-link run context forwarding', () => {
         onProcess: vi.fn(),
       },
       {
-        backendId: 'coco',
+        backendId: 'custom-cli',
         resolveBinary: () => '/bin/echo',
         buildArgv: ({ prompt }) => [prompt],
         outputProtocol: 'plain-text',
@@ -646,7 +579,7 @@ describe('agent-link run context forwarding', () => {
         onProcess: vi.fn(),
       },
       {
-        backendId: 'coco',
+        backendId: 'custom-cli',
         resolveBinary: () => '/bin/echo',
         buildArgv: ({ prompt }) => [prompt],
         outputProtocol: 'plain-text',
@@ -704,7 +637,7 @@ describe('agent-link run context forwarding', () => {
         onProcess: vi.fn(),
       },
       {
-        backendId: 'coco',
+        backendId: 'custom-cli',
         resolveBinary: () => '/bin/echo',
         buildArgv: ({ prompt }) => [prompt],
         outputProtocol: 'plain-text',
@@ -1050,7 +983,7 @@ describe('agent-link run context forwarding', () => {
         signal: abortController.signal,
       },
       {
-        backendId: 'coco',
+        backendId: 'custom-cli',
         resolveBinary: () => '/bin/echo',
         buildArgv: ({ prompt }) => [prompt],
         outputProtocol: 'plain-text',
@@ -1411,9 +1344,9 @@ describe('agent-link run context forwarding', () => {
         onOutput: vi.fn(async (output) => outputs.push(output)),
       },
       {
-        backendId: 'device-traecli',
+        backendId: 'device-custom-cli',
         model: 'Kimi-K2.6',
-        resolveBinary: () => '/usr/local/bin/traecli',
+        resolveBinary: () => '/usr/local/bin/custom-cli',
         buildArgv: ({ prompt }) => [prompt],
         outputProtocol: 'jsonline-stream-json',
       },
@@ -2224,25 +2157,25 @@ describe('agent-link run context forwarding', () => {
     const promise = runViaAgentLink(
       {
         group: {
-          name: 'Legacy Device TraeCLI',
-          folder: 'legacy-device-traecli',
+          name: 'Legacy Device Custom CLI',
+          folder: 'legacy-device-custom-cli',
           added_at: '2026-01-01T00:00:00.000Z',
           executionMode: 'host',
-          executionNode: 'runtime:cl_1234567890abcdef:traecli',
+          executionNode: 'runtime:cl_1234567890abcdef:custom-cli',
           runtimeProfile: 'device-cli-agent',
           created_by: 'u1',
         } as any,
         input: {
           prompt: '今天做什么？',
-          chatJid: 'web:legacy-device-traecli',
+          chatJid: 'web:legacy-device-custom-cli',
           isHome: false,
         } as any,
         executionMode: 'host',
         onProcess: vi.fn(),
       },
       {
-        backendId: 'mac-traecli',
-        resolveBinary: () => '/usr/local/bin/traecli',
+        backendId: 'mac-custom-cli',
+        resolveBinary: () => '/usr/local/bin/custom-cli',
         buildArgv: ({ prompt }) => [
           '-p',
           prompt,
@@ -2250,7 +2183,7 @@ describe('agent-link run context forwarding', () => {
         ],
         outputProtocol: 'jsonline-stream-json',
       },
-      'runtime:cl_1234567890abcdef:traecli',
+      'runtime:cl_1234567890abcdef:custom-cli',
     );
 
     expect(sent[0]).toMatchObject({ type: 'run.request' });
@@ -2265,7 +2198,7 @@ describe('agent-link run context forwarding', () => {
     await promise;
   });
 
-  test('runViaAgentLink uses agent.run for ACP TraeCLI clients instead of print-mode argv', async () => {
+  test('runViaAgentLink uses agent.run for ACP custom clients instead of print-mode argv', async () => {
     const sent: any[] = [];
     getOnlineMetaMock.mockReturnValue({
       capabilities: ['agent.run'],
@@ -2284,40 +2217,40 @@ describe('agent-link run context forwarding', () => {
     const promise = runViaAgentLink(
       {
         group: {
-          name: 'ACP TraeCLI',
-          folder: 'acp-traecli',
+          name: 'ACP Custom CLI',
+          folder: 'acp-custom-cli',
           added_at: '2026-01-01T00:00:00.000Z',
           executionMode: 'host',
-          executionNode: 'runtime:cl_1234567890abcdef:traecli',
+          executionNode: 'runtime:cl_1234567890abcdef:custom-cli',
           runtimeProfile: 'device-cli-agent',
           created_by: 'u1',
         } as any,
         input: {
           prompt: '今天做什么？',
-          chatJid: 'web:acp-traecli',
+          chatJid: 'web:acp-custom-cli',
           isHome: false,
         } as any,
         executionMode: 'host',
         onProcess: vi.fn(),
       },
       {
-        backendId: 'mac-traecli',
-        resolveBinary: () => '/usr/local/bin/traecli',
+        backendId: 'mac-custom-cli',
+        resolveBinary: () => '/usr/local/bin/custom-cli',
         buildArgv: ({ prompt }) => [
           '-p',
           prompt,
           '--output-format=stream-json',
         ],
         outputProtocol: 'jsonline-stream-json',
-        agentClientId: 'traecli',
+        agentClientId: 'custom-cli',
         agentClientTransport: 'acp',
       },
-      'runtime:cl_1234567890abcdef:traecli',
+      'runtime:cl_1234567890abcdef:custom-cli',
     );
 
     expect(sent[0]).toMatchObject({
       type: 'agent.run.request',
-      agentId: 'traecli',
+      agentId: 'custom-cli',
       input: { prompt: '今天做什么？' },
     });
     expect(sent[0]).not.toHaveProperty('argv');
@@ -2350,26 +2283,26 @@ describe('agent-link run context forwarding', () => {
     const promise = runViaAgentLink(
       {
         group: {
-          name: 'Legacy Device TraeCLI Continued',
-          folder: 'legacy-device-traecli-continued',
+          name: 'Legacy Device Custom CLI Continued',
+          folder: 'legacy-device-custom-cli-continued',
           added_at: '2026-01-01T00:00:00.000Z',
           executionMode: 'host',
-          executionNode: 'runtime:cl_1234567890abcdef:traecli',
+          executionNode: 'runtime:cl_1234567890abcdef:custom-cli',
           runtimeProfile: 'device-cli-agent',
           created_by: 'u1',
         } as any,
         input: {
           prompt: '继续',
           sessionId: 'native-session-1',
-          chatJid: 'web:legacy-device-traecli-continued',
+          chatJid: 'web:legacy-device-custom-cli-continued',
           isHome: false,
         } as any,
         executionMode: 'host',
         onProcess: vi.fn(),
       },
       {
-        backendId: 'mac-traecli',
-        resolveBinary: () => '/usr/local/bin/traecli',
+        backendId: 'mac-custom-cli',
+        resolveBinary: () => '/usr/local/bin/custom-cli',
         buildArgv: ({ prompt }) => [
           '-p',
           prompt,
@@ -2377,7 +2310,7 @@ describe('agent-link run context forwarding', () => {
         ],
         outputProtocol: 'jsonline-stream-json',
       },
-      'runtime:cl_1234567890abcdef:traecli',
+      'runtime:cl_1234567890abcdef:custom-cli',
     );
 
     expect(sent[0].argv[1]).toBe('继续');

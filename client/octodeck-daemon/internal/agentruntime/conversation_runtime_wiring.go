@@ -5,7 +5,6 @@ import (
 
 	claudecode "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/agentruntime/claudecode"
 	codex "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/agentruntime/codex"
-	traecli "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/agentruntime/traecli"
 	traex "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/agentruntime/traex"
 	daemonconfig "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/config"
 	proto "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/protocol"
@@ -38,7 +37,7 @@ func BuildConversationRuntimeRegistry(cfg *daemonconfig.Config) *Registry {
 }
 
 // buildFamilyDrivers instantiates one FamilyDriver per discovered builtin
-// agent client (claude-code / codex / traecli / traex-acp). Custom stdio/a2a/
+// agent client (claude-code / codex / traex-acp). Custom stdio/a2a/
 // http agents are intentionally excluded and continue through their custom
 // direct transport path.
 func buildFamilyDrivers(cfg *daemonconfig.Config) map[string]FamilyDriver {
@@ -58,8 +57,6 @@ func buildFamilyDrivers(cfg *daemonconfig.Config) map[string]FamilyDriver {
 			d = claudecode.NewDriver(client, entry)
 		case "codex":
 			d = codex.NewDriver(client, entry)
-		case "traecli":
-			d = traecli.NewDriver(client, entry)
 		case "traex":
 			d = traex.NewDriver(client, entry)
 		default:

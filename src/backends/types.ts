@@ -1,7 +1,7 @@
 /**
  * Agent backend abstraction.
  *
- * 一个 backend 知道如何 spawn 一个外部 agent 进程（Claude Agent SDK / coco / ...），
+ * 一个 backend 知道如何 spawn 一个外部 agent 进程（Claude Agent SDK / Codex CLI / ...），
  * 并把它的输出按 octodeck 的 stdout marker 协议（OUTPUT_START_MARKER /
  * OUTPUT_END_MARKER 包裹的 ContainerOutput JSON）暴露给上层。
  *

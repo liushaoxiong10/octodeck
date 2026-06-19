@@ -10,7 +10,7 @@ function insertBeforeTail(argv: string[], tailCount: number, extra: string[]): s
   return [...argv.slice(0, index), ...extra, ...argv.slice(index)];
 }
 
-function agentFamily(agentClientId: string | undefined | null): 'claude' | 'codex' | 'traecli' | 'traex' | 'unknown' {
+function agentFamily(agentClientId: string | undefined | null): 'claude' | 'codex' | 'traex' | 'unknown' {
   return inferAgentClientFamily(agentClientId) ?? 'unknown';
 }
 
@@ -95,12 +95,6 @@ export function applyAgentPermissionArgs(
   if (family === 'claude') {
     if (hasArg(argv, '--permission-mode', '--dangerously-skip-permissions')) return argv;
     return [...argv, '--permission-mode', mode];
-  }
-
-  if (family === 'traecli') {
-    if (mode !== 'bypassPermissions') return argv;
-    if (hasArg(argv, '-y', '--yes')) return argv;
-    return [...argv, '-y'];
   }
 
   if (family === 'codex') {

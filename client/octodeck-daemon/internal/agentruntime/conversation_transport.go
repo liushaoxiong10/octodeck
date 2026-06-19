@@ -13,10 +13,10 @@ import (
 // disconnect, etc.). The Instance uses it to decide whether to Stop the
 // process and retry once with the same SessionID before giving up.
 //
-// All four families (claudecode / codex / traecli / traex) surface transport
+// All builtin families (claudecode / codex / traex) surface transport
 // failures through the same acpsdk / codexacp / claudeacp / exec pipe layer,
 // so one string/identity matcher covers them. Mirrors the per-family helper
-// in traecli/acp_transport.go.
+// in /acp_transport.go.
 func IsTransportDisconnect(err error) bool {
 	if err == nil {
 		return false

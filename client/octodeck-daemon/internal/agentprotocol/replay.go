@@ -11,7 +11,7 @@ import (
 // session_update replay after LoadSession/ResumeSession. After this point any
 // remaining replay frames are released to the caller. 1.5s matches the legacy
 // per-family helper; the value is empirical from the codexacp/claudeacp/
-// traecli adapters and balances "wait long enough for the prompt echo to
+//  adapters and balances "wait long enough for the prompt echo to
 // arrive" against "do not stall a fast-replying agent".
 func ReplaySuppressDeadline() time.Time {
 	return time.Now().Add(1500 * time.Millisecond)
@@ -30,8 +30,8 @@ func ReplaySuppressDeadline() time.Time {
 //	suppress      — true when the frame should be dropped (still in replay
 //	                window and not the prompt echo). false to forward.
 //
-// Identical semantics to traecli/acp_bridge.go's per-family helper; lifted
-// here so claudecode/codex/traex/traecli drivers share one implementation.
+// Identical semantics to /acp_bridge.go's per-family helper; lifted
+// here so claudecode/codex/traex/ drivers share one implementation.
 func ShouldSuppressReplayFrame(frame *proto.AgentRunEventFrame, prompt, messageID string, deadline time.Time) (matchedPrompt bool, suppress bool) {
 	if frame == nil {
 		return false, true
@@ -48,7 +48,7 @@ func ShouldSuppressReplayFrame(frame *proto.AgentRunEventFrame, prompt, messageI
 // isCurrentPromptEcho reports whether frame is the user-message echo of the
 // current turn's prompt — matched first by messageID (preferred, exact) and
 // secondarily by trimmed prompt text (fallback for providers that drop the
-// id). Same matcher as the legacy traecli helper.
+// id). Same matcher as the legacy  helper.
 func isCurrentPromptEcho(frame *proto.AgentRunEventFrame, prompt, messageID string) bool {
 	if frame == nil || frame.EventType != "log" || frame.Payload == nil {
 		return false

@@ -12,7 +12,7 @@ import (
 
 func TestDiscoverFindsSupportedClientsOnPath(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"claude", "codex", "traecli"} {
+	for _, name := range []string{"claude", "codex", "traex", "traecli"} {
 		p := filepath.Join(dir, name)
 		if err := os.WriteFile(p, []byte("#!/bin/sh\necho "+name+" 1.0\n"), 0o755); err != nil {
 			t.Fatal(err)
@@ -32,12 +32,15 @@ func TestDiscoverFindsSupportedClientsOnPath(t *testing.T) {
 	if byID["codex"].Binary != filepath.Join(dir, "codex") {
 		t.Fatalf("missing codex discovery: %#v", clients)
 	}
-	trae := byID["traecli"]
-	if trae.Binary != filepath.Join(dir, "traecli") {
-		t.Fatalf("missing traecli discovery: %#v", clients)
+	traex := byID["traex-acp"]
+	if traex.Binary != filepath.Join(dir, "traex") {
+		t.Fatalf("missing traex discovery: %#v", clients)
 	}
-	if trae.Transport != "acp" || strings.Join(trae.Args, " ") != "acp serve" {
-		t.Fatalf("traecli should default to ACP subcommand: %#v", trae)
+	if traex.Transport != "acp" {
+		t.Fatalf("traex should default to ACP transport: %#v", traex)
+	}
+	if _, ok := byID["traecli"]; ok {
+		t.Fatalf("traecli should not be discovered after support removal: %#v", clients)
 	}
 }
 

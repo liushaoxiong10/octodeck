@@ -96,8 +96,6 @@ export function buildDaemonInstallScript(
         '/usr/bin/python3',
         '/usr/local/bin/node',
         '/opt/homebrew/bin/node',
-        '/usr/local/bin/coco',
-        '/opt/homebrew/bin/coco',
         '/usr/local/bin/claude',
         '/opt/homebrew/bin/claude',
       ],

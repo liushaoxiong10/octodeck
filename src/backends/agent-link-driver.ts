@@ -964,7 +964,7 @@ function shouldInlineSystemPromptForLegacyDeviceCli(
   agentClientId: string | undefined,
 ): boolean {
   // Claude Code has a native --append-system-prompt path. Other device CLIs
-  // (Codex / TraeCLI / custom clients) may ignore argv-level system prompt
+  // (Codex / TraeX / custom clients) may ignore argv-level system prompt
   // conventions, so inline OctoDeck system context into the user prompt to make
   // cloud global memory visible consistently in legacy run.request mode.
   return (
@@ -1347,7 +1347,7 @@ function supportsAgentRun(
   // ACP transports are exposed by the daemon as native agent runtimes. During
   // reconnect/discover races older server state may not have a fresh runtimes
   // snapshot yet; still prefer agent.run so we do not fall back to legacy
-  // run.request and rebuild a print-mode argv such as `traecli -p ...`.
+  // run.request and rebuild a print-mode argv.
   return agentClientTransport === 'acp';
 }
 

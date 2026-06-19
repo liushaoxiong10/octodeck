@@ -1,7 +1,7 @@
 // Package agentruntime: capabilities_optional.go 冻结了 family 子包可以选择
 // 实现的可选能力接口集。daemon 主流程通过类型断言（type assertion）判断
 // 某个 Agent 是否实现了某个能力，从而避免在公共层硬编码 claude / codex /
-// traecli / traex 等家族字面量。
+// traex 等家族字面量。
 //
 // 这些接口的签名在阶段 A 之后被冻结，B/C/D 阶段的各 family 子包必须严格
 // 遵守；如需扩展能力，应通过新增 interface（而不是修改这里的接口）来

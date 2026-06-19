@@ -45,7 +45,7 @@ interface Skill {
   enabled: boolean;
   packageName?: string;
   packageSource?: string;
-  sourceProvider?: 'claude' | 'codex' | 'traecli' | string;
+  sourceProvider?: 'claude' | 'codex' | string;
   level?: 'package' | 'skill';
   levelKey?: string;
   installedAt?: string;
@@ -74,7 +74,7 @@ type SkillInstallTarget =
   | { kind: 'device'; deviceLinkId: string }
   | { kind: 'device-agent-workspace'; agentId: string };
 
-type SkillSourceProvider = 'claude' | 'codex' | 'traecli';
+type SkillSourceProvider = 'claude' | 'codex';
 
 // --- Utility Functions ---
 
@@ -88,7 +88,6 @@ function getProjectSkillsDir(): string {
 
 function normalizeSourceProvider(value: unknown): SkillSourceProvider {
   if (value === 'codex') return 'codex';
-  if (value === 'traecli' || value === 'trae') return 'traecli';
   return 'claude';
 }
 
@@ -641,11 +640,7 @@ async function installSkillForUser(
   const sourceProvider = normalizeSourceProvider(options.sourceProvider);
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-install-'));
   const providerConfigDir =
-    sourceProvider === 'claude'
-      ? 'claude'
-      : sourceProvider === 'traecli'
-        ? 'trae'
-        : sourceProvider;
+    sourceProvider === 'claude' ? 'claude' : sourceProvider;
   const tempSkillsDir = path.join(tempHome, `.${providerConfigDir}`, 'skills');
   fs.mkdirSync(tempSkillsDir, { recursive: true });
 

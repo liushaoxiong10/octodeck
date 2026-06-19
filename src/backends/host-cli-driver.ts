@@ -2,7 +2,7 @@
  * Generic host-mode CLI driver.
  *
  * 把所有「在 host 上 spawn 一个外部 CLI、按行读 stdout、写 run log、超时 kill」
- * 的样板代码抽到这里。built-in `coco` 与所有自定义 backend 都通过它落地，
+ * 的样板代码抽到这里。内置 CLI 与所有自定义 backend 都通过它落地，
  * 避免每个 backend 复制 80% 的代码。
  *
  * 安全要点：
@@ -61,7 +61,7 @@ export interface HostCliDriverConfig {
   model?: string;
   /** Device agent-runtime permission/sandbox mode, e.g. bypassPermissions / full-access. */
   permissionMode?: string | null;
-  /** Discovered agent client id used to adapt permission args, e.g. claude-code / codex / traecli. */
+  /** Discovered agent client id used to adapt permission args, e.g. claude-code / codex / traex. */
   agentClientId?: string | null;
   /** Discovered agent client transport. ACP clients should use agent.run instead of legacy run.request. */
   agentClientTransport?: string | null;

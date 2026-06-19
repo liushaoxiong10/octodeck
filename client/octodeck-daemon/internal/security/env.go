@@ -10,7 +10,7 @@ import (
 )
 
 // EnvConfig configures the environment-builder with the session directory used
-// to derive per-provider config dirs (CODEX_HOME, TRAECLI_CONFIG_DIR, ...).
+// to derive per-provider config dirs (CODEX_HOME, TRAEX_HOME, ...).
 type EnvConfig struct {
 	SessionDir string
 }
@@ -36,9 +36,8 @@ func BuildEnv(cfg EnvConfig, overrides map[string]string, runCtx any, base map[s
 		_ = os.MkdirAll(root, 0o700)
 		base["OCTODECK_SESSION_DIR"] = root
 		providerDirs := map[string]string{
-			"CODEX_HOME":         filepath.Join(root, "codex"),
-			"TRAECLI_CONFIG_DIR": filepath.Join(root, "traecli"),
-			"TRAEX_HOME":         filepath.Join(root, "traex"),
+			"CODEX_HOME": filepath.Join(root, "codex"),
+			"TRAEX_HOME": filepath.Join(root, "traex"),
 		}
 		for key, dir := range providerDirs {
 			_ = os.MkdirAll(dir, 0o700)

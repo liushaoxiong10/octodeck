@@ -5,7 +5,6 @@ import (
 
 	claudecode "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/agentruntime/claudecode"
 	codex "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/agentruntime/codex"
-	traecli "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/agentruntime/traecli"
 	traex "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/agentruntime/traex"
 	daemonconfig "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/config"
 	inventory "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/inventory"
@@ -21,9 +20,6 @@ var builtinAgentFactories = map[string]AgentFactory{
 	},
 	codex.FamilyID: func(client inventory.Info, entry *daemonconfig.AgentRegistryEntry) Agent {
 		return codex.New(client, entry)
-	},
-	traecli.FamilyID: func(client inventory.Info, entry *daemonconfig.AgentRegistryEntry) Agent {
-		return traecli.New(client, entry)
 	},
 	traex.FamilyID: func(client inventory.Info, entry *daemonconfig.AgentRegistryEntry) Agent {
 		return traex.New(client, entry)
