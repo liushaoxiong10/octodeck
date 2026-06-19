@@ -63,6 +63,23 @@ describe('device-first host migration', () => {
     expect(source).not.toContain('直接在服务器上执行');
   });
 
+  test('workspace creation only offers repos that belong to the selected device', () => {
+    const dialog = readFileSync(join(repoRoot, 'web/src/components/chat/CreateContainerDialog.tsx'), 'utf8');
+    const sidebar = readFileSync(join(repoRoot, 'web/src/components/layout/UnifiedSidebar.tsx'), 'utf8');
+    const groupRoutes = readFileSync(join(repoRoot, 'src/routes/groups.ts'), 'utf8');
+
+    expect(dialog).toContain("repo.kind !== 'device_path' ||");
+    expect(dialog).toContain('repo.device_link_id === selectedDeviceId');
+    expect(dialog).toContain('!selectableRepos.some((repo) => repo.id === selectedRepoId)');
+    expect(sidebar).toContain('repoVisibilityDeviceId');
+    expect(sidebar).toContain('repo.device_link_id === repoVisibilityDeviceId');
+    expect(sidebar).toContain('repoVisibilityRepos.map((repo)');
+    expect(sidebar).toContain('当前 Device 可用');
+    expect(groupRoutes).toContain('repoBelongsToDeviceTarget');
+    expect(groupRoutes).toContain('repo_id does not belong to the selected Device');
+    expect(groupRoutes).toContain('visible_repo_ids contains Repo outside the selected Device');
+  });
+
   test('workspace rebuild can switch to cloud sdk or server side device runtime', () => {
     const hook = readFileSync(join(repoRoot, 'web/src/hooks/useClearWorkspace.ts'), 'utf8');
     const sidebar = readFileSync(join(repoRoot, 'web/src/components/layout/UnifiedSidebar.tsx'), 'utf8');

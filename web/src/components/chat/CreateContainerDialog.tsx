@@ -102,8 +102,12 @@ export function CreateContainerDialog({
   );
 
   const selectableRepos = useMemo(
-    () => repos,
-    [repos],
+    () => repos.filter(
+      (repo) =>
+        repo.kind !== 'device_path' ||
+        repo.device_link_id === selectedDeviceId,
+    ),
+    [repos, selectedDeviceId],
   );
 
   useEffect(() => {
@@ -111,6 +115,13 @@ export function CreateContainerDialog({
       setExecutionNode(selectedRepo.device_link_id);
     }
   }, [selectedRepo]);
+
+  useEffect(() => {
+    if (hostRepoMode !== 'repo' || !selectedRepoId) return;
+    if (!selectableRepos.some((repo) => repo.id === selectedRepoId)) {
+      setSelectedRepoId('');
+    }
+  }, [hostRepoMode, selectableRepos, selectedRepoId]);
 
   useEffect(() => {
     if (runtimeProfile !== 'device-cli-agent') return;

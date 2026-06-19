@@ -381,6 +381,15 @@ function listAllVisibleRepoSnapshotIds(
     .sort();
 }
 
+function repoBelongsToDeviceTarget(
+  repo: { kind: string; deviceLinkId?: string },
+  target: string | undefined,
+): boolean {
+  if (repo.kind !== 'device_path') return true;
+  const targetLinkId = deviceLinkIdFromExecutionTarget(target);
+  return !!targetLinkId && repo.deviceLinkId === targetLinkId;
+}
+
 import { removeFlowArtifacts } from '../file-manager.js';
 import {
   getSession as getAgentLinkSession,
@@ -555,12 +564,14 @@ groupRoutes.post('/', authMiddleware, async (c) => {
   if (repoId && (!selectedRepo || selectedRepo.createdBy !== authUser.id)) {
     return c.json({ error: 'repo_id not found' }, 400);
   }
+  const visibleRepos = [];
   if (visibleRepoIds) {
     for (const visibleRepoId of visibleRepoIds) {
       const repo = getManagedRepoById(visibleRepoId);
       if (!repo || repo.createdBy !== authUser.id) {
         return c.json({ error: 'visible_repo_ids contains unknown repo' }, 400);
       }
+      visibleRepos.push(repo);
     }
   }
   const effectiveRepoGitUrl =
@@ -575,6 +586,37 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     selectedRepo?.kind === 'device_path'
       ? selectedRepo.deviceLinkId
       : executionNode;
+  if (
+    selectedRepo?.kind === 'device_path' &&
+    executionNode &&
+    !repoBelongsToDeviceTarget(selectedRepo, executionNode)
+  ) {
+    return c.json(
+      { error: 'repo_id does not belong to the selected Device' },
+      400,
+    );
+  }
+  if (
+    selectedRepo &&
+    !repoBelongsToDeviceTarget(selectedRepo, effectiveExecutionNode)
+  ) {
+    return c.json(
+      { error: 'repo_id does not belong to the selected Device' },
+      400,
+    );
+  }
+  if (
+    visibleRepos.some(
+      (repo) => !repoBelongsToDeviceTarget(repo, effectiveExecutionNode),
+    )
+  ) {
+    return c.json(
+      {
+        error: 'visible_repo_ids contains Repo outside the selected Device',
+      },
+      400,
+    );
+  }
 
   // Billing: check group limit
   const groupLimit = checkGroupLimit(authUser.id, authUser.role);
@@ -1058,12 +1100,14 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     }
   }
 
+  const patchVisibleRepos = [];
   if (visible_repo_ids) {
     for (const visibleRepoId of visible_repo_ids) {
       const repo = getManagedRepoById(visibleRepoId);
       if (!repo || repo.createdBy !== authUser.id) {
         return c.json({ error: 'visible_repo_ids contains unknown repo' }, 400);
       }
+      patchVisibleRepos.push(repo);
     }
   }
 
@@ -1072,6 +1116,22 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   const existingDeviceLinkId =
     existing.deviceLinkId ||
     deviceLinkIdFromExecutionTarget(existing.executionNode);
+  const effectivePatchDeviceLinkId =
+    nextDeviceLinkId !== undefined && nextDeviceLinkId !== null
+      ? nextDeviceLinkId
+      : (existing.deviceLinkId ?? existing.executionNode);
+  if (
+    patchVisibleRepos.some(
+      (repo) => !repoBelongsToDeviceTarget(repo, effectivePatchDeviceLinkId),
+    )
+  ) {
+    return c.json(
+      {
+        error: 'visible_repo_ids contains Repo outside the selected Device',
+      },
+      400,
+    );
+  }
   const nextResolvedDeviceLinkId =
     nextDeviceLinkId !== undefined && nextDeviceLinkId !== null
       ? deviceLinkIdFromExecutionTarget(nextDeviceLinkId)

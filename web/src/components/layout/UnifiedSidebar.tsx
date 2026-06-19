@@ -29,6 +29,16 @@ import { cn } from '@/lib/utils';
 import { filterNavItems } from './nav-items';
 import { type GroupEntry, type DateSection, groupByDate, compareByLastActivity } from '../../utils/group-utils';
 
+function deviceIdFromExecutionTarget(target: string | undefined): string | null {
+  if (!target) return null;
+  if (/^cl_[0-9a-f]{16}$/.test(target)) return target;
+  const runtimeMatch = target.match(/^runtime:(cl_[0-9a-f]{16}):[^:]+$/);
+  if (runtimeMatch) return runtimeMatch[1];
+  const legacyRuntimeMatch = target.match(/^(cl_[0-9a-f]{16}):[^:]+$/);
+  if (legacyRuntimeMatch) return legacyRuntimeMatch[1];
+  return null;
+}
+
 interface UnifiedSidebarProps {
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -100,6 +110,31 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
   useEffect(() => {
     if (repoVisibilityState.open) void loadRepos();
   }, [repoVisibilityState.open, loadRepos]);
+
+  const repoVisibilityDeviceId = useMemo(() => {
+    const group = groups[repoVisibilityState.jid];
+    return deviceIdFromExecutionTarget(group?.device_link_id ?? group?.execution_node);
+  }, [groups, repoVisibilityState.jid]);
+
+  const repoVisibilityRepos = useMemo(
+    () => repos.filter(
+      (repo) =>
+        repo.kind !== 'device_path' ||
+        repo.device_link_id === repoVisibilityDeviceId,
+    ),
+    [repos, repoVisibilityDeviceId],
+  );
+
+  useEffect(() => {
+    if (!repoVisibilityState.open || repoVisibilityState.mode !== 'selected') {
+      return;
+    }
+    const selectableIds = new Set(repoVisibilityRepos.map((repo) => repo.id));
+    const nextIds = repoVisibilityState.ids.filter((id) => selectableIds.has(id));
+    if (nextIds.length !== repoVisibilityState.ids.length) {
+      setRepoVisibilityState((state) => ({ ...state, ids: nextIds }));
+    }
+  }, [repoVisibilityRepos, repoVisibilityState.ids, repoVisibilityState.mode, repoVisibilityState.open]);
 
   const { mainGroup, otherGroups } = useMemo(() => {
     let main: GroupEntry | null = null;
@@ -422,7 +457,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
                   />
                   <div>
                     <div className="text-sm font-medium">全部可见</div>
-                    <p className="text-xs text-muted-foreground mt-0.5">该账号下所有托管 Repo 都会挂载到新会话，新添加的 Repo 会在下一次新消息触发时生效。</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">该工作区当前 Device 可用的托管 Repo 都会挂载到新会话，新添加的 Repo 会在下一次新消息触发时生效。</p>
                   </div>
                 </label>
                 <label className="flex items-start gap-3 rounded-lg border p-3 cursor-pointer hover:bg-accent/50 transition-colors">
@@ -449,10 +484,10 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
                   <div className="max-h-64 overflow-y-auto p-2 space-y-1">
                     {reposLoading ? (
                       <div className="px-2 py-6 text-center text-xs text-muted-foreground">加载中…</div>
-                    ) : repos.length === 0 ? (
-                      <div className="px-2 py-6 text-center text-xs text-muted-foreground">暂无 Repo，请先在 Repos 页面添加。</div>
+                    ) : repoVisibilityRepos.length === 0 ? (
+                      <div className="px-2 py-6 text-center text-xs text-muted-foreground">暂无当前 Device 可用的 Repo，请先在 Repos 页面添加。</div>
                     ) : (
-                      repos.map((repo) => (
+                      repoVisibilityRepos.map((repo) => (
                         <label key={repo.id} className="flex items-start gap-3 rounded-md px-2 py-2 hover:bg-accent/50 cursor-pointer">
                           <input
                             type="checkbox"
