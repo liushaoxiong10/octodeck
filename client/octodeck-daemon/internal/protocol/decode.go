@@ -75,6 +75,18 @@ func ParseInbound(raw []byte) (any, error) {
 			return nil, err
 		}
 		return &f, nil
+	case TWorkspaceGitStatusRequest:
+		var f WorkspaceGitStatusRequestFrame
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, err
+		}
+		return &f, nil
+	case TWorkspaceGitCommitRequest:
+		var f WorkspaceGitCommitRequestFrame
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, err
+		}
+		return &f, nil
 	case TAgentPermissionDecision:
 		var f AgentPermissionDecisionFrame
 		if err := json.Unmarshal(raw, &f); err != nil {

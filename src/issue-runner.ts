@@ -3,6 +3,7 @@ import * as crypto from 'node:crypto';
 import type { ContainerOutput } from './container-runner.js';
 import type { StreamEvent } from './stream-event.types.js';
 import {
+  createAgentTaskScopedToken,
   ensureChatExists,
   createIssueAgentRequest,
   createIssueAgentRunEvent,
@@ -12,8 +13,11 @@ import {
   getLastCompletedIssueRunAt,
   getRegisteredGroup,
   getUserHomeGroup,
+  listAgentLinksByUser,
+  listIssueAgentRunEvents,
   listIssueAgentRequests,
   listIssueComments,
+  revokeAgentTaskScopedToken,
   setIssueAgentRunAwaiting,
   storeMessageDirect,
   touchIssueAgentRunHeartbeat,
@@ -25,6 +29,9 @@ import {
 import { logger } from './logger.js';
 import { afterIssueEventCreated } from './issue-notifier.js';
 import { resolveBackend } from './backends/registry.js';
+import { listCustomBackends } from './backends/custom-loader.js';
+import { getOnlineMeta, isOnline } from './agent-link/registry.js';
+import { resolveAgentRunRuntimeTarget } from './runtime-scheduler.js';
 import type {
   IssueAgentRequest,
   IssueAgentRun,
@@ -32,13 +39,36 @@ import type {
   RegisteredGroup,
   WorkspaceIssue,
 } from './types.js';
+import type { RunPermissionPolicy } from './permissions.js';
 import type { WebDeps } from './web-context.js';
+
+const ISSUE_RUN_TASK_TOKEN_TTL_MS = 2 * 60 * 60 * 1000;
+
+function buildIssueRunPermissionPolicy(
+  issue: WorkspaceIssue,
+  _run: IssueAgentRun,
+): RunPermissionPolicy {
+  return {
+    filesystem: 'workspace',
+    workspaceFolder: issue.workspace_folder,
+    repoId: issue.project_repo_id ?? null,
+    network: 'disabled',
+    secrets: 'none',
+    shell: 'approval',
+    git: 'push_approval',
+  };
+}
+
+function issueAgentTaskId(runId: string): string {
+  return `agtask_${runId}`;
+}
 
 export function buildIssuePrompt(
   issue: WorkspaceIssue,
   run: IssueAgentRun,
   comments: IssueComment[] | null = null,
   lastAnsweredRequest: IssueAgentRequest | null = null,
+  childRunTask: QueuedChildRunTask | null = null,
 ): string {
   const parts: (string | null)[] = [];
   if (lastAnsweredRequest) {
@@ -88,6 +118,12 @@ export function buildIssuePrompt(
       parts.push(c.body || '(empty)');
     }
   }
+  if (childRunTask) {
+    parts.push('');
+    parts.push(`[${childRunTask.heading}]`);
+    if (run.parent_run_id) parts.push(`Parent run: ${run.parent_run_id}`);
+    parts.push(childRunTask.prompt);
+  }
   parts.push('');
   parts.push('Instructions:');
   parts.push('- Start from this issue context.');
@@ -97,8 +133,32 @@ export function buildIssuePrompt(
   return parts.filter((line): line is string => line !== null).join('\n');
 }
 
+interface QueuedChildRunTask {
+  trigger: 'review_agent' | 'fix_run_spawner';
+  heading: string;
+  prompt: string;
+}
+
+function loadQueuedChildRunTask(run: IssueAgentRun): QueuedChildRunTask | null {
+  if (!run.parent_run_id) return null;
+  const events = listIssueAgentRunEvents(run.id);
+  const queued = events.find((event) => {
+    const payload = event.payload ?? null;
+    return event.event_type === 'run_queued' && (payload?.trigger === 'review_agent' || payload?.trigger === 'fix_run_spawner');
+  });
+  const prompt = queued?.detail?.trim();
+  const trigger = queued?.payload?.trigger;
+  if (!prompt || (trigger !== 'review_agent' && trigger !== 'fix_run_spawner')) return null;
+  return {
+    trigger,
+    heading: trigger === 'fix_run_spawner' ? 'FIX RUN TASK' : 'REVIEW AGENT TASK',
+    prompt,
+  };
+}
+
 function buildIssueGroup(baseGroup: RegisteredGroup, issue: WorkspaceIssue, run: IssueAgentRun): RegisteredGroup {
   const executionNode = run.execution_node ?? issue.execution_node ?? undefined;
+  const isServerExecution = executionNode?.startsWith('server:') === true;
   return {
     ...baseGroup,
     folder: issue.workspace_folder,
@@ -107,11 +167,87 @@ function buildIssueGroup(baseGroup: RegisteredGroup, issue: WorkspaceIssue, run:
     repoGitUrl: issue.project_git_url ?? baseGroup.repoGitUrl,
     repoMainBranch: issue.project_git_url ? undefined : baseGroup.repoMainBranch,
     repoDevicePath: issue.project_device_path ?? baseGroup.repoDevicePath,
-    deviceLinkId: run.agent_link_id ?? issue.agent_link_id ?? baseGroup.deviceLinkId,
+    deviceLinkId: isServerExecution ? undefined : (run.agent_link_id ?? issue.agent_link_id ?? baseGroup.deviceLinkId),
     agentClientId: run.agent_client_id ?? issue.agent_client_id ?? baseGroup.agentClientId,
     executionNode: executionNode ?? baseGroup.executionNode,
     executionMode: executionNode ? 'host' : baseGroup.executionMode ?? 'container',
   };
+}
+
+function maybeSelfHealIssueRunRuntimeTarget(issue: WorkspaceIssue, run: IssueAgentRun): IssueAgentRun {
+  const executionTarget = run.execution_node ?? issue.execution_node ?? null;
+  if (!executionTarget) return run;
+
+  try {
+    const devices = listAgentLinksByUser(run.created_by ?? issue.created_by).map((link) => {
+      const online = getOnlineMeta(link.id);
+      const linkOnline = isOnline(link.id);
+      return {
+        id: link.id,
+        displayName: link.displayName,
+        online: linkOnline,
+        status: online?.status ?? (linkOnline ? 'idle' as const : 'offline' as const),
+        lastHeartbeatAt: online?.lastHeartbeatAt
+          ? new Date(online.lastHeartbeatAt).toISOString()
+          : link.lastSeenAt,
+        agentClients: link.agentClients ?? [],
+        runtimes: online?.runtimes ?? [],
+      };
+    });
+    const serverBackends = listCustomBackends()
+      .filter((backend) => backend.runtime === 'server-side')
+      .map((backend) => ({
+        id: backend.id,
+        displayName: backend.displayName,
+        runtime: backend.runtime,
+        providerId: backend.providerId,
+      }));
+    const decision = resolveAgentRunRuntimeTarget({
+      executionTarget,
+      preferredAgentClientId: run.agent_client_id ?? issue.agent_client_id ?? undefined,
+      devices,
+      serverBackends,
+      includeServerBackends: true,
+      allowFailover: true,
+      allowedDeviceLinkId: issue.project_device_link_id ?? undefined,
+    });
+    if (decision.schedulingReason !== 'target_recovered' || !decision.executionNode || !decision.recovery) {
+      return run;
+    }
+
+    const healedRun: IssueAgentRun = {
+      ...run,
+      agent_link_id: decision.deviceLinkId ?? null,
+      agent_client_id: decision.agentClientId ?? run.agent_client_id,
+      execution_node: decision.executionNode,
+      backend: decision.backendId ?? run.backend,
+    };
+    updateIssueAgentRun(run.id, {
+      agent_link_id: healedRun.agent_link_id,
+      agent_client_id: healedRun.agent_client_id,
+      execution_node: healedRun.execution_node,
+      backend: healedRun.backend,
+    });
+    auditIssueRunEvent(issue.id, run.id, 'runtime_self_healed', {
+      title: 'Runtime target self-healed',
+      summary: `${decision.recovery.originalRuntimeId} → ${decision.runtimeId}`,
+      payload: {
+        strategy: decision.recovery.strategy,
+        originalRuntimeId: decision.recovery.originalRuntimeId,
+        originalExecutionNode: decision.recovery.originalExecutionNode,
+        originalBlockedReason: decision.recovery.originalBlockedReason,
+        recoveredRuntimeId: decision.runtimeId,
+        recoveredExecutionNode: decision.executionNode,
+        recoveredDeviceLinkId: decision.deviceLinkId ?? null,
+        recoveredAgentClientId: decision.agentClientId ?? null,
+        recoveredBackendId: decision.backendId ?? null,
+      },
+    });
+    return healedRun;
+  } catch (err) {
+    logger.warn({ err, issueId: issue.id, runId: run.id, executionTarget }, 'Failed to self-heal issue runtime target; using original target');
+    return run;
+  }
 }
 
 function issueRunChatJid(issue: WorkspaceIssue, run: IssueAgentRun): string {
@@ -195,6 +331,22 @@ export async function runIssueAgent(
   const issue = getIssueById(issueId);
   const run = getIssueAgentRunById(runId);
   if (!issue || !run) return;
+  let taskScopedTokenId: string | null = null;
+
+  const revokeIssueRunTaskScopedToken = (reason: string): void => {
+    if (!taskScopedTokenId) return;
+    try {
+      if (revokeAgentTaskScopedToken(taskScopedTokenId, reason)) {
+        auditIssueRunEvent(issueId, runId, 'task_scoped_token_revoked', {
+          title: 'Task-scoped token revoked',
+          summary: reason,
+          payload: { tokenId: taskScopedTokenId, taskId: issueAgentTaskId(runId), reason },
+        });
+      }
+    } catch (err) {
+      logger.warn({ err, issueId, runId, tokenId: taskScopedTokenId }, 'Failed to revoke issue run task-scoped token');
+    }
+  };
 
   const startedAt = new Date().toISOString();
   updateIssueAgentRun(runId, {
@@ -249,7 +401,8 @@ export async function runIssueAgent(
     const baseGroup = getRegisteredGroup(issue.workspace_jid);
     if (!baseGroup) throw new Error('Workspace not found');
 
-    const issueGroup = buildIssueGroup(baseGroup, issue, run);
+    const activeRun = maybeSelfHealIssueRunRuntimeTarget(issue, run);
+    const issueGroup = buildIssueGroup(baseGroup, issue, activeRun);
     const executionMode = issueGroup.executionMode === 'host' ? 'host' : 'container';
     const backend = resolveBackend(issueGroup);
     const ownerHomeFolder = issueGroup.created_by
@@ -283,7 +436,8 @@ export async function runIssueAgent(
       }
     }
 
-    const prompt = buildIssuePrompt(issue, run, injectedComments, lastAnsweredRequest);
+    const childRunTask = loadQueuedChildRunTask(run);
+    const prompt = buildIssuePrompt(issue, run, injectedComments, lastAnsweredRequest, childRunTask);
     const runChatJid = issueRunChatJid(issue, run);
     persistIssuePrompt(issue, run, issue.created_by, prompt);
     auditIssueRunEvent(issueId, runId, 'input_prepared', {
@@ -304,6 +458,31 @@ export async function runIssueAgent(
     let latestResult = '';
     let latestError = '';
     let output: ContainerOutput;
+    const runPermissionPolicy = buildIssueRunPermissionPolicy(issue, run);
+    const runPermissionPolicyRecord: Record<string, unknown> = {
+      ...runPermissionPolicy,
+    };
+    const taskScopedToken = createAgentTaskScopedToken({
+      task_id: issueAgentTaskId(run.id),
+      actor_user_id: run.created_by,
+      agent_link_id: issueGroup.deviceLinkId ?? null,
+      agent_client_id: issueGroup.agentClientId ?? null,
+      workspace_folder: issue.workspace_folder,
+      repo_id: issue.project_repo_id ?? null,
+      policy: runPermissionPolicyRecord,
+      ttl_ms: ISSUE_RUN_TASK_TOKEN_TTL_MS,
+    });
+    taskScopedTokenId = taskScopedToken.id;
+    auditIssueRunEvent(issueId, runId, 'task_scoped_token_created', {
+      title: 'Task-scoped token created',
+      summary: taskScopedToken.id,
+      payload: {
+        tokenId: taskScopedToken.id,
+        taskId: issueAgentTaskId(run.id),
+        expiresAt: taskScopedToken.expires_at,
+        policy: runPermissionPolicyRecord,
+      },
+    });
     if (!backend.supportsExecutionMode(executionMode)) {
       auditIssueRunEvent(issueId, runId, 'backend_rejected', {
         title: 'Backend rejected execution mode',
@@ -341,6 +520,8 @@ export async function runIssueAgent(
           messageTaskId: issue.id,
           taskRunId: run.id,
           scheduledTaskHasWorkspace: true,
+          taskScopedToken: taskScopedToken.token,
+          runPermissionPolicy: runPermissionPolicyRecord,
         },
         onProcess: (proc, identifier, selectedProviderId) => {
           auditIssueRunEvent(issueId, runId, 'process_registered', {
@@ -451,6 +632,7 @@ export async function runIssueAgent(
     if (output.error) latestError = output.error;
     const currentStatus = getIssueAgentRunById(runId)?.status;
     if (currentStatus === 'canceled') {
+      revokeIssueRunTaskScopedToken('issue_run_terminal_canceled');
       return;
     }
     // If the run was paused while waiting for human input (permission /
@@ -494,6 +676,7 @@ export async function runIssueAgent(
       run_completed_at: new Date().toISOString(),
     });
     updateIssueLastRun(issueId, runId, status);
+    revokeIssueRunTaskScopedToken(`issue_run_terminal_${status}`);
     if (status === 'success' && (issue.status === 'todo' || issue.status === 'in_progress')) {
       updateIssue(issueId, { status: 'review' });
       auditIssueRunEvent(issueId, runId, 'issue_status_changed', {
@@ -539,5 +722,6 @@ export async function runIssueAgent(
       run_completed_at: new Date().toISOString(),
     });
     updateIssueLastRun(issueId, runId, 'error');
+    revokeIssueRunTaskScopedToken('issue_run_terminal_error');
   }
 }

@@ -26,6 +26,15 @@ for target in \
   sync_file "$SRC_SE" "$target"
 done
 
+# --- OctoDeck domain event types/reducers (2 targets: backend + web) ---
+SRC_OE="$ROOT/shared/octodeck-event.ts"
+for target in \
+  "$ROOT/src/octodeck-event.types.ts" \
+  "$ROOT/web/src/octodeck-event.types.ts" \
+; do
+  sync_file "$SRC_OE" "$target"
+done
+
 # --- Image detector (2 targets: backend + agent-runner; not needed by web) ---
 SRC_ID="$ROOT/shared/image-detector.ts"
 for target in \

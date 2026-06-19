@@ -6,7 +6,92 @@ export interface AgentDefinition {
   name: string;
   description: string;
   tools: string[];
+  requiredSkills?: AgentRegistryRequiredSkill[];
+  version?: string;
+  visibility?: string;
+  defaultModel?: string | null;
   updatedAt: string;
+}
+
+export interface AgentRegistryRequiredSkill {
+  id: string;
+  requestedVersion: string | null;
+  raw?: string;
+  installed: boolean;
+  installedVersion: string | null;
+  versionSatisfied: boolean | null;
+  packageId: string | null;
+}
+
+export interface AgentRegistrySnapshot {
+  summary: {
+    totalAgents: number;
+    totalSkillPackages: number;
+    unresolvedSkillDependencies: number;
+    dependencyConflicts: number;
+  };
+  agents: Array<AgentDefinition & { requiredSkills: AgentRegistryRequiredSkill[] }>;
+  dependencyConflicts: Array<{
+    agentId: string;
+    skillId: string;
+    requestedVersion: string | null;
+    installedVersion: string | null;
+    packageId: string | null;
+  }>;
+  skillPackages: Array<{
+    id: string;
+    name: string;
+    source: string | null;
+    skillIds: string[];
+    version: string | null;
+    author: string | null;
+    checksum: string;
+    fileCount: number;
+    totalBytes: number;
+    fileManifest: Array<{
+      skillId: string;
+      name: string;
+      type: 'file' | 'directory';
+      size: number;
+    }>;
+    providerTargets: string[];
+    installRecords: Array<{
+      skillId: string;
+      target: 'cloud' | 'device' | string;
+      provider: string | null;
+      installedAt: string;
+    }>;
+    updatedAt: string;
+  }>;
+}
+
+export interface AgentDefinitionGovernance {
+  agentId: string;
+  versions: Array<{
+    id: string;
+    agentId: string;
+    version: string;
+    checksum: string;
+    createdAt: string;
+    createdBy: string;
+    sourceAction: 'create' | 'update' | 'delete' | 'rollback' | string;
+  }>;
+  auditEvents: Array<{
+    id: string;
+    agentId: string;
+    action: 'create' | 'update' | 'delete' | 'rollback' | string;
+    actorUserId: string;
+    actorUsername: string;
+    fromVersion: string | null;
+    toVersion: string | null;
+    rollbackVersionId?: string;
+    approval: {
+      status: 'approved' | string;
+      approvedBy: string;
+      approvedAt: string;
+    };
+    createdAt: string;
+  }>;
 }
 
 export interface AgentDefinitionDetail extends AgentDefinition {
@@ -48,6 +133,12 @@ interface AgentDefinitionsState {
   marketplaceDetails: Record<string, MarketplaceAgentDetail>;
   marketplaceInstalling: Record<string, boolean>;
 
+  registry: AgentRegistrySnapshot | null;
+  registryLoading: boolean;
+  registryError: string | null;
+  agentGovernance: Record<string, AgentDefinitionGovernance>;
+  governanceLoading: Record<string, boolean>;
+
   loadAgents: () => Promise<void>;
   getAgentDetail: (id: string) => Promise<AgentDefinitionDetail>;
   updateAgent: (id: string, content: string) => Promise<void>;
@@ -60,6 +151,9 @@ interface AgentDefinitionsState {
     agentId: string,
     opts?: { force?: boolean; keepOriginalId?: boolean },
   ) => Promise<InstallMarketplaceResult>;
+  loadRegistry: () => Promise<void>;
+  loadAgentGovernance: (id: string) => Promise<AgentDefinitionGovernance>;
+  rollbackAgentDefinition: (id: string, versionId: string) => Promise<void>;
 }
 
 export const useAgentDefinitionsStore = create<AgentDefinitionsState>((set, get) => ({
@@ -74,6 +168,12 @@ export const useAgentDefinitionsStore = create<AgentDefinitionsState>((set, get)
   marketplaceDetailLoading: {},
   marketplaceDetails: {},
   marketplaceInstalling: {},
+
+  registry: null,
+  registryLoading: false,
+  registryError: null,
+  agentGovernance: {},
+  governanceLoading: {},
 
   loadAgents: async () => {
     set({ loading: true });
@@ -190,5 +290,39 @@ export const useAgentDefinitionsStore = create<AgentDefinitionsState>((set, get)
         return { marketplaceInstalling: next };
       });
     }
+  },
+
+  loadRegistry: async () => {
+    set({ registryLoading: true, registryError: null });
+    try {
+      const data = await api.get<{ registry: AgentRegistrySnapshot }>('/api/agent-definitions/registry');
+      set({ registry: data.registry, registryLoading: false });
+    } catch (err) {
+      set({ registryLoading: false, registryError: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  loadAgentGovernance: async (id: string) => {
+    set((s) => ({ governanceLoading: { ...s.governanceLoading, [id]: true } }));
+    try {
+      const data = await api.get<{ governance: AgentDefinitionGovernance }>(
+        `/api/agent-definitions/${encodeURIComponent(id)}/governance`,
+      );
+      set((s) => ({
+        agentGovernance: { ...s.agentGovernance, [id]: data.governance },
+        governanceLoading: { ...s.governanceLoading, [id]: false },
+      }));
+      return data.governance;
+    } catch (err) {
+      set((s) => ({ governanceLoading: { ...s.governanceLoading, [id]: false } }));
+      throw err;
+    }
+  },
+
+  rollbackAgentDefinition: async (id: string, versionId: string) => {
+    await api.post(`/api/agent-definitions/${encodeURIComponent(id)}/rollback`, { versionId });
+    await get().loadAgents();
+    await get().loadRegistry();
+    await get().loadAgentGovernance(id);
   },
 }));

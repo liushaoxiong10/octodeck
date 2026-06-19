@@ -1,10 +1,15 @@
 import { replaceInApp, withBasePath } from '../utils/url';
+import type { OctoDeckEvent, OctoDeckEventDomain } from '../octodeck-event.types';
+import { octodeckEventsFromWsMessage } from '../realtime-events';
 
 type WsHandler = (data: any) => void;
+type WsEventName = 'connected' | 'disconnected' | `octodeck_event:${OctoDeckEventDomain | 'any'}`;
+
+export type { OctoDeckEvent };
 
 class WsManager {
   private ws: WebSocket | null = null;
-  private handlers = new Map<string, Set<WsHandler>>();
+  private handlers = new Map<WsEventName, Set<WsHandler>>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = 1000;
   private maxReconnectDelay = 30000;
@@ -37,7 +42,10 @@ class WsManager {
       if (this.ws !== ws) return;
       try {
         const data = JSON.parse(event.data);
-        this.emit(data.type, data);
+        for (const event of octodeckEventsFromWsMessage(data)) {
+          this.emit('octodeck_event:any', { type: 'octodeck_event', event, raw: data });
+          this.emit(`octodeck_event:${event.domain}`, { type: 'octodeck_event', event, raw: data });
+        }
       } catch {}
     };
 
@@ -79,13 +87,13 @@ class WsManager {
     return false;
   }
 
-  on(type: string, handler: WsHandler) {
+  on(type: WsEventName, handler: WsHandler) {
     if (!this.handlers.has(type)) this.handlers.set(type, new Set());
     this.handlers.get(type)!.add(handler);
     return () => this.handlers.get(type)?.delete(handler);
   }
 
-  private emit(type: string, data: any) {
+  private emit(type: WsEventName, data: any) {
     this.handlers.get(type)?.forEach(h => h(data));
   }
 

@@ -33,6 +33,7 @@ import {
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { api } from '../api/client';
+import { wsManager } from '../api/ws';
 import { useAuthStore } from '../stores/auth';
 import { useAgentLinksStore, type AgentLink } from '../stores/agentLinks';
 import {
@@ -1571,7 +1572,6 @@ function AgentTeamWorkspace({
     error,
     load,
     loadGenerationJobs,
-    loadGenerationJob,
     loadAgentMdDefinitions,
     update,
     remove,
@@ -1626,9 +1626,12 @@ function AgentTeamWorkspace({
   const [selectedGenerationJobId, setSelectedGenerationJobId] = useState<
     string | null
   >(null);
-  const pollGenerationJobsRef = useRef(new Set<string>());
+  const handledGenerationJobsRef = useRef(new Set<string>());
   const pendingGenerationJobs = generationJobs.filter(
     (job) => job.status === 'running',
+  );
+  const completedGenerationJobs = generationJobs.filter(
+    (job) => job.status !== 'running',
   );
   const selectedGenerationJob = selectedGenerationJobId
     ? (generationJobs.find((job) => job.id === selectedGenerationJobId) ?? null)
@@ -1757,32 +1760,20 @@ function AgentTeamWorkspace({
   }, [load, loadAgentMdDefinitions, loadGenerationJobs]);
 
   useEffect(() => {
-    const runningJobs = generationJobs.filter(
-      (job) => job.status === 'running',
-    );
-    if (runningJobs.length === 0) return;
-    const timer = window.setInterval(() => {
-      for (const job of runningJobs) {
-        void loadGenerationJob(job.id)
-          .then(async (freshJob) => {
-            if (freshJob.status === 'running') return;
-            if (pollGenerationJobsRef.current.has(freshJob.id)) return;
-            pollGenerationJobsRef.current.add(freshJob.id);
-            if (freshJob.status === 'success' && freshJob.team) {
-              await load();
-              await loadAgentMdDefinitions();
-              selectTeam(freshJob.team.id);
-              setSelectedGenerationJobId(null);
-              toast.success(`Agent Team「${freshJob.team.name}」已生成`);
-            } else if (freshJob.status === 'error') {
-              toast.error(freshJob.error || 'Agent Team 生成失败');
-            }
-          })
-          .catch(() => undefined);
+    for (const freshJob of completedGenerationJobs) {
+      if (handledGenerationJobsRef.current.has(freshJob.id)) continue;
+      handledGenerationJobsRef.current.add(freshJob.id);
+      if (freshJob.status === 'success' && freshJob.team) {
+        void load();
+        void loadAgentMdDefinitions();
+        selectTeam(freshJob.team.id);
+        setSelectedGenerationJobId(null);
+        toast.success(`Agent Team「${freshJob.team.name}」已生成`);
+      } else if (freshJob.status === 'error') {
+        toast.error(freshJob.error || 'Agent Team 生成失败');
       }
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [generationJobs, load, loadAgentMdDefinitions, loadGenerationJob]);
+    }
+  }, [completedGenerationJobs, load, loadAgentMdDefinitions]);
 
   useEffect(() => {
     if (
@@ -1868,24 +1859,27 @@ function AgentTeamWorkspace({
   }, [refreshRunHistory, resetRunObservability, selectedTeam?.id]);
 
   useEffect(() => {
-    if (!activeRun || !isActiveAgentTeamRunStatus(activeRun.status)) return;
-    const intervalMs = activeRun.status === 'running' ? 2000 : 5000;
-    const timer = window.setInterval(() => {
-      void refreshRunObservability(activeRun.id, { silent: true })
-        .then((freshRun) => {
-          if (!isActiveAgentTeamRunStatus(freshRun.status)) {
-            void refreshRunHistory();
-          }
-        })
-        .catch(() => undefined);
-    }, intervalMs);
-    return () => window.clearInterval(timer);
-  }, [
-    activeRun?.id,
-    activeRun?.status,
-    refreshRunHistory,
-    refreshRunObservability,
-  ]);
+    const unsubAgentTeamEvents = wsManager.on('octodeck_event:agent_task', (data: any) => {
+      const event = data.event;
+      if (!event.type?.startsWith('agent_task.agent_team_') || !event.runId) return;
+      if (activeRun?.id === event.runId) {
+        void refreshRunObservability(event.runId, { silent: true })
+          .then((freshRun) => {
+            if (!isActiveAgentTeamRunStatus(freshRun.status)) {
+              void refreshRunHistory();
+            }
+          })
+          .catch(() => undefined);
+        return;
+      }
+      if (event.payload?.teamId === selectedTeam?.id) {
+        void refreshRunHistory();
+      }
+    });
+    return () => {
+      unsubAgentTeamEvents();
+    };
+  }, [activeRun?.id, refreshRunHistory, refreshRunObservability, selectedTeam?.id]);
 
   const updateRoleAssignment = (roleId: string, runnerAgentId: string) => {
     setRoleAssignments((current) => {

@@ -94,10 +94,16 @@ func (c *connection) Run(ctx context.Context) error {
 				c.executors.Agent.HandlePermissionDecision(ctx, f)
 			},
 			OnWorkspaceCleanup: func(f *proto.WorkspaceCleanupRequestFrame) { c.executors.Maintenance.HandleWorkspaceCleanup(f) },
-			OnToolRequest:      func(ctx context.Context, f *proto.ToolRequestFrame) { c.executors.Tool.Handle(ctx, f) },
-			OnToolCancel:       nil,
-			OnModelsRequest:    func(ctx context.Context, f *proto.ModelsRequestFrame) { models.Handle(ctx, f) },
-			OnSkillsRequest:    func(ctx context.Context, f *proto.SkillsRequestFrame) { skills.Handle(ctx, f) },
+			OnWorkspaceGitStatus: func(ctx context.Context, f *proto.WorkspaceGitStatusRequestFrame) {
+				c.executors.Maintenance.HandleWorkspaceGitStatus(ctx, f)
+			},
+			OnWorkspaceGitCommit: func(ctx context.Context, f *proto.WorkspaceGitCommitRequestFrame) {
+				c.executors.Maintenance.HandleWorkspaceGitCommit(ctx, f)
+			},
+			OnToolRequest:   func(ctx context.Context, f *proto.ToolRequestFrame) { c.executors.Tool.Handle(ctx, f) },
+			OnToolCancel:    nil,
+			OnModelsRequest: func(ctx context.Context, f *proto.ModelsRequestFrame) { models.Handle(ctx, f) },
+			OnSkillsRequest: func(ctx context.Context, f *proto.SkillsRequestFrame) { skills.Handle(ctx, f) },
 			OnDaemonUpdate: func(ctx context.Context, f *proto.DaemonUpdateRequestFrame) {
 				handleDaemonUpdate(ctx, c.cfg, c.pool, c.send, f)
 			},

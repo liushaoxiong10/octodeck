@@ -47,6 +47,11 @@ import memoryRoutes from './routes/memory.js';
 import configRoutes, { injectConfigDeps } from './routes/config.js';
 import tasksRoutes from './routes/tasks.js';
 import issueRoutes from './routes/issues.js';
+import approvalRoutes from './routes/approval-requests.js';
+import autopilotRoutes from './routes/autopilots.js';
+import registryRoutes from './routes/registry.js';
+import orchestrationRoutes from './routes/orchestration.js';
+import qualityRoutes from './routes/quality.js';
 import historyRoutes from './routes/history.js';
 import adminRoutes from './routes/admin.js';
 import fileRoutes from './routes/files.js';
@@ -125,6 +130,8 @@ import { parseAgentLinkTarget } from './backends/agent-link-driver.js';
 import { logger } from './logger.js';
 import { IssueAutoDriver } from './issue-auto-driver.js';
 import { IssueRunReconciler } from './issue-run-reconciler.js';
+import { createOctoDeckEvent } from './octodeck-events.js';
+import { providerPool, type ProviderHealthChangeEvent } from './provider-pool.js';
 import {
   executeSessionReset,
   isClearCommand,
@@ -295,6 +302,11 @@ app.route('/api/memory', memoryRoutes);
 app.route('/api/config', configRoutes);
 app.route('/api/tasks', tasksRoutes);
 app.route('/api/issues', issueRoutes);
+app.route('/api/approval-requests', approvalRoutes);
+app.route('/api/autopilots', autopilotRoutes);
+app.route('/api/registry', registryRoutes);
+app.route('/api/orchestration', orchestrationRoutes);
+app.route('/api/quality', qualityRoutes);
 app.route('/api/history', historyRoutes);
 app.route('/api/skills', skillsRoutes);
 app.route('/api/admin', adminRoutes);
@@ -1821,6 +1833,14 @@ function safeBroadcast(
   }
 }
 
+export function broadcastOctoDeckEvent(
+  event: import('./octodeck-events.js').OctoDeckEvent,
+  allowedUserIds?: Set<string> | null,
+  adminOnly = false,
+): void {
+  safeBroadcast({ type: 'octodeck_event', event }, adminOnly, allowedUserIds);
+}
+
 /**
  * Get the set of user IDs allowed to receive broadcasts for a group.
  * Includes the owner and all shared members. Admin is NOT automatically included
@@ -2457,6 +2477,22 @@ export function broadcastIssueWsEvent(
     event,
   };
   safeBroadcast(msg, isHostGroupJid(workspaceJid), allowedUserIds);
+  broadcastOctoDeckEvent(
+    createOctoDeckEvent({
+      type: `issue.timeline.${event.event_type}`,
+      domain: 'issue',
+      action: event.event_type,
+      workspaceJid,
+      issueId,
+      runId: runId ?? event.run_id ?? null,
+      userId: event.actor_id ?? undefined,
+      timestamp: event.created_at,
+      correlationId: event.reference_id ?? undefined,
+      payload: event,
+    }),
+    allowedUserIds,
+    isHostGroupJid(workspaceJid),
+  );
 }
 
 export function broadcastIssueRequest(
@@ -2473,6 +2509,23 @@ export function broadcastIssueRequest(
     request,
   };
   safeBroadcast(msg, isHostGroupJid(workspaceJid), allowedUserIds);
+  const action = eventName.replace('issue_request_', '');
+  broadcastOctoDeckEvent(
+    createOctoDeckEvent({
+      type: `approval.request.${action}`,
+      domain: 'approval',
+      action,
+      workspaceJid,
+      issueId,
+      runId: request.run_id,
+      userId: request.answered_by ?? undefined,
+      timestamp: request.answered_at ?? request.created_at,
+      correlationId: request.correlation_id ?? request.id,
+      payload: request,
+    }),
+    allowedUserIds,
+    isHostGroupJid(workspaceJid),
+  );
 }
 
 export function broadcastGroupCreated(
@@ -2501,6 +2554,16 @@ export function broadcastBillingUpdate(
   // Send only to the specific user
   const allowedUserIds = new Set([userId]);
   safeBroadcast(msg, false, allowedUserIds);
+  broadcastOctoDeckEvent(
+    createOctoDeckEvent({
+      type: 'billing.usage.updated',
+      domain: 'billing',
+      action: 'updated',
+      userId,
+      payload: usage,
+    }),
+    allowedUserIds,
+  );
 }
 
 export function broadcastWhatsAppStatus(
@@ -2634,6 +2697,22 @@ export function broadcastDockerBuildComplete(
   safeBroadcast({ type: 'docker_build_complete', success, error }, true);
 }
 
+function broadcastProviderPoolHealthEvent(
+  event: ProviderHealthChangeEvent,
+): void {
+  broadcastOctoDeckEvent(
+    createOctoDeckEvent({
+      type: 'system.provider_pool.health.updated',
+      domain: 'system',
+      action: 'updated',
+      correlationId: event.profileId,
+      payload: event,
+    }),
+    undefined,
+    true,
+  );
+}
+
 function broadcastStatus(): void {
   if (!deps) return;
 
@@ -2664,6 +2743,8 @@ export function startWebServer(webDeps: WebDeps): void {
   webDeps.broadcastStreamEvent = broadcastStreamEvent;
   webDeps.broadcastIssueEvent = broadcastIssueWsEvent;
   webDeps.broadcastIssueRequest = broadcastIssueRequest;
+  webDeps.broadcastOctoDeckEvent = broadcastOctoDeckEvent;
+  providerPool.setOnHealthChange(broadcastProviderPoolHealthEvent);
   deps = webDeps;
   setWebDeps(webDeps);
   injectConfigDeps(webDeps);

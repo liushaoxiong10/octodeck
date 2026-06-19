@@ -25,6 +25,18 @@ export interface ProviderHealthStatus {
   activeSessionCount: number;
 }
 
+export interface ProviderHealthChangeEvent {
+  profileId: string;
+  reason:
+    | 'success'
+    | 'failure'
+    | 'session_acquired'
+    | 'session_released'
+    | 'reset'
+    | 'auto_recovered';
+  statuses: ProviderHealthStatus[];
+}
+
 // ─── 常量 ──────────────────────────────────────────────────
 
 const DEFAULT_UNHEALTHY_THRESHOLD = 3;
@@ -51,6 +63,11 @@ export class ProviderPool {
   private recoveryIntervalMs = DEFAULT_RECOVERY_INTERVAL_MS;
   private healthMap: Map<string, ProviderHealthStatus> = new Map();
   private roundRobinIndex = 0;
+  private healthChangeHandler: ((event: ProviderHealthChangeEvent) => void) | null = null;
+
+  setOnHealthChange(handler: ((event: ProviderHealthChangeEvent) => void) | null): void {
+    this.healthChangeHandler = handler;
+  }
 
   /**
    * Refresh internal state from V4 provider config.
@@ -105,6 +122,7 @@ export class ProviderPool {
           { profileId: member.profileId },
           'Provider auto-recovered after recovery interval',
         );
+        this.emitHealthChange(member.profileId, 'auto_recovered');
       }
     }
 
@@ -188,6 +206,7 @@ export class ProviderPool {
       health.unhealthySince = null;
       logger.info({ profileId }, 'Provider recovered after success report');
     }
+    this.emitHealthChange(profileId, 'success');
   }
 
   reportFailure(profileId: string, immediate = false): void {
@@ -209,6 +228,7 @@ export class ProviderPool {
         'Provider marked unhealthy after consecutive failures',
       );
     }
+    this.emitHealthChange(profileId, 'failure');
   }
 
   // ─── 会话计数 ────────────────────────────────────────────
@@ -216,11 +236,13 @@ export class ProviderPool {
   acquireSession(profileId: string): void {
     const health = this.getOrCreateHealth(profileId);
     health.activeSessionCount += 1;
+    this.emitHealthChange(profileId, 'session_acquired');
   }
 
   releaseSession(profileId: string): void {
     const health = this.getOrCreateHealth(profileId);
     health.activeSessionCount = Math.max(0, health.activeSessionCount - 1);
+    this.emitHealthChange(profileId, 'session_released');
   }
 
   // ─── 查询 ───────────────────────────────────────────────
@@ -242,6 +264,7 @@ export class ProviderPool {
 
   resetHealth(profileId: string): void {
     this.healthMap.set(profileId, makeHealthStatus(profileId));
+    this.emitHealthChange(profileId, 'reset');
   }
 
   // ─── 内部工具 ────────────────────────────────────────────
@@ -253,6 +276,17 @@ export class ProviderPool {
       this.healthMap.set(profileId, health);
     }
     return health;
+  }
+
+  private emitHealthChange(
+    profileId: string,
+    reason: ProviderHealthChangeEvent['reason'],
+  ): void {
+    this.healthChangeHandler?.({
+      profileId,
+      reason,
+      statuses: this.getHealthStatuses(),
+    });
   }
 }
 

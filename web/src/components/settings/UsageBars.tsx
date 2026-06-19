@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '@/api/client';
+import { wsManager } from '@/api/ws';
 import type { CachedOAuthUsage, OAuthUsageBucket } from './types';
-
-const POLL_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
 
 function barColor(utilization: number): string {
   if (utilization >= 80) return 'bg-red-500';
@@ -61,7 +60,6 @@ function UsageColumn({
 export function UsageBars({ providerId }: { providerId: string }) {
   const [usage, setUsage] = useState<CachedOAuthUsage | null>(null);
   const [loading, setLoading] = useState(true);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -81,7 +79,12 @@ export function UsageBars({ providerId }: { providerId: string }) {
     };
 
     fetchUsage();
-    timerRef.current = setInterval(fetchUsage, POLL_INTERVAL_MS);
+
+    const unsubBilling = wsManager.on('octodeck_event:billing', (data: any) => {
+      const event = data.event;
+      if (event.type === 'billing.usage.updated') fetchUsage();
+    });
+    const unsubConnected = wsManager.on('connected', () => fetchUsage());
 
     const onVisible = () => {
       if (document.visibilityState === 'visible') fetchUsage();
@@ -90,8 +93,9 @@ export function UsageBars({ providerId }: { providerId: string }) {
 
     return () => {
       cancelled = true;
+      unsubBilling();
+      unsubConnected();
       document.removeEventListener('visibilitychange', onVisible);
-      if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [providerId]);
 

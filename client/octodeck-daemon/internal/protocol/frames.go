@@ -191,6 +191,41 @@ type AgentRuntimeStatusFrame struct {
 	CrashCount int       `json:"crashCount,omitempty"`
 }
 
+type WorkspaceGitStatusFile struct {
+	Path      string `json:"path"`
+	Status    string `json:"status"`
+	Additions int    `json:"additions,omitempty"`
+	Deletions int    `json:"deletions,omitempty"`
+	Patch     string `json:"patch,omitempty"`
+}
+
+type WorkspaceGitStatusResultFrame struct {
+	Type          FrameType                `json:"type"`
+	RequestID     string                   `json:"requestId"`
+	OK            bool                     `json:"ok"`
+	WorkspacePath string                   `json:"workspacePath,omitempty"`
+	Branch        string                   `json:"branch,omitempty"`
+	Head          string                   `json:"head,omitempty"`
+	Clean         bool                     `json:"clean"`
+	Files         []WorkspaceGitStatusFile `json:"files"`
+	DiffStat      string                   `json:"diffStat,omitempty"`
+	Error         *string                  `json:"error"`
+	DurationMs    int64                    `json:"durationMs"`
+}
+
+type WorkspaceGitCommitResultFrame struct {
+	Type           FrameType `json:"type"`
+	RequestID      string    `json:"requestId"`
+	OK             bool      `json:"ok"`
+	WorkspacePath  string    `json:"workspacePath,omitempty"`
+	Branch         string    `json:"branch,omitempty"`
+	Commit         string    `json:"commit,omitempty"`
+	Clean          bool      `json:"clean"`
+	FilesCommitted int       `json:"filesCommitted"`
+	Error          *string   `json:"error"`
+	DurationMs     int64     `json:"durationMs"`
+}
+
 type ToolEventFrame struct {
 	Type      FrameType `json:"type"`
 	RequestID string    `json:"requestId"`
@@ -398,6 +433,27 @@ type WorkspaceCleanupRequestFrame struct {
 	SessionID string    `json:"sessionId,omitempty"`
 	TaskID    string    `json:"taskId,omitempty"`
 	TaskRunID string    `json:"taskRunId,omitempty"`
+}
+
+type WorkspaceGitStatusRequestFrame struct {
+	Type            FrameType            `json:"type"`
+	ID              int64                `json:"id"`
+	RequestID       string               `json:"requestId"`
+	Workspace       *AgentRunWorkspace   `json:"workspace,omitempty"`
+	WorkspaceRepos  []*WorkspaceRepoSpec `json:"workspaceRepos,omitempty"`
+	WorkspaceRepo   *WorkspaceRepoSpec   `json:"workspaceRepo,omitempty"`
+	IncludeDiffStat bool                 `json:"includeDiffStat,omitempty"`
+	IncludePatch    bool                 `json:"includePatch,omitempty"`
+}
+
+type WorkspaceGitCommitRequestFrame struct {
+	Type           FrameType            `json:"type"`
+	ID             int64                `json:"id"`
+	RequestID      string               `json:"requestId"`
+	Workspace      *AgentRunWorkspace   `json:"workspace,omitempty"`
+	WorkspaceRepos []*WorkspaceRepoSpec `json:"workspaceRepos,omitempty"`
+	WorkspaceRepo  *WorkspaceRepoSpec   `json:"workspaceRepo,omitempty"`
+	Message        string               `json:"message"`
 }
 
 type AgentPermissionDecisionFrame struct {

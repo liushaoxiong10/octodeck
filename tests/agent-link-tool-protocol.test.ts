@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { encodeFrame, parseInboundFrame } from '../src/agent-link/protocol.js';
+import { AgentRunRequestFrame, encodeFrame, parseInboundFrame } from '../src/agent-link/protocol.js';
 
 const repoRoot = process.cwd();
 
@@ -100,6 +100,172 @@ describe('agent-link tool protocol', () => {
       latestVersion: 'octodeck-daemon/1.0.13',
       currentVersion: 'octodeck-daemon/1.0.3',
     });
+  });
+
+  test('encodes workspace git status requests sent to octodeck-daemon', () => {
+    const encoded = encodeFrame({
+      type: 'workspace.git.status.request',
+      id: 9,
+      requestId: 'git-status-1',
+      workspace: {
+        kind: 'workspace',
+        folder: 'demo',
+        agentId: 'claude-code',
+        scope: 'session',
+        scopeId: 'issue-run-1',
+      },
+      workspaceRepos: [
+        {
+          kind: 'git',
+          gitUrl: 'https://example.com/acme/demo.git',
+          groupFolder: 'demo',
+          name: 'demo',
+          agentId: 'claude-code',
+          scope: 'session',
+          scopeId: 'issue-run-1',
+        },
+      ],
+      includeDiffStat: true,
+    });
+
+    expect(JSON.parse(encoded)).toMatchObject({
+      type: 'workspace.git.status.request',
+      requestId: 'git-status-1',
+      workspaceRepos: [{ kind: 'git', name: 'demo' }],
+      includeDiffStat: true,
+    });
+  });
+
+  test('accepts workspace git status result frames from octodeck-daemon', () => {
+    const parsed = parseInboundFrame(
+      JSON.stringify({
+        type: 'workspace.git.status.result',
+        requestId: 'git-status-1',
+        ok: true,
+        workspacePath: '/Users/alice/.octodeck/workspace/demo/sessions/issue-run-1/demo',
+        branch: 'octodeck/demo',
+        head: 'abc1234',
+        clean: false,
+        files: [
+          {
+            path: 'src/app.ts',
+            status: 'modified',
+            additions: 4,
+            deletions: 1,
+            patch: '@@ -1 +1 @@\n-old\n+new',
+          },
+          { path: 'src/new.ts', status: 'untracked' },
+        ],
+        diffStat: ' src/app.ts | 5 ++++-',
+        error: null,
+        durationMs: 15,
+      }),
+    );
+
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.frame.type).toBe('workspace.git.status.result');
+      expect(parsed.frame.clean).toBe(false);
+      expect(parsed.frame.files[0]).toMatchObject({ path: 'src/app.ts', additions: 4 });
+      expect(parsed.frame.files[0].patch).toContain('+new');
+    }
+  });
+
+  test('encodes workspace git commit requests sent to octodeck-daemon', () => {
+    const encoded = encodeFrame({
+      type: 'workspace.git.commit.request',
+      id: 10,
+      requestId: 'git-commit-1',
+      workspace: {
+        kind: 'workspace',
+        folder: 'demo',
+        agentId: 'claude-code',
+        scope: 'task',
+        taskId: 'iss_1',
+        taskRunId: 'irun_1',
+      },
+      workspaceRepo: {
+        kind: 'git',
+        gitUrl: 'https://example.com/acme/demo.git',
+        groupFolder: 'demo',
+        name: 'demo',
+        agentId: 'claude-code',
+        scope: 'task',
+        taskId: 'iss_1',
+        taskRunId: 'irun_1',
+      },
+      message: 'fix: update app',
+    });
+
+    expect(JSON.parse(encoded)).toMatchObject({
+      type: 'workspace.git.commit.request',
+      requestId: 'git-commit-1',
+      message: 'fix: update app',
+      workspaceRepo: { kind: 'git', name: 'demo' },
+    });
+  });
+
+  test('encodes task-scoped token and run permission policy in agent run requests', () => {
+    const parsed = AgentRunRequestFrame.parse({
+      type: 'agent.run.request',
+      id: 11,
+      runId: 'irun_1',
+      agentId: 'claude-code',
+      workspace: { kind: 'workspace', folder: 'main', scope: 'task', taskId: 'iss_1', taskRunId: 'irun_1' },
+      input: { prompt: 'work on issue' },
+      timeoutMs: 60_000,
+      maxOutputBytes: 65_536,
+      policy: {
+        model: 'claude-sonnet-4',
+        taskScopedToken: 'ott_test_token',
+        runPermissionPolicy: {
+          filesystem: 'workspace',
+          workspaceFolder: 'main',
+          repoId: 'repo_1',
+          network: 'disabled',
+          secrets: 'none',
+          shell: 'approval',
+          git: 'push_approval',
+        },
+      },
+    });
+    const encoded = encodeFrame(parsed);
+
+    expect(JSON.parse(encoded)).toMatchObject({
+      type: 'agent.run.request',
+      runId: 'irun_1',
+      policy: {
+        taskScopedToken: 'ott_test_token',
+        runPermissionPolicy: {
+          workspaceFolder: 'main',
+          git: 'push_approval',
+        },
+      },
+    });
+  });
+
+  test('accepts workspace git commit result frames from octodeck-daemon', () => {
+    const parsed = parseInboundFrame(
+      JSON.stringify({
+        type: 'workspace.git.commit.result',
+        requestId: 'git-commit-1',
+        ok: true,
+        workspacePath: '/tmp/demo',
+        branch: 'main',
+        commit: 'abc1234',
+        clean: true,
+        filesCommitted: 2,
+        error: null,
+        durationMs: 22,
+      }),
+    );
+
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.frame.type).toBe('workspace.git.commit.result');
+      expect(parsed.frame.commit).toBe('abc1234');
+      expect(parsed.frame.filesCommitted).toBe(2);
+    }
   });
 
   test('accepts hello and ping resource snapshots from octodeck-daemon', () => {

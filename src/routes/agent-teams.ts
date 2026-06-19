@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { ChildProcess } from 'child_process';
 import crypto from 'crypto';
 
-import type { Variables } from '../web-context.js';
+import { getWebDeps, type Variables } from '../web-context.js';
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
 import { AGENT_RUNNER_SECRET, verifyAgentToolToken } from '../config.js';
 import { getBackend } from '../backends/registry.js';
@@ -74,7 +74,10 @@ import {
   recordAgentTeamRun,
   recordAgentTeamTask,
   recordAgentTeamTraceEvent,
+  type AgentTeamRunRecord,
+  type AgentTeamTaskRecord,
 } from '../db.js';
+import { createOctoDeckEvent } from '../octodeck-events.js';
 
 const router = new Hono<{ Variables: Variables }>();
 const AGENT_TEAM_GENERATION_TIMEOUT_MS = 1_800_000;
@@ -104,6 +107,117 @@ function toPublicGenerationJob(job: AgentTeamGenerationJob): AgentTeamGeneration
     ...job,
     agentMdDefinitions: undefined,
   };
+}
+
+function broadcastAgentTeamGenerationEvent(job: AgentTeamGenerationJob): void {
+  getWebDeps()?.broadcastOctoDeckEvent?.(
+    createOctoDeckEvent({
+      type: `agent_task.agent_team_generation.${job.status}`,
+      domain: 'agent_task',
+      action: job.status,
+      userId: job.userId,
+      taskId: job.id,
+      correlationId: job.id,
+      payload: {
+        source_type: 'agent_team_generation',
+        jobId: job.id,
+        status: job.status,
+        teamId: job.team?.id,
+        job: toPublicGenerationJob(job),
+      },
+    }),
+    new Set([job.userId]),
+  );
+}
+
+function broadcastAgentTeamRunEvent(run: AgentTeamRunRecord): void {
+  getWebDeps()?.broadcastOctoDeckEvent?.(
+    createOctoDeckEvent({
+      type: `agent_task.agent_team_run.${run.status}`,
+      domain: 'agent_task',
+      action: run.status,
+      userId: run.userId,
+      taskId: run.id,
+      runId: run.id,
+      correlationId: run.id,
+      payload: {
+        source_type: 'agent_team_run',
+        teamId: run.teamId,
+        runId: run.id,
+        traceId: run.traceId,
+        status: run.status,
+        workflowShape: run.workflowShape,
+      },
+    }),
+    new Set([run.userId]),
+  );
+}
+
+function broadcastAgentTeamTaskEvent(task: AgentTeamTaskRecord): void {
+  const run = getAgentTeamRun(task.runId);
+  getWebDeps()?.broadcastOctoDeckEvent?.(
+    createOctoDeckEvent({
+      type: `agent_task.agent_team_task.${task.status}`,
+      domain: 'agent_task',
+      action: task.status,
+      userId: run?.userId,
+      taskId: task.id,
+      runId: task.runId,
+      correlationId: task.id,
+      payload: {
+        source_type: 'agent_team_task',
+        teamId: run?.teamId,
+        runId: task.runId,
+        taskId: task.id,
+        roleId: task.roleId,
+        phase: task.phase,
+        actorId: task.actorId,
+        status: task.status,
+      },
+    }),
+    run?.userId ? new Set([run.userId]) : undefined,
+  );
+}
+
+function broadcastAgentTeamApprovalEvent(input: {
+  run: AgentTeamRunRecord | NonNullable<ReturnType<typeof getAgentTeamRun>>;
+  approval: Record<string, unknown>;
+  action: 'created' | 'answered';
+}): void {
+  const approvalId = String(input.approval.id ?? '');
+  if (!approvalId) return;
+  const status = String(input.approval.status ?? (input.action === 'created' ? 'pending' : 'answered'));
+  getWebDeps()?.broadcastOctoDeckEvent?.(
+    createOctoDeckEvent({
+      type: `approval.agent_team.${input.action}`,
+      domain: 'approval',
+      action: input.action,
+      userId: input.run.userId,
+      runId: input.run.id,
+      taskId: typeof input.approval.taskId === 'string' ? input.approval.taskId : undefined,
+      correlationId: approvalId,
+      payload: {
+        ...input.approval,
+        id: approvalId,
+        status,
+        title: String(input.approval.title ?? 'Agent Team approval required'),
+        summary: String(input.approval.description ?? ''),
+        href: `/agents?runId=${encodeURIComponent(input.run.id)}`,
+        decisionUrl: `/api/agent-teams/runs/${input.run.id}/approvals/${approvalId}`,
+      },
+    }),
+    new Set([input.run.userId]),
+  );
+}
+
+function recordAndBroadcastAgentTeamRun(run: AgentTeamRunRecord): void {
+  recordAgentTeamRun(run);
+  broadcastAgentTeamRunEvent(run);
+}
+
+function recordAndBroadcastAgentTeamTask(task: AgentTeamTaskRecord): void {
+  recordAgentTeamTask(task);
+  broadcastAgentTeamTaskEvent(task);
 }
 
 const ShapeSchema = z.enum([
@@ -411,6 +525,7 @@ router.post('/generate', authMiddleware, systemConfigMiddleware, async (c) => {
     updatedAt: now,
   };
   agentTeamGenerationJobs.set(job.id, job);
+  broadcastAgentTeamGenerationEvent(job);
   void runAgentTeamGenerationJob(job.id, fallback);
   return c.json({ job: toPublicGenerationJob(job) }, 202);
 });
@@ -717,7 +832,7 @@ function cancelAgentTeamRunAndRecord(
   reason: string,
 ): ReturnType<typeof cancelAgentTeamRun> {
   const cancellation = cancelAgentTeamRun(run.id, reason);
-  recordAgentTeamRun({
+  recordAndBroadcastAgentTeamRun({
     id: run.id,
     teamId: run.teamId,
     userId: run.userId,
@@ -767,7 +882,7 @@ router.post(
         },
         400,
       );
-    recordAgentTeamApproval({
+    const decidedApproval = {
       id: String(approval.id),
       runId: run.id,
       taskId: typeof approval.taskId === 'string' ? approval.taskId : undefined,
@@ -780,9 +895,11 @@ router.post(
       resolvedBy: user.id,
       resolvedAt: new Date().toISOString(),
       createdAt: String(approval.createdAt),
-    });
+    };
+    recordAgentTeamApproval(decidedApproval);
+    broadcastAgentTeamApprovalEvent({ run, approval: decidedApproval, action: 'answered' });
     if (parsed.data.decision === 'rejected') {
-      recordAgentTeamRun({
+      recordAndBroadcastAgentTeamRun({
         id: run.id,
         teamId: run.teamId,
         userId: run.userId,
@@ -848,7 +965,7 @@ router.post(
   },
 );
 
-async function executeTeamRequest(
+export async function executeTeamRequest(
   c: any,
   teamId: string,
 ): Promise<
@@ -921,7 +1038,7 @@ async function executeTeamRequest(
   const traceId = `team_trace_${crypto.randomBytes(8).toString('hex')}`;
   const approvalRole = findApprovalRequiredRole(team);
   if (approvalRole) {
-    recordAgentTeamRun({
+    recordAndBroadcastAgentTeamRun({
       id: runId,
       teamId: team.id,
       userId: user.id,
@@ -1101,7 +1218,7 @@ async function handleAgentTeamToolBody(
       const approval = getAgentTeamApproval(parsed.data.approvalId, run.id);
       if (!approval)
         return c.json({ error: 'agent team approval not found' }, 404);
-      recordAgentTeamApproval({
+      const decidedApproval = {
         id: String(approval.id),
         runId: run.id,
         taskId:
@@ -1115,9 +1232,11 @@ async function handleAgentTeamToolBody(
         resolvedBy: user.id,
         resolvedAt: new Date().toISOString(),
         createdAt: String(approval.createdAt),
-      });
+      };
+      recordAgentTeamApproval(decidedApproval);
+      broadcastAgentTeamApprovalEvent({ run, approval: decidedApproval, action: 'answered' });
       if (parsed.data.decision === 'rejected') {
-        recordAgentTeamRun({
+        recordAndBroadcastAgentTeamRun({
           id: run.id,
           teamId: run.teamId,
           userId: run.userId,
@@ -1322,7 +1441,7 @@ async function executePreparedRun(
     approvalDecision,
   } = config;
   const settings = getSystemSettings();
-  recordAgentTeamRun({
+  recordAndBroadcastAgentTeamRun({
     id: runId,
     teamId: team.id,
     userId: user.id,
@@ -1394,7 +1513,7 @@ async function executePreparedRun(
         },
       );
       const taskId = `${runId}:${role.id}:${phase}`;
-      recordAgentTeamTask({
+      recordAndBroadcastAgentTeamTask({
         id: taskId,
         runId,
         roleId: role.id,
@@ -1467,7 +1586,7 @@ async function executePreparedRun(
           }
         }
       })();
-      recordAgentTeamTask({
+      recordAndBroadcastAgentTeamTask({
         id: taskId,
         runId,
         roleId: role.id,
@@ -1512,7 +1631,7 @@ async function executePreparedRun(
     });
   }
   if (execution.waitingApproval) {
-    recordAgentTeamApproval({
+    const pendingApproval = {
       id: execution.waitingApproval.approvalId,
       runId,
       taskId: execution.waitingApproval.stepId,
@@ -1522,12 +1641,18 @@ async function executePreparedRun(
       title: `Approve workflow step ${execution.waitingApproval.stepId}`,
       description: execution.waitingApproval.reason,
       payload: execution.waitingApproval.payload,
+    } as const;
+    recordAgentTeamApproval(pendingApproval);
+    broadcastAgentTeamApprovalEvent({
+      run: { id: runId, teamId: team.id, userId: user.id, prompt, status: 'waiting_approval', traceId, workflowShape: team.shape },
+      approval: pendingApproval,
+      action: 'created',
     });
   }
   const latestRun = getAgentTeamRun(runId, user.id);
   const finalRunStatus =
     latestRun?.status === 'cancelled' ? 'cancelled' : execution.status;
-  recordAgentTeamRun({
+  recordAndBroadcastAgentTeamRun({
     id: runId,
     teamId: team.id,
     userId: user.id,
@@ -1814,23 +1939,27 @@ async function runAgentTeamGenerationJob(
         ),
     );
     const completedAt = new Date().toISOString();
-    agentTeamGenerationJobs.set(jobId, {
+    const completedJob: AgentTeamGenerationJob = {
       ...job,
       status: 'success',
       team,
       agentMdDefinitions: createdAgentMdDefinitions,
       updatedAt: completedAt,
       completedAt,
-    });
+    };
+    agentTeamGenerationJobs.set(jobId, completedJob);
+    broadcastAgentTeamGenerationEvent(completedJob);
   } catch (err) {
     const completedAt = new Date().toISOString();
-    agentTeamGenerationJobs.set(jobId, {
+    const completedJob: AgentTeamGenerationJob = {
       ...job,
       status: 'error',
       error: err instanceof Error ? err.message : String(err),
       updatedAt: completedAt,
       completedAt,
-    });
+    };
+    agentTeamGenerationJobs.set(jobId, completedJob);
+    broadcastAgentTeamGenerationEvent(completedJob);
   }
 }
 

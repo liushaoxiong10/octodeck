@@ -39,6 +39,7 @@ import {
   stableChunkId,
   stableEdgeId,
 } from '../repo-knowledge.js';
+import { createOctoDeckEvent } from '../octodeck-events.js';
 import { listRepoKnowledgePlugins } from '../repo-knowledge-plugins.js';
 import { listRepoKnowledgeSearchBackends } from '../repo-knowledge-search.js';
 import type {
@@ -48,7 +49,7 @@ import type {
   RepoKnowledgeRunMilestone,
 } from '../types.js';
 import type { AuthUser, ManagedRepo } from '../types.js';
-import type { Variables } from '../web-context.js';
+import { getWebDeps, type Variables } from '../web-context.js';
 
 const repoRoutes = new Hono<{ Variables: Variables }>();
 
@@ -325,6 +326,21 @@ repoRoutes.post('/:id/knowledge/generate', authMiddleware, async (c) => {
     agentPrompt: validation.data.agent_prompt,
     agentTimeoutMs: validation.data.agent_timeout_ms,
   });
+  const taskStatus = task.alreadyRunning ? 'running' : 'queued';
+  getWebDeps()?.broadcastOctoDeckEvent?.(
+    createOctoDeckEvent({
+      type: taskStatus === 'queued' ? 'repo_knowledge.run.queued' : 'repo_knowledge.run.running',
+      domain: 'repo_knowledge',
+      action: taskStatus,
+      repoId: repo.id,
+      userId: user.id,
+      runId: task.taskId,
+      taskId: task.taskId,
+      deviceLinkId: executionDeviceLinkId,
+      payload: { repoId: repo.id, runId: task.taskId, taskId: task.taskId, status: taskStatus },
+    }),
+    new Set([user.id]),
+  );
   return c.json({
     index: task.index,
     task: {
@@ -538,6 +554,27 @@ repoRoutes.post('/knowledge/runs/:runId/upload', async (c) => {
       generatedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
+    getWebDeps()?.broadcastOctoDeckEvent?.(
+      createOctoDeckEvent({
+        type: 'repo_knowledge.run.ready',
+        domain: 'repo_knowledge',
+        action: 'ready',
+        repoId: repo.id,
+        userId: run.userId,
+        runId: run.id,
+        taskId: run.id,
+        deviceLinkId: run.executionDeviceLinkId,
+        payload: {
+          repoId: repo.id,
+          runId: run.id,
+          status: 'ready',
+          merged: result.merged,
+          skipped: result.skipped,
+          stats: result.stats,
+        },
+      }),
+      new Set([run.userId]),
+    );
     return c.json({
       ok: true,
       merged: result.merged,

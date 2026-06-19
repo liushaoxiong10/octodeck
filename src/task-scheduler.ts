@@ -27,21 +27,25 @@ import {
   logTaskRun,
   logTaskRunStart,
   releaseTaskRunClaim,
+  upsertAgentTask,
   updateTaskRunLog,
   updateTaskAfterRun,
   updateTaskAfterRunClaimed,
 } from './db.js';
+import { enforceOrchestrationDecision } from './orchestration-enforcer.js';
+import { evaluateOrchestrationPolicy } from './orchestration-policy.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import { resolveTaskOwner } from './task-utils.js';
 import { removeFlowArtifacts } from './file-manager.js';
 import { hasScriptCapacity, runScript } from './script-runner.js';
 import type { StreamEvent } from './stream-event.types.js';
-import { ExecutionMode, RegisteredGroup, ScheduledTask } from './types.js';
+import { AuthUser, ExecutionMode, RegisteredGroup, ScheduledTask, User } from './types.js';
 import { checkBillingAccessFresh, isBillingEnabled } from './billing.js';
 import { checkOwnerActive } from './owner-gate.js';
 import { stripAgentInternalTags } from './utils.js';
 import { requestWorkspaceCleanup } from './agent-link/registry.js';
+import { buildRegistryGovernanceSnapshot } from './routes/registry.js';
 
 /**
  * Resolve the actual group JID to send a task to.
@@ -112,6 +116,18 @@ function resolveTaskSourceGroup(
   return groups[task.chat_jid] || Object.values(groups).find(
     (g) => g.folder === task.group_folder,
   );
+}
+
+function userToAuthUser(user: User): AuthUser {
+  return {
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    status: user.status,
+    display_name: user.display_name,
+    permissions: user.permissions,
+    must_change_password: user.must_change_password,
+  };
 }
 
 function applyTaskWorkspaceConfig(
@@ -279,6 +295,99 @@ function computeNextRun(task: ScheduledTask): string | null {
   return null;
 }
 
+async function enforceScheduledTaskOrchestration(
+  task: ScheduledTask,
+  sourceGroup: RegisteredGroup | undefined,
+  claimToken: string,
+): Promise<boolean> {
+  const ownerId = task.created_by ?? sourceGroup?.created_by;
+  const owner = ownerId ? getUserById(ownerId) : undefined;
+  if (!owner) return true;
+
+  const { registry } = buildRegistryGovernanceSnapshot(userToAuthUser(owner));
+  const decision = evaluateOrchestrationPolicy({
+    source: 'task',
+    item: {
+      id: task.id,
+      title: task.prompt,
+      description: task.script_command,
+      priority: null,
+      selectedSkillIds: null,
+      agentClientId: task.agent_client_id ?? null,
+      executionNode: task.execution_node ?? null,
+    },
+    registry,
+  });
+
+  const shouldExecute = decision.mode === 'auto' && decision.enforcementAction === 'execute';
+  if (shouldExecute) return true;
+
+  const now = new Date().toISOString();
+  const runLogId = logTaskRunStart(task.id);
+  const nextRun = computeNextRun(task);
+  const runRef = `orch_${crypto.randomBytes(8).toString('hex')}`;
+
+  await enforceOrchestrationDecision({
+    source: 'task',
+    sourceId: task.id,
+    title: task.prompt,
+    decision,
+    now,
+    createApprovalRequest: () => ({ requestId: runRef, runId: runRef }),
+    createEvent: (event) => {
+      const blocked = event.decision.mode === 'blocked';
+      const approval = event.decision.mode === 'approval_required';
+      const result = approval
+        ? `Approval required: ${event.detail ?? event.summary}`
+        : blocked
+          ? `Blocked: ${event.detail ?? event.summary}`
+          : `Manual review required: ${event.detail ?? event.summary}`;
+      updateTaskRunLog(runLogId, {
+        duration_ms: 0,
+        status: blocked ? 'error' : 'success',
+        result: blocked ? null : result,
+        error: blocked ? result : null,
+      });
+      upsertAgentTask({
+        id: `agtask_${runRef}`,
+        source_type: 'scheduled_task',
+        source_ref: task.id,
+        run_ref: runRef,
+        status: approval ? 'waiting_approval' : blocked ? 'skipped' : 'paused',
+        workspace_jid: task.workspace_jid ?? task.chat_jid,
+        workspace_folder: task.workspace_folder ?? task.group_folder,
+        actor_user_id: owner.id,
+        agent_client_id: task.agent_client_id ?? null,
+        execution_node: task.execution_node ?? null,
+        backend: task.backend ?? null,
+        result: blocked ? null : result,
+        error: blocked ? result : null,
+        context: {
+          taskId: task.id,
+          orchestrationPolicy: true,
+          enforcementAction: event.decision.enforcementAction,
+          decision: event.decision,
+        },
+        created_at: now,
+        updated_at: now,
+        completed_at: approval ? null : now,
+      });
+    },
+  });
+
+  completeTaskRunWithFence(
+    task.id,
+    claimToken,
+    nextRun,
+    decision.mode === 'blocked'
+      ? `Blocked: ${decision.blockers.join(' · ') || 'Orchestration policy blocked execution'}`
+      : decision.mode === 'approval_required'
+        ? 'Approval required before scheduled task execution'
+        : 'Manual orchestration review required before scheduled task execution',
+  );
+  return false;
+}
+
 /**
  * Re-check DB before running — task may have been cancelled/paused while queued.
  * Returns true if the task is still active and should proceed.
@@ -330,6 +439,41 @@ async function runTask(
   const sourceJid = resolveTargetGroupJid(task, groups) || task.chat_jid;
   const sourceGroup = groups[sourceJid] || resolveTaskSourceGroup(task, groups);
 
+  const mirrorScheduledTaskRun = (
+    status: 'queued' | 'running' | 'success' | 'error' | 'canceled' | 'lost',
+    extra: { result?: string | null; error?: string | null; completedAt?: string | null } = {},
+  ) => {
+    const now = new Date().toISOString();
+    upsertAgentTask({
+      id: `agtask_${taskRunId}`,
+      source_type: 'scheduled_task',
+      source_ref: task.id,
+      run_ref: taskRunId,
+      status,
+      workspace_jid: task.workspace_jid ?? sourceJid ?? task.chat_jid,
+      workspace_folder: task.workspace_folder ?? task.group_folder,
+      actor_user_id: task.created_by ?? null,
+      agent_client_id: task.agent_client_id ?? null,
+      execution_node: task.execution_node ?? null,
+      backend: task.backend ?? null,
+      result: extra.result ?? null,
+      error: extra.error ?? null,
+      context: {
+        taskId: task.id,
+        runLogId,
+        manualRun: !!options?.manualRun,
+        scheduleType: task.schedule_type,
+        executionType: task.execution_type,
+      },
+      created_at: new Date(startTime).toISOString(),
+      started_at: status === 'queued' ? null : new Date(startTime).toISOString(),
+      completed_at: extra.completedAt ?? null,
+      updated_at: now,
+    });
+  };
+
+  mirrorScheduledTaskRun('running');
+
   if (!sourceGroup) {
     logger.error(
       { taskId: task.id, chatJid: task.chat_jid, groupFolder: task.group_folder },
@@ -340,6 +484,10 @@ async function runTask(
       status: 'error',
       result: null,
       error: `Source workspace group not found: ${task.chat_jid}`,
+    });
+    mirrorScheduledTaskRun('error', {
+      error: `Source workspace group not found: ${task.chat_jid}`,
+      completedAt: new Date().toISOString(),
     });
     const nextRun = options?.manualRun ? task.next_run : computeNextRun(task);
     completeTaskRunWithFence(
@@ -390,12 +538,13 @@ async function runTask(
         },
         'Owner not active, blocking scheduled task',
       );
-      updateTaskRunLog(runLogId, {
-        duration_ms: Date.now() - startTime,
-        status: 'error',
-        result: null,
-        error: '账户已禁用',
-      });
+    updateTaskRunLog(runLogId, {
+      duration_ms: Date.now() - startTime,
+      status: 'error',
+      result: null,
+      error: '账户已禁用',
+    });
+      mirrorScheduledTaskRun('error', { error: '账户已禁用', completedAt: new Date().toISOString() });
       runningTaskIds.delete(task.id);
       const nextRun = options?.manualRun ? task.next_run : computeNextRun(task);
       completeTaskRunWithFence(
@@ -433,6 +582,7 @@ async function runTask(
           result: null,
           error: `计费限制: ${reason}`,
         });
+        mirrorScheduledTaskRun('error', { error: `计费限制: ${reason}`, completedAt: new Date().toISOString() });
         runningTaskIds.delete(task.id);
         // Still compute next run so the task isn't stuck (but preserve for manual runs)
         const nextRun = options?.manualRun
@@ -485,6 +635,11 @@ async function runTask(
       status: error ? 'error' : 'success',
       result,
       error,
+    });
+    mirrorScheduledTaskRun(error ? 'error' : 'success', {
+      result,
+      error,
+      completedAt: new Date().toISOString(),
     });
     // Send _close sentinel so the idle agent process exits promptly,
     // freeing the queue slot for the next run.
@@ -1004,6 +1159,19 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         }
       }
 
+      try {
+        const { runDueAutopilots } = await import('./routes/autopilots.js');
+        const autopilotResults = await runDueAutopilots();
+        if (autopilotResults.length > 0) {
+          logger.info(
+            { count: autopilotResults.length },
+            'Triggered due autopilots',
+          );
+        }
+      } catch (err) {
+        logger.error({ err }, 'Failed to trigger due autopilots');
+      }
+
       const dueTasks = getDueTasks();
       if (dueTasks.length > 0) {
         logger.info({ count: dueTasks.length }, 'Found due tasks');
@@ -1099,6 +1267,19 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
             logger.debug(
               { taskId: currentTask.id },
               'Background task claim lost, skipping',
+            );
+            continue;
+          }
+          const sourceGroup = groups[targetGroupJid] || resolveTaskSourceGroup(currentTask, groups);
+          const orchestrationAllowed = await enforceScheduledTaskOrchestration(
+            currentTask,
+            sourceGroup,
+            claim.token,
+          );
+          if (!orchestrationAllowed) {
+            logger.info(
+              { taskId: currentTask.id },
+              'Scheduled task held by orchestration policy',
             );
             continue;
           }

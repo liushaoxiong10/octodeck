@@ -93,6 +93,17 @@ describe('agent team runtime persistence and role assignments', () => {
     fs.mkdirSync(tmpRoot, { recursive: true });
     calls.length = 0;
     await db.initDatabase();
+    const now = new Date().toISOString();
+    db.createUser({
+      id: 'alice',
+      username: 'alice',
+      password_hash: 'hash',
+      display_name: 'Alice',
+      role: 'admin',
+      status: 'active',
+      created_at: now,
+      updated_at: now,
+    });
     unregisterBackend('runner_a');
     unregisterBackend('runner_b');
     runtimeControl.clearAgentTeamRuntimeControlsForTests();
@@ -282,17 +293,6 @@ describe('agent team runtime persistence and role assignments', () => {
 
   test('executes an agent team through a daemon link authenticated tool bridge', async () => {
     const token = 'daemon-link-token-for-agent-team-tool';
-    const now = new Date().toISOString();
-    db.createUser({
-      id: 'alice',
-      username: 'alice',
-      password_hash: 'hash',
-      display_name: 'Alice',
-      role: 'admin',
-      status: 'active',
-      created_at: now,
-      updated_at: now,
-    });
     db.createAgentLink({
       id: 'cl_agent_team_daemon',
       userId: 'alice',

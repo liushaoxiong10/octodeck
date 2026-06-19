@@ -650,6 +650,8 @@ export function ingestRepoKnowledgeUpload(
       symbol?: string;
       packageName?: string;
       source?: string;
+      confidence?: number;
+      runId?: string;
       metadata?: Record<string, unknown>;
     }>;
     summary?: string;
@@ -693,6 +695,8 @@ export function ingestRepoKnowledgeUpload(
       symbol: e.symbol,
       packageName: e.packageName,
       source: e.source && e.source.trim() ? `agent:${e.source}` : 'agent',
+      confidence: typeof e.confidence === 'number' ? Math.max(0, Math.min(1, e.confidence)) : undefined,
+      runId: e.runId,
       metadata: { ...(e.metadata ?? {}), _source: 'agent-upload' },
     });
   }

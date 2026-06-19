@@ -66,6 +66,7 @@ import { cn } from '../lib/utils';
 const STATUSES: Array<{ value: IssueStatus; label: string }> = [
   { value: 'todo', label: 'Todo' },
   { value: 'in_progress', label: 'In progress' },
+  { value: 'waiting_for_human', label: 'Waiting for human' },
   { value: 'review', label: 'Review' },
   { value: 'done', label: 'Done' },
   { value: 'canceled', label: 'Canceled' },

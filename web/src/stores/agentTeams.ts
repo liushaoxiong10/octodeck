@@ -177,6 +177,8 @@ const AGENT_MD_STORE_SOURCES: AgentMdStoreSource[] = [
     name: 'jnMetaCode/agency-agents-zh',
   },
 ];
+const AGENCY_AGENTS_INDEX_URL = 'https://data.jsdelivr.com/v1/package/gh';
+const AGENCY_AGENTS_RAW_URL = 'https://cdn.jsdelivr.net/gh';
 const AGENT_MD_STORE_CACHE_TTL_MS = 60_000;
 const AGENT_TEAM_GENERATION_SUBMIT_TIMEOUT_MS = 30_000;
 const AGENCY_AGENTS_CATEGORIES = new Set([
@@ -260,11 +262,11 @@ async function fetchTextWithTimeout(
 }
 
 function agentMdStoreIndexUrl(source: AgentMdStoreSource): string {
-  return `https://data.jsdelivr.com/v1/package/gh/${source.owner}/${source.repo}@${source.branch}/flat`;
+  return `${AGENCY_AGENTS_INDEX_URL}/${source.owner}/${source.repo}@${source.branch}/flat`;
 }
 
 function agentMdStoreRawUrl(source: AgentMdStoreSource, filePath: string): string {
-  return `https://cdn.jsdelivr.net/gh/${source.owner}/${source.repo}@${source.branch}/${filePath
+  return `${AGENCY_AGENTS_RAW_URL}/${source.owner}/${source.repo}@${source.branch}/${filePath
     .split('/')
     .map((part) => encodeURIComponent(part))
     .join('/')}`;
@@ -564,6 +566,7 @@ interface AgentTeamsState {
     goal: string;
     shape: AgentTeamShape;
   }) => Promise<AgentTeamGenerationJob>;
+  upsertGenerationJob: (job: AgentTeamGenerationJob) => void;
   loadGenerationJobs: () => Promise<AgentTeamGenerationJob[]>;
   loadGenerationJob: (jobId: string) => Promise<AgentTeamGenerationJob>;
   execute: (
@@ -668,6 +671,15 @@ export const useAgentTeamsStore = create<AgentTeamsState>((set, get) => ({
     } finally {
       set({ saving: false });
     }
+  },
+
+  upsertGenerationJob: (job) => {
+    set((state) => ({
+      generationJobs: [
+        job,
+        ...state.generationJobs.filter((item) => item.id !== job.id),
+      ],
+    }));
   },
 
   loadGenerationJobs: async () => {

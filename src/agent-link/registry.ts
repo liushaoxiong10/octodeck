@@ -43,6 +43,8 @@ import {
   deliverAgentDiscoverResult,
   deliverAgentSessionDeleteResult,
   deliverAgentSessionsResult,
+  deliverWorkspaceGitCommitResult,
+  deliverWorkspaceGitStatusResult,
   failAgentRuntimeRequestsForLink,
 } from './agent-runtime-rpc.js';
 import { AgentLinkSession } from './session.js';
@@ -75,6 +77,7 @@ export interface OnlineLinkInfo {
   resources?: HelloFrame['resources'];
   agentRuntimeCapabilities?: HelloFrame['agentRuntimeCapabilities'];
   status?: 'idle' | 'busy' | 'draining' | 'offline';
+  lastHeartbeatAt?: number;
   runningRuns?: NonNullable<import('./protocol.js').PingFrame['runningRuns']>;
   maxConcurrentRuns?: number;
   availableSlots?: number;
@@ -177,6 +180,7 @@ export function handleHello(
     resources: frame.resources,
     agentRuntimeCapabilities: frame.agentRuntimeCapabilities,
     status: 'idle',
+    lastHeartbeatAt: Date.now(),
     runningRuns: [],
     maxConcurrentRuns: undefined,
     availableSlots: undefined,
@@ -226,6 +230,11 @@ export function handleFrame(
 ): void {
   // Touch DB last_seen at most every 30s
   touchSeenThrottled(session.linkId);
+  const heartbeatMeta = sessionMeta.get(session.linkId);
+  if (heartbeatMeta) {
+    heartbeatMeta.lastHeartbeatAt = Date.now();
+    sessionMeta.set(session.linkId, heartbeatMeta);
+  }
 
   switch (frame.type) {
     case 'agent.run.status':
@@ -407,6 +416,12 @@ export function handleFrame(
     case 'agent.session.delete.result':
       deliverAgentSessionDeleteResult(frame);
       return;
+    case 'workspace.git.status.result':
+      deliverWorkspaceGitStatusResult(frame);
+      return;
+    case 'workspace.git.commit.result':
+      deliverWorkspaceGitCommitResult(frame);
+      return;
     case 'agent.runtime.status': {
       const meta = sessionMeta.get(session.linkId);
       if (meta) {
@@ -538,15 +553,20 @@ export function listOnlineRuntimesByProvider(
     for (const runtime of runtimes) {
       if (
         runtime.agentClientId === agentClientId &&
-        runtime.status !== 'offline'
+        runtime.status !== 'offline' &&
+        runtime.status !== 'draining' &&
+        (runtime.availableSlots == null || runtime.availableSlots > 0)
       ) {
         out.push(runtime);
       }
     }
   }
-  return out.sort(
-    (a, b) => (a.runningRuns?.length ?? 0) - (b.runningRuns?.length ?? 0),
-  );
+  return out.sort((a, b) => {
+    const spareA = a.availableSlots ?? Number.MAX_SAFE_INTEGER;
+    const spareB = b.availableSlots ?? Number.MAX_SAFE_INTEGER;
+    if (spareA !== spareB) return spareB - spareA;
+    return (a.runningRuns?.length ?? 0) - (b.runningRuns?.length ?? 0);
+  });
 }
 
 export function listOnlineByUser(userId: string): OnlineLinkInfo[] {

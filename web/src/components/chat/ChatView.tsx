@@ -40,7 +40,6 @@ const SIDEBAR_TABS = [
   { id: 'members' as const, icon: Users, label: '成员' },
 ];
 
-const POLL_INTERVAL_MS = 2000;
 const TERMINAL_MIN_HEIGHT = 150;
 const TERMINAL_DEFAULT_HEIGHT = 300;
 const TERMINAL_MAX_RATIO = 0.7;
@@ -122,8 +121,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const interruptQuery = useChatStore(s => s.interruptQuery);
   const resetSession = useChatStore(s => s.resetSession);
   const handleStreamEvent = useChatStore(s => s.handleStreamEvent);
-  const handleWsNewMessage = useChatStore(s => s.handleWsNewMessage);
-  const handleWsError = useChatStore(s => s.handleWsError);
   const handleStreamSnapshot = useChatStore(s => s.handleStreamSnapshot);
 
   const agents = useChatStore(s => s.agents[groupJid] ?? EMPTY_AGENTS);
@@ -172,7 +169,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         ? 'Device CLI'
         : undefined;
   const canUseTerminal = !group?.runtime_profile && group?.execution_mode === 'container';
-  const pollRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Sidebar: members tab visibility
   const isHome = !!group?.is_home;
@@ -200,8 +196,16 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         .catch(() => {});
     };
     fetchStatus();
-    const timer = setInterval(fetchStatus, 30_000); // refresh every 30s
-    return () => { active = false; clearInterval(timer); };
+    const unsubDevice = wsManager.on('octodeck_event:device', (data: any) => {
+      const event = data.event;
+      if (event.domain === 'device') fetchStatus();
+    });
+    const unsubConnected = wsManager.on('connected', () => fetchStatus());
+    return () => {
+      active = false;
+      unsubDevice();
+      unsubConnected();
+    };
   }, [isOwnHome]);
 
   // 进入对话时清除未读计数
@@ -225,43 +229,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     loadMessages(groupJid, false, urlSessionId);
   }, [groupJid, urlSessionId, loadMessages]);
 
-  // Poll for new messages — use setTimeout recursion to avoid request piling up
-  // Pauses when the page is not visible to save resources
-  useEffect(() => {
-    let active = true;
-
-    const schedulePoll = () => {
-      if (!active || document.hidden) return;
-      pollRef.current = setTimeout(poll, POLL_INTERVAL_MS);
-    };
-
-    const poll = async () => {
-      if (!active) return;
-      try {
-        await refreshMessages(groupJid, urlSessionId);
-      } catch { /* handled in store */ }
-      schedulePoll();
-    };
-
-    const handleVisibility = () => {
-      if (!document.hidden && active) {
-        // Resume polling immediately when page becomes visible
-        if (pollRef.current) clearTimeout(pollRef.current);
-        poll();
-      }
-    };
-
-    document.addEventListener('visibilitychange', handleVisibility);
-    schedulePoll();
-
-    return () => {
-      active = false;
-      document.removeEventListener('visibilitychange', handleVisibility);
-      if (pollRef.current) clearTimeout(pollRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupJid, urlSessionId]);
-
   // WS 重连时恢复正在运行的 agent 状态（独立于 groupJid，避免切换会话时重复调用）
   // wsManager.connect() 已提升到 AppLayout 级别
   const restoreActiveState = useChatStore(s => s.restoreActiveState);
@@ -269,6 +236,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     restoreActiveState();
     const unsub = wsManager.on('connected', () => {
       restoreActiveState();
+      // Reconcile main chat messages that may have been missed during WS disconnection.
+      refreshMessages(groupJid, urlSessionId);
       // Reconcile agent list with backend truth — picks up any agent_status
       // events that were missed during WS disconnection.  Force-refresh
       // bypasses the per-group memoize so reconnect always hits the API.
@@ -285,7 +254,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     });
     return () => { unsub(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupJid]);
+  }, [groupJid, urlSessionId]);
 
   // Derived: active agent info and kind
   const activeAgent = activeAgentTab ? agents.find(a => a.id === activeAgentTab) : null;
@@ -422,41 +391,35 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     })();
   }, [activeAgentTab, isConversationTab, groupJid, hydrateAgentMessages, loadAgentMessages, agentMessages]);
 
-  // 监听 WebSocket 流式事件
+  // 监听标准 AgentTask 流式事件
   useEffect(() => {
-    const unsub1 = wsManager.on('stream_event', (data: any) => {
-      if (data.chatJid === groupJid) {
-        handleStreamEvent(groupJid, data.event, data.agentId);
-      }
-    });
-    // 通过 new_message 立即添加消息到本地状态（消除轮询延迟导致的消息"丢失"）
-    const unsub2 = wsManager.on('new_message', (data: any) => {
-      if (data.chatJid === groupJid && data.message) {
-        handleWsNewMessage(groupJid, data.message, data.agentId, data.source);
-      }
-    });
-    // WebSocket 消息校验失败时通知用户
-    const unsub3 = wsManager.on('ws_error', (data: any) => {
-      if (!data.chatJid || data.chatJid === groupJid) {
-        handleWsError(data.chatJid, data.agentId);
-        showToast('发送失败', data.error || '消息格式无效', 4000);
-      }
-    });
     // 后端推送的流式快照（WS 重连时恢复）
     const agentSnapshotPrefix = groupJid + '#agent:';
-    const unsub4 = wsManager.on('stream_snapshot', (data: any) => {
-      if (!data.snapshot) return;
-      if (data.chatJid === groupJid) {
-        handleStreamSnapshot(groupJid, data.snapshot);
-      } else if (typeof data.chatJid === 'string' && data.chatJid.startsWith(agentSnapshotPrefix)) {
-        // Agent-specific snapshot: extract agentId and restore agentStreaming
-        const snapshotAgentId = data.chatJid.slice(agentSnapshotPrefix.length);
-        handleStreamSnapshot(groupJid, data.snapshot, snapshotAgentId);
+    const unsub1 = wsManager.on('octodeck_event:agent_task', (data: any) => {
+      const event = data.event;
+      if (!event) return;
+      if (event?.chatJid === groupJid && event.type?.startsWith('agent_task.stream.')) {
+        if (event.type === 'agent_task.stream.snapshot') {
+          handleStreamSnapshot(groupJid, event.payload.snapshot);
+          return;
+        }
+        handleStreamEvent(groupJid, event.payload.event, event.payload.agentId);
+      }
+      if (event.type === 'agent_task.stream.snapshot' && typeof event.chatJid === 'string' && event.chatJid.startsWith(agentSnapshotPrefix)) {
+        const snapshotAgentId = event.chatJid.slice(agentSnapshotPrefix.length);
+        handleStreamSnapshot(groupJid, event.payload.snapshot, snapshotAgentId);
+      }
+    });
+    const unsubSystem = wsManager.on('octodeck_event:system', (data: any) => {
+      const event = data.event;
+      if (!event) return;
+      if (event.type === 'system.ws.error' && (!event.chatJid || event.chatJid === groupJid)) {
+        showToast('发送失败', event.payload.error || '消息格式无效', 4000);
       }
     });
     // agent_status 已提升到 AppLayout 全局监听
-    return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
-  }, [groupJid, handleStreamEvent, handleWsNewMessage, handleWsError, handleStreamSnapshot]);
+    return () => { unsub1(); unsubSystem(); };
+  }, [groupJid, handleStreamEvent, handleStreamSnapshot]);
 
   const [scrollTrigger, setScrollTrigger] = useState(0);
 

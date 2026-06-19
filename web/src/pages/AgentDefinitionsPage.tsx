@@ -12,8 +12,17 @@ import {
 } from '../stores/agent-definitions';
 import { InstallAgentMarketplaceDialog } from '@/components/agent-definitions/InstallAgentMarketplaceDialog';
 
+function formatRegistryBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function AgentDefinitionsPage() {
   const { agents, loading, error: listError, loadAgents, createAgent } =
+    useAgentDefinitionsStore();
+  const { registry, registryLoading, loadRegistry } = useAgentDefinitionsStore();
+  const { agentGovernance, governanceLoading, loadAgentGovernance, rollbackAgentDefinition } =
     useAgentDefinitionsStore();
   const getAgentDetail = useAgentDefinitionsStore((s) => s.getAgentDetail);
   const updateAgent = useAgentDefinitionsStore((s) => s.updateAgent);
@@ -30,6 +39,7 @@ export function AgentDefinitionsPage() {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [rollingBackVersionId, setRollingBackVersionId] = useState<string | null>(null);
 
   // Create dialog
   const [showCreate, setShowCreate] = useState(false);
@@ -47,6 +57,7 @@ export function AgentDefinitionsPage() {
 
   const dirty = useMemo(() => content !== initialContent, [content, initialContent]);
   const byteCount = useMemo(() => new TextEncoder().encode(content).length, [content]);
+  const selectedGovernance = selectedId ? agentGovernance[selectedId] : null;
 
   const filtered = useMemo(() => {
     const q = searchQuery.toLowerCase();
@@ -60,7 +71,8 @@ export function AgentDefinitionsPage() {
 
   useEffect(() => {
     loadAgents();
-  }, [loadAgents]);
+    loadRegistry();
+  }, [loadAgents, loadRegistry]);
 
   const loadDetail = useCallback(async (id: string) => {
     setLoadingDetail(true);
@@ -72,13 +84,14 @@ export function AgentDefinitionsPage() {
       setContent(data.content);
       setInitialContent(data.content);
       setSelectedId(id);
+      void loadAgentGovernance(id);
     } catch (err) {
       setDetailError(err instanceof Error ? err.message : '加载失败');
       setDetail(null);
     } finally {
       setLoadingDetail(false);
     }
-  }, [getAgentDetail]);
+  }, [getAgentDetail, loadAgentGovernance]);
 
   const handleSelectAgent = async (id: string) => {
     if (id === selectedId && isMobile) {
@@ -102,10 +115,30 @@ export function AgentDefinitionsPage() {
       // Just update local state with the saved content — no extra fetch needed.
       setInitialContent(content);
       setNotice('已保存');
+      await loadRegistry();
+      await loadAgentGovernance(detail.id);
     } catch (err) {
       setDetailError(err instanceof Error ? err.message : '保存失败');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRollbackVersion = async (versionId: string) => {
+    if (!detail) return;
+    if (dirty && !confirm('当前有未保存修改，回滚会覆盖编辑器内容。是否继续？')) return;
+    if (!confirm('确认回滚到此版本？当前版本会先写入版本快照。')) return;
+    setRollingBackVersionId(versionId);
+    setDetailError(null);
+    setNotice(null);
+    try {
+      await rollbackAgentDefinition(detail.id, versionId);
+      await loadDetail(detail.id);
+      setNotice('已回滚');
+    } catch (err) {
+      setDetailError(err instanceof Error ? err.message : '回滚失败');
+    } finally {
+      setRollingBackVersionId(null);
     }
   };
 
@@ -196,6 +229,56 @@ tools:
             <div className="text-xs text-muted-foreground">
               已加载 Agent: {agents.length}
             </div>
+            <div className="mt-3 rounded-xl border border-border bg-muted/30 p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-semibold text-foreground">Agent Registry</div>
+                  <div className="text-xs text-muted-foreground">
+                    版本化 Agent、requiredSkills 与 Skill Packages 安装记录
+                  </div>
+                </div>
+                <Button variant="outline" size="sm" onClick={loadRegistry} disabled={registryLoading}>
+                  <RefreshCw size={14} className={registryLoading ? 'animate-spin' : ''} />
+                  Registry
+                </Button>
+              </div>
+              <div className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                <div className="rounded-lg bg-background px-3 py-2">
+                  <div className="text-muted-foreground">Agents</div>
+                  <div className="font-semibold text-foreground">{registry?.summary.totalAgents ?? 0}</div>
+                </div>
+                <div className="rounded-lg bg-background px-3 py-2">
+                  <div className="text-muted-foreground">Skill Packages</div>
+                  <div className="font-semibold text-foreground">{registry?.summary.totalSkillPackages ?? 0}</div>
+                </div>
+                <div className="rounded-lg bg-background px-3 py-2">
+                  <div className="text-muted-foreground">unresolvedSkillDependencies</div>
+                  <div className="font-semibold text-foreground">{registry?.summary.unresolvedSkillDependencies ?? 0}</div>
+                </div>
+                <div className="rounded-lg bg-background px-3 py-2">
+                  <div className="text-muted-foreground">Skill 依赖冲突</div>
+                  <div className="font-semibold text-foreground">{registry?.summary.dependencyConflicts ?? 0}</div>
+                </div>
+              </div>
+              {registry?.dependencyConflicts?.length ? (
+                <div className="mt-2 space-y-1 rounded-lg border border-warning/40 bg-warning/10 p-2 text-xs text-warning">
+                  {registry.dependencyConflicts.slice(0, 3).map((conflict) => (
+                    <div key={`${conflict.agentId}:${conflict.skillId}`} className="break-all">
+                      版本不匹配：{conflict.agentId} 需要 {conflict.skillId}@{conflict.requestedVersion ?? 'any'}，当前 {conflict.installedVersion ?? 'unknown'}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {registry?.skillPackages?.length ? (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {registry.skillPackages.slice(0, 6).map((pkg) => (
+                    <span key={pkg.id} className="rounded-full bg-background px-2 py-1 text-[11px] text-muted-foreground">
+                      {pkg.id} · {pkg.version ?? 'unversioned'} · {pkg.installRecords.length} installs · 文件集合 {pkg.fileCount} files / {formatRegistryBytes(pkg.totalBytes)}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           </CardContent>
         </Card>
 
@@ -243,6 +326,13 @@ tools:
                         </div>
                         <div className="text-[11px] text-muted-foreground line-clamp-2 mt-0.5">
                           {agent.description || '无描述'}
+                        </div>
+                        <div className="mt-1 flex flex-wrap gap-1 text-[10px] text-muted-foreground">
+                          <span className="rounded bg-muted px-1.5 py-0.5">v{agent.version ?? '0.1.0'}</span>
+                          <span className="rounded bg-muted px-1.5 py-0.5">{agent.visibility ?? 'private'}</span>
+                          {(agent.requiredSkills?.length ?? 0) > 0 && (
+                            <span className="rounded bg-muted px-1.5 py-0.5">requiredSkills {agent.requiredSkills?.length}</span>
+                          )}
                         </div>
                         {agent.tools.length > 0 && (
                           <div className="flex flex-wrap gap-1 mt-1.5">
@@ -293,6 +383,24 @@ tools:
                       Agent ID: <span className="font-mono">{detail.id}</span> · 最近更新时间: {updatedText} · 字节数: {byteCount}
                     </div>
                     <div className="text-xs text-muted-foreground mt-1">
+                      版本: {detail.version ?? '0.1.0'} · 可见性: {detail.visibility ?? 'private'} · 默认模型: {detail.defaultModel ?? '未设置'}
+                    </div>
+                    {(detail.requiredSkills?.length ?? 0) > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {detail.requiredSkills?.map((skill) => {
+                          const registrySkill = registry?.agents
+                            .find((agent) => agent.id === detail.id)
+                            ?.requiredSkills.find((item) => item.id === skill.id);
+                          const conflict = registrySkill?.versionSatisfied === false;
+                          return (
+                          <span key={skill.id} className={`rounded-full px-2 py-1 text-[11px] ${conflict ? 'bg-warning/10 text-warning' : 'bg-muted text-muted-foreground'}`}>
+                            {skill.raw ?? skill.id}{conflict ? ' · 版本不匹配' : ''}
+                          </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <div className="text-xs text-muted-foreground mt-1">
                       系统自动生成，作为唯一标识，不可修改
                     </div>
                   </div>
@@ -335,6 +443,68 @@ tools:
                     {dirty && <span className="text-sm text-warning">有未保存修改</span>}
                     {notice && <span className="text-sm text-success">{notice}</span>}
                     {detailError && <span className="text-sm text-error">{detailError}</span>}
+                  </div>
+
+                  <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                    <div className="rounded-xl border border-border bg-muted/20 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <div>
+                          <div className="text-sm font-semibold text-foreground">审批审计</div>
+                          <div className="text-xs text-muted-foreground">Agent Definition 变更审批与审计轨迹</div>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => loadAgentGovernance(detail.id)}
+                          disabled={!!governanceLoading[detail.id]}
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${governanceLoading[detail.id] ? 'animate-spin' : ''}`} />
+                        </Button>
+                      </div>
+                      <div className="space-y-2 text-xs">
+                        {(selectedGovernance?.auditEvents ?? []).slice(0, 4).map((event) => (
+                          <div key={event.id} className="rounded-lg bg-background px-3 py-2">
+                            <div className="font-medium text-foreground">
+                              {event.action} · {event.fromVersion ?? '∅'} → {event.toVersion ?? '∅'}
+                            </div>
+                            <div className="text-muted-foreground">
+                              {event.approval.status} by {event.approval.approvedBy} · {new Date(event.createdAt).toLocaleString()}
+                            </div>
+                          </div>
+                        ))}
+                        {!selectedGovernance?.auditEvents?.length && (
+                          <div className="text-muted-foreground">暂无审计记录</div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-border bg-muted/20 p-3">
+                      <div className="mb-2">
+                        <div className="text-sm font-semibold text-foreground">版本回滚</div>
+                        <div className="text-xs text-muted-foreground">回滚前会先保存当前内容作为新版本快照</div>
+                      </div>
+                      <div className="space-y-2 text-xs">
+                        {(selectedGovernance?.versions ?? []).slice(0, 4).map((version) => (
+                          <div key={version.id} className="flex items-center justify-between gap-2 rounded-lg bg-background px-3 py-2">
+                            <div className="min-w-0">
+                              <div className="font-medium text-foreground">v{version.version} · {version.sourceAction}</div>
+                              <div className="truncate text-muted-foreground">{version.checksum}</div>
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleRollbackVersion(version.id)}
+                              disabled={rollingBackVersionId === version.id || saving || deleting}
+                            >
+                              {rollingBackVersionId === version.id ? '回滚中...' : '回滚到此版本'}
+                            </Button>
+                          </div>
+                        ))}
+                        {!selectedGovernance?.versions?.length && (
+                          <div className="text-muted-foreground">暂无可回滚版本</div>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </>
               ) : loadingDetail ? (

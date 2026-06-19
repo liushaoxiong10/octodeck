@@ -295,6 +295,10 @@ export interface ContainerInput {
   ownerUserId?: string;
   /** Signed per-user token used by in-process MCP tools to call server bridges. */
   agentToolToken?: string;
+  /** Short-lived token scoped to the current AgentTask/run. */
+  taskScopedToken?: string;
+  /** Permission policy bound to taskScopedToken and exposed to runtime adapters. */
+  runPermissionPolicy?: Record<string, unknown>;
   /**
    * Lightweight execution hint for one-shot structured output tasks.
    * Backends may use this to skip the full interactive agent runner, tools,

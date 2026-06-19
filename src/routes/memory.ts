@@ -6,7 +6,7 @@
 // 前端 path 形式: cloud://{memoryType}/{scopeKey}/{path}
 
 import { Hono } from 'hono';
-import type { Variables } from '../web-context.js';
+import { getWebDeps, type Variables } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
 import {
   MemoryFileSchema,
@@ -28,6 +28,7 @@ import {
   type CloudMemoryRecord,
   type CloudMemoryType,
 } from '../memory-store.js';
+import { createOctoDeckEvent } from '../octodeck-events.js';
 
 const memoryRoutes = new Hono<{ Variables: Variables }>();
 
@@ -289,6 +290,37 @@ function writeMemoryFile(
   };
 }
 
+function broadcastMemoryUpdate(
+  userId: string,
+  input: {
+    memoryType: CloudMemoryType;
+    path: string;
+    action: 'created' | 'updated' | 'deleted' | 'synced';
+    scopeKey?: string;
+    deviceLinkId?: string;
+    correlationId?: string;
+    source?: string;
+  },
+): void {
+  const type = input.memoryType === 'agent' && input.action === 'synced'
+    ? 'memory.agent.synced'
+    : input.memoryType === 'global' && input.action === 'updated'
+      ? 'memory.global.updated'
+      : `memory.${input.memoryType}.${input.action}`;
+  getWebDeps()?.broadcastOctoDeckEvent?.(
+    createOctoDeckEvent({
+      type,
+      domain: 'memory',
+      action: input.action,
+      userId,
+      deviceLinkId: input.deviceLinkId,
+      correlationId: input.correlationId,
+      payload: { userId, ...input },
+    }),
+    new Set([userId]),
+  );
+}
+
 const TYPE_RANK: Record<MemorySource['type'], number> = {
   global: 0,
   session: 1,
@@ -416,9 +448,16 @@ memoryRoutes.put('/file', authMiddleware, async (c) => {
   }
   try {
     const user = c.get('user') as AuthUser;
-    return c.json(
-      writeMemoryFile(validation.data.path, validation.data.content, user),
-    );
+    const ref = resolveAccessibleCloudRef(validation.data.path, user);
+    const file = writeMemoryFile(validation.data.path, validation.data.content, user);
+    broadcastMemoryUpdate(user.id, {
+      memoryType: ref.memoryType,
+      scopeKey: ref.scopeKey,
+      path: ref.path,
+      action: 'updated',
+      source: 'web',
+    });
+    return c.json(file);
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Failed to write memory file';
@@ -475,6 +514,13 @@ memoryRoutes.put('/global', authMiddleware, async (c) => {
       source: 'web',
       updatedBy: user.id,
     });
+    broadcastMemoryUpdate(user.id, {
+      memoryType: 'global',
+      scopeKey: `global:${user.id}`,
+      path: 'CLAUDE.md',
+      action: 'updated',
+      source: 'web',
+    });
     return c.json({
       path: 'cloud://global/global:' + user.id + '/CLAUDE.md',
       content: record.content,
@@ -519,6 +565,15 @@ memoryRoutes.post('/client-agent-sync', authMiddleware, async (c) => {
       content,
       source: 'client_sync',
       updatedBy: deviceLinkId,
+    });
+    broadcastMemoryUpdate(user.id, {
+      memoryType: 'agent',
+      scopeKey: `agent:${deviceLinkId}:${agentId}`,
+      path: memoryPath,
+      action: 'synced',
+      deviceLinkId,
+      correlationId: agentId,
+      source: 'client_sync',
     });
     return c.json({ memory: record });
   } catch (err) {

@@ -13,6 +13,7 @@ import type {
   IssueAgentRequest,
 } from './types.js';
 import type { RuntimeOwnerCandidateUser } from './runtime-owner.js';
+import type { OctoDeckEvent } from './octodeck-events.js';
 import {
   getJidsByFolder,
   getRegisteredGroup,
@@ -149,6 +150,12 @@ export interface WebDeps {
     issueId: string,
     request: IssueAgentRequest,
     eventName?: 'issue_request_created' | 'issue_request_answered' | 'issue_request_expired',
+  ) => void;
+  /** Broadcast a standardized OctoDeckEvent to selected users. */
+  broadcastOctoDeckEvent?: (
+    event: OctoDeckEvent,
+    allowedUserIds?: Set<string> | null,
+    adminOnly?: boolean,
   ) => void;
   handleSpawnCommand?: (
     chatJid: string,

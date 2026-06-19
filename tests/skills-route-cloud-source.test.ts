@@ -9,6 +9,8 @@ const listCloudSkillsByUserMock = vi.hoisted(() => vi.fn(() => []));
 const getSessionMock = vi.hoisted(() => vi.fn());
 const invokeRemoteToolMock = vi.hoisted(() => vi.fn());
 const getCustomBackendMock = vi.hoisted(() => vi.fn());
+const upsertCloudSkillMock = vi.hoisted(() => vi.fn());
+const execFileMock = vi.hoisted(() => vi.fn());
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'octodeck-skills-route-'));
 const tmpDataDir = path.join(tmpRoot, 'data');
@@ -51,8 +53,13 @@ vi.mock('../src/db.js', async (importOriginal) => {
     getCloudSkill: () => undefined,
     setCloudSkillEnabled: () => false,
     deleteCloudSkill: () => false,
+    upsertCloudSkill: upsertCloudSkillMock,
   };
 });
+
+vi.mock('child_process', () => ({
+  execFile: execFileMock,
+}));
 
 vi.mock('../src/agent-link/registry.js', () => ({
   getSession: getSessionMock,
@@ -78,6 +85,8 @@ describe('GET /api/skills cloud source handling', () => {
     getSessionMock.mockReset();
     invokeRemoteToolMock.mockReset();
     getCustomBackendMock.mockReset();
+    upsertCloudSkillMock.mockReset();
+    execFileMock.mockReset();
   });
 
   test('lists DB-backed cloud skills and does not scan host local/system skills', async () => {
@@ -146,6 +155,41 @@ describe('GET /api/skills cloud source handling', () => {
     });
   });
 
+  test('installs device-global skills through the selected provider native directory', async () => {
+    getAgentLinkByIdMock.mockReturnValue({
+      id: 'cl_1234567890abcdef',
+      userId: 'alice',
+      revokedAt: null,
+    });
+    getSessionMock.mockReturnValue({ state: 'open', send: vi.fn() });
+    invokeRemoteToolMock.mockResolvedValue({
+      ok: true,
+      result: { stdout: 'demo-skill\n', stderr: '' },
+      error: null,
+      durationMs: 12,
+    });
+
+    const res = await skillsRoutes.request('/install', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        package: 'owner/repo@demo-skill',
+        target: 'device',
+        deviceLinkId: 'cl_1234567890abcdef',
+        sourceProvider: 'codex',
+      }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.installed).toEqual(['demo-skill']);
+    const command = invokeRemoteToolMock.mock.calls[0][1].input.command as string;
+    expect(command).toContain('-a codex');
+    expect(command).toContain('$tmp_home/.codex/skills');
+    expect(command).toContain('~/.codex/skills');
+    expect(command).not.toContain('$tmp_home/.claude/skills');
+  });
+
   test('installs skill into selected agent workspace on its bound device', async () => {
     getCustomBackendMock.mockReturnValue({
       id: 'agent-abc',
@@ -187,6 +231,103 @@ describe('GET /api/skills cloud source handling', () => {
     });
     expect(invokeRemoteToolMock.mock.calls[0][1].input.command).toContain('./skills');
   });
+
+  test('installs workspace skills through the selected provider native workspace directory', async () => {
+    getCustomBackendMock.mockReturnValue({
+      id: 'agent-opencode',
+      displayName: 'Agent OpenCode',
+      deviceLinkId: 'cl_1234567890abcdef',
+      workdirMode: 'auto',
+    });
+    getAgentLinkByIdMock.mockReturnValue({
+      id: 'cl_1234567890abcdef',
+      userId: 'alice',
+      revokedAt: null,
+    });
+    getSessionMock.mockReturnValue({ state: 'open', send: vi.fn() });
+    invokeRemoteToolMock.mockResolvedValue({
+      ok: true,
+      result: { stdout: 'demo-skill\n', stderr: '' },
+      error: null,
+      durationMs: 12,
+    });
+
+    const res = await skillsRoutes.request('/install', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        package: 'owner/repo@demo-skill',
+        target: 'device-agent-workspace',
+        agentId: 'agent-opencode',
+        sourceProvider: 'opencode',
+      }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.installed).toEqual(['demo-skill']);
+    const command = invokeRemoteToolMock.mock.calls[0][1].input.command as string;
+    expect(command).toContain('-a opencode');
+    expect(command).toContain('$tmp_home/.opencode/skills');
+    expect(command).toContain('./.opencode/skills');
+    expect(command).not.toContain('$tmp_home/.claude/skills');
+  });
+
+  test.each([
+    { sourceProvider: 'claude', providerDir: '.claude', adapter: 'claude-code' },
+    { sourceProvider: 'codex', providerDir: '.codex', adapter: 'codex' },
+    { sourceProvider: 'traecli', providerDir: '.trae', adapter: 'traecli' },
+    { sourceProvider: 'opencode', providerDir: '.opencode', adapter: 'opencode' },
+  ])(
+    'installs cloud skill packages through $sourceProvider native skills directory',
+    async ({ sourceProvider, providerDir, adapter }) => {
+      execFileMock.mockImplementation(
+        (
+          _file: string,
+          args: string[],
+          options: { env?: NodeJS.ProcessEnv },
+          callback: (error: Error | null, stdout: string, stderr: string) => void,
+        ) => {
+          expect(args).toEqual([
+            '-y',
+            'skills',
+            'add',
+            'owner/repo@demo-skill',
+            '--global',
+            '--yes',
+            '-a',
+            adapter,
+          ]);
+          const home = options.env?.HOME;
+          expect(home).toBeTruthy();
+          writeSkill(path.join(home!, providerDir, 'skills', 'demo-skill'), 'Demo Skill');
+          callback(null, '', '');
+        },
+      );
+
+      const res = await skillsRoutes.request('/install', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          package: 'owner/repo@demo-skill',
+          sourceProvider,
+        }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.installed).toEqual(['demo-skill']);
+      expect(upsertCloudSkillMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'alice',
+          skillId: 'demo-skill',
+          packageName: 'owner/repo@demo-skill',
+          packageSource: 'skills.sh',
+          sourceProvider,
+        }),
+      );
+    },
+  );
 });
 
 function writeSkill(dir: string, name: string): void {

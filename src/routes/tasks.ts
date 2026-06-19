@@ -21,12 +21,15 @@ import {
   deleteTask,
   getTaskRunLogs,
   getRegisteredGroup,
+  getIssueById,
   getAllRegisteredGroups,
   getUserHomeGroup,
   getAgentLinkById,
+  listAgentLinksByUser,
   deleteGroupData,
+  listAgentTasks,
 } from '../db.js';
-import type { AuthUser, RegisteredGroup, ScheduledTask } from '../types.js';
+import type { AgentTaskSourceType, AgentTaskStatus, AuthUser, RegisteredGroup, ScheduledTask } from '../types.js';
 import { TIMEZONE } from '../config.js';
 import {
   isHostExecutionGroup,
@@ -36,8 +39,32 @@ import {
 } from '../web-context.js';
 import { getRunningTaskIds } from '../task-scheduler.js';
 import { getChannelType, extractChatId } from '../im-channel.js';
+import { createOctoDeckEvent } from '../octodeck-events.js';
+import { getOnlineMeta as getAgentLinkOnlineMeta, isOnline as isAgentLinkOnline } from '../agent-link/registry.js';
+import { buildRuntimePoolSnapshot, resolveRuntimeSchedulingTarget } from '../runtime-pool.js';
+import { resolveAgentRunRuntimeTarget } from '../runtime-scheduler.js';
 
 const tasksRoutes = new Hono<{ Variables: Variables }>();
+
+const AGENT_TASK_SOURCE_TYPES = new Set<AgentTaskSourceType>([
+  'issue_run',
+  'scheduled_task',
+  'agent_team_run',
+  'agent_team_task',
+]);
+
+const AGENT_TASK_STATUSES = new Set<AgentTaskStatus>([
+  'queued',
+  'running',
+  'awaiting_input',
+  'waiting_approval',
+  'paused',
+  'success',
+  'error',
+  'canceled',
+  'lost',
+  'skipped',
+]);
 
 function isAgentLinkExecutionTarget(value: string | undefined | null): boolean {
   return (
@@ -62,6 +89,56 @@ function deviceLinkIdFromExecutionTarget(
   return undefined;
 }
 
+function assertTaskRuntimeAdmissible(input: {
+  authUser: AuthUser;
+  executionNode: string;
+  preferredAgentClientId?: string | null;
+}): {
+  resolvedExecutionNode: string;
+  resolvedLinkId: string | null;
+  resolvedAgentClientId: string | null;
+} {
+  const resolvedLinkId = deviceLinkIdFromExecutionTarget(input.executionNode);
+  const links = resolvedLinkId
+    ? [getAgentLinkById(resolvedLinkId)].filter((link): link is NonNullable<ReturnType<typeof getAgentLinkById>> => Boolean(link))
+    : listAgentLinksByUser(input.authUser.id);
+  const devices = links.map((link) => {
+    const online = getAgentLinkOnlineMeta(link.id);
+    const linkOnline = isAgentLinkOnline(link.id);
+    return {
+      id: link.id,
+      displayName: link.displayName,
+      online: linkOnline,
+      status: online?.status ?? (linkOnline ? 'idle' as const : 'offline' as const),
+      lastHeartbeatAt: online?.lastHeartbeatAt
+        ? new Date(online.lastHeartbeatAt).toISOString()
+        : link.lastSeenAt,
+      agentClients: link.agentClients ?? [],
+      runtimes: online?.runtimes ?? [],
+    };
+  });
+  const runtimePool = buildRuntimePoolSnapshot({
+    devices,
+    serverBackends: [],
+    assignment: { preferredAgentClientId: input.preferredAgentClientId ?? 'claude-code' },
+  });
+  const runtimePoolDecision = resolveRuntimeSchedulingTarget(runtimePool, input.executionNode);
+  const decision = resolveAgentRunRuntimeTarget({
+    executionTarget: input.executionNode,
+    preferredAgentClientId: input.preferredAgentClientId,
+    devices,
+    serverBackends: [],
+  });
+  if (!decision.eligible || !decision.executionNode) {
+    throw new Error(`Selected task runtime is not schedulable: ${decision.blockedReason ?? runtimePoolDecision.blockedReason ?? 'runtime_not_found'}`);
+  }
+  return {
+    resolvedExecutionNode: decision.executionNode,
+    resolvedLinkId: decision.deviceLinkId ?? resolvedLinkId ?? null,
+    resolvedAgentClientId: decision.agentClientId ?? input.preferredAgentClientId ?? null,
+  };
+}
+
 function buildTaskAgentConfig(
   group: RegisteredGroup,
   overrides: {
@@ -84,7 +161,90 @@ function buildTaskAgentConfig(
   };
 }
 
+function broadcastScheduledTaskEvent(
+  task: ScheduledTask | null | undefined,
+  authUser: AuthUser,
+): void {
+  if (!task) return;
+  getWebDeps()?.broadcastOctoDeckEvent?.(
+    createOctoDeckEvent({
+      type: `agent_task.scheduled_task.${task.status}`,
+      domain: 'agent_task',
+      action: task.status,
+      userId: authUser.id,
+      workspaceJid: task.workspace_jid ?? task.chat_jid,
+      chatJid: task.chat_jid,
+      taskId: task.id,
+      correlationId: task.id,
+      payload: {
+        source_type: 'scheduled_task',
+        taskId: task.id,
+        status: task.status,
+        task,
+      },
+    }),
+    new Set([authUser.id]),
+  );
+}
+
+function canAccessIssueAgentRuns(issueId: string, authUser: AuthUser): boolean {
+  const issue = getIssueById(issueId);
+  if (!issue) return false;
+  const group = getRegisteredGroup(issue.workspace_jid);
+  if (!group) return authUser.role === 'admin';
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) return false;
+  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) return false;
+  return true;
+}
+
+function canAccessScheduledTaskAgentRuns(taskId: string, authUser: AuthUser): boolean {
+  const task = getTaskById(taskId);
+  if (!task) return false;
+  if (task.execution_mode === 'host' && authUser.role !== 'admin') return false;
+  const group = getRegisteredGroup(task.chat_jid);
+  if (!group) return authUser.role === 'admin';
+  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) return false;
+  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) return false;
+  return true;
+}
+
 // --- Routes ---
+
+tasksRoutes.get('/agent-runs', authMiddleware, (c) => {
+  const authUser = c.get('user') as AuthUser;
+  const sourceTypeRaw = c.req.query('source_type');
+  const statusRaw = c.req.query('status');
+  const sourceType = AGENT_TASK_SOURCE_TYPES.has(sourceTypeRaw as AgentTaskSourceType)
+    ? (sourceTypeRaw as AgentTaskSourceType)
+    : undefined;
+  const status = AGENT_TASK_STATUSES.has(statusRaw as AgentTaskStatus)
+    ? (statusRaw as AgentTaskStatus)
+    : undefined;
+  const sourceRef = c.req.query('source_ref') || undefined;
+  const limitRaw = parseInt(c.req.query('limit') || '100', 10);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(limitRaw, 500)) : 100;
+
+  if (sourceType === 'issue_run' && sourceRef) {
+    if (!canAccessIssueAgentRuns(sourceRef, authUser)) {
+      return c.json({ error: 'Issue not found' }, 404);
+    }
+  } else if (sourceType === 'scheduled_task' && sourceRef) {
+    if (!canAccessScheduledTaskAgentRuns(sourceRef, authUser)) {
+      return c.json({ error: 'Task not found' }, 404);
+    }
+  } else if (authUser.role !== 'admin') {
+    return c.json({ error: 'source_type and source_ref are required' }, 400);
+  }
+
+  return c.json({
+    tasks: listAgentTasks({
+      source_type: sourceType,
+      source_ref: sourceRef,
+      status,
+      limit,
+    }),
+  });
+});
 
 tasksRoutes.get('/', authMiddleware, async (c) => {
   const authUser = c.get('user') as AuthUser;
@@ -228,6 +388,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
   const sourceIsHost = isHostExecutionGroup(group);
   let taskExecutionMode: 'host' | 'container';
   let taskExecutionNode: string | null = null;
+  let taskAgentClientId = agent_client_id ?? null;
   if (validation.data.execution_mode === 'host') {
     if (!sourceIsHost) {
       return c.json(
@@ -253,12 +414,8 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
         400,
       );
     }
-    const resolvedTaskExecutionNode =
-      deviceLinkIdFromExecutionTarget(taskExecutionNode);
-    if (
-      !resolvedTaskExecutionNode &&
-      !taskExecutionNode.startsWith('provider:')
-    ) {
+    const resolvedTaskExecutionNode = deviceLinkIdFromExecutionTarget(taskExecutionNode);
+    if (!resolvedTaskExecutionNode && !taskExecutionNode.startsWith('provider:')) {
       return c.json({ error: 'Invalid execution_node format' }, 400);
     }
     if (resolvedTaskExecutionNode) {
@@ -266,6 +423,17 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
       if (!link || link.userId !== authUser.id || link.revokedAt) {
         return c.json({ error: 'execution_node not found' }, 400);
       }
+    }
+    try {
+      const taskRuntimeAdmission = assertTaskRuntimeAdmissible({
+        authUser,
+        executionNode: taskExecutionNode,
+        preferredAgentClientId: taskAgentClientId,
+      });
+      taskExecutionNode = taskRuntimeAdmission.resolvedExecutionNode;
+      taskAgentClientId = taskRuntimeAdmission.resolvedAgentClientId ?? taskAgentClientId;
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
   }
 
@@ -308,7 +476,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     execution_type: execType,
     ...buildTaskAgentConfig(group, {
       runtime_profile,
-      agent_client_id,
+      agent_client_id: taskAgentClientId ?? undefined,
       backend,
       agent_model,
     }),
@@ -321,6 +489,7 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     created_by: authUser.id,
     notify_channels: notify_channels ?? null,
   });
+  broadcastScheduledTaskEvent(getTaskById(taskId), authUser);
 
   return c.json({ success: true, taskId });
 });
@@ -444,6 +613,7 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
   }
 
   updateTask(id, patchData);
+  broadcastScheduledTaskEvent(getTaskById(id), authUser);
 
   return c.json({ success: true });
 });
@@ -735,6 +905,7 @@ tasksRoutes.post('/ai', authMiddleware, async (c) => {
     created_by: authUser.id,
     notify_channels: notifyChannels,
   });
+  broadcastScheduledTaskEvent(getTaskById(taskId), authUser);
 
   logger.info(
     { taskId, description: description.slice(0, 80) },
@@ -755,6 +926,7 @@ tasksRoutes.post('/ai', authMiddleware, async (c) => {
           status: 'paused',
           prompt: description,
         });
+        broadcastScheduledTaskEvent(getTaskById(taskId), authUser);
         logger.warn({ taskId }, 'AI parse returned null, task paused');
         return;
       }
@@ -767,6 +939,7 @@ tasksRoutes.post('/ai', authMiddleware, async (c) => {
           status: 'paused',
           prompt: description,
         });
+        broadcastScheduledTaskEvent(getTaskById(taskId), authUser);
         logger.warn({ taskId }, 'AI parse result invalid, task paused');
         return;
       }
@@ -795,6 +968,7 @@ tasksRoutes.post('/ai', authMiddleware, async (c) => {
           status: 'paused',
           prompt: parsed.prompt,
         });
+        broadcastScheduledTaskEvent(getTaskById(taskId), authUser);
         logger.warn(
           { taskId, scheduleValue: parsed.schedule_value },
           'AI parsed schedule invalid, task paused',
@@ -811,6 +985,7 @@ tasksRoutes.post('/ai', authMiddleware, async (c) => {
         next_run: nextRun,
         status: 'active',
       });
+      broadcastScheduledTaskEvent(getTaskById(taskId), authUser);
 
       logger.info(
         {
@@ -825,6 +1000,7 @@ tasksRoutes.post('/ai', authMiddleware, async (c) => {
       const cur = getTaskById(taskId);
       if (cur && cur.status === 'parsing') {
         updateTask(taskId, { status: 'paused' });
+        broadcastScheduledTaskEvent(getTaskById(taskId), authUser);
       }
     }
   })().catch((err) =>

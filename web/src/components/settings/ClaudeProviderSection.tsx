@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ExternalLink,
   Loader2,
@@ -6,6 +6,7 @@ import {
 
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { api } from '../../api/client';
+import { wsManager } from '../../api/ws';
 import type {
   ProviderWithHealth,
   ProvidersListResponse,
@@ -42,9 +43,6 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
   // 确认对话框
   const [pendingDeleteProvider, setPendingDeleteProvider] = useState<ProviderWithHealth | null>(null);
 
-  // 健康轮询标记
-  const healthTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
   // Claude 服务状态
   const [claudeStatus, setClaudeStatus] = useState<{
     indicator: string;
@@ -76,8 +74,6 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
       }
     };
     fetchStatus();
-    const timer = setInterval(fetchStatus, 5 * 60 * 1000);
-    return () => clearInterval(timer);
   }, []);
 
   // ─── 加载提供商列表 ──────────────────────────────────────────
@@ -98,39 +94,37 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
     loadProviders();
   }, [loadProviders]);
 
-  // ─── 健康状态轮询（启用 >= 2 个提供商时） ────────────────────
-  useEffect(() => {
-    if (healthTimerRef.current) {
-      clearInterval(healthTimerRef.current);
-      healthTimerRef.current = null;
-    }
-
+  const refreshProviderHealth = useCallback(async () => {
     if (enabledCount < 2) return;
-
-    const pollHealth = async () => {
-      try {
-        const data = await api.get<{ statuses: ProviderHealthStatus[] }>(
-          '/api/config/claude/providers/health',
-        );
-        setProviders((prev) =>
-          prev.map((p) => {
-            const updated = data.statuses.find((s) => s.profileId === p.id);
-            return updated ? { ...p, health: updated } : p;
-          }),
-        );
-      } catch {
-        // 静默忽略
-      }
-    };
-
-    healthTimerRef.current = setInterval(pollHealth, 10000);
-    return () => {
-      if (healthTimerRef.current) {
-        clearInterval(healthTimerRef.current);
-        healthTimerRef.current = null;
-      }
-    };
+    try {
+      const data = await api.get<{ statuses: ProviderHealthStatus[] }>(
+        '/api/config/claude/providers/health',
+      );
+      setProviders((prev) =>
+        prev.map((p) => {
+          const updated = data.statuses.find((s) => s.profileId === p.id);
+          return updated ? { ...p, health: updated } : p;
+        }),
+      );
+    } catch {
+      // 静默忽略
+    }
   }, [enabledCount]);
+
+  // ─── 健康状态通过标准 system 事件刷新 ────────────────────
+  useEffect(() => {
+    const unsubSystem = wsManager.on('octodeck_event:system', (data: any) => {
+      const event = data.event;
+      if (event.type === 'system.provider_pool.health.updated') {
+        refreshProviderHealth();
+      }
+    });
+    const unsubConnected = wsManager.on('connected', () => refreshProviderHealth());
+    return () => {
+      unsubSystem();
+      unsubConnected();
+    };
+  }, [refreshProviderHealth]);
 
   // ─── 切换提供商启用/禁用 ──────────────────────────────────────
   const handleToggle = useCallback(

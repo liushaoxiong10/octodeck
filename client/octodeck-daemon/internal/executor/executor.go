@@ -42,6 +42,8 @@ type AgentExecutor interface {
 // memory sync, update).
 type MaintenanceExecutor interface {
 	HandleWorkspaceCleanup(req *proto.WorkspaceCleanupRequestFrame)
+	HandleWorkspaceGitStatus(ctx context.Context, req *proto.WorkspaceGitStatusRequestFrame)
+	HandleWorkspaceGitCommit(ctx context.Context, req *proto.WorkspaceGitCommitRequestFrame)
 	HandleMemorySync(req *proto.MemorySyncFrame)
 }
 

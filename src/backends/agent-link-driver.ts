@@ -934,6 +934,8 @@ function buildAgentRunPolicy(
   }
   const systemPrompt = buildDeviceCliSystemPrompt(input, group, ownerUserId);
   if (systemPrompt) policy.systemPrompt = systemPrompt;
+  if (input.taskScopedToken) policy.taskScopedToken = input.taskScopedToken;
+  if (input.runPermissionPolicy) policy.runPermissionPolicy = input.runPermissionPolicy;
   return policy;
 }
 

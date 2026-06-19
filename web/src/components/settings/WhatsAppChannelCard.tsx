@@ -90,25 +90,26 @@ export function WhatsAppChannelCard() {
     loadConfig();
   }, [loadConfig]);
 
-  // Subscribe to live whatsapp_status WS events for the current user
+  // Subscribe to standard device-domain OctoDeckEvents for live WhatsApp status.
   useEffect(() => {
-    const unsubscribe = wsManager.on(
-      'whatsapp_status',
-      (data: WhatsAppStatusEvent) => {
+    const unsubscribe = wsManager.on('octodeck_event:device', (data: any) => {
+      const event = data.event;
+      if (event.type?.startsWith('device.whatsapp.')) {
+        const status = event.payload as WhatsAppStatusEvent;
         setState({
-          status: data.status,
-          qr: data.qr,
-          qrDataUrl: data.qrDataUrl,
-          error: data.error,
-          meJid: data.meJid,
-          meName: data.meName,
+          status: status.status,
+          qr: status.qr,
+          qrDataUrl: status.qrDataUrl,
+          error: status.error,
+          meJid: status.meJid,
+          meName: status.meName,
         });
         // Refresh config card-level connected/paired flags when status changes
-        if (data.status === 'connected' || data.status === 'logged_out') {
+        if (status.status === 'connected' || status.status === 'logged_out') {
           loadConfig();
         }
-      },
-    );
+      }
+    });
     return () => {
       unsubscribe();
     };

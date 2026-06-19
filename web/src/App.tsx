@@ -22,8 +22,12 @@ const IssuesPage = lazy(() => import('./pages/IssuesPage').then(m => ({ default:
 const IssueDetailPage = lazy(() => import('./pages/IssueDetailPage').then(m => ({ default: m.IssueDetailPage })));
 const HistoryPage = lazy(() => import('./pages/HistoryPage').then(m => ({ default: m.HistoryPage })));
 const DevicesPage = lazy(() => import('./pages/DevicesPage').then(m => ({ default: m.DevicesPage })));
+const RuntimePoolPage = lazy(() => import('./pages/RuntimePoolPage').then(m => ({ default: m.RuntimePoolPage })));
+const OrchestrationPage = lazy(() => import('./pages/OrchestrationPage').then(m => ({ default: m.OrchestrationPage })));
 const ReposPage = lazy(() => import('./pages/ReposPage').then(m => ({ default: m.ReposPage })));
 const AgentsPage = lazy(() => import('./pages/AgentsPage').then(m => ({ default: m.AgentsPage })));
+const RegistryPage = lazy(() => import('./pages/RegistryPage').then(m => ({ default: m.RegistryPage })));
+const AutopilotsPage = lazy(() => import('./pages/AutopilotsPage').then(m => ({ default: m.AutopilotsPage })));
 const ModelEndpointsPage = lazy(() => import('./pages/ModelEndpointsPage').then(m => ({ default: m.ModelEndpointsPage })));
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then(m => ({ default: m.SettingsPage })));
 const BillingPage = lazy(() => import('./pages/BillingPage'));
@@ -67,13 +71,17 @@ export function App() {
           <Route path="/chat/:groupFolder?" element={<Suspense fallback={null}><ChatPage /></Suspense>} />
           <Route path="/groups" element={<Navigate to="/settings?tab=groups" replace />} />
           <Route path="/tasks" element={<Suspense fallback={null}><TasksPage /></Suspense>} />
+          <Route path="/autopilots" element={<Suspense fallback={null}><AutopilotsPage /></Suspense>} />
           <Route path="/issues" element={<Suspense fallback={null}><IssuesPage /></Suspense>} />
           <Route path="/issues/:groupFolder" element={<Suspense fallback={null}><IssuesPage /></Suspense>} />
           <Route path="/issues/detail/:id" element={<Suspense fallback={null}><IssueDetailPage /></Suspense>} />
           <Route path="/history" element={<Suspense fallback={null}><HistoryPage /></Suspense>} />
           <Route path="/repos" element={<Suspense fallback={null}><ReposPage /></Suspense>} />
           <Route path="/devices" element={<Suspense fallback={null}><DevicesPage /></Suspense>} />
+          <Route path="/runtimes" element={<Suspense fallback={null}><RuntimePoolPage /></Suspense>} />
+          <Route path="/orchestration" element={<Suspense fallback={null}><OrchestrationPage /></Suspense>} />
           <Route path="/agents" element={<Suspense fallback={null}><AgentsPage /></Suspense>} />
+          <Route path="/registry" element={<Suspense fallback={null}><RegistryPage /></Suspense>} />
           <Route path="/model-endpoints" element={<Suspense fallback={null}><ModelEndpointsPage /></Suspense>} />
           <Route path="/monitor" element={<Navigate to="/settings?tab=monitor" replace />} />
           <Route path="/usage" element={<Navigate to="/settings?tab=usage" replace />} />

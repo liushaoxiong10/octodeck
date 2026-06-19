@@ -227,13 +227,18 @@ export interface RepoKnowledgeGraphEdge {
   symbol?: string;
   packageName?: string;
   source: string;
+  confidence?: number;
+  runId?: string;
   metadata?: Record<string, unknown>;
   updatedAt: string;
 }
 
 export interface RepoKnowledgeSearchHit extends RepoKnowledgeChunk {
   score: number;
+  vectorScore?: number;
   snippet: string;
+  matchedTerms?: string[];
+  rationale?: string[];
   related?: RepoKnowledgeGraphEdge[];
 }
 
@@ -388,6 +393,66 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+export type AgentTaskSourceType =
+  | 'issue_run'
+  | 'scheduled_task'
+  | 'agent_team_run'
+  | 'agent_team_task';
+
+export type AgentTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'awaiting_input'
+  | 'waiting_approval'
+  | 'paused'
+  | 'success'
+  | 'error'
+  | 'canceled'
+  | 'lost'
+  | 'skipped';
+
+export interface AgentTask {
+  id: string;
+  source_type: AgentTaskSourceType;
+  source_ref: string;
+  run_ref?: string | null;
+  status: AgentTaskStatus;
+  workspace_jid?: string | null;
+  workspace_folder?: string | null;
+  actor_user_id?: string | null;
+  agent_link_id?: string | null;
+  agent_client_id?: string | null;
+  execution_node?: string | null;
+  backend?: string | null;
+  result?: string | null;
+  error?: string | null;
+  context?: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface AgentTaskScopedToken {
+  id: string;
+  task_id: string;
+  actor_user_id?: string | null;
+  agent_link_id?: string | null;
+  agent_client_id?: string | null;
+  workspace_folder?: string | null;
+  repo_id?: string | null;
+  policy: Record<string, unknown>;
+  expires_at: string;
+  created_at: string;
+  last_used_at?: string | null;
+  revoked_at?: string | null;
+  revoke_reason?: string | null;
+}
+
+export interface IssuedAgentTaskScopedToken extends AgentTaskScopedToken {
+  token: string;
+}
+
 export type IssueStatus =
   | 'todo'
   | 'in_progress'
@@ -397,6 +462,43 @@ export type IssueStatus =
   | 'canceled';
 
 export type IssuePriority = 'low' | 'medium' | 'high' | 'urgent';
+
+export type AutopilotTriggerType = 'schedule' | 'webhook' | 'manual' | 'api';
+export type AutopilotActionType = 'create_issue' | 'run_agent' | 'run_agent_team';
+export type AutopilotStatus = 'active' | 'paused' | 'deleted';
+export type AutopilotRunStatus = 'running' | 'success' | 'error' | 'skipped';
+
+export interface Autopilot {
+  id: string;
+  name: string;
+  description?: string | null;
+  trigger: Record<string, unknown> & { type?: AutopilotTriggerType };
+  action: Record<string, unknown> & { type?: AutopilotActionType };
+  status: AutopilotStatus;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  last_run_id?: string | null;
+  last_run_status?: AutopilotRunStatus | null;
+  last_run_at?: string | null;
+  deleted_at?: string | null;
+}
+
+export interface AutopilotRun {
+  id: string;
+  autopilot_id: string;
+  trigger_type: AutopilotTriggerType;
+  status: AutopilotRunStatus;
+  retry_of?: string | null;
+  attempt: number;
+  payload?: Record<string, unknown> | null;
+  result?: Record<string, unknown> | null;
+  error?: string | null;
+  skip_reason?: string | null;
+  created_by: string;
+  created_at: string;
+  completed_at?: string | null;
+}
 
 export interface WorkspaceIssue {
   id: string;
@@ -719,7 +821,11 @@ export type AuthEventType =
   | 'invite_deleted'
   | 'invite_used'
   | 'recovery_reset'
-  | 'register_success';
+  | 'register_success'
+  | 'agent_task_token_created'
+  | 'agent_task_token_used'
+  | 'agent_task_token_rejected'
+  | 'agent_task_token_revoked';
 
 export interface AuthAuditLog {
   id: number;
@@ -774,6 +880,10 @@ export interface ImContextBinding {
 
 // WebSocket message types
 export type WsMessageOut =
+  | {
+      type: 'octodeck_event';
+      event: import('./octodeck-events.js').OctoDeckEvent;
+    }
   | {
       type: 'new_message';
       chatJid: string;
@@ -849,6 +959,28 @@ export type WsMessageOut =
       type: 'billing_update';
       userId: string;
       usage: BillingAccessResult;
+    }
+  | {
+      type: 'repo_knowledge_run_state';
+      repoId: string;
+      userId: string;
+      runId: string;
+      status: 'queued' | 'running' | 'uploading' | 'ready' | 'error';
+      taskId?: string;
+      deviceLinkId?: string;
+      error?: string | null;
+      stats?: Record<string, unknown>;
+    }
+  | {
+      type: 'memory_update';
+      userId: string;
+      memoryType: 'global' | 'session' | 'agent';
+      path: string;
+      action: 'created' | 'updated' | 'deleted' | 'synced';
+      scopeKey?: string;
+      deviceLinkId?: string;
+      correlationId?: string;
+      source?: string;
     }
   | { type: 'ws_error'; error: string; chatJid?: string; agentId?: string }
   | {

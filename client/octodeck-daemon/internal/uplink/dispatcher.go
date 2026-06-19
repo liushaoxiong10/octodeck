@@ -50,6 +50,14 @@ func (h *Handlers) dispatch(ctx context.Context, frame any) (fatalErr error) {
 		if h.OnWorkspaceCleanup != nil {
 			h.OnWorkspaceCleanup(f)
 		}
+	case *proto.WorkspaceGitStatusRequestFrame:
+		if h.OnWorkspaceGitStatus != nil {
+			h.OnWorkspaceGitStatus(ctx, f)
+		}
+	case *proto.WorkspaceGitCommitRequestFrame:
+		if h.OnWorkspaceGitCommit != nil {
+			h.OnWorkspaceGitCommit(ctx, f)
+		}
 	case *proto.ToolRequestFrame:
 		if h.OnToolRequest != nil {
 			h.OnToolRequest(ctx, f)

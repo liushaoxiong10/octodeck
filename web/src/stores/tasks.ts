@@ -38,9 +38,32 @@ export interface TaskRunLog {
   error?: string | null;
 }
 
+export interface AgentTaskLedgerRow {
+  id: string;
+  source_type: 'issue_run' | 'scheduled_task' | 'agent_team_run' | 'agent_team_task';
+  source_ref: string;
+  run_ref?: string | null;
+  status: 'queued' | 'running' | 'awaiting_input' | 'waiting_approval' | 'paused' | 'success' | 'error' | 'canceled' | 'lost' | 'skipped';
+  workspace_jid?: string | null;
+  workspace_folder?: string | null;
+  actor_user_id?: string | null;
+  agent_link_id?: string | null;
+  agent_client_id?: string | null;
+  execution_node?: string | null;
+  backend?: string | null;
+  result?: string | null;
+  error?: string | null;
+  context?: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
 interface TasksState {
   tasks: ScheduledTask[];
   logs: Record<string, TaskRunLog[]>;
+  agentRunsByTask: Record<string, AgentTaskLedgerRow[]>;
   loading: boolean;
   error: string | null;
   runningTaskIds: Set<string>;
@@ -66,6 +89,7 @@ interface TasksState {
   updateTask: (id: string, fields: Record<string, unknown>) => Promise<void>;
   deleteTask: (id: string) => Promise<void>;
   loadLogs: (taskId: string) => Promise<void>;
+  loadAgentRunsForTask: (taskId: string) => Promise<AgentTaskLedgerRow[]>;
   runTaskNow: (id: string) => Promise<void>;
 }
 
@@ -81,6 +105,7 @@ function normalizeOnceScheduleValue(value: string): string {
 export const useTasksStore = create<TasksState>((set, get) => ({
   tasks: [],
   logs: {},
+  agentRunsByTask: {},
   loading: false,
   error: null,
   runningTaskIds: new Set<string>(),
@@ -209,6 +234,23 @@ export const useTasksStore = create<TasksState>((set, get) => ({
       }));
     } catch (err) {
       set({ error: extractErrorMessage(err) });
+    }
+  },
+
+  loadAgentRunsForTask: async (taskId: string) => {
+    try {
+      const data = await api.get<{ tasks: AgentTaskLedgerRow[] }>(
+        `/api/tasks/agent-runs?source_type=scheduled_task&source_ref=${encodeURIComponent(taskId)}`,
+      );
+      const rows = data.tasks ?? [];
+      set((s) => ({
+        agentRunsByTask: { ...s.agentRunsByTask, [taskId]: rows },
+        error: null,
+      }));
+      return rows;
+    } catch (err) {
+      set({ error: extractErrorMessage(err) });
+      return [];
     }
   },
 

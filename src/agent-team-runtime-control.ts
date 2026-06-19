@@ -29,6 +29,17 @@ export interface AgentTeamRoleRuntimeTargetValidationInput {
     assignment?: AgentTeamRuntimeValidationAssignment,
     role?: AgentTeamRuntimeValidationRole,
   ) => string | undefined;
+  resolveRuntimeTarget?: (
+    runnerAgentId: string,
+    assignment?: AgentTeamRuntimeValidationAssignment,
+    role?: AgentTeamRuntimeValidationRole,
+  ) => {
+    ok: boolean;
+    runtimeId: string | null;
+    executionNode: string | null;
+    blockedReason?: string;
+    schedulingReason?: string;
+  };
 }
 
 export interface AgentTeamRoleRuntimeTargetValidationResult {
@@ -225,6 +236,14 @@ export function validateAgentTeamRoleRuntimeTargets(
     ) {
       errors.push(
         `role ${role.id} requires a device link for workspacePolicy=device`,
+      );
+      setStatus(409);
+    }
+
+    const runtimeDecision = input.resolveRuntimeTarget?.(runnerAgentId, assignment, role);
+    if (runtimeDecision && !runtimeDecision.ok) {
+      errors.push(
+        `role ${role.id} runtime ${runtimeDecision.runtimeId ?? runtimeDecision.executionNode ?? 'unknown'} is not schedulable: ${runtimeDecision.blockedReason ?? runtimeDecision.schedulingReason ?? 'runtime_not_found'}`,
       );
       setStatus(409);
     }

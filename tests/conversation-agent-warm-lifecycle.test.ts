@@ -33,7 +33,7 @@ function seedRunner(q: GroupQueue, jid: string, opts: SeedOpts = {}) {
     queryInFlight: opts.queryInFlight ?? false,
     pendingMessages: false,
     pendingTasks: [],
-    process: null,
+    process: opts.active === false ? null : { pid: 12345 },
     containerName: null,
     displayName: null,
     groupFolder: opts.groupFolder ?? 'main',

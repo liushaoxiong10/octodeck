@@ -60,6 +60,7 @@ import {
 } from '../agent-link/agent-runtime-rpc.js';
 import type { AuthUser } from '../types.js';
 import { listCustomBackends } from '../backends/custom-loader.js';
+import { buildRuntimePoolSnapshot } from '../runtime-pool.js';
 import { handleAgentTeamLinkToolRequest } from './agent-teams.js';
 
 const DAEMON_UPDATE_COMMAND =
@@ -83,6 +84,7 @@ function isDaemonUpdateAvailable(current: string | null | undefined): boolean {
 const BCRYPT_ROUNDS = 10;
 const TOKEN_BYTES = 32; // 64 hex chars
 const MAX_LINKS_PER_USER = 16;
+const DEFAULT_USER_RUNTIME_MAX_CONCURRENT_RUNS = 4;
 
 const agentLinkRoutes = new Hono<{ Variables: Variables }>();
 
@@ -115,6 +117,7 @@ agentLinkRoutes.get('/', authMiddleware, (c) => {
       uninstallCommand: DAEMON_UNINSTALL_COMMAND,
       lastConnectedAt: l.lastConnectedAt ?? null,
       lastSeenAt: l.lastSeenAt ?? null,
+      lastHeartbeatAt: online?.lastHeartbeatAt ? new Date(online.lastHeartbeatAt).toISOString() : null,
       status: online?.status ?? (linkOnline ? 'idle' : 'offline'),
       runningRuns: online?.runningRuns ?? [],
       maxConcurrentRuns: online?.maxConcurrentRuns ?? null,
@@ -126,6 +129,46 @@ agentLinkRoutes.get('/', authMiddleware, (c) => {
     };
   });
   return c.json({ links: result });
+});
+
+agentLinkRoutes.get('/runtime-pool', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const preferredAgentClientId = c.req.query('agentClientId')?.trim() || 'claude-code';
+  const links = listAgentLinksByUser(user.id);
+  const devices = links.map((l) => {
+    const online = getOnlineMeta(l.id);
+    const linkOnline = isOnline(l.id);
+    return {
+      id: l.id,
+      displayName: l.displayName,
+      online: linkOnline,
+      status: online?.status ?? (linkOnline ? 'idle' as const : 'offline' as const),
+      lastHeartbeatAt: online?.lastHeartbeatAt
+        ? new Date(online.lastHeartbeatAt).toISOString()
+        : l.lastSeenAt,
+      agentClients: l.agentClients ?? [],
+      runtimes: online?.runtimes ?? [],
+    };
+  });
+  const serverBackends = listCustomBackends()
+    .filter((backend) => backend.runtime === 'server-side')
+    .map((backend) => ({
+      id: backend.id,
+      displayName: backend.displayName,
+      runtime: backend.runtime,
+      providerId: backend.providerId,
+    }));
+  return c.json({
+    runtimePool: buildRuntimePoolSnapshot({
+      devices,
+      serverBackends,
+      quota: {
+        userId: user.id,
+        maxConcurrentRuns: DEFAULT_USER_RUNTIME_MAX_CONCURRENT_RUNS,
+      },
+      assignment: { preferredAgentClientId },
+    }),
+  });
 });
 
 agentLinkRoutes.post('/', authMiddleware, async (c) => {

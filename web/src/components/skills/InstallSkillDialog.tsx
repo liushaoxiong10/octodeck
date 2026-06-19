@@ -20,6 +20,17 @@ interface InstallSkillDialogProps {
 }
 
 type Tab = 'search' | 'manual';
+type SourceProvider = NonNullable<InstallSkillOptions['sourceProvider']>;
+
+const PROVIDER_SKILL_FORMATS: Array<{
+  value: SourceProvider;
+  label: string;
+  hint: string;
+  workspaceDir: string;
+}> = [
+  { value: 'claude', label: 'Claude / Claude Code', hint: '~/.claude/skills', workspaceDir: 'skills/' },
+  { value: 'codex', label: 'Codex', hint: '~/.codex/skills', workspaceDir: '.codex/skills/' },
+];
 
 function packageBase(pkg: string): string {
   return pkg.split('@')[0]?.split('#')[0] ?? pkg;
@@ -165,6 +176,7 @@ export function InstallSkillDialog({
   const [searchQuery, setSearchQuery] = useState('');
   const [installingPkg, setInstallingPkg] = useState<string | null>(null);
   const [target, setTarget] = useState<'cloud' | 'device' | 'device-agent-workspace'>('cloud');
+  const [sourceProvider, setSourceProvider] = useState<SourceProvider>('claude');
   const [deviceLinkId, setDeviceLinkId] = useState('');
   const [agentId, setAgentId] = useState('');
   const [selectedPackages, setSelectedPackages] = useState<string[]>([]);
@@ -233,6 +245,7 @@ export function InstallSkillDialog({
       setSearchQuery('');
       setInstallingPkg(null);
       setTarget('cloud');
+      setSourceProvider('claude');
       setDeviceLinkId('');
       setAgentId('');
       setSelectedPackages([]);
@@ -265,18 +278,19 @@ export function InstallSkillDialog({
     return agent.displayName;
   };
   const buildInstallOptions = (): InstallSkillOptions => {
-    if (target === 'cloud') return { target: 'cloud' };
+    if (target === 'cloud') return { target: 'cloud', sourceProvider };
     if (target === 'device-agent-workspace') {
       if (!agentId) throw new Error('请选择安装目标 Workspace');
-      return { target: 'device-agent-workspace', agentId };
+      return { target: 'device-agent-workspace', agentId, sourceProvider };
     }
     if (!deviceLinkId) throw new Error('请选择安装目标 Device');
-    return { target: 'device', deviceLinkId };
+    return { target: 'device', deviceLinkId, sourceProvider };
   };
 
   const packageResults = Array.from(
     new Map(searchResults.map((result) => [packageBase(result.package), result])).values(),
   );
+  const providerFormat = PROVIDER_SKILL_FORMATS.find((item) => item.value === sourceProvider) ?? PROVIDER_SKILL_FORMATS[0];
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
@@ -301,6 +315,17 @@ export function InstallSkillDialog({
               Workspace
             </label>
           </div>
+          <label className="block text-sm font-medium text-foreground">Provider / Skill 格式</label>
+          <select
+            value={sourceProvider}
+            onChange={(e) => setSourceProvider(e.target.value as SourceProvider)}
+            disabled={isInstalling}
+            className="h-9 w-full px-3 text-sm border border-border rounded-md bg-transparent"
+          >
+            {PROVIDER_SKILL_FORMATS.map((format) => (
+              <option key={format.value} value={format.value}>{format.label}</option>
+            ))}
+          </select>
           {target === 'device' && (
             <select
               value={deviceLinkId}
@@ -358,12 +383,20 @@ export function InstallSkillDialog({
             return (
               <p className="mt-2 rounded-md bg-muted/40 px-3 py-2 text-xs leading-5 text-muted-foreground break-all">
                 技能将安装到：<span className="font-mono text-foreground">{cwd}{cwd.endsWith('/') ? '' : '/'}skills/</span>
+                {sourceProvider !== 'claude' && (
+                  <span className="font-mono text-foreground">（{providerFormat.workspaceDir}）</span>
+                )}
               </p>
             );
           })()}
           {target === 'cloud' && (
             <p className="rounded-md bg-muted/40 px-3 py-2 text-xs leading-5 text-muted-foreground">
-              云端 Skill 会安装为 Claude SDK / Claude Code 可用的格式，并保存到 OctoDeck Cloud Skills。
+              云端 Skill 会安装为 {providerFormat.label} 可用的格式（{providerFormat.hint}），并保存到 OctoDeck Cloud Skills。
+            </p>
+          )}
+          {target === 'device' && (
+            <p className="rounded-md bg-muted/40 px-3 py-2 text-xs leading-5 text-muted-foreground">
+              Device Skill 会安装为 {providerFormat.label} 原生格式（{providerFormat.hint}）。
             </p>
           )}
         </div>

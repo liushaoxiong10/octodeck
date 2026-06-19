@@ -12,6 +12,8 @@ export interface AgentLink {
     version?: string;
     permissionModes?: string[];
     capabilities?: string[];
+    provider?: string;
+    transport?: 'stdio' | 'acp' | 'a2a' | 'http';
   }>;
   resources: {
     cpuCount?: number;
@@ -40,6 +42,7 @@ export interface AgentLink {
   clientVersion: string | null;
   lastConnectedAt: string | null;
   lastSeenAt: string | null;
+  lastHeartbeatAt?: string | null;
   createdAt: string;
   online: boolean;
   status?: 'idle' | 'busy' | 'draining' | 'offline';
@@ -58,6 +61,8 @@ export interface AgentLink {
     deviceLinkId: string;
     agentClientId: string;
     displayName?: string;
+    provider?: string;
+    transport?: 'stdio' | 'acp' | 'a2a' | 'http';
     status: 'idle' | 'busy' | 'draining' | 'offline';
     maxConcurrentRuns?: number;
     availableSlots?: number;
@@ -68,6 +73,62 @@ export interface AgentLink {
   latestVersion?: string | null;
   updateCommand?: string;
   uninstallCommand?: string;
+}
+
+export interface RuntimePoolSnapshot {
+  summary: {
+    totalRuntimes: number;
+    onlineRuntimes: number;
+    busyRuntimes: number;
+    degradedRuntimes: number;
+    recoverableRuntimes: number;
+    availableSlots: number;
+    admissibleSlots: number;
+    runningRuns: number;
+  };
+  quota?: {
+    userId?: string;
+    maxConcurrentRuns: number;
+    runningRuns: number;
+    remainingRuns: number;
+    saturated: boolean;
+  };
+  assignment?: {
+    recommendedRuntimeId: string | null;
+    executionNode: string | null;
+    deviceLinkId?: string;
+    agentClientId?: string;
+    backendId?: string;
+    reason: 'matched_preferred_agent' | 'best_available' | 'no_eligible_runtime';
+  };
+  runtimes: Array<{
+    runtimeId: string;
+    kind: 'server' | 'device';
+    deviceLinkId?: string;
+    deviceName?: string;
+    backendId?: string;
+    agentClientId: string;
+    displayName: string;
+    provider?: string;
+    transport?: 'stdio' | 'acp' | 'a2a' | 'http';
+    status: 'idle' | 'busy' | 'draining' | 'offline';
+    health: 'available' | 'busy' | 'draining' | 'offline' | 'full' | 'degraded';
+    scheduling: {
+      eligible: boolean;
+      blockedReason?: 'runtime_offline' | 'runtime_draining' | 'runtime_full' | 'runtime_degraded' | 'quota_exhausted';
+    };
+    recovery: {
+      action: 'none' | 'wait_for_reconnect' | 'respect_drain' | 'wait_for_heartbeat' | 'wait_for_capacity' | 'wait_for_quota';
+      retryable: boolean;
+      failoverEligible: boolean;
+      reason: string;
+    };
+    maxConcurrentRuns?: number;
+    availableSlots?: number;
+    lastHeartbeatAt?: string;
+    heartbeatAgeMs?: number;
+    runningRuns: NonNullable<AgentLink['runningRuns']>;
+  }>;
 }
 
 export interface DaemonVersionInfo {
@@ -101,10 +162,12 @@ interface AgentLinkRotateResponse {
 
 interface AgentLinksState {
   links: AgentLink[];
+  runtimePool: RuntimePoolSnapshot | null;
   loading: boolean;
   error: string | null;
 
   load: () => Promise<void>;
+  loadRuntimePool: () => Promise<RuntimePoolSnapshot | null>;
   create: (displayName: string) => Promise<AgentLinkCreateResponse>;
   rotate: (id: string) => Promise<AgentLinkRotateResponse>;
   remove: (id: string) => Promise<void>;
@@ -124,6 +187,7 @@ interface AgentLinksState {
 
 export const useAgentLinksStore = create<AgentLinksState>((set, get) => ({
   links: [],
+  runtimePool: null,
   loading: false,
   error: null,
 
@@ -137,6 +201,17 @@ export const useAgentLinksStore = create<AgentLinksState>((set, get) => ({
         loading: false,
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  },
+
+  loadRuntimePool: async () => {
+    try {
+      const data = await api.get<{ runtimePool: RuntimePoolSnapshot }>('/api/devices/runtime-pool');
+      set({ runtimePool: data.runtimePool, error: null });
+      return data.runtimePool;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return null;
     }
   },
 

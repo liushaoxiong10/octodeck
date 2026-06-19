@@ -429,11 +429,12 @@ function ProvidersPanel({ link }: { link: AgentLink }) {
       {link.agentClients.length > 0 ? (
         <div className="overflow-x-auto rounded-2xl border border-border bg-background/80 shadow-sm">
           <div className="min-w-[960px]">
-            <div className="grid grid-cols-[minmax(180px,1.3fr)_minmax(280px,2fr)_96px_96px_minmax(220px,1.2fr)] gap-3 border-b border-border bg-muted/30 px-4 py-2 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+            <div className="grid grid-cols-[minmax(180px,1.3fr)_minmax(280px,2fr)_112px_96px_minmax(150px,1fr)_minmax(220px,1.2fr)] gap-3 border-b border-border bg-muted/30 px-4 py-2 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
               <div>Provider</div>
               <div>Runtime</div>
               <div>运行中</div>
               <div>Caps</div>
+              <div>Slots</div>
               <div>Binary</div>
             </div>
             {link.agentClients.map((client) => {
@@ -442,7 +443,7 @@ function ProvidersPanel({ link }: { link: AgentLink }) {
               return (
                 <div
                   key={client.id}
-                  className="grid grid-cols-[minmax(180px,1.3fr)_minmax(280px,2fr)_96px_96px_minmax(220px,1.2fr)] items-center gap-3 border-b border-border/70 px-4 py-3 text-xs last:border-b-0"
+                  className="grid grid-cols-[minmax(180px,1.3fr)_minmax(280px,2fr)_112px_96px_minmax(150px,1fr)_minmax(220px,1.2fr)] items-center gap-3 border-b border-border/70 px-4 py-3 text-xs last:border-b-0"
                 >
                   <div className="min-w-0">
                     <div className="truncate text-sm font-semibold text-foreground">
@@ -450,6 +451,9 @@ function ProvidersPanel({ link }: { link: AgentLink }) {
                     </div>
                     <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
                       {client.id}
+                    </div>
+                    <div className="mt-1 truncate text-[11px] text-muted-foreground">
+                      Provider / Transport · {client.provider ?? runtime?.provider ?? 'local'} / {client.transport ?? runtime?.transport ?? 'stdio'}
                     </div>
                   </div>
 
@@ -498,6 +502,13 @@ function ProvidersPanel({ link }: { link: AgentLink }) {
                           : ''}
                       </div>
                     ) : null}
+                  </div>
+
+                  <div className="font-semibold text-foreground">
+                    {runtime?.availableSlots ?? '—'}
+                    <div className="mt-1 truncate text-[11px] font-normal text-muted-foreground">
+                      max {runtime?.maxConcurrentRuns ?? '—'}
+                    </div>
                   </div>
 
                   <div className="min-w-0">
@@ -779,15 +790,6 @@ export function DevicesSection() {
   useEffect(() => {
     load();
     void loadBackends();
-  }, [load, loadBackends]);
-
-  // Periodic refresh to keep online status fresh
-  useEffect(() => {
-    const t = setInterval(() => {
-      load();
-      void loadBackends();
-    }, 15_000);
-    return () => clearInterval(t);
   }, [load, loadBackends]);
 
   useEffect(() => {

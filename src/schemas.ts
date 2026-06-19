@@ -167,6 +167,112 @@ export const IssueRunSchema = z.object({
   include_new_comments: z.boolean().optional().default(true),
 });
 
+const AutopilotIssueActionSchema = z.object({
+  title: z.string().min(1).max(200),
+  description: z.string().max(20000).optional().default(''),
+  priority: z.enum(['low', 'medium', 'high', 'urgent']).optional().default('medium'),
+  workspace_jid: z.string().min(1).optional(),
+  workspace_folder: z.string().min(1).optional(),
+  project_repo_id: z.string().nullable().optional(),
+  agent_link_id: z.string().nullable().optional(),
+  agent_client_id: z.string().nullable().optional(),
+  execution_node: z.string().nullable().optional(),
+  backend: z.string().nullable().optional(),
+  selected_skills: z.array(z.string()).optional().default([]),
+});
+
+export const AutopilotTriggerSchema = z.object({
+  type: z.enum(['schedule', 'webhook', 'manual', 'api']),
+  schedule_type: z.enum(['cron', 'interval', 'once']).optional(),
+  schedule_value: z.string().optional(),
+  token: z.string().max(256).optional(),
+}).superRefine((data, ctx) => {
+  if (data.type === 'webhook' && !data.token?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['token'],
+      message: 'webhook trigger requires token',
+    });
+  }
+  if (data.type === 'schedule') {
+    if (!data.schedule_type) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['schedule_type'],
+        message: 'schedule trigger requires schedule_type',
+      });
+    }
+    if (!data.schedule_value?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['schedule_value'],
+        message: 'schedule trigger requires schedule_value',
+      });
+    } else if (data.schedule_type === 'cron' && !CRON_REGEX.test(data.schedule_value.trim())) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['schedule_value'],
+        message: 'Invalid cron expression (expected 5 or 6 fields)',
+      });
+    } else if (data.schedule_type === 'interval') {
+      const num = Number(data.schedule_value);
+      if (!Number.isFinite(num) || num <= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['schedule_value'],
+          message: 'Interval must be a positive number (milliseconds)',
+        });
+      }
+    } else if (data.schedule_type === 'once' && isNaN(Date.parse(data.schedule_value))) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['schedule_value'],
+        message: 'Once schedule must be a valid ISO 8601 date string',
+      });
+    }
+  }
+});
+
+export const AutopilotActionSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('create_issue'),
+    issue: AutopilotIssueActionSchema,
+  }),
+  z.object({
+    type: z.literal('run_agent'),
+    issue: AutopilotIssueActionSchema,
+    run: IssueRunSchema.omit({ comment_ids: true, include_new_comments: true }).optional().default({}),
+  }),
+  z.object({
+    type: z.literal('run_agent_team'),
+    team_id: z.string().min(1),
+    prompt: z.string().min(1),
+    workflow_shape: z.string().min(1).optional().default('pipeline'),
+    role_assignments: z.record(z.string(), z.unknown()).optional().default({}),
+  }),
+]);
+
+export const AutopilotCreateSchema = z.object({
+  name: z.string().min(1).max(120),
+  description: z.string().max(2000).nullable().optional(),
+  trigger: AutopilotTriggerSchema,
+  action: AutopilotActionSchema,
+  status: z.enum(['active', 'paused']).optional().default('active'),
+});
+
+export const AutopilotPatchSchema = z.object({
+  name: z.string().min(1).max(120).optional(),
+  description: z.string().max(2000).nullable().optional(),
+  trigger: AutopilotTriggerSchema.optional(),
+  action: AutopilotActionSchema.optional(),
+  status: z.enum(['active', 'paused']).optional(),
+});
+
+export const AutopilotTriggerRequestSchema = z.object({
+  trigger_type: z.enum(['schedule', 'webhook', 'manual', 'api']).optional(),
+  payload: z.record(z.string(), z.unknown()).optional().default({}),
+});
+
 export const IssueAttachmentCreateSchema = z.object({
   filename: z.string().min(1).max(255),
   mime_type: z.string().min(1).max(120),
@@ -337,6 +443,8 @@ export const RepoKnowledgeEdgePayloadSchema = z.object({
   symbol: z.string().max(256).optional(),
   packageName: z.string().max(256).optional(),
   source: z.string().max(128).optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  runId: z.string().max(128).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 

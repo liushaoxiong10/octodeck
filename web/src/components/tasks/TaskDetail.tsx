@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Check, Pencil, RefreshCw, X } from 'lucide-react';
-import { ScheduledTask, TaskRunLog, useTasksStore } from '../../stores/tasks';
+import { ScheduledTask, TaskRunLog, type AgentTaskLedgerRow, useTasksStore } from '../../stores/tasks';
+import { getOrchestrationPreviewKey, useOrchestrationStore } from '../../stores/orchestration';
 import { showToast } from '../../utils/toast';
 import { INTERVAL_UNITS, formatInterval, decomposeInterval, toggleNotifyChannel } from '../../utils/task-utils';
 import { useConnectedChannels } from '../../hooks/useConnectedChannels';
@@ -17,8 +18,30 @@ const LOG_STATUS_STYLES: Record<string, { bg: string; text: string; label: strin
   error: { bg: 'bg-red-100 dark:bg-red-900/40', text: 'text-red-700 dark:text-red-300', label: '失败' },
 };
 
+const AGENT_TASK_STATUS_STYLES: Record<string, { bg: string; text: string; label: string }> = {
+  queued: { bg: 'bg-slate-100 dark:bg-slate-900/40', text: 'text-slate-700 dark:text-slate-300', label: '排队中' },
+  running: { bg: 'bg-blue-100 dark:bg-blue-900/40', text: 'text-blue-700 dark:text-blue-300', label: '运行中' },
+  awaiting_input: { bg: 'bg-amber-100 dark:bg-amber-900/40', text: 'text-amber-700 dark:text-amber-300', label: '等待输入' },
+  waiting_approval: { bg: 'bg-amber-100 dark:bg-amber-900/40', text: 'text-amber-700 dark:text-amber-300', label: '等待审批' },
+  paused: { bg: 'bg-muted', text: 'text-muted-foreground', label: '已暂停' },
+  success: { bg: 'bg-green-100 dark:bg-green-900/40', text: 'text-green-700 dark:text-green-300', label: '成功' },
+  error: { bg: 'bg-red-100 dark:bg-red-900/40', text: 'text-red-700 dark:text-red-300', label: '失败' },
+  canceled: { bg: 'bg-muted', text: 'text-muted-foreground', label: '已取消' },
+  lost: { bg: 'bg-red-100 dark:bg-red-900/40', text: 'text-red-700 dark:text-red-300', label: '已丢失' },
+  skipped: { bg: 'bg-muted', text: 'text-muted-foreground', label: '已跳过' },
+};
+
 function RunLogStatusBadge({ status }: { status: string }) {
   const style = LOG_STATUS_STYLES[status] || { bg: 'bg-muted', text: 'text-muted-foreground', label: status };
+  return (
+    <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${style.bg} ${style.text}`}>
+      {style.label}
+    </span>
+  );
+}
+
+function AgentTaskStatusBadge({ status }: { status: string }) {
+  const style = AGENT_TASK_STATUS_STYLES[status] || { bg: 'bg-muted', text: 'text-muted-foreground', label: status };
   return (
     <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${style.bg} ${style.text}`}>
       {style.label}
@@ -36,24 +59,39 @@ function formatDuration(ms: number): string {
 }
 
 export function TaskDetail({ task }: TaskDetailProps) {
-  const { updateTask, loadLogs, logs } = useTasksStore();
+  const { updateTask, loadLogs, loadAgentRunsForTask, logs, agentRunsByTask } = useTasksStore();
+  const loadOrchestrationPreview = useOrchestrationStore((s) => s.loadPreview);
+  const orchestrationDecision = useOrchestrationStore(
+    (s) => s.previews[getOrchestrationPreviewKey('task', task.id)],
+  );
 
   const connectedChannels = useConnectedChannels();
   const groupNames = useTasksStore((s) => s.groupNames);
   const taskLogs = logs[task.id] || [];
+  const agentRuns = agentRunsByTask[task.id] || [];
   const [logsLoading, setLogsLoading] = useState(false);
 
   useEffect(() => {
     loadLogs(task.id);
-  }, [task.id, loadLogs]);
+    loadAgentRunsForTask(task.id);
+    loadOrchestrationPreview({ source: 'task', id: task.id });
+  }, [task.id, loadLogs, loadAgentRunsForTask, loadOrchestrationPreview]);
 
   const handleRefreshLogs = async () => {
     setLogsLoading(true);
     try {
       await loadLogs(task.id);
+      await loadAgentRunsForTask(task.id);
     } finally {
       setLogsLoading(false);
     }
+  };
+
+  const getAgentTaskRuntimeProfile = (row: AgentTaskLedgerRow): string => {
+    const runtime_profile = row.context?.runtime_profile;
+    return typeof runtime_profile === 'string' && runtime_profile.trim()
+      ? runtime_profile
+      : row.execution_node || row.agent_client_id || row.backend || '-';
   };
 
   const [editing, setEditing] = useState(false);
@@ -312,6 +350,54 @@ export function TaskDetail({ task }: TaskDetailProps) {
         )}
       </div>
 
+      <div className="rounded-lg border border-border bg-card p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-foreground">Orchestration Preview</div>
+            <div className="mt-1 text-xs text-muted-foreground">source: 'task' · 策略预判 Agent、targetRuntimeId、风险与审批需求</div>
+          </div>
+          {orchestrationDecision && (
+            <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+              {orchestrationDecision.mode}
+            </span>
+          )}
+        </div>
+        {orchestrationDecision ? (
+          <div className="mt-3 grid grid-cols-1 gap-2 text-xs md:grid-cols-4">
+            <div className="rounded border border-border bg-background p-2">
+              <div className="text-muted-foreground">Agent</div>
+              <div className="mt-1 font-mono text-foreground">{orchestrationDecision.targetAgentId ?? 'manual'}</div>
+            </div>
+            <div className="rounded border border-border bg-background p-2">
+              <div className="text-muted-foreground">targetRuntimeId</div>
+              <div className="mt-1 font-mono text-foreground">{orchestrationDecision.targetRuntimeId ?? 'blocked'}</div>
+            </div>
+            <div className="rounded border border-border bg-background p-2">
+              <div className="text-muted-foreground">Risk</div>
+              <div className="mt-1 text-foreground">{orchestrationDecision.riskLevel}</div>
+              <div className="mt-1 font-mono text-[11px] text-muted-foreground">{orchestrationDecision.enforcementAction}</div>
+            </div>
+            <div className="rounded border border-border bg-background p-2">
+              <div className="text-muted-foreground">approvalRequired</div>
+              <div className="mt-1 text-foreground">{String(orchestrationDecision.approvalRequired)}</div>
+              <Link to={`/orchestration?source=task&id=${encodeURIComponent(task.id)}`} className="mt-2 inline-flex text-[11px] text-primary hover:underline">
+                Control Tower
+              </Link>
+            </div>
+            <div className="rounded border border-border bg-background p-2 md:col-span-2">
+              <div className="text-muted-foreground">permissionScopes</div>
+              <div className="mt-1 text-foreground">{orchestrationDecision.permissionScopes.join(', ') || 'none'}</div>
+            </div>
+            <div className="rounded border border-border bg-background p-2 md:col-span-2">
+              <div className="text-muted-foreground">Reasons / Blockers</div>
+              <div className="mt-1 text-foreground">{[...orchestrationDecision.reasons, ...orchestrationDecision.blockers].join(' · ') || '—'}</div>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-muted-foreground">正在生成 orchestration preview…</div>
+        )}
+      </div>
+
       {/* Schedule Details */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <div>
@@ -503,6 +589,54 @@ export function TaskDetail({ task }: TaskDetailProps) {
             renderNotifyChannelsBadges()
           )}
         </div>
+      </div>
+
+      {/* AgentTask Ledger */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-sm text-muted-foreground">AgentTask Ledger</div>
+          <button
+            onClick={() => loadAgentRunsForTask(task.id)}
+            className="p-1 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+            title="刷新 AgentTask Ledger"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
+        {agentRuns.length === 0 ? (
+          <p className="text-xs text-muted-foreground">暂无统一任务运行记录</p>
+        ) : (
+          <div className="border border-border rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-brand-50 text-primary text-xs">
+                  <th className="text-left px-4 py-2 font-medium">run_ref</th>
+                  <th className="text-left px-4 py-2 font-medium">状态</th>
+                  <th className="text-left px-4 py-2 font-medium">runtime_profile</th>
+                  <th className="text-left px-4 py-2 font-medium">更新时间</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {agentRuns.map((row) => (
+                  <tr key={row.id}>
+                    <td className="px-4 py-2.5 text-foreground font-mono text-xs">
+                      {row.run_ref || row.id}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <AgentTaskStatusBadge status={row.status} />
+                    </td>
+                    <td className="px-4 py-2.5 text-foreground text-xs">
+                      {getAgentTaskRuntimeProfile(row)}
+                    </td>
+                    <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">
+                      {formatDate(row.updated_at)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Execution Logs */}

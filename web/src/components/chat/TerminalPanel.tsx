@@ -112,25 +112,21 @@ export function TerminalPanel({
       }
     };
 
-    // 监听 WebSocket 消息
-    const unsubOutput = wsManager.on('terminal_output', (data: any) => {
-      if (data.chatJid === groupJid) {
-        terminal.write(data.data);
+    // 监听标准 runtime 终端事件
+    const unsubRuntime = wsManager.on('octodeck_event:runtime', (data: any) => {
+      const event = data.event;
+      if (event?.chatJid !== groupJid) return;
+      if (event.type === 'runtime.terminal.output') {
+        terminal.write(event.payload.data);
       }
-    });
-
-    const unsubStarted = wsManager.on('terminal_started', (data: any) => {
-      if (data.chatJid === groupJid) {
+      if (event.type === 'runtime.terminal.started') {
         syncConnState('connected');
       }
-    });
-
-    const unsubStopped = wsManager.on('terminal_stopped', (data: any) => {
-      if (data.chatJid === groupJid) {
+      if (event.type === 'runtime.terminal.stopped') {
         syncConnState('disconnected');
-        terminal.write(`\r\n\x1b[33m[${data.reason || '终端已断开'}]\x1b[0m\r\n`);
+        terminal.write(`\r\n\x1b[33m[${event.payload.reason || '终端已断开'}]\x1b[0m\r\n`);
         // Auto-reconnect after unexpected stop (not user-initiated)
-        if (data.reason !== '用户关闭终端') {
+        if (event.payload.reason !== '用户关闭终端') {
           terminal.write('\x1b[33m[3 秒后自动重连...]\x1b[0m\r\n');
           setTimeout(() => {
             if (connStateRef.current === 'disconnected' && wsManager.isConnected()) {
@@ -139,13 +135,10 @@ export function TerminalPanel({
           }, 3000);
         }
       }
-    });
-
-    const unsubError = wsManager.on('terminal_error', (data: any) => {
-      if (data.chatJid === groupJid) {
+      if (event.type === 'runtime.terminal.error') {
         syncConnState('disconnected');
         // 针对工作区未运行/启动中的错误，自动延迟重连
-        if (data.error?.includes('工作区未运行') || data.error?.includes('工作区启动中')) {
+        if (event.payload.error?.includes('工作区未运行') || event.payload.error?.includes('工作区启动中')) {
           terminal.write(`\r\n\x1b[33m[工作区启动中，5 秒后自动重连...]\x1b[0m\r\n`);
           setTimeout(() => {
             if (connStateRef.current === 'disconnected' && wsManager.isConnected()) {
@@ -153,7 +146,7 @@ export function TerminalPanel({
             }
           }, 5000);
         } else {
-          terminal.write(`\r\n\x1b[31m[错误: ${data.error}]\x1b[0m\r\n`);
+          terminal.write(`\r\n\x1b[31m[错误: ${event.payload.error}]\x1b[0m\r\n`);
         }
       }
     });
@@ -222,10 +215,7 @@ export function TerminalPanel({
         textarea.removeEventListener('compositionend', onCompositionEnd);
       }
       onDataDisposable.dispose();
-      unsubOutput();
-      unsubStarted();
-      unsubStopped();
-      unsubError();
+      unsubRuntime();
       unsubWsConnected();
       unsubWsDisconnected();
       if (wsManager.isConnected()) {

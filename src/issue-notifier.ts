@@ -32,6 +32,8 @@ const NOTIFY_EVENT_TYPES: ReadonlySet<IssueEvent['event_type']> = new Set([
   'run_failed',         // error
   'run_succeeded',      // success with result
   'run_canceled',
+  'run_lost',
+  'agent_request_created',
 ]);
 
 // Which status transitions should actually notify (filtering status_changed noise)

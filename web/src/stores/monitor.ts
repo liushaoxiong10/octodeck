@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
+import type { OctoDeckEvent } from '../octodeck-event.types';
 
 export interface SystemStatus {
   activeContainers: number;
@@ -37,6 +38,7 @@ interface MonitorState {
   buildResult: { success: boolean; error?: string; stdout?: string; stderr?: string } | null;
   loadStatus: () => Promise<void>;
   buildDockerImage: () => Promise<void>;
+  applyDockerBuildEvent: (event: OctoDeckEvent<{ line: string } | { success: boolean; error?: string }>) => void;
   clearBuildResult: () => void;
   switchProvider: (folder: string, providerId: string) => Promise<{ ok: boolean; restarted: boolean }>;
 }
@@ -89,6 +91,34 @@ export const useMonitorStore = create<MonitorState>((set) => ({
           error: err instanceof Error ? err.message : String(err),
         },
       });
+    }
+  },
+
+  applyDockerBuildEvent: (event) => {
+    if (event.type === 'system.docker_build.log') {
+      const payload = event.payload as { line: string };
+      set((s) => ({
+        building: true,
+        buildLogs: [...s.buildLogs.slice(-199), payload.line],
+        status: s.status ? { ...s.status, dockerBuildInProgress: true } : s.status,
+      }));
+      return;
+    }
+
+    if (event.type === 'system.docker_build.complete') {
+      const payload = event.payload as { success: boolean; error?: string };
+      set((s) => ({
+        building: false,
+        buildResult: { success: payload.success, error: payload.error },
+        status: s.status
+          ? {
+              ...s.status,
+              dockerBuildInProgress: false,
+              dockerBuildResult: { success: payload.success, error: payload.error },
+              dockerImageExists: payload.success ? true : s.status.dockerImageExists,
+            }
+          : s.status,
+      }));
     }
   },
 

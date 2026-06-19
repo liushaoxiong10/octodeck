@@ -24,14 +24,6 @@ export function TasksPage() {
     loadTasks();
   }, [loadTasks]);
 
-  // Poll while any task is in 'parsing' state so UI updates when done
-  const hasParsing = tasks.some((t) => t.status === 'parsing');
-  useEffect(() => {
-    if (!hasParsing) return;
-    const interval = setInterval(loadTasks, 3000);
-    return () => clearInterval(interval);
-  }, [hasParsing, loadTasks]);
-
   const handleCreateTask = async (data: {
     prompt: string;
     scheduleType: 'cron' | 'interval' | 'once';

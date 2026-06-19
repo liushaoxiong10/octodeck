@@ -15,41 +15,32 @@ import { wsManager } from '../api/ws';
 import { api } from '@/api/client';
 
 export function MonitorPage() {
-  const { status, loading, loadStatus, building, buildLogs, buildResult, buildDockerImage, clearBuildResult } = useMonitorStore();
+  const { status, loading, loadStatus, building, buildLogs, buildResult, buildDockerImage, applyDockerBuildEvent, clearBuildResult } = useMonitorStore();
   const isAdmin = useAuthStore((s) => s.user?.role === 'admin');
   const logEndRef = useRef<HTMLDivElement>(null);
   const [providers, setProviders] = useState<SimpleProvider[]>([]);
 
   useEffect(() => {
     loadStatus();
-
-    const interval = setInterval(() => {
-      loadStatus();
-    }, 10000);
-
-    return () => clearInterval(interval);
   }, [loadStatus]);
 
-  // WebSocket listeners for docker build progress
+  // Standard OctoDeckEvent listener for docker build progress
   useEffect(() => {
-    const unsubLog = wsManager.on('docker_build_log', (data: { line: string }) => {
-      useMonitorStore.setState((s) => ({
-        buildLogs: [...s.buildLogs.slice(-199), data.line],
-      }));
-    });
-    const unsubComplete = wsManager.on('docker_build_complete', (data: { success: boolean; error?: string }) => {
-      useMonitorStore.setState({
-        building: false,
-        buildResult: { success: data.success, error: data.error },
-      });
-      loadStatus();
+    const unsubSystem = wsManager.on('octodeck_event:system', (data: any) => {
+      const event = data.event;
+      if (!event) return;
+      if (event.type === 'system.docker_build.log') {
+        applyDockerBuildEvent(event);
+      }
+      if (event.type === 'system.docker_build.complete') {
+        applyDockerBuildEvent(event);
+      }
     });
 
     return () => {
-      unsubLog();
-      unsubComplete();
+      unsubSystem();
     };
-  }, [loadStatus]);
+  }, [applyDockerBuildEvent]);
 
   // Fetch providers once for all ProviderSwitcher instances
   useEffect(() => {
@@ -74,7 +65,7 @@ export function MonitorPage() {
       <div className="max-w-7xl mx-auto">
         <PageHeader
           title="系统监控"
-          subtitle="实时监控系统状态（10秒自动刷新）"
+          subtitle="实时监控系统状态（事件驱动，手动刷新兜底）"
           className="mb-6"
           actions={
             <Button variant="outline" onClick={loadStatus} disabled={loading}>

@@ -148,4 +148,30 @@ describe('agent team runtime control', () => {
 
     expect(result).toEqual({ ok: true, errors: [] });
   });
+
+  test('rejects role assignments whose resolved runtime is blocked', () => {
+    const result = validateAgentTeamRoleRuntimeTargets({
+      roles: [{ id: 'builder', name: 'Builder', policy: { workspacePolicy: 'device' } }],
+      roleAssignments: {
+        builder: { runnerAgentId: 'runner_a', linkId: 'cl_full0000000001', agentClientId: 'claude-code' },
+      },
+      defaultRunnerAgentId: 'runner_a',
+      allowedBackends: ['runner_a'],
+      resolveBackend: () => ({ supportsExecutionMode: () => true }),
+      resolveDeviceLink: (_runnerAgentId, assignment) => assignment?.linkId,
+      resolveRuntimeTarget: () => ({
+        ok: false,
+        runtimeId: 'cl_full0000000001:claude-code',
+        executionNode: 'runtime:cl_full0000000001:claude-code',
+        deviceLinkId: 'cl_full0000000001',
+        agentClientId: 'claude-code',
+        blockedReason: 'runtime_full',
+        schedulingReason: 'target_blocked',
+      }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(409);
+    expect(result.errors).toContain('role builder runtime cl_full0000000001:claude-code is not schedulable: runtime_full');
+  });
 });

@@ -4,6 +4,7 @@ vi.mock('../src/db.js', () => ({
   recordAgentLinkResources: vi.fn(),
   recordAgentLinkConnect: vi.fn(),
   touchAgentLinkSeen: vi.fn(),
+  touchIssueAgentRunHeartbeat: vi.fn(),
 }));
 
 const failRunsForLink = vi.fn();
@@ -12,8 +13,12 @@ const failModelRequestsForLink = vi.fn();
 const failSkillsRequestsForLink = vi.fn();
 
 vi.mock('../src/agent-link/run-rpc.js', () => ({
+  deliverAgentRunEvent: vi.fn(),
+  deliverAgentRunResult: vi.fn(),
+  deliverAgentRunStatus: vi.fn(),
   deliverEvent: vi.fn(),
   deliverResult: vi.fn(),
+  deliverStatus: vi.fn(),
   failRunsForLink,
 }));
 
@@ -31,6 +36,15 @@ vi.mock('../src/agent-link/model-rpc.js', () => ({
 vi.mock('../src/agent-link/skills-rpc.js', () => ({
   deliverSkillsResult: vi.fn(),
   failSkillsRequestsForLink,
+}));
+
+vi.mock('../src/agent-link/agent-runtime-rpc.js', () => ({
+  deliverAgentDiscoverResult: vi.fn(),
+  deliverAgentSessionDeleteResult: vi.fn(),
+  deliverAgentSessionsResult: vi.fn(),
+  deliverWorkspaceGitCommitResult: vi.fn(),
+  deliverWorkspaceGitStatusResult: vi.fn(),
+  failAgentRuntimeRequestsForLink: vi.fn(),
 }));
 
 vi.mock('../src/memory-store.js', () => ({
@@ -97,5 +111,58 @@ describe('agent-link registry replacement handling', () => {
         currentVersion: 'octodeck-daemon/1.0.3',
       }),
     );
+  });
+
+  test('provider runtime selection skips full and draining runtimes then prefers spare capacity', async () => {
+    vi.clearAllMocks();
+    const { handleFrame, handleHello, listOnlineRuntimesByProvider } = await import('../src/agent-link/registry.js');
+
+    for (const [linkId, status, availableSlots, runningRuns] of [
+      ['cl_runtimefull', 'busy', 0, [{ runId: 'run-full', backendId: 'codex', cwd: '/repo' }]],
+      ['cl_runtimedrain', 'draining', 4, []],
+      ['cl_runtimeone', 'idle', 1, []],
+      ['cl_runtimemore', 'idle', 3, []],
+    ] as const) {
+      const session = fakeSession(linkId);
+      handleHello(
+        session,
+        {
+          type: 'hello',
+          id: 1,
+          version: 'octodeck-daemon/1.0.23',
+          capabilities: ['agent.run'],
+          agentClients: [
+            {
+              id: 'codex',
+              displayName: 'Codex',
+              binary: 'codex',
+              capabilities: ['agent.run'],
+            },
+          ],
+        },
+        linkId,
+      );
+      handleFrame(session, {
+        type: 'ping',
+        id: 2,
+        runtimes: [
+          {
+            runtimeId: `${linkId}:codex`,
+            deviceLinkId: linkId,
+            agentClientId: 'codex',
+            displayName: 'Codex',
+            status,
+            availableSlots,
+            runningRuns,
+          },
+        ],
+      } as any);
+    }
+
+    const selected = listOnlineRuntimesByProvider('codex', 'user_1');
+    expect(selected.map((runtime) => runtime.deviceLinkId)).toEqual([
+      'cl_runtimemore',
+      'cl_runtimeone',
+    ]);
   });
 });

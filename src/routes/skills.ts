@@ -76,6 +76,14 @@ type SkillInstallTarget =
 
 type SkillSourceProvider = 'claude' | 'codex';
 
+const PROVIDER_SKILL_TARGETS: Record<
+  SkillSourceProvider,
+  { configDir: string; adapter: string }
+> = {
+  claude: { configDir: 'claude', adapter: 'claude-code' },
+  codex: { configDir: 'codex', adapter: 'codex' },
+};
+
 // --- Utility Functions ---
 
 function getLegacyCloudSkillDir(userId: string): string {
@@ -639,15 +647,14 @@ async function installSkillForUser(
   // This avoids any race condition when multiple installs run concurrently.
   const sourceProvider = normalizeSourceProvider(options.sourceProvider);
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-install-'));
-  const providerConfigDir =
-    sourceProvider === 'claude' ? 'claude' : sourceProvider;
-  const tempSkillsDir = path.join(tempHome, `.${providerConfigDir}`, 'skills');
+  const providerTarget = PROVIDER_SKILL_TARGETS[sourceProvider];
+  const tempSkillsDir = path.join(tempHome, `.${providerTarget.configDir}`, 'skills');
   fs.mkdirSync(tempSkillsDir, { recursive: true });
 
   try {
     await execFileAsync(
       'npx',
-      ['-y', 'skills', 'add', pkg, '--global', '--yes', '-a', sourceProvider === 'claude' ? 'claude-code' : sourceProvider],
+      ['-y', 'skills', 'add', pkg, '--global', '--yes', '-a', providerTarget.adapter],
       {
         timeout: 60_000,
         env: { ...process.env, HOME: tempHome },
@@ -728,6 +735,7 @@ async function installSkillOnDevice(
   userId: string,
   deviceLinkId: string,
   pkg: string,
+  sourceProviderInput: SkillSourceProvider = 'claude',
 ): Promise<{ success: boolean; installed?: string[]; error?: string }> {
   if (
     !/^[\w\-]+\/[\w\-.]+(?:[@#][\w\-.\/]+)?$/.test(pkg) &&
@@ -743,23 +751,26 @@ async function installSkillOnDevice(
   if (!session || session.state !== 'open') {
     return { success: false, error: 'device offline' };
   }
+  const sourceProvider = normalizeSourceProvider(sourceProviderInput);
+  const providerTarget = PROVIDER_SKILL_TARGETS[sourceProvider];
+  const providerSkillsDir = `.${providerTarget.configDir}/skills`;
   try {
     // Use a temp HOME so `--global` install is isolated from concurrent
     // installs; then atomically move discovered skill directories into the
-    // real `~/.claude/skills/` so the device's CLI discovery picks them up.
+    // real provider-native skills dir so the device's CLI discovery picks them up.
     const command = [
       'set -eu',
       'tmp_home="$(mktemp -d)"',
       'cleanup() { rm -rf "$tmp_home"; }',
       'trap cleanup EXIT',
-      'mkdir -p "$tmp_home/.claude/skills" ~/.claude/skills',
-      `HOME="$tmp_home" npx -y skills add ${shellQuote(pkg)} --global --yes -a claude-code`,
+      `mkdir -p "$tmp_home/${providerSkillsDir}" ~/${providerSkillsDir}`,
+      `HOME="$tmp_home" npx -y skills add ${shellQuote(pkg)} --global --yes -a ${providerTarget.adapter}`,
       'installed=""',
       'count=0',
-      'for entry in "$tmp_home/.claude/skills"/*; do',
+      `for entry in "$tmp_home/${providerSkillsDir}"/*; do`,
       '  [ -e "$entry" ] || continue',
       '  name="$(basename "$entry")"',
-      '  target="$HOME/.claude/skills/$name"',
+      `  target="$HOME/${providerSkillsDir}/$name"`,
       '  rm -rf "$target"',
       '  cp -RL "$entry" "$target"',
       '  installed="$installed $name"',
@@ -800,6 +811,7 @@ async function installSkillOnAgentWorkspace(
   userId: string,
   agentId: string,
   pkg: string,
+  sourceProviderInput: SkillSourceProvider = 'claude',
 ): Promise<{ success: boolean; installed?: string[]; error?: string }> {
   if (
     !/^[\w\-]+\/[\w\-.]+(?:[@#][\w\-.\/]+)?$/.test(pkg) &&
@@ -829,20 +841,24 @@ async function installSkillOnAgentWorkspace(
     backend.workdirMode === 'custom' && backend.workdir
       ? backend.workdir
       : `octodeck-workspace://${backend.id}`;
+  const sourceProvider = normalizeSourceProvider(sourceProviderInput);
+  const providerTarget = PROVIDER_SKILL_TARGETS[sourceProvider];
+  const providerSkillsDir = `.${providerTarget.configDir}/skills`;
+  const workspaceSkillsDir = sourceProvider === 'claude' ? './skills' : `./${providerSkillsDir}`;
   const command = [
     'set -eu',
     'tmp_home="$(mktemp -d)"',
     'cleanup() { rm -rf "$tmp_home"; }',
     'trap cleanup EXIT',
-    'mkdir -p "$tmp_home/.claude/skills" ./skills',
-    `HOME="$tmp_home" npx -y skills add ${shellQuote(pkg)} --global --yes -a claude-code`,
+    `mkdir -p "$tmp_home/${providerSkillsDir}" ${workspaceSkillsDir}`,
+    `HOME="$tmp_home" npx -y skills add ${shellQuote(pkg)} --global --yes -a ${providerTarget.adapter}`,
     'installed=""',
     'count=0',
-    'for entry in "$tmp_home/.claude/skills"/*; do',
+    `for entry in "$tmp_home/${providerSkillsDir}"/*; do`,
     '  [ -e "$entry" ] || continue',
     '  name="$(basename "$entry")"',
-    '  rm -rf "./skills/$name"',
-    '  cp -RL "$entry" "./skills/$name"',
+    `  rm -rf "${workspaceSkillsDir}/$name"`,
+    `  cp -RL "$entry" "${workspaceSkillsDir}/$name"`,
     '  installed="$installed $name"',
     '  count=$((count + 1))',
     'done',
@@ -910,9 +926,9 @@ skillsRoutes.post('/install', authMiddleware, async (c) => {
       : { kind: 'cloud' };
   const result =
     target.kind === 'device'
-      ? await installSkillOnDevice(authUser.id, target.deviceLinkId, pkg)
+      ? await installSkillOnDevice(authUser.id, target.deviceLinkId, pkg, sourceProvider)
       : target.kind === 'device-agent-workspace'
-        ? await installSkillOnAgentWorkspace(authUser.id, target.agentId, pkg)
+        ? await installSkillOnAgentWorkspace(authUser.id, target.agentId, pkg, sourceProvider)
       : await installSkillForUser(authUser.id, pkg, {
           sourceProvider,
           selectedSkillIds,

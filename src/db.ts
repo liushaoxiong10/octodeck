@@ -17,6 +17,16 @@ import {
   AgentStatus,
   AuthAuditLog,
   AuthEventType,
+  Autopilot,
+  AutopilotActionType,
+  AutopilotRun,
+  AutopilotRunStatus,
+  AutopilotStatus,
+  AutopilotTriggerType,
+  AgentTask,
+  AgentTaskScopedToken,
+  AgentTaskSourceType,
+  AgentTaskStatus,
   BalanceOperatorType,
   BalanceReferenceType,
   BalanceTransaction,
@@ -30,6 +40,7 @@ import {
   GroupMember,
   InviteCode,
   InviteCodeWithCreator,
+  IssuedAgentTaskScopedToken,
   MessageFinalizationReason,
   MonthlyUsage,
   NewMessage,
@@ -396,6 +407,50 @@ function initializeSqliteDatabase(
     );
     CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
 
+    CREATE TABLE IF NOT EXISTS agent_tasks (
+      id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL,
+      source_ref TEXT NOT NULL,
+      run_ref TEXT,
+      status TEXT NOT NULL,
+      workspace_jid TEXT,
+      workspace_folder TEXT,
+      actor_user_id TEXT,
+      agent_link_id TEXT,
+      agent_client_id TEXT,
+      execution_node TEXT,
+      backend TEXT,
+      result TEXT,
+      error TEXT,
+      context TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_tasks_source ON agent_tasks(source_type, source_ref, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_tasks_run_ref ON agent_tasks(run_ref);
+
+    CREATE TABLE IF NOT EXISTS agent_task_scoped_tokens (
+      id TEXT PRIMARY KEY,
+      token_hash TEXT NOT NULL UNIQUE,
+      task_id TEXT NOT NULL,
+      actor_user_id TEXT,
+      agent_link_id TEXT,
+      agent_client_id TEXT,
+      workspace_folder TEXT,
+      repo_id TEXT,
+      policy TEXT,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_used_at TEXT,
+      revoked_at TEXT,
+      revoke_reason TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_task_tokens_task ON agent_task_scoped_tokens(task_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_task_tokens_expiry ON agent_task_scoped_tokens(expires_at);
+
     CREATE TABLE IF NOT EXISTS issues (
       id TEXT PRIMARY KEY,
       workspace_jid TEXT NOT NULL,
@@ -522,6 +577,41 @@ function initializeSqliteDatabase(
     CREATE INDEX IF NOT EXISTS idx_issue_events_issue ON issue_events(issue_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_issue_events_run ON issue_events(run_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_issue_events_type ON issue_events(event_type, created_at);
+
+    CREATE TABLE IF NOT EXISTS autopilots (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      trigger_json TEXT NOT NULL,
+      action_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_run_id TEXT,
+      last_run_status TEXT,
+      last_run_at TEXT,
+      deleted_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_autopilots_user_status ON autopilots(created_by, status, updated_at);
+
+    CREATE TABLE IF NOT EXISTS autopilot_runs (
+      id TEXT PRIMARY KEY,
+      autopilot_id TEXT NOT NULL,
+      trigger_type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      retry_of TEXT,
+      attempt INTEGER NOT NULL DEFAULT 1,
+      payload_json TEXT,
+      result_json TEXT,
+      error TEXT,
+      skip_reason TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      completed_at TEXT,
+      FOREIGN KEY (autopilot_id) REFERENCES autopilots(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_autopilot_runs_autopilot ON autopilot_runs(autopilot_id, created_at);
 
     CREATE TABLE IF NOT EXISTS issue_comments (
       id TEXT PRIMARY KEY,
@@ -1170,6 +1260,8 @@ function initializeSqliteDatabase(
       symbol TEXT,
       package_name TEXT,
       source TEXT NOT NULL,
+      confidence REAL,
+      run_id TEXT,
       metadata_json TEXT NOT NULL DEFAULT '{}',
       updated_at TEXT NOT NULL
     );
@@ -1212,11 +1304,9 @@ function initializeSqliteDatabase(
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
   ensureColumn('repos', 'main_branch', 'TEXT');
-  ensureColumn(
-    'repo_knowledge_chunks',
-    'metadata_json',
-    "TEXT NOT NULL DEFAULT '{}'",
-  );
+  ensureColumn('repo_knowledge_chunks', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn('repo_knowledge_graph_edges', 'confidence', 'REAL');
+  ensureColumn('repo_knowledge_graph_edges', 'run_id', 'TEXT');
   ensureColumn('chats', 'archived_at', 'TEXT');
   ensureColumn('chats', 'archive_reason', 'TEXT');
   ensureColumn(
@@ -1263,6 +1353,24 @@ function initializeSqliteDatabase(
   ensureColumn('scheduled_tasks', 'claimed_by', 'TEXT');
   ensureColumn('scheduled_tasks', 'claimed_at', 'TEXT');
   ensureColumn('scheduled_tasks', 'lease_expires_at', 'TEXT');
+  ensureColumn('agent_tasks', 'source_type', 'TEXT');
+  ensureColumn('agent_tasks', 'source_ref', 'TEXT');
+  ensureColumn('agent_tasks', 'run_ref', 'TEXT');
+  ensureColumn('agent_tasks', 'status', 'TEXT');
+  ensureColumn('agent_tasks', 'workspace_jid', 'TEXT');
+  ensureColumn('agent_tasks', 'workspace_folder', 'TEXT');
+  ensureColumn('agent_tasks', 'actor_user_id', 'TEXT');
+  ensureColumn('agent_tasks', 'agent_link_id', 'TEXT');
+  ensureColumn('agent_tasks', 'agent_client_id', 'TEXT');
+  ensureColumn('agent_tasks', 'execution_node', 'TEXT');
+  ensureColumn('agent_tasks', 'backend', 'TEXT');
+  ensureColumn('agent_tasks', 'result', 'TEXT');
+  ensureColumn('agent_tasks', 'error', 'TEXT');
+  ensureColumn('agent_tasks', 'context', 'TEXT');
+  ensureColumn('agent_tasks', 'created_at', 'TEXT');
+  ensureColumn('agent_tasks', 'updated_at', 'TEXT');
+  ensureColumn('agent_tasks', 'started_at', 'TEXT');
+  ensureColumn('agent_tasks', 'completed_at', 'TEXT');
   ensureColumn('issues', 'assignee_user_id', 'TEXT');
   ensureColumn('issues', 'due_date', 'TEXT');
   ensureColumn('issues', 'project_repo_id', 'TEXT');
@@ -1278,6 +1386,9 @@ function initializeSqliteDatabase(
   ensureColumn('issues', 'last_run_id', 'TEXT');
   ensureColumn('issues', 'last_run_status', 'TEXT');
   ensureColumn('issues', 'last_run_at', 'TEXT');
+  ensureColumn('autopilot_runs', 'skip_reason', 'TEXT');
+  ensureColumn('autopilot_runs', 'retry_of', 'TEXT');
+  ensureColumn('autopilot_runs', 'attempt', 'INTEGER NOT NULL DEFAULT 1');
   ensureColumn('issue_agent_run_events', 'title', 'TEXT');
   ensureColumn('issue_agent_run_events', 'summary', 'TEXT');
   ensureColumn('issue_agent_run_events', 'detail', 'TEXT');
@@ -2441,6 +2552,21 @@ export interface AgentTeamApprovalRecord {
   createdAt?: string;
 }
 
+function sanitizeAgentTaskId(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]+/g, '_');
+}
+
+function mapAgentTeamRunStatusToAgentTaskStatus(status: AgentTeamRunRecord['status']): AgentTaskStatus {
+  if (status === 'waiting_approval') return 'waiting_approval';
+  if (status === 'cancelled') return 'canceled';
+  return status;
+}
+
+function mapAgentTeamTaskStatusToAgentTaskStatus(status: AgentTeamTaskRecord['status']): AgentTaskStatus {
+  if (status === 'cancelled') return 'canceled';
+  return status;
+}
+
 export function recordAgentTeamRun(record: AgentTeamRunRecord): void {
   if (!db) return;
   const now = new Date().toISOString();
@@ -2472,6 +2598,26 @@ export function recordAgentTeamRun(record: AgentTeamRunRecord): void {
     record.completedAt ?? null,
     record.updatedAt ?? now,
   );
+  upsertAgentTask({
+    id: `agtask_${record.id}`,
+    source_type: 'agent_team_run',
+    source_ref: record.teamId,
+    run_ref: record.id,
+    status: mapAgentTeamRunStatusToAgentTaskStatus(record.status),
+    actor_user_id: record.userId,
+    result: record.finalResult ?? null,
+    error: record.error ?? null,
+    context: {
+      teamId: record.teamId,
+      traceId: record.traceId,
+      workflowShape: record.workflowShape,
+      roleAssignments: record.roleAssignments ?? {},
+    },
+    created_at: record.createdAt ?? now,
+    started_at: record.startedAt ?? null,
+    completed_at: record.completedAt ?? null,
+    updated_at: record.updatedAt ?? now,
+  });
 }
 
 export function recordAgentTeamTask(record: AgentTeamTaskRecord): void {
@@ -2504,6 +2650,27 @@ export function recordAgentTeamTask(record: AgentTeamTaskRecord): void {
     record.completedAt ?? null,
     record.updatedAt ?? now,
   );
+  upsertAgentTask({
+    id: `agtask_${sanitizeAgentTaskId(record.id)}`,
+    source_type: 'agent_team_task',
+    source_ref: record.runId,
+    run_ref: record.id,
+    status: mapAgentTeamTaskStatusToAgentTaskStatus(record.status),
+    actor_user_id: record.actorId ?? null,
+    result: record.output ?? null,
+    error: record.error ?? null,
+    context: {
+      runId: record.runId,
+      roleId: record.roleId ?? null,
+      phase: record.phase ?? null,
+      attempt: record.attempt ?? 1,
+      input: record.input ?? null,
+    },
+    created_at: record.startedAt ?? now,
+    started_at: record.startedAt ?? null,
+    completed_at: record.completedAt ?? null,
+    updated_at: record.updatedAt ?? now,
+  });
 }
 
 export function recordAgentTeamTraceEvent(
@@ -4422,6 +4589,66 @@ function mapIssueRunRow(row: unknown): IssueAgentRun {
   };
 }
 
+type AutopilotRow = Omit<Autopilot, 'trigger' | 'action'> & {
+  trigger_json: string;
+  action_json: string;
+};
+
+type AutopilotRunRow = Omit<AutopilotRun, 'payload' | 'result'> & {
+  payload_json?: string | null;
+  result_json?: string | null;
+};
+
+function parseJsonRecord(value: string | null | undefined): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function mapAutopilotRow(row: unknown): Autopilot {
+  const r = row as AutopilotRow;
+  return {
+    id: r.id,
+    name: toUtf8String(r.name),
+    description: toUtf8StringOrNull(r.description),
+    trigger: parseJsonRecord(r.trigger_json) ?? {},
+    action: parseJsonRecord(r.action_json) ?? {},
+    status: r.status as AutopilotStatus,
+    created_by: r.created_by,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    last_run_id: r.last_run_id ?? null,
+    last_run_status: (r.last_run_status as AutopilotRunStatus | null) ?? null,
+    last_run_at: r.last_run_at ?? null,
+    deleted_at: r.deleted_at ?? null,
+  };
+}
+
+function mapAutopilotRunRow(row: unknown): AutopilotRun {
+  const r = row as AutopilotRunRow;
+  return {
+    id: r.id,
+    autopilot_id: r.autopilot_id,
+    trigger_type: r.trigger_type as AutopilotTriggerType,
+    status: r.status as AutopilotRunStatus,
+    retry_of: r.retry_of ?? null,
+    attempt: Number(r.attempt ?? 1),
+    payload: parseJsonRecord(r.payload_json),
+    result: parseJsonRecord(r.result_json),
+    error: toUtf8StringOrNull(r.error),
+    skip_reason: toUtf8StringOrNull(r.skip_reason),
+    created_by: r.created_by,
+    created_at: r.created_at,
+    completed_at: r.completed_at ?? null,
+  };
+}
+
 function mapIssueRunEventRow(row: unknown): IssueAgentRunEvent {
   const r = row as Omit<IssueAgentRunEvent, 'payload'> & {
     payload?: string | null;
@@ -4444,6 +4671,28 @@ function mapIssueRunEventRow(row: unknown): IssueAgentRunEvent {
     summary: toUtf8StringOrNull(r.summary),
     detail: toUtf8StringOrNull(r.detail),
     payload,
+  };
+}
+
+function parseAgentTaskContext(value: string | null | undefined): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { value: parsed };
+  } catch {
+    return { raw: value };
+  }
+}
+
+function mapAgentTaskRow(row: unknown): AgentTask {
+  const r = row as Omit<AgentTask, 'context'> & { context?: string | null };
+  return {
+    ...r,
+    source_type: r.source_type as AgentTaskSourceType,
+    status: r.status as AgentTaskStatus,
+    result: toUtf8StringOrNull(r.result),
+    error: toUtf8StringOrNull(r.error),
+    context: parseAgentTaskContext(r.context),
   };
 }
 
@@ -4635,6 +4884,158 @@ export function listAutoDrivableIssues(limit = 20): WorkspaceIssue[] {
   return rows.map(mapIssueRow);
 }
 
+export function createAutopilot(input: Omit<Autopilot, 'last_run_id' | 'last_run_status' | 'last_run_at' | 'deleted_at'>): Autopilot {
+  db.prepare(
+    `INSERT INTO autopilots (
+      id, name, description, trigger_json, action_json, status,
+      created_by, created_at, updated_at, last_run_id, last_run_status, last_run_at, deleted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)`,
+  ).run(
+    input.id,
+    toUtf8String(input.name, 'autopilots.name'),
+    input.description == null ? null : toUtf8String(input.description, 'autopilots.description'),
+    JSON.stringify(input.trigger ?? {}),
+    JSON.stringify(input.action ?? {}),
+    input.status,
+    input.created_by,
+    input.created_at,
+    input.updated_at,
+  );
+  const created = getAutopilotById(input.id);
+  if (!created) throw new Error('Failed to create autopilot');
+  return created;
+}
+
+export function getAutopilotById(id: string): Autopilot | undefined {
+  const row = db.prepare('SELECT * FROM autopilots WHERE id = ? AND deleted_at IS NULL').get(id);
+  return row ? mapAutopilotRow(row) : undefined;
+}
+
+export function listAutopilotsByUser(userId: string): Autopilot[] {
+  return db
+    .prepare('SELECT * FROM autopilots WHERE created_by = ? AND deleted_at IS NULL ORDER BY updated_at DESC, created_at DESC')
+    .all(userId)
+    .map(mapAutopilotRow);
+}
+
+export function listDueScheduledAutopilots(nowIso: string): Autopilot[] {
+  return db
+    .prepare("SELECT * FROM autopilots WHERE status = 'active' AND deleted_at IS NULL ORDER BY updated_at ASC")
+    .all()
+    .map(mapAutopilotRow)
+    .filter((autopilot: Autopilot) => {
+      if (autopilot.trigger.type !== 'schedule') return false;
+      const nextRun = autopilot.trigger.next_run;
+      return typeof nextRun === 'string' && nextRun <= nowIso;
+    });
+}
+
+export function updateAutopilot(
+  id: string,
+  updates: Partial<Pick<Autopilot, 'name' | 'description' | 'trigger' | 'action' | 'status'>>,
+  updatedAt = new Date().toISOString(),
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  const add = (column: string, value: unknown) => {
+    fields.push(`${column} = ?`);
+    values.push(value);
+  };
+  if (updates.name !== undefined) add('name', toUtf8String(updates.name, 'autopilots.name'));
+  if (updates.description !== undefined) add('description', updates.description == null ? null : toUtf8String(updates.description, 'autopilots.description'));
+  if (updates.trigger !== undefined) add('trigger_json', JSON.stringify(updates.trigger));
+  if (updates.action !== undefined) add('action_json', JSON.stringify(updates.action));
+  if (updates.status !== undefined) add('status', updates.status);
+  if (fields.length === 0) return;
+  add('updated_at', updatedAt);
+  values.push(id);
+  db.prepare(`UPDATE autopilots SET ${fields.join(', ')} WHERE id = ? AND deleted_at IS NULL`).run(...values);
+}
+
+export function deleteAutopilot(id: string, deletedAt = new Date().toISOString()): void {
+  db.prepare(
+    `UPDATE autopilots SET status = 'deleted', deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+  ).run(deletedAt, deletedAt, id);
+}
+
+export function createAutopilotRun(run: AutopilotRun): AutopilotRun {
+  db.prepare(
+    `INSERT INTO autopilot_runs (
+      id, autopilot_id, trigger_type, status, retry_of, attempt, payload_json, result_json, error, skip_reason,
+      created_by, created_at, completed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    run.id,
+    run.autopilot_id,
+    run.trigger_type,
+    run.status,
+    run.retry_of ?? null,
+    run.attempt,
+    run.payload == null ? null : JSON.stringify(run.payload),
+    run.result == null ? null : JSON.stringify(run.result),
+    run.error == null ? null : toUtf8String(run.error, 'autopilot_runs.error'),
+    run.skip_reason == null ? null : toUtf8String(run.skip_reason, 'autopilot_runs.skip_reason'),
+    run.created_by,
+    run.created_at,
+    run.completed_at ?? null,
+  );
+  updateAutopilotLastRun(run.autopilot_id, run.id, run.status, run.completed_at ?? run.created_at);
+  const created = getAutopilotRunById(run.id);
+  if (!created) throw new Error('Failed to create autopilot run');
+  return created;
+}
+
+export function getAutopilotRunById(id: string): AutopilotRun | undefined {
+  const row = db.prepare('SELECT * FROM autopilot_runs WHERE id = ?').get(id);
+  return row ? mapAutopilotRunRow(row) : undefined;
+}
+
+export function listAutopilotRuns(autopilotId: string): AutopilotRun[] {
+  return db
+    .prepare('SELECT * FROM autopilot_runs WHERE autopilot_id = ? ORDER BY created_at DESC')
+    .all(autopilotId)
+    .map(mapAutopilotRunRow);
+}
+
+export function hasRunningAutopilotRun(autopilotId: string): boolean {
+  const row = db
+    .prepare("SELECT 1 FROM autopilot_runs WHERE autopilot_id = ? AND status = 'running' LIMIT 1")
+    .get(autopilotId);
+  return !!row;
+}
+
+export function updateAutopilotRun(
+  id: string,
+  updates: Partial<Pick<AutopilotRun, 'status' | 'result' | 'error' | 'skip_reason' | 'completed_at'>>,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  const add = (column: string, value: unknown) => {
+    fields.push(`${column} = ?`);
+    values.push(value);
+  };
+  if (updates.status !== undefined) add('status', updates.status);
+  if (updates.result !== undefined) add('result_json', updates.result == null ? null : JSON.stringify(updates.result));
+  if (updates.error !== undefined) add('error', updates.error == null ? null : toUtf8String(updates.error, 'autopilot_runs.error'));
+  if (updates.skip_reason !== undefined) add('skip_reason', updates.skip_reason == null ? null : toUtf8String(updates.skip_reason, 'autopilot_runs.skip_reason'));
+  if (updates.completed_at !== undefined) add('completed_at', updates.completed_at);
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE autopilot_runs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  const run = getAutopilotRunById(id);
+  if (run) updateAutopilotLastRun(run.autopilot_id, run.id, run.status, run.completed_at ?? run.created_at);
+}
+
+function updateAutopilotLastRun(autopilotId: string, runId: string, status: AutopilotRunStatus, at: string): void {
+  db.prepare('UPDATE autopilots SET last_run_id = ?, last_run_status = ?, last_run_at = ?, updated_at = ? WHERE id = ?').run(
+    runId,
+    status,
+    at,
+    at,
+    autopilotId,
+  );
+}
+
 export function updateIssue(
   id: string,
   updates: Partial<
@@ -4780,7 +5181,351 @@ export function createIssueAgentRun(
   );
   const created = getIssueAgentRunById(run.id);
   if (!created) throw new Error('Failed to create issue agent run');
+  mirrorIssueRunToAgentTask(created);
   return created;
+}
+
+function mirrorIssueRunToAgentTask(run: IssueAgentRun): void {
+  const issue = getIssueById(run.issue_id);
+  const repoKnowledgeContext = issue ? buildIssueRunRepoKnowledgeContext(issue) : null;
+  upsertAgentTask({
+    id: `agtask_${run.id}`,
+    source_type: 'issue_run',
+    source_ref: run.issue_id,
+    run_ref: run.id,
+    status: run.status,
+    workspace_jid: run.workspace_jid,
+    workspace_folder: run.workspace_folder,
+    actor_user_id: run.created_by,
+    agent_link_id: run.agent_link_id ?? null,
+    agent_client_id: run.agent_client_id ?? null,
+    execution_node: run.execution_node ?? null,
+    backend: run.backend ?? null,
+    result: run.result ?? null,
+    error: run.error ?? null,
+    context: {
+      issueId: run.issue_id,
+      selectedSkills: run.selected_skills ?? [],
+      parentRunId: run.parent_run_id ?? null,
+      awaitingKind: run.awaiting_kind ?? null,
+      awaitingPayloadId: run.awaiting_payload_id ?? null,
+      sessionId: run.session_id ?? null,
+      ...(repoKnowledgeContext ? { repoKnowledge: repoKnowledgeContext } : {}),
+    },
+    created_at: run.created_at,
+    started_at: run.run_started_at ?? null,
+    completed_at: run.run_completed_at ?? null,
+    updated_at: run.run_completed_at ?? run.last_seen_at ?? run.run_started_at ?? run.created_at,
+  });
+}
+
+function buildIssueRunRepoKnowledgeContext(issue: WorkspaceIssue): Record<string, unknown> | null {
+  if (!issue.project_repo_id) return null;
+  const query = [issue.title, issue.description].join('\n').trim();
+  if (!query) return null;
+  const hits = searchRepoKnowledge({
+    repoId: issue.project_repo_id,
+    userId: issue.created_by,
+    query,
+    includeRelated: true,
+    limit: 5,
+  });
+  if (hits.length === 0) return null;
+  const topNames = hits
+    .map((hit) => hit.name || hit.path)
+    .filter(Boolean)
+    .slice(0, 3);
+  return {
+    repoId: issue.project_repo_id,
+    query,
+    injectedAt: new Date().toISOString(),
+    architectureSummary: `${hits.length} relevant chunk${hits.length === 1 ? '' : 's'} injected from Repo Knowledge for issue context. Top anchors: ${topNames.join(', ') || 'none'}.`,
+    riskPoints: hits.slice(0, 5).map((hit) => {
+      const why = (hit.rationale ?? []).join(', ') || 'search match';
+      return `${hit.name || hit.path} matched by ${why}; verify this context before editing ${hit.path}.`;
+    }),
+    hits: hits.map((hit) => ({
+      chunkId: hit.id,
+      path: hit.path,
+      kind: hit.kind,
+      name: hit.name ?? null,
+      language: hit.language ?? null,
+      startLine: hit.startLine ?? null,
+      endLine: hit.endLine ?? null,
+      score: hit.score,
+      snippet: hit.snippet,
+      matchedTerms: hit.matchedTerms ?? [],
+      rationale: hit.rationale ?? [],
+      related: (hit.related ?? []).slice(0, 5).map((edge) => ({
+        id: edge.id,
+        fromPath: edge.fromPath,
+        toPath: edge.toPath ?? null,
+        edgeKind: edge.edgeKind,
+        source: edge.source,
+        confidence: edge.confidence ?? null,
+        runId: edge.runId ?? null,
+      })),
+    })),
+  };
+}
+
+export function upsertAgentTask(
+  task: Omit<AgentTask, 'created_at' | 'updated_at'> & {
+    created_at?: string;
+    updated_at?: string;
+    context?: Record<string, unknown> | null;
+  },
+): AgentTask {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO agent_tasks (
+      id, source_type, source_ref, run_ref, status, workspace_jid, workspace_folder,
+      actor_user_id, agent_link_id, agent_client_id, execution_node, backend,
+      result, error, context, created_at, updated_at, started_at, completed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      source_type = excluded.source_type,
+      source_ref = excluded.source_ref,
+      run_ref = COALESCE(excluded.run_ref, agent_tasks.run_ref),
+      status = excluded.status,
+      workspace_jid = COALESCE(excluded.workspace_jid, agent_tasks.workspace_jid),
+      workspace_folder = COALESCE(excluded.workspace_folder, agent_tasks.workspace_folder),
+      actor_user_id = COALESCE(excluded.actor_user_id, agent_tasks.actor_user_id),
+      agent_link_id = COALESCE(excluded.agent_link_id, agent_tasks.agent_link_id),
+      agent_client_id = COALESCE(excluded.agent_client_id, agent_tasks.agent_client_id),
+      execution_node = COALESCE(excluded.execution_node, agent_tasks.execution_node),
+      backend = COALESCE(excluded.backend, agent_tasks.backend),
+      result = COALESCE(excluded.result, agent_tasks.result),
+      error = CASE WHEN excluded.error IS NOT NULL THEN excluded.error ELSE agent_tasks.error END,
+      context = COALESCE(excluded.context, agent_tasks.context),
+      updated_at = excluded.updated_at,
+      started_at = COALESCE(excluded.started_at, agent_tasks.started_at),
+      completed_at = COALESCE(excluded.completed_at, agent_tasks.completed_at)`,
+  ).run(
+    task.id,
+    task.source_type,
+    task.source_ref,
+    task.run_ref ?? null,
+    task.status,
+    task.workspace_jid ?? null,
+    task.workspace_folder ?? null,
+    task.actor_user_id ?? null,
+    task.agent_link_id ?? null,
+    task.agent_client_id ?? null,
+    task.execution_node ?? null,
+    task.backend ?? null,
+    task.result == null ? null : toUtf8String(task.result, 'agent_tasks.result'),
+    task.error == null ? null : toUtf8String(task.error, 'agent_tasks.error'),
+    task.context == null ? null : JSON.stringify(task.context),
+    task.created_at ?? now,
+    task.updated_at ?? now,
+    task.started_at ?? null,
+    task.completed_at ?? null,
+  );
+  const created = getAgentTaskById(task.id);
+  if (!created) throw new Error('Failed to upsert agent task');
+  return created;
+}
+
+export function getAgentTaskById(id: string): AgentTask | undefined {
+  const row = db.prepare('SELECT * FROM agent_tasks WHERE id = ?').get(id);
+  return row ? mapAgentTaskRow(row) : undefined;
+}
+
+export function listAgentTasks(filters: {
+  source_type?: AgentTaskSourceType;
+  source_ref?: string;
+  status?: AgentTaskStatus;
+  limit?: number;
+} = {}): AgentTask[] {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+  if (filters.source_type) {
+    clauses.push('source_type = ?');
+    values.push(filters.source_type);
+  }
+  if (filters.source_ref) {
+    clauses.push('source_ref = ?');
+    values.push(filters.source_ref);
+  }
+  if (filters.status) {
+    clauses.push('status = ?');
+    values.push(filters.status);
+  }
+  const limit = Math.max(1, Math.min(filters.limit ?? 100, 500));
+  values.push(limit);
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  return db
+    .prepare(`SELECT * FROM agent_tasks ${where} ORDER BY updated_at DESC LIMIT ?`)
+    .all(...values)
+    .map(mapAgentTaskRow);
+}
+
+function agentTaskTokenHash(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function newAgentTaskTokenId(): string {
+  return `agttok_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+function newAgentTaskTokenSecret(): string {
+  return `ott_${crypto.randomBytes(32).toString('base64url')}`;
+}
+
+function parseAgentTaskTokenPolicy(value: string | null | undefined): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { value: parsed };
+  } catch {
+    return { raw: value };
+  }
+}
+
+function mapAgentTaskScopedTokenRow(row: unknown): AgentTaskScopedToken {
+  const r = row as AgentTaskScopedToken & { policy?: string | null };
+  return {
+    id: String(r.id),
+    task_id: String(r.task_id),
+    actor_user_id: r.actor_user_id ?? null,
+    agent_link_id: r.agent_link_id ?? null,
+    agent_client_id: r.agent_client_id ?? null,
+    workspace_folder: r.workspace_folder ?? null,
+    repo_id: r.repo_id ?? null,
+    policy: parseAgentTaskTokenPolicy(r.policy),
+    expires_at: String(r.expires_at),
+    created_at: String(r.created_at),
+    last_used_at: r.last_used_at ?? null,
+    revoked_at: r.revoked_at ?? null,
+    revoke_reason: r.revoke_reason ?? null,
+  };
+}
+
+export function createAgentTaskScopedToken(input: {
+  task_id: string;
+  actor_user_id?: string | null;
+  agent_link_id?: string | null;
+  agent_client_id?: string | null;
+  workspace_folder?: string | null;
+  repo_id?: string | null;
+  policy?: Record<string, unknown> | null;
+  ttl_ms?: number;
+  now?: string;
+}): IssuedAgentTaskScopedToken {
+  const now = input.now ?? new Date().toISOString();
+  const ttlMs = Number.isFinite(input.ttl_ms) && input.ttl_ms! > 0 ? input.ttl_ms! : 60 * 60 * 1000;
+  const expiresAt = new Date(new Date(now).getTime() + ttlMs).toISOString();
+  const id = newAgentTaskTokenId();
+  const token = newAgentTaskTokenSecret();
+  const policy = input.policy ?? {};
+
+  db.prepare(
+    `INSERT INTO agent_task_scoped_tokens (
+      id, token_hash, task_id, actor_user_id, agent_link_id, agent_client_id,
+      workspace_folder, repo_id, policy, expires_at, created_at, last_used_at, revoked_at, revoke_reason
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+  ).run(
+    id,
+    agentTaskTokenHash(token),
+    input.task_id,
+    input.actor_user_id ?? null,
+    input.agent_link_id ?? null,
+    input.agent_client_id ?? null,
+    input.workspace_folder ?? null,
+    input.repo_id ?? null,
+    JSON.stringify(policy),
+    expiresAt,
+    now,
+  );
+
+  logAuthEvent({
+    event_type: 'agent_task_token_created',
+    username: input.actor_user_id ?? 'system',
+    details: {
+      tokenId: id,
+      taskId: input.task_id,
+      agentLinkId: input.agent_link_id ?? null,
+      agentClientId: input.agent_client_id ?? null,
+      workspaceFolder: input.workspace_folder ?? null,
+      repoId: input.repo_id ?? null,
+      expiresAt,
+      policy,
+    },
+  });
+
+  const row = getAgentTaskScopedTokenById(id);
+  if (!row) throw new Error('Failed to create agent task scoped token');
+  return { ...row, token };
+}
+
+export function getAgentTaskScopedTokenById(id: string): AgentTaskScopedToken | undefined {
+  const row = db.prepare('SELECT * FROM agent_task_scoped_tokens WHERE id = ?').get(id);
+  return row ? mapAgentTaskScopedTokenRow(row) : undefined;
+}
+
+export function verifyAgentTaskScopedToken(
+  token: string,
+  constraints: {
+    task_id?: string;
+    agent_link_id?: string;
+    agent_client_id?: string;
+    workspace_folder?: string;
+    repo_id?: string;
+    now?: string;
+  } = {},
+): AgentTaskScopedToken | null {
+  if (!token || !token.startsWith('ott_')) return null;
+  const row = db
+    .prepare('SELECT * FROM agent_task_scoped_tokens WHERE token_hash = ?')
+    .get(agentTaskTokenHash(token));
+  if (!row) return null;
+  const record = mapAgentTaskScopedTokenRow(row);
+  const now = constraints.now ?? new Date().toISOString();
+  const reject = (reason: string): null => {
+    logAuthEvent({
+      event_type: 'agent_task_token_rejected',
+      username: record.actor_user_id ?? 'system',
+      details: { tokenId: record.id, taskId: record.task_id, reason },
+    });
+    return null;
+  };
+
+  if (record.revoked_at) return reject('revoked');
+  if (new Date(record.expires_at).getTime() <= new Date(now).getTime()) return reject('expired');
+  if (constraints.task_id && record.task_id !== constraints.task_id) return reject('task_mismatch');
+  if (constraints.agent_link_id && record.agent_link_id !== constraints.agent_link_id) return reject('agent_link_mismatch');
+  if (constraints.agent_client_id && record.agent_client_id !== constraints.agent_client_id) return reject('agent_client_mismatch');
+  if (constraints.workspace_folder && record.workspace_folder !== constraints.workspace_folder) return reject('workspace_mismatch');
+  if (constraints.repo_id && record.repo_id !== constraints.repo_id) return reject('repo_mismatch');
+
+  db.prepare('UPDATE agent_task_scoped_tokens SET last_used_at = ? WHERE id = ?').run(now, record.id);
+  logAuthEvent({
+    event_type: 'agent_task_token_used',
+    username: record.actor_user_id ?? 'system',
+    details: { tokenId: record.id, taskId: record.task_id },
+  });
+  return getAgentTaskScopedTokenById(record.id) ?? null;
+}
+
+export function revokeAgentTaskScopedToken(
+  id: string,
+  reason = 'revoked',
+  now = new Date().toISOString(),
+): boolean {
+  const record = getAgentTaskScopedTokenById(id);
+  if (!record || record.revoked_at) return false;
+  const result = db
+    .prepare('UPDATE agent_task_scoped_tokens SET revoked_at = ?, revoke_reason = ? WHERE id = ? AND revoked_at IS NULL')
+    .run(now, reason, id);
+  if (result.changes > 0) {
+    logAuthEvent({
+      event_type: 'agent_task_token_revoked',
+      username: record.actor_user_id ?? 'system',
+      details: { tokenId: id, taskId: record.task_id, reason },
+    });
+  }
+  return result.changes > 0;
 }
 
 export function getIssueAgentRunById(id: string): IssueAgentRun | undefined {
@@ -4807,6 +5552,10 @@ export function updateIssueAgentRun(
       | 'error'
       | 'session_id'
       | 'parent_run_id'
+      | 'agent_link_id'
+      | 'agent_client_id'
+      | 'execution_node'
+      | 'backend'
       | 'awaiting_kind'
       | 'awaiting_payload_id'
       | 'last_seen_at'
@@ -4838,25 +5587,22 @@ export function updateIssueAgentRun(
         : toUtf8String(updates.error, 'issue_agent_runs.error'),
     );
   if (updates.session_id !== undefined) add('session_id', updates.session_id);
-  if (updates.parent_run_id !== undefined)
-    add('parent_run_id', updates.parent_run_id);
-  if (updates.awaiting_kind !== undefined)
-    add('awaiting_kind', updates.awaiting_kind);
-  if (updates.awaiting_payload_id !== undefined)
-    add('awaiting_payload_id', updates.awaiting_payload_id);
-  if (updates.last_seen_at !== undefined)
-    add('last_seen_at', updates.last_seen_at);
-  if (updates.heartbeat_deadline_at !== undefined)
-    add('heartbeat_deadline_at', updates.heartbeat_deadline_at);
-  if (updates.run_started_at !== undefined)
-    add('run_started_at', updates.run_started_at);
-  if (updates.run_completed_at !== undefined)
-    add('run_completed_at', updates.run_completed_at);
+  if (updates.parent_run_id !== undefined) add('parent_run_id', updates.parent_run_id);
+  if (updates.agent_link_id !== undefined) add('agent_link_id', updates.agent_link_id);
+  if (updates.agent_client_id !== undefined) add('agent_client_id', updates.agent_client_id);
+  if (updates.execution_node !== undefined) add('execution_node', updates.execution_node);
+  if (updates.backend !== undefined) add('backend', updates.backend);
+  if (updates.awaiting_kind !== undefined) add('awaiting_kind', updates.awaiting_kind);
+  if (updates.awaiting_payload_id !== undefined) add('awaiting_payload_id', updates.awaiting_payload_id);
+  if (updates.last_seen_at !== undefined) add('last_seen_at', updates.last_seen_at);
+  if (updates.heartbeat_deadline_at !== undefined) add('heartbeat_deadline_at', updates.heartbeat_deadline_at);
+  if (updates.run_started_at !== undefined) add('run_started_at', updates.run_started_at);
+  if (updates.run_completed_at !== undefined) add('run_completed_at', updates.run_completed_at);
   if (fields.length === 0) return;
   values.push(id);
-  db.prepare(
-    `UPDATE issue_agent_runs SET ${fields.join(', ')} WHERE id = ?`,
-  ).run(...values);
+  db.prepare(`UPDATE issue_agent_runs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  const updated = getIssueAgentRunById(id);
+  if (updated) mirrorIssueRunToAgentTask(updated);
 }
 
 export function createIssueAgentRunEvent(
@@ -6131,6 +6877,8 @@ type RepoKnowledgeGraphEdgeRow = {
   symbol: string | null;
   package_name: string | null;
   source: string;
+  confidence: number | null;
+  run_id: string | null;
   metadata_json: string | null;
   updated_at: string;
 };
@@ -6261,9 +7009,51 @@ function parseRepoKnowledgeGraphEdgeRow(
     symbol: row.symbol ?? undefined,
     packageName: row.package_name ?? undefined,
     source: row.source,
+    confidence: typeof row.confidence === 'number' ? row.confidence : undefined,
+    runId: row.run_id ?? undefined,
     metadata: parseJsonObject(row.metadata_json),
     updatedAt: row.updated_at,
   };
+}
+
+function repoKnowledgeTerms(value: string): string[] {
+  return value
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}_./:-]+/u)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 2 && term.length <= 64);
+}
+
+function buildRepoKnowledgeTermVector(chunk: Omit<RepoKnowledgeChunk, 'repoId' | 'userId' | 'updatedAt'>): Record<string, number> {
+  const weightedText = [
+    chunk.name ? `${chunk.name} ${chunk.name} ${chunk.name}` : '',
+    `${chunk.path} ${chunk.path}`,
+    chunk.language ?? '',
+    chunk.keywords ? `${chunk.keywords} ${chunk.keywords}` : '',
+    chunk.content,
+  ].join('\n');
+  const counts = new Map<string, number>();
+  for (const term of repoKnowledgeTerms(weightedText)) {
+    counts.set(term, (counts.get(term) ?? 0) + 1);
+  }
+  return Object.fromEntries(
+    Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 80),
+  );
+}
+
+function repoKnowledgeVectorScore(chunk: RepoKnowledgeChunk, terms: string[]): number {
+  const vector = chunk.metadata?.termVector;
+  if (!vector || typeof vector !== 'object' || Array.isArray(vector)) return 0;
+  let score = 0;
+  for (const term of terms) {
+    for (const variant of knowledgeTermVariants(term)) {
+      const value = (vector as Record<string, unknown>)[variant];
+      if (typeof value === 'number' && Number.isFinite(value)) score += value;
+    }
+  }
+  return score;
 }
 
 export function getRepoKnowledgeIndex(
@@ -6512,6 +7302,10 @@ export function replaceRepoKnowledgeChunks(input: {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const chunk of input.chunks) {
+      const metadata = {
+        ...(chunk.metadata ?? {}),
+        termVector: buildRepoKnowledgeTermVector(chunk),
+      };
       insert.run(
         chunk.id,
         input.repoId,
@@ -6524,7 +7318,7 @@ export function replaceRepoKnowledgeChunks(input: {
         chunk.endLine ?? null,
         chunk.content,
         chunk.keywords ?? null,
-        JSON.stringify(chunk.metadata ?? {}),
+        JSON.stringify(metadata),
         now,
       );
     }
@@ -6550,8 +7344,8 @@ export function replaceRepoKnowledgeChunks(input: {
     }
     const insertEdge = db.prepare(
       `INSERT OR IGNORE INTO repo_knowledge_graph_edges (
-        id, repo_id, user_id, from_path, to_path, edge_kind, symbol, package_name, source, metadata_json, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, repo_id, user_id, from_path, to_path, edge_kind, symbol, package_name, source, confidence, run_id, metadata_json, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const edge of input.edges ?? []) {
       insertEdge.run(
@@ -6564,6 +7358,8 @@ export function replaceRepoKnowledgeChunks(input: {
         edge.symbol ?? null,
         edge.packageName ?? null,
         edge.source,
+        typeof edge.confidence === 'number' ? edge.confidence : null,
+        edge.runId ?? null,
         JSON.stringify(edge.metadata ?? {}),
         now,
       );
@@ -6796,11 +7592,38 @@ function scoreKnowledgeChunk(
   return score;
 }
 
-function buildKnowledgeSnippet(
-  content: string,
-  terms: string[],
-  maxLength = 700,
-): string {
+function knowledgeTermVariants(term: string): string[] {
+  const variants = [term];
+  if (term.endsWith('tion') && term.length > 5) variants.push(term.slice(0, -3));
+  if (term.endsWith('ing') && term.length > 5) variants.push(term.slice(0, -3));
+  if (term.endsWith('ed') && term.length > 4) variants.push(term.slice(0, -2));
+  return Array.from(new Set(variants));
+}
+
+function explainKnowledgeHit(chunk: RepoKnowledgeChunk, terms: string[]): { matchedTerms: string[]; rationale: string[] } {
+  const fields: Array<[string, string | undefined]> = [
+    ['name', chunk.name],
+    ['path', chunk.path],
+    ['language', chunk.language],
+    ['keywords', chunk.keywords],
+    ['content', chunk.content],
+  ];
+  const matchedTerms = terms.filter((term) =>
+    fields.some(([, value]) => {
+      const lower = value?.toLowerCase();
+      return lower ? knowledgeTermVariants(term).some((variant) => lower.includes(variant)) : false;
+    }),
+  );
+  const rationale = fields
+    .filter(([, value]) => {
+      const lower = value?.toLowerCase();
+      return lower ? terms.some((term) => knowledgeTermVariants(term).some((variant) => lower.includes(variant))) : false;
+    })
+    .map(([field]) => field);
+  return { matchedTerms: Array.from(new Set(matchedTerms)), rationale: Array.from(new Set(rationale)) };
+}
+
+function buildKnowledgeSnippet(content: string, terms: string[], maxLength = 700): string {
   const lower = content.toLowerCase();
   const firstHit = terms
     .map((term) => lower.indexOf(term))
@@ -6874,20 +7697,21 @@ export function searchRepoKnowledge(input: {
         .all(...args) as RepoKnowledgeChunkRow[];
       return rows
         .map(parseRepoKnowledgeChunkRow)
-        .map((chunk) => ({
-          ...chunk,
-          score: scoreKnowledgeChunk(chunk, terms) + 5,
-          snippet: buildKnowledgeSnippet(chunk.content, terms),
-          related:
-            input.includeRelated && input.repoId
-              ? listRepoKnowledgeGraphEdges({
-                  repoId: input.repoId,
-                  userId: input.userId,
-                  path: chunk.path,
-                  limit: 10,
-                })
+        .map((chunk) => {
+          const explanation = explainKnowledgeHit(chunk, terms);
+          const vectorScore = repoKnowledgeVectorScore(chunk, terms);
+          return {
+            ...chunk,
+            score: scoreKnowledgeChunk(chunk, terms) + vectorScore + 5,
+            vectorScore,
+            snippet: buildKnowledgeSnippet(chunk.content, terms),
+            matchedTerms: explanation.matchedTerms,
+            rationale: explanation.rationale,
+            related: input.includeRelated && input.repoId
+              ? listRepoKnowledgeGraphEdges({ repoId: input.repoId, userId: input.userId, path: chunk.path, limit: 10 })
               : undefined,
-        }))
+          };
+        })
         .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
         .slice(0, limit);
     } catch (err) {
@@ -6927,20 +7751,21 @@ export function searchRepoKnowledge(input: {
     .all(...args) as RepoKnowledgeChunkRow[];
   return rows
     .map(parseRepoKnowledgeChunkRow)
-    .map((chunk) => ({
-      ...chunk,
-      score: scoreKnowledgeChunk(chunk, terms),
-      snippet: buildKnowledgeSnippet(chunk.content, terms),
-      related:
-        input.includeRelated && input.repoId
-          ? listRepoKnowledgeGraphEdges({
-              repoId: input.repoId,
-              userId: input.userId,
-              path: chunk.path,
-              limit: 10,
-            })
+    .map((chunk) => {
+      const explanation = explainKnowledgeHit(chunk, terms);
+      const vectorScore = repoKnowledgeVectorScore(chunk, terms);
+      return {
+        ...chunk,
+        score: scoreKnowledgeChunk(chunk, terms) + vectorScore,
+        vectorScore,
+        snippet: buildKnowledgeSnippet(chunk.content, terms),
+        matchedTerms: explanation.matchedTerms,
+        rationale: explanation.rationale,
+        related: input.includeRelated && input.repoId
+          ? listRepoKnowledgeGraphEdges({ repoId: input.repoId, userId: input.userId, path: chunk.path, limit: 10 })
           : undefined,
-    }))
+      };
+    })
     .filter((hit) => hit.score > 0)
     .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
     .slice(0, limit);

@@ -10,6 +10,9 @@ import type { Variables } from '../web-context.js';
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
 import { logger } from '../logger.js';
 import { AGENCY_AGENTS_ZH_INDEX } from '../agent-marketplace-index.js';
+import { listCloudSkillsByUser } from '../db.js';
+import { buildTeamAgentRegistrySnapshot } from '../agent-registry.js';
+import type { AuthUser } from '../types.js';
 
 const agentDefinitionsRoutes = new Hono<{ Variables: Variables }>();
 
@@ -20,11 +23,51 @@ interface AgentDefinition {
   name: string;
   description: string;
   tools: string[];
+  requiredSkills: AgentRequiredSkill[];
+  version: string;
+  visibility: string;
+  defaultModel: string | null;
   updatedAt: string;
+}
+
+interface AgentRequiredSkill {
+  id: string;
+  version: string | null;
+  raw: string;
 }
 
 interface AgentDefinitionDetail extends AgentDefinition {
   content: string;
+}
+
+type AgentGovernanceAction = 'create' | 'update' | 'delete' | 'rollback';
+
+interface AgentVersionSnapshot {
+  id: string;
+  agentId: string;
+  version: string;
+  checksum: string;
+  content: string;
+  createdAt: string;
+  createdBy: string;
+  sourceAction: AgentGovernanceAction;
+}
+
+interface AgentAuditEvent {
+  id: string;
+  agentId: string;
+  action: AgentGovernanceAction;
+  actorUserId: string;
+  actorUsername: string;
+  fromVersion: string | null;
+  toVersion: string | null;
+  rollbackVersionId?: string;
+  approval: {
+    status: 'approved';
+    approvedBy: string;
+    approvedAt: string;
+  };
+  createdAt: string;
 }
 
 // --- Utility Functions ---
@@ -61,6 +104,30 @@ function createUniqueAgentFile(content: string): string {
   throw new Error('Failed to generate unique agent ID');
 }
 
+function getRegistryGovernanceDir(): string {
+  return path.join(getAgentsDir(), '.octodeck-registry');
+}
+
+function getAgentVersionsDir(agentId: string): string {
+  return path.join(getRegistryGovernanceDir(), 'agents', agentId, 'versions');
+}
+
+function getAgentAuditLogPath(agentId: string): string {
+  return path.join(getRegistryGovernanceDir(), 'agents', agentId, 'audit.jsonl');
+}
+
+function checksumForContent(content: string): string {
+  return `sha256:${crypto.createHash('sha256').update(content).digest('hex')}`;
+}
+
+function governanceEventId(seed: string): string {
+  return `agevt_${crypto.createHash('sha1').update(seed).digest('hex').slice(0, 16)}`;
+}
+
+function versionSnapshotId(seed: string): string {
+  return `agver_${crypto.createHash('sha1').update(seed).digest('hex').slice(0, 16)}`;
+}
+
 function extractTools(
   frontmatter: Record<string, string | string[]>,
 ): string[] {
@@ -72,6 +139,51 @@ function extractTools(
           .map((t) => t.trim())
           .filter(Boolean)
       : [];
+}
+
+function extractRequiredSkills(
+  frontmatter: Record<string, string | string[]>,
+): AgentRequiredSkill[] {
+  const raw = frontmatter['required-skills'] ?? frontmatter.skills;
+  const entries = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'string'
+      ? raw.split(',')
+      : [];
+
+  return entries
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((rawSkill) => {
+      const atIndex = rawSkill.lastIndexOf('@');
+      if (atIndex > 0) {
+        return {
+          id: rawSkill.slice(0, atIndex),
+          version: rawSkill.slice(atIndex + 1) || null,
+          raw: rawSkill,
+        };
+      }
+      return { id: rawSkill, version: null, raw: rawSkill };
+    });
+}
+
+function extractAgentVersion(frontmatter: Record<string, string | string[]>): string {
+  const value = frontmatter.version;
+  return typeof value === 'string' && value.trim() ? value.trim() : '0.1.0';
+}
+
+function extractAgentVisibility(frontmatter: Record<string, string | string[]>): string {
+  const value = frontmatter.visibility;
+  return typeof value === 'string' && value.trim() ? value.trim() : 'private';
+}
+
+function extractDefaultModel(frontmatter: Record<string, string | string[]>): string | null {
+  const value = frontmatter['default-model'] ?? frontmatter.defaultModel ?? frontmatter.model;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function extractVersionFromContent(content: string): string {
+  return extractAgentVersion(parseFrontmatter(content));
 }
 
 function parseFrontmatter(content: string): Record<string, string | string[]> {
@@ -144,7 +256,7 @@ function parseFrontmatter(content: string): Record<string, string | string[]> {
   return result;
 }
 
-function discoverAgents(): AgentDefinition[] {
+export function discoverAgents(): AgentDefinition[] {
   const agentsDir = getAgentsDir();
   if (!fs.existsSync(agentsDir)) return [];
 
@@ -167,6 +279,10 @@ function discoverAgents(): AgentDefinition[] {
           name: (frontmatter.name as string) || id,
           description: (frontmatter.description as string) || '',
           tools: extractTools(frontmatter),
+          requiredSkills: extractRequiredSkills(frontmatter),
+          version: extractAgentVersion(frontmatter),
+          visibility: extractAgentVisibility(frontmatter),
+          defaultModel: extractDefaultModel(frontmatter),
           updatedAt: stats.mtime.toISOString(),
         });
       } catch (err) {
@@ -199,12 +315,127 @@ function getAgentDetail(id: string): AgentDefinitionDetail | null {
       name: (frontmatter.name as string) || id,
       description: (frontmatter.description as string) || '',
       tools: extractTools(frontmatter),
+      requiredSkills: extractRequiredSkills(frontmatter),
+      version: extractAgentVersion(frontmatter),
+      visibility: extractAgentVisibility(frontmatter),
+      defaultModel: extractDefaultModel(frontmatter),
       updatedAt: stats.mtime.toISOString(),
       content,
     };
   } catch {
     return null;
   }
+}
+
+function recordAgentVersionSnapshot(input: {
+  agentId: string;
+  content: string;
+  actor: AuthUser;
+  sourceAction: AgentGovernanceAction;
+  createdAt?: string;
+}): AgentVersionSnapshot {
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  const checksum = checksumForContent(input.content);
+  const snapshot: AgentVersionSnapshot = {
+    id: versionSnapshotId(`${input.agentId}:${createdAt}:${checksum}`),
+    agentId: input.agentId,
+    version: extractVersionFromContent(input.content),
+    checksum,
+    content: input.content,
+    createdAt,
+    createdBy: input.actor.id,
+    sourceAction: input.sourceAction,
+  };
+
+  const versionsDir = getAgentVersionsDir(input.agentId);
+  fs.mkdirSync(versionsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(versionsDir, `${snapshot.id}.json`),
+    JSON.stringify(snapshot, null, 2),
+    'utf8',
+  );
+  return snapshot;
+}
+
+function appendAgentAuditEvent(input: {
+  agentId: string;
+  action: AgentGovernanceAction;
+  actor: AuthUser;
+  fromVersion: string | null;
+  toVersion: string | null;
+  rollbackVersionId?: string;
+  createdAt?: string;
+}): AgentAuditEvent {
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  const actorName = input.actor.username || input.actor.id;
+  const event: AgentAuditEvent = {
+    id: governanceEventId(
+      `${input.agentId}:${input.action}:${createdAt}:${input.fromVersion ?? ''}:${input.toVersion ?? ''}`,
+    ),
+    agentId: input.agentId,
+    action: input.action,
+    actorUserId: input.actor.id,
+    actorUsername: actorName,
+    fromVersion: input.fromVersion,
+    toVersion: input.toVersion,
+    approval: {
+      status: 'approved',
+      approvedBy: actorName,
+      approvedAt: createdAt,
+    },
+    createdAt,
+  };
+  if (input.rollbackVersionId) event.rollbackVersionId = input.rollbackVersionId;
+
+  const auditPath = getAgentAuditLogPath(input.agentId);
+  fs.mkdirSync(path.dirname(auditPath), { recursive: true });
+  fs.appendFileSync(auditPath, `${JSON.stringify(event)}\n`, 'utf8');
+  return event;
+}
+
+function readAgentVersionSnapshots(agentId: string): AgentVersionSnapshot[] {
+  const versionsDir = getAgentVersionsDir(agentId);
+  if (!fs.existsSync(versionsDir)) return [];
+  const snapshots: AgentVersionSnapshot[] = [];
+  for (const entry of fs.readdirSync(versionsDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    try {
+      const parsed = JSON.parse(
+        fs.readFileSync(path.join(versionsDir, entry.name), 'utf8'),
+      ) as AgentVersionSnapshot;
+      if (parsed.agentId === agentId && parsed.id) snapshots.push(parsed);
+    } catch {
+      // Ignore corrupt governance snapshots; audit trail remains append-only.
+    }
+  }
+  return snapshots.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+function readAgentAuditEvents(agentId: string): AgentAuditEvent[] {
+  const auditPath = getAgentAuditLogPath(agentId);
+  if (!fs.existsSync(auditPath)) return [];
+  return fs
+    .readFileSync(auditPath, 'utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        const event = JSON.parse(line) as AgentAuditEvent;
+        return event.agentId === agentId ? [event] : [];
+      } catch {
+        return [];
+      }
+    })
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+function getAgentGovernance(agentId: string) {
+  return {
+    agentId,
+    versions: readAgentVersionSnapshots(agentId).map(({ content: _content, ...meta }) => meta),
+    auditEvents: readAgentAuditEvents(agentId),
+  };
 }
 
 // --- Routes ---
@@ -214,6 +445,68 @@ agentDefinitionsRoutes.get('/', authMiddleware, (c) => {
   const agents = discoverAgents();
   return c.json({ agents });
 });
+
+// Team-level Agent / Skill Registry snapshot.
+agentDefinitionsRoutes.get('/registry', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const registry = buildTeamAgentRegistrySnapshot({
+    agents: discoverAgents(),
+    skills: listCloudSkillsByUser(user.id),
+  });
+  return c.json({ registry });
+});
+
+// Governance metadata: version snapshots, approval decisions and audit events.
+agentDefinitionsRoutes.get('/:id/governance', authMiddleware, (c) => {
+  const id = c.req.param('id');
+  if (!validateAgentId(id)) return c.json({ error: 'Invalid agent ID' }, 400);
+  const filePath = path.join(getAgentsDir(), `${id}.md`);
+  if (!fs.existsSync(filePath)) return c.json({ error: 'Agent definition not found' }, 404);
+  return c.json({ governance: getAgentGovernance(id) });
+});
+
+agentDefinitionsRoutes.post(
+  '/:id/rollback',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const id = c.req.param('id');
+    if (!validateAgentId(id)) return c.json({ error: 'Invalid agent ID' }, 400);
+
+    const body = await c.req.json().catch(() => ({}));
+    const versionId = typeof body.versionId === 'string' ? body.versionId.trim() : '';
+    if (!/^agver_[0-9a-f]{16}$/.test(versionId)) {
+      return c.json({ error: 'Invalid version ID' }, 400);
+    }
+
+    const filePath = path.join(getAgentsDir(), `${id}.md`);
+    if (!fs.existsSync(filePath)) return c.json({ error: 'Agent definition not found' }, 404);
+
+    const snapshot = readAgentVersionSnapshots(id).find((item) => item.id === versionId);
+    if (!snapshot) return c.json({ error: 'Agent version not found' }, 404);
+
+    const actor = c.get('user') as AuthUser;
+    const currentContent = fs.readFileSync(filePath, 'utf8');
+    const fromVersion = extractVersionFromContent(currentContent);
+    recordAgentVersionSnapshot({
+      agentId: id,
+      content: currentContent,
+      actor,
+      sourceAction: 'rollback',
+    });
+    fs.writeFileSync(filePath, snapshot.content, 'utf8');
+    appendAgentAuditEvent({
+      agentId: id,
+      action: 'rollback',
+      actor,
+      fromVersion,
+      toVersion: snapshot.version,
+      rollbackVersionId: snapshot.id,
+    });
+
+    return c.json({ success: true, restoredVersion: snapshot.version });
+  },
+);
 
 // Get single agent detail
 agentDefinitionsRoutes.get('/:id', authMiddleware, (c) => {
@@ -245,7 +538,24 @@ agentDefinitionsRoutes.put(
     const filePath = path.join(getAgentsDir(), `${id}.md`);
     try {
       fs.accessSync(filePath);
+      const actor = c.get('user') as AuthUser;
+      const previousContent = fs.readFileSync(filePath, 'utf8');
+      const fromVersion = extractVersionFromContent(previousContent);
+      const toVersion = extractVersionFromContent(content);
+      recordAgentVersionSnapshot({
+        agentId: id,
+        content: previousContent,
+        actor,
+        sourceAction: 'update',
+      });
       fs.writeFileSync(filePath, content, 'utf-8');
+      appendAgentAuditEvent({
+        agentId: id,
+        action: 'update',
+        actor,
+        fromVersion,
+        toVersion,
+      });
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return c.json({ error: 'Agent definition not found' }, 404);
@@ -274,6 +584,14 @@ agentDefinitionsRoutes.post(
 
     try {
       const id = createUniqueAgentFile(content);
+      const actor = c.get('user') as AuthUser;
+      appendAgentAuditEvent({
+        agentId: id,
+        action: 'create',
+        actor,
+        fromVersion: null,
+        toVersion: extractVersionFromContent(content),
+      });
       return c.json({ success: true, id });
     } catch (err) {
       logger.warn(
@@ -298,7 +616,23 @@ agentDefinitionsRoutes.delete(
 
     const filePath = path.join(getAgentsDir(), `${id}.md`);
     try {
+      const actor = c.get('user') as AuthUser;
+      const previousContent = fs.readFileSync(filePath, 'utf8');
+      const fromVersion = extractVersionFromContent(previousContent);
+      recordAgentVersionSnapshot({
+        agentId: id,
+        content: previousContent,
+        actor,
+        sourceAction: 'delete',
+      });
       fs.unlinkSync(filePath);
+      appendAgentAuditEvent({
+        agentId: id,
+        action: 'delete',
+        actor,
+        fromVersion,
+        toVersion: null,
+      });
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return c.json({ error: 'Agent definition not found' }, 404);

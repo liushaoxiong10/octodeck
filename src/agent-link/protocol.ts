@@ -166,6 +166,20 @@ export const AgentRunPolicySchema = z.object({
   toolPolicy: z.record(z.string(), z.string()).optional(),
   model: z.string().max(256).optional(),
   systemPrompt: z.string().max(100_000).optional(),
+  taskScopedToken: z.string().max(256).optional(),
+  runPermissionPolicy: z
+    .object({
+      filesystem: z.enum(['none', 'read', 'workspace', 'write']).optional(),
+      workspaceFolder: z.string().max(256).nullable().optional(),
+      repoId: z.string().max(256).nullable().optional(),
+      network: z.enum(['disabled', 'allowlist', 'enabled']).optional(),
+      networkAllowlist: z.array(z.string().max(256)).max(256).optional(),
+      secrets: z.enum(['none', 'scoped', 'all']).optional(),
+      allowedSecretKeys: z.array(z.string().max(256)).max(256).optional(),
+      shell: z.enum(['disabled', 'safe', 'approval', 'enabled']).optional(),
+      git: z.enum(['read', 'commit', 'push_approval', 'push']).optional(),
+    })
+    .optional(),
 });
 export type AgentRunPolicy = z.infer<typeof AgentRunPolicySchema>;
 
@@ -263,6 +277,33 @@ export const WorkspaceCleanupRequestFrame = z.object({
 });
 export type WorkspaceCleanupRequestFrame = z.infer<
   typeof WorkspaceCleanupRequestFrame
+>;
+
+export const WorkspaceGitStatusRequestFrame = z.object({
+  type: z.literal('workspace.git.status.request'),
+  id: z.number().int().nonnegative(),
+  requestId: z.string(),
+  workspace: AgentRunWorkspaceSchema.optional(),
+  workspaceRepos: z.array(WorkspaceRepoSpecSchema).max(100).optional(),
+  workspaceRepo: WorkspaceRepoSpecSchema.optional(),
+  includeDiffStat: z.boolean().optional(),
+  includePatch: z.boolean().optional(),
+});
+export type WorkspaceGitStatusRequestFrame = z.infer<
+  typeof WorkspaceGitStatusRequestFrame
+>;
+
+export const WorkspaceGitCommitRequestFrame = z.object({
+  type: z.literal('workspace.git.commit.request'),
+  id: z.number().int().nonnegative(),
+  requestId: z.string(),
+  workspace: AgentRunWorkspaceSchema.optional(),
+  workspaceRepos: z.array(WorkspaceRepoSpecSchema).max(100).optional(),
+  workspaceRepo: WorkspaceRepoSpecSchema.optional(),
+  message: z.string().min(1).max(10_000),
+});
+export type WorkspaceGitCommitRequestFrame = z.infer<
+  typeof WorkspaceGitCommitRequestFrame
 >;
 
 export const AgentPermissionDecisionFrame = z.object({
@@ -534,6 +575,48 @@ export const AgentRuntimeStatusFrame = z.object({
 });
 export type AgentRuntimeStatusFrame = z.infer<typeof AgentRuntimeStatusFrame>;
 
+export const WorkspaceGitStatusFileSchema = z.object({
+  path: z.string().min(1).max(4096),
+  status: z.string().min(1).max(64),
+  additions: z.number().int().nonnegative().optional(),
+  deletions: z.number().int().nonnegative().optional(),
+  patch: z.string().max(500_000).optional(),
+});
+export type WorkspaceGitStatusFile = z.infer<typeof WorkspaceGitStatusFileSchema>;
+
+export const WorkspaceGitStatusResultFrame = z.object({
+  type: z.literal('workspace.git.status.result'),
+  requestId: z.string(),
+  ok: z.boolean(),
+  workspacePath: z.string().max(4096).optional(),
+  branch: z.string().max(512).optional(),
+  head: z.string().max(128).optional(),
+  clean: z.boolean(),
+  files: z.array(WorkspaceGitStatusFileSchema).max(5000),
+  diffStat: z.string().max(200_000).optional(),
+  error: z.string().nullable(),
+  durationMs: z.number().int().nonnegative(),
+});
+export type WorkspaceGitStatusResultFrame = z.infer<
+  typeof WorkspaceGitStatusResultFrame
+>;
+
+export const WorkspaceGitCommitResultFrame = z.object({
+  type: z.literal('workspace.git.commit.result'),
+  requestId: z.string(),
+  ok: z.boolean(),
+  workspacePath: z.string().max(4096).optional(),
+  branch: z.string().max(512).optional(),
+  commit: z.string().max(128).optional(),
+  clean: z.boolean(),
+  filesCommitted: z.number().int().nonnegative(),
+  error: z.string().nullable(),
+  durationMs: z.number().int().nonnegative(),
+});
+export type WorkspaceGitCommitResultFrame = z.infer<
+  typeof WorkspaceGitCommitResultFrame
+>;
+
 export const ToolEventFrame = z.object({
   type: z.literal('tool.event'),
   requestId: z.string(),
@@ -636,6 +719,8 @@ export const InboundFrame = z.discriminatedUnion('type', [
   AgentSessionsResultFrame,
   AgentSessionDeleteResultFrame,
   AgentRuntimeStatusFrame,
+  WorkspaceGitStatusResultFrame,
+  WorkspaceGitCommitResultFrame,
   ToolEventFrame,
   ToolResultFrame,
   MemorySyncFrame,
@@ -655,6 +740,8 @@ export const OutboundFrame = z.discriminatedUnion('type', [
   AgentSessionsRequestFrame,
   AgentSessionDeleteRequestFrame,
   WorkspaceCleanupRequestFrame,
+  WorkspaceGitStatusRequestFrame,
+  WorkspaceGitCommitRequestFrame,
   AgentPermissionDecisionFrame,
   ToolRequestFrame,
   ToolCancelFrame,

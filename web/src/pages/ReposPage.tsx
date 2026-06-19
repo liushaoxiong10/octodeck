@@ -179,15 +179,6 @@ export function ReposPage() {
     void loadSearchBackends();
   }, [load, loadDevices, loadKnowledgePlugins, loadSearchBackends]);
 
-  useEffect(() => {
-    if (!repos.some((repo) => repo.knowledge?.status === 'indexing')) return;
-    const timer = window.setInterval(() => {
-      void load();
-      void loadDevices();
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [repos, load, loadDevices]);
-
   const onlineDevices = useMemo(() => devices.filter((device) => device.online), [devices]);
 
   async function handleCreate() {
