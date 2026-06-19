@@ -82,4 +82,29 @@ describe('managed repos db', () => {
     expect(group?.deviceLinkId).toBe('cl_1234567890abcdef');
     expect(group?.agentClientId).toBe('claude-code');
   });
+
+  test('normalizes legacy sandbox permission modes on registered groups', () => {
+    db.setRegisteredGroup('web:permission-readonly-test', {
+      name: 'Permission Readonly',
+      folder: 'permission-readonly',
+      added_at: new Date().toISOString(),
+      permissionMode: 'read-only' as any,
+    });
+    db.setRegisteredGroup('web:permission-workspace-test', {
+      name: 'Permission Workspace',
+      folder: 'permission-workspace',
+      added_at: new Date().toISOString(),
+      permissionMode: 'workspace-write' as any,
+    });
+    db.setRegisteredGroup('web:permission-full-test', {
+      name: 'Permission Full',
+      folder: 'permission-full',
+      added_at: new Date().toISOString(),
+      permissionMode: 'danger-full-access' as any,
+    });
+
+    expect(db.getRegisteredGroup('web:permission-readonly-test')?.permissionMode).toBeUndefined();
+    expect(db.getRegisteredGroup('web:permission-workspace-test')?.permissionMode).toBe('acceptEdits');
+    expect(db.getRegisteredGroup('web:permission-full-test')?.permissionMode).toBe('bypassPermissions');
+  });
 });

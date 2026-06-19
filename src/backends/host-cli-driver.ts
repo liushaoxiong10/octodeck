@@ -63,6 +63,8 @@ export interface HostCliDriverConfig {
   permissionMode?: string | null;
   /** Discovered agent client id used to adapt permission args, e.g. claude-code / codex / traecli. */
   agentClientId?: string | null;
+  /** Discovered agent client transport. ACP clients should use agent.run instead of legacy run.request. */
+  agentClientTransport?: string | null;
   workdirMode?: 'auto' | 'custom';
   workdir?: string;
 }

@@ -83,6 +83,13 @@ export interface ConnectOptions {
   isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
   /** 飞书流式卡片按钮中断回调 */
   onCardInterrupt?: (chatJid: string) => void;
+  /** 飞书审批卡片按钮回调 */
+  onApprovalDecision?: (decision: {
+    linkId: string;
+    runId: string;
+    requestId: string;
+    decision: 'approve' | 'reject';
+  }) => void | Promise<void>;
   /** P2P（私聊）消息到达时调用，用于自动检测 bot owner 的 open_id */
   onP2pSender?: (senderOpenId: string) => void;
 }
@@ -545,6 +552,67 @@ function buildPostMdFallback(text: string): string {
 
 function buildInteractiveCard(text: string): object {
   return buildAgentReplyCard({ status: 'done', text });
+}
+
+export interface FeishuApprovalRequestCardInput {
+  linkId: string;
+  runId: string;
+  requestId: string;
+  title?: string;
+  summary?: string;
+  toolName?: string;
+  detail?: string;
+}
+
+export function buildFeishuApprovalRequestCard(
+  input: FeishuApprovalRequestCardInput,
+): object {
+  const title = input.title || 'Agent 请求审批';
+  const lines = [
+    input.summary || 'Agent 正在等待你批准一次操作。',
+    input.toolName ? `工具：${input.toolName}` : '',
+    input.detail ? `详情：${input.detail}` : '',
+  ].filter(Boolean);
+  return {
+    type: 'interactive',
+    card: {
+      schema: '2.0',
+      config: { update_multi: true },
+      header: {
+        title: { tag: 'plain_text', content: title },
+        template: 'orange',
+      },
+      body: {
+        elements: [
+          { tag: 'markdown', content: optimizeMarkdownStyle(lines.join('\n\n')) },
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: '批准' },
+            type: 'primary',
+            value: {
+              action: 'agent_permission_decision',
+              decision: 'approve',
+              linkId: input.linkId,
+              runId: input.runId,
+              requestId: input.requestId,
+            },
+          },
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: '拒绝' },
+            type: 'danger',
+            value: {
+              action: 'agent_permission_decision',
+              decision: 'reject',
+              linkId: input.linkId,
+              runId: input.runId,
+              requestId: input.requestId,
+            },
+          },
+        ],
+      },
+    },
+  };
 }
 
 // ─── Factory Function ──────────────────────────────────────────
@@ -1839,6 +1907,33 @@ export function createFeishuConnection(
           try {
             const action = data?.action?.value?.action;
             const messageId = data?.context?.open_message_id;
+            if (action === 'agent_permission_decision') {
+              const value = data?.action?.value ?? {};
+              const decision = value.decision === 'approve' ? 'approve' : value.decision === 'reject' ? 'reject' : null;
+              if (
+                decision &&
+                typeof value.linkId === 'string' &&
+                typeof value.runId === 'string' &&
+                typeof value.requestId === 'string'
+              ) {
+                await connectOptions?.onApprovalDecision?.({
+                  linkId: value.linkId,
+                  runId: value.runId,
+                  requestId: value.requestId,
+                  decision,
+                });
+                logger.info(
+                  {
+                    linkId: value.linkId,
+                    runId: value.runId,
+                    requestId: value.requestId,
+                    decision,
+                  },
+                  'Card action: agent permission decision',
+                );
+              }
+              return;
+            }
             if (action !== 'interrupt_stream' || !messageId) return;
 
             const chatJid = resolveJidByMessageId(messageId);

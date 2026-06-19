@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import type { PoolConfig } from 'pg';
 
 import {
   DatabaseBackendConfig,
@@ -152,7 +153,7 @@ async function createPostgresqlRemoteStore(
   databaseUrl: string,
 ): Promise<RemoteSqliteStore> {
   const pg = await import('pg');
-  const pool = new pg.Pool({ connectionString: databaseUrl });
+  const pool = new pg.Pool(createPostgresqlPoolConfig(databaseUrl));
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ${POSTGRES_TABLE} (
@@ -188,6 +189,27 @@ async function createPostgresqlRemoteStore(
       await pool.end();
     },
   };
+}
+
+export function createPostgresqlPoolConfig(databaseUrl: string): PoolConfig {
+  const parsed = new URL(databaseUrl);
+  const hostname = parsed.hostname;
+  if (!hostname.startsWith('[') || !hostname.endsWith(']')) {
+    return { connectionString: databaseUrl };
+  }
+
+  const config: PoolConfig = {
+    host: hostname.slice(1, -1),
+    port: parsed.port ? Number(parsed.port) : undefined,
+    user: parsed.username ? decodeURIComponent(parsed.username) : undefined,
+    password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+    database: parsed.pathname
+      ? decodeURIComponent(parsed.pathname.replace(/^\//, ''))
+      : undefined,
+  };
+  const options = parsed.searchParams.get('options');
+  if (options) config.options = options;
+  return config;
 }
 
 async function createMysqlRemoteStore(

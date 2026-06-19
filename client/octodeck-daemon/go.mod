@@ -9,3 +9,5 @@ require github.com/coder/websocket v1.8.12
 require github.com/coder/acp-go-sdk v0.13.5
 
 require github.com/beyond5959/acp-adapter v0.3.8
+
+replace github.com/beyond5959/acp-adapter => ./third_party/acp-adapter

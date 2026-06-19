@@ -69,6 +69,49 @@ describe('provider switch: session clear must not lose the provider_id binding',
     expect(db.getSessionProviderId('grp', null)).toBe('provider-B');
   });
 
+  test('clearSessionId preserves the server conversation id and provider binding', () => {
+    db.setSession('grp', 'sess-A', null);
+    db.setSessionProviderId('grp', null, 'provider-A');
+    const workspaceSessionId = db.ensureSessionWorkspaceSessionId('grp', null);
+
+    db.clearSessionId('grp', null);
+
+    expect(db.getSession('grp', null) || undefined).toBeUndefined();
+    expect(db.getSessionProviderId('grp', null)).toBe('provider-A');
+    expect(db.ensureSessionWorkspaceSessionId('grp', null)).toBe(
+      workspaceSessionId,
+    );
+  });
+
+  test('clearSessionIdsForFolder preserves all server conversation ids', () => {
+    db.setSession('grp', 'sess-main', null);
+    db.setSessionProviderId('grp', null, 'provider-A');
+    const mainWorkspaceSessionId = db.ensureSessionWorkspaceSessionId(
+      'grp',
+      null,
+    );
+    db.setSession('grp', 'sess-agent', 'agent-1');
+    db.setSessionProviderId('grp', 'agent-1', 'provider-B');
+    const agentWorkspaceSessionId = db.ensureSessionWorkspaceSessionId(
+      'grp',
+      'agent-1',
+    );
+
+    const cleared = db.clearSessionIdsForFolder('grp');
+
+    expect(cleared).toBeGreaterThanOrEqual(2);
+    expect(db.getSession('grp', null) || undefined).toBeUndefined();
+    expect(db.getSession('grp', 'agent-1') || undefined).toBeUndefined();
+    expect(db.getSessionProviderId('grp', null)).toBe('provider-A');
+    expect(db.getSessionProviderId('grp', 'agent-1')).toBe('provider-B');
+    expect(db.ensureSessionWorkspaceSessionId('grp', null)).toBe(
+      mainWorkspaceSessionId,
+    );
+    expect(db.ensureSessionWorkspaceSessionId('grp', 'agent-1')).toBe(
+      agentWorkspaceSessionId,
+    );
+  });
+
   test('re-bind is agent-scoped — does not leak across agent_ids', () => {
     db.setSession('grp', 'sess-main', null);
     db.setSessionProviderId('grp', null, 'provider-A');

@@ -29,7 +29,7 @@ import {
   getJidsByFolder,
   updateChatName,
   deleteSession,
-  deleteAllSessionsForFolder,
+  clearSessionIdsForFolder,
   getSession as getStoredSession,
   deleteChatHistory,
   deleteGroupData,
@@ -336,15 +336,19 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       device_link_id: isAdmin ? group.deviceLinkId : undefined,
       agent_client_id: isAdmin ? group.agentClientId : undefined,
       agent_model: isAdmin ? group.agentModel : undefined,
-      agent_access_scope: isAdmin ? group.agentAccessScope ?? 'all' : undefined,
-      permission_mode: isAdmin ? group.permissionMode ?? 'bypassPermissions' : undefined,
+      agent_access_scope: isAdmin
+        ? (group.agentAccessScope ?? 'all')
+        : undefined,
+      permission_mode: isAdmin
+        ? (group.permissionMode ?? 'bypassPermissions')
+        : undefined,
       system_prompt: canModifyThisGroup ? group.systemPrompt : undefined,
       execution_mode: group.executionMode || 'container',
       custom_cwd: isAdmin ? group.customCwd : undefined,
       repo_id: isAdmin ? group.repoId : undefined,
       repo_git_url: isAdmin ? group.repoGitUrl : undefined,
       repo_device_path: isAdmin ? group.repoDevicePath : undefined,
-      visible_repo_mode: isAdmin ? group.visibleRepoMode ?? 'all' : undefined,
+      visible_repo_mode: isAdmin ? (group.visibleRepoMode ?? 'all') : undefined,
       visible_repo_ids: isAdmin ? group.visibleRepoIds : undefined,
       is_home: isHome || undefined,
       is_my_home: (isHome && group.created_by === user.id) || undefined,
@@ -365,9 +369,14 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
   return result;
 }
 
-function listAllVisibleRepoSnapshotIds(userId: string, linkId?: string): string[] {
+function listAllVisibleRepoSnapshotIds(
+  userId: string,
+  linkId?: string,
+): string[] {
   return listManagedReposByUser(userId)
-    .filter((repo) => repo.kind !== 'device_path' || repo.deviceLinkId === linkId)
+    .filter(
+      (repo) => repo.kind !== 'device_path' || repo.deviceLinkId === linkId,
+    )
     .map((repo) => repo.id)
     .sort();
 }
@@ -429,7 +438,8 @@ async function clearDeviceMainAgentSession(opts: {
   if (!linkId || !sessionId) return;
 
   const agentId =
-    group.agentClientId || agentClientIdFromExecutionTarget(group.executionNode);
+    group.agentClientId ||
+    agentClientIdFromExecutionTarget(group.executionNode);
   if (!agentId) return;
 
   const runtimeSession = getAgentLinkSession(linkId);
@@ -843,12 +853,12 @@ groupRoutes.post('/', authMiddleware, async (c) => {
   const now = new Date().toISOString();
   const resolvedVisibleRepoMode =
     runtimeProfile !== 'server-agent'
-      ? visibleRepoMode ?? (repoId ? 'selected' : 'all')
+      ? (visibleRepoMode ?? (repoId ? 'selected' : 'all'))
       : undefined;
   const resolvedVisibleRepoIds =
     runtimeProfile !== 'server-agent'
       ? resolvedVisibleRepoMode === 'selected'
-        ? visibleRepoIds ?? (repoId ? [repoId] : [])
+        ? (visibleRepoIds ?? (repoId ? [repoId] : []))
         : listAllVisibleRepoSnapshotIds(authUser.id, effectiveExecutionNode)
       : undefined;
 
@@ -950,7 +960,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
         ? group.repoDevicePath
         : undefined,
       visible_repo_mode: hasHostExecutionPermission(authUser)
-        ? group.visibleRepoMode ?? 'all'
+        ? (group.visibleRepoMode ?? 'all')
         : undefined,
       visible_repo_ids: hasHostExecutionPermission(authUser)
         ? group.visibleRepoIds
@@ -1060,7 +1070,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   const nextDeviceLinkId =
     device_link_id !== undefined ? device_link_id : execution_node;
   const existingDeviceLinkId =
-    existing.deviceLinkId || deviceLinkIdFromExecutionTarget(existing.executionNode);
+    existing.deviceLinkId ||
+    deviceLinkIdFromExecutionTarget(existing.executionNode);
   const nextResolvedDeviceLinkId =
     nextDeviceLinkId !== undefined && nextDeviceLinkId !== null
       ? deviceLinkIdFromExecutionTarget(nextDeviceLinkId)
@@ -1100,7 +1111,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   // 重建工作区的旧前端会原样提交当前 execution_mode；如果值未变化则允许，
   // 避免 web:main 在切换 runtime_profile/backend 前被无意义的 execution_mode 拦截为 403。
   const existingExecutionMode =
-    existing.executionMode ?? (existing.folder === 'main' ? 'host' : 'container');
+    existing.executionMode ??
+    (existing.folder === 'main' ? 'host' : 'container');
   if (
     execution_mode !== undefined &&
     existing.is_home &&
@@ -1197,9 +1209,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   ) {
     const previousAgentModel = existing.agentModel?.trim() || '';
     const nextAgentModel =
-      agent_model !== undefined
-        ? agent_model.trim()
-        : previousAgentModel;
+      agent_model !== undefined ? agent_model.trim() : previousAgentModel;
     const agentModelChanged =
       agent_model !== undefined && nextAgentModel !== previousAgentModel;
 
@@ -1209,7 +1219,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         : existing.visibleRepoMode;
     const nextVisibleRepoIds =
       visible_repo_ids !== undefined
-        ? visible_repo_ids ?? undefined
+        ? (visible_repo_ids ?? undefined)
         : visible_repo_mode === 'all'
           ? listAllVisibleRepoSnapshotIds(
               authUser.id,
@@ -1265,7 +1275,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
           ? agent_access_scope
           : existing.agentAccessScope,
       permissionMode:
-        permission_mode !== undefined ? permission_mode : existing.permissionMode,
+        permission_mode !== undefined
+          ? permission_mode
+          : existing.permissionMode,
       systemPrompt:
         system_prompt !== undefined
           ? system_prompt?.trim() || undefined
@@ -1282,13 +1294,12 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     deps.getRegisteredGroups()[jid] = updated;
 
     if (agentModelChanged) {
-      // 模型配置是运行会话级参数。Claude/ACP/Device CLI 的原生 session
-      // 往往会把创建时的 model 固定在会话内；如果只更新 DB 而继续复用
-      // OctoDeck/native session 或 warm runner，下一次实际 run 仍可能使用旧模型。
-      // 因此模型变更后必须清空该 workspace 下所有主/子 Agent session，
-      // 并停止 warm 进程，让下一次 run 用新 model 冷启动。
+      // 模型配置是运行会话级参数。这里必须只清 provider/native session_id，
+      // 不能删除 sessions 行，否则 workspace_session_id 会重建，daemon 侧
+      // 服务端 conversation -> provider session 映射也会换槽位，导致切模型
+      // 后看起来像新对话。
       try {
-        deleteAllSessionsForFolder(existing.folder);
+        const clearedSessionCount = clearSessionIdsForFolder(existing.folder);
         delete deps.getSessions()[existing.folder];
 
         const siblingJids = getJidsByFolder(existing.folder);
@@ -1311,8 +1322,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
             folder: existing.folder,
             previousAgentModel,
             nextAgentModel,
+            clearedSessionCount,
           },
-          'Group agent model changed; cleared sessions and stopped warm runners',
+          'Group agent model changed; cleared native session ids and stopped warm runners',
         );
       } catch (err) {
         logger.warn(
@@ -1455,7 +1467,8 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
   }
 
   const cleanupDeviceLinkId =
-    existing.deviceLinkId || deviceLinkIdFromExecutionTarget(existing.executionNode);
+    existing.deviceLinkId ||
+    deviceLinkIdFromExecutionTarget(existing.executionNode);
   if (cleanupDeviceLinkId) {
     requestWorkspaceCleanup({
       linkId: cleanupDeviceLinkId,
@@ -1900,6 +1913,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
 
   const before = c.req.query('before');
   const after = c.req.query('after');
+  const afterId = c.req.query('afterId');
   const sessionId = c.req.query('session');
   const agentIdParam = c.req.query('agentId');
   const limitRaw = parseInt(c.req.query('limit') || '50', 10);
@@ -1917,7 +1931,13 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
 
     const virtualJid = `${jid}#agent:${agentIdParam}`;
     if (after) {
-      const messages = getMessagesAfter(virtualJid, after, limit, sessionId);
+      const messages = getMessagesAfter(
+        virtualJid,
+        after,
+        limit,
+        sessionId,
+        afterId,
+      );
       return c.json({ messages });
     }
     const rows = getMessagesPage(virtualJid, before, limit + 1, sessionId);
@@ -1950,7 +1970,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   if (queryJids.length === 1) {
     // 单 JID 走原路径
     if (after) {
-      const messages = getMessagesAfter(jid, after, limit, sessionId);
+      const messages = getMessagesAfter(jid, after, limit, sessionId, afterId);
       return c.json({ messages });
     }
     const rows = getMessagesPage(jid, before, limit + 1, sessionId);
@@ -1961,7 +1981,13 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
 
   // 多 JID 合并查询
   if (after) {
-    const messages = getMessagesAfterMulti(queryJids, after, limit, sessionId);
+    const messages = getMessagesAfterMulti(
+      queryJids,
+      after,
+      limit,
+      sessionId,
+      afterId,
+    );
     return c.json({ messages });
   }
   const rows = getMessagesPageMulti(queryJids, before, limit + 1, sessionId);

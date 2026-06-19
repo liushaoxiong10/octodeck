@@ -1,10 +1,15 @@
 import type { CustomBackendDef } from './dynamic.js';
+import {
+  templateForAgentClient,
+  transportForAgentClient,
+} from './agent-client-families.js';
 
 export interface DiscoveredAgentClient {
   id: 'claude-code' | 'codex' | 'traecli' | string;
   displayName: string;
   binary: string;
   version?: string;
+  family?: 'claude' | 'codex' | 'traecli' | 'traex' | string;
   transport?: 'stdio' | 'acp' | 'a2a' | 'http' | string;
   permissionModes?: string[];
   capabilities?: string[];
@@ -58,7 +63,10 @@ export function buildAgentBackendFromClient(input: {
       `Agent client ${input.discoveredClient.id} 不支持权限模式: ${input.permissionMode}`,
     );
   }
-  const template = templateForAgentClient(input.discoveredClient.id);
+  const template = templateForAgentClient(
+    input.discoveredClient.id,
+    input.discoveredClient.family,
+  );
   return {
     id: input.id,
     displayName: input.displayName,
@@ -81,6 +89,13 @@ export function buildAgentBackendFromClient(input: {
     workdir: input.workdir,
     deviceLinkId: input.deviceLinkId,
     agentClientId: input.agentClientId,
+    agentClientTransport:
+      input.discoveredClient.transport ??
+      transportForAgentClient(
+        input.discoveredClient.id,
+        input.discoveredClient.family,
+      ) ??
+      null,
     agentMdId: input.agentMdId,
   };
 }
@@ -98,90 +113,12 @@ export function normalizeAgentClientBackendDef(
       sessionArgvTemplate: template.sessionArgvTemplate,
       resumeArgvTemplate: template.resumeArgvTemplate,
       outputProtocol: template.outputProtocol,
+      agentClientTransport:
+        def.agentClientTransport ??
+        transportForAgentClient(def.agentClientId) ??
+        null,
     };
   } catch {
     return { ...def };
-  }
-}
-
-type AgentClientTemplate = Pick<
-  CustomBackendDef,
-  | 'argvTemplate'
-  | 'outputProtocol'
-  | 'supportsNativeSessions'
-  | 'sessionArgvTemplate'
-  | 'resumeArgvTemplate'
->;
-
-const CODEX_STYLE_EXEC_TEMPLATE: AgentClientTemplate = {
-  argvTemplate: [
-    'exec',
-    '--json',
-    '--skip-git-repo-check',
-    '-m',
-    '{model}',
-    '{prompt}',
-  ],
-  outputProtocol: 'jsonline-stream-json',
-  supportsNativeSessions: true,
-  resumeArgvTemplate: [
-    'exec',
-    'resume',
-    '--json',
-    '--skip-git-repo-check',
-    '-m',
-    '{model}',
-    '{sessionId}',
-    '{prompt}',
-  ],
-};
-
-function templateForAgentClient(
-  id: string,
-): AgentClientTemplate {
-  switch (id) {
-    case 'claude-acp':
-    case 'claude-code':
-      return {
-        argvTemplate: [
-          '-p',
-          '{prompt}',
-          '--model',
-          '{model}',
-          '--output-format',
-          'stream-json',
-          '--verbose',
-          '--mcp-config',
-          '__OCTODECK_AGENT_TEAM_MCP_CONFIG__',
-        ],
-        outputProtocol: 'jsonline-stream-json',
-        supportsNativeSessions: true,
-        sessionArgvTemplate: ['--resume={sessionId}'],
-      };
-    case 'codex-acp':
-    case 'codex':
-      return CODEX_STYLE_EXEC_TEMPLATE;
-    case 'traex-acp':
-    case 'traex':
-      // traex 的 stdio 调用约定与 codex 基本一致，权限参数单独适配。
-      return CODEX_STYLE_EXEC_TEMPLATE;
-    case 'traecli-acp':
-    case 'traecli':
-      return {
-        argvTemplate: [
-          '-p',
-          '{prompt}',
-          '-c',
-          'model.name={model}',
-          '--output-format=stream-json',
-          '--include-partial-messages',
-          '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
-        ],
-        outputProtocol: 'jsonline-stream-json',
-        supportsNativeSessions: true,
-        sessionArgvTemplate: ['--resume={sessionId}'],
-      };
-    default:
-      throw new Error(`不支持的 Agent client: ${id}`);
   }
 }

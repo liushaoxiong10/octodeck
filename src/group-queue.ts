@@ -452,10 +452,32 @@ export class GroupQueue {
     if (this.shuttingDown) return;
 
     const state = this.getGroup(groupJid);
+    const isAgentConversationTask =
+      groupJid.includes('#agent:') && taskId.startsWith('agent-conv:');
+    const logAgentConversationQueueDecision = (
+      decision: string,
+      extra: Record<string, unknown> = {},
+    ): void => {
+      if (!isAgentConversationTask) return;
+      logger.info(
+        {
+          groupJid,
+          taskId,
+          pendingTaskCount: state.pendingTasks.length,
+          activeCount: this.activeCount,
+          activeContainerCount: this.activeContainerCount,
+          activeHostProcessCount: this.activeHostProcessCount,
+          waitingCount: this.waitingGroups.size,
+          ...extra,
+        },
+        `Agent conversation queue decision: ${decision}`,
+      );
+    };
 
     // Prevent double-queuing of the same task
     if (state.pendingTasks.some((t) => t.id === taskId)) {
       logger.debug({ groupJid, taskId }, 'Task already queued, skipping');
+      logAgentConversationQueueDecision('duplicate_task_skipped');
       return;
     }
 
@@ -463,6 +485,10 @@ export class GroupQueue {
     if (state.active || (activeRunner && activeRunner !== groupJid)) {
       state.pendingTasks.push({ id: taskId, groupJid, fn });
       this.waitingGroups.add(groupJid);
+      logAgentConversationQueueDecision('queued_active_runner', {
+        ownActive: state.active,
+        activeRunner: activeRunner || groupJid,
+      });
       logger.debug(
         { groupJid, taskId, activeRunner: activeRunner || groupJid },
         'Group runner active, task queued',
@@ -474,6 +500,9 @@ export class GroupQueue {
       const isHost = this.isHostMode(groupJid);
       state.pendingTasks.push({ id: taskId, groupJid, fn });
       this.waitingGroups.add(groupJid);
+      logAgentConversationQueueDecision('queued_capacity_limit', {
+        mode: isHost ? 'host' : 'container',
+      });
       logger.debug(
         {
           groupJid,
@@ -489,6 +518,7 @@ export class GroupQueue {
 
     // Run immediately
     this.waitingGroups.delete(groupJid);
+    logAgentConversationQueueDecision('run_immediately');
     this.runTask(groupJid, { id: taskId, groupJid, fn });
   }
 
@@ -1181,6 +1211,19 @@ export class GroupQueue {
       },
       'Running queued task',
     );
+    if (groupJid.includes('#agent:') && task.id.startsWith('agent-conv:')) {
+      logger.info(
+        {
+          groupJid,
+          taskId: task.id,
+          activeCount: this.activeCount,
+          activeContainerCount: this.activeContainerCount,
+          activeHostProcessCount: this.activeHostProcessCount,
+          mode: isHostMode ? 'host' : 'container',
+        },
+        'Agent conversation queued task started',
+      );
+    }
 
     try {
       this.onRunnerStateChangeFn?.(groupJid, 'running');

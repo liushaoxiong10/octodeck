@@ -113,6 +113,13 @@ export interface IMChannelConnectOpts {
   ) => { activation_mode?: string } | undefined;
   /** 飞书流式卡片按钮中断回调 */
   onCardInterrupt?: (chatJid: string) => void;
+  /** 飞书审批卡片按钮回调 */
+  onApprovalDecision?: (decision: {
+    linkId: string;
+    runId: string;
+    requestId: string;
+    decision: 'approve' | 'reject';
+  }) => void | Promise<void>;
   /** P2P（私聊）消息到达时调用，用于自动检测 owner open_id（仅飞书） */
   onP2pSender?: (senderOpenId: string) => void;
 }
@@ -211,6 +218,7 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
         isGroupOwnerMessage: opts.isGroupOwnerMessage,
         isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
         onCardInterrupt: opts.onCardInterrupt,
+        onApprovalDecision: opts.onApprovalDecision,
         onP2pSender: opts.onP2pSender,
       });
       if (!connected) {

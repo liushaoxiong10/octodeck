@@ -70,6 +70,7 @@ vi.mock('../web/src/utils/toast', () => ({
 
 vi.mock('../web/src/utils/pwaCache', () => ({
   invalidateGroupCache: vi.fn(),
+  invalidateGroupsListCache: vi.fn(),
   invalidateWorkspaceGroupCaches: invalidateWorkspaceGroupCachesMock,
 }));
 
@@ -295,7 +296,10 @@ describe('clearHistory', () => {
       return Promise.resolve({ messages: [], hasMore: false });
     });
 
-    await expect(useChatStore.getState().clearHistory(jid)).resolves.toBe(true);
+    await expect(useChatStore.getState().clearHistory(jid)).resolves.toEqual({
+      jid,
+      folder: 'home-new',
+    });
 
     const state = useChatStore.getState();
     expect(state.messages[jid]).toBeUndefined();
@@ -444,6 +448,96 @@ describe('handleAgentStatus', () => {
   });
 });
 
+describe('sendMessage', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    apiPostMock.mockReset();
+    resetChatStore();
+  });
+
+  it('clears stale streaming and pending thinking when starting a new user turn', async () => {
+    const jid = 'web:main';
+    const oldUser = mainMessage('old-user', '2026-01-02T10:00:00.000Z');
+
+    useChatStore.setState({
+      messages: { [jid]: [oldUser] },
+      waiting: { [jid]: true },
+      streaming: {
+        [jid]: {
+          ...initialState.streaming[jid],
+          thinkingText: 'stale thinking',
+          isThinking: true,
+        } as any,
+      },
+      pendingThinking: { [jid]: 'stale pending thinking' },
+      pendingThinkingDuration: { [jid]: 1234 },
+    });
+    apiPostMock.mockResolvedValueOnce({
+      success: true,
+      messageId: 'new-user',
+      timestamp: '2026-01-02T10:05:00.000Z',
+    });
+
+    await expect(
+      useChatStore.getState().sendMessage(jid, 'next message'),
+    ).resolves.toBe(true);
+
+    const state = useChatStore.getState();
+    expect(state.waiting[jid]).toBe(true);
+    expect(state.streaming[jid]).toBeUndefined();
+    expect(state.pendingThinking[jid]).toBeUndefined();
+    expect(state.pendingThinkingDuration[jid]).toBeUndefined();
+    expect(state.messages[jid].map((msg) => msg.id)).toEqual([
+      'old-user',
+      'new-user',
+    ]);
+  });
+});
+
+describe('handleWsError', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    resetChatStore();
+  });
+
+  it('clears stale agent waiting state after a rejected WebSocket send', () => {
+    const jid = 'web:main';
+    const agentId = 'agent-1';
+
+    useChatStore.setState({
+      agentWaiting: { [agentId]: true },
+      agentStreaming: { [agentId]: { partialText: 'thinking' } as any },
+      waiting: { [jid]: true },
+      streaming: { [jid]: { partialText: 'main thinking' } as any },
+    });
+
+    useChatStore.getState().handleWsError(jid, agentId);
+
+    const state = useChatStore.getState();
+    expect(state.agentWaiting[agentId]).toBeUndefined();
+    expect(state.agentStreaming[agentId]).toBeUndefined();
+    expect(state.waiting[jid]).toBe(true);
+    expect(state.streaming[jid]).toBeDefined();
+  });
+
+  it('clears main waiting state after a rejected WebSocket send without agentId', () => {
+    const jid = 'web:main';
+
+    useChatStore.setState({
+      waiting: { [jid]: true },
+      streaming: { [jid]: { partialText: 'main thinking' } as any },
+    });
+
+    useChatStore.getState().handleWsError(jid);
+
+    const state = useChatStore.getState();
+    expect(state.waiting[jid]).toBeUndefined();
+    expect(state.streaming[jid]).toBeUndefined();
+  });
+});
+
 describe('handleRunnerState', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -478,7 +572,7 @@ describe('handleRunnerState', () => {
     await Promise.resolve();
 
     expect(apiGetMock).toHaveBeenCalledWith(
-      `/api/groups/${encodeURIComponent(jid)}/messages?limit=50&after=${encodeURIComponent(userMessage.timestamp)}`,
+      `/api/groups/${encodeURIComponent(jid)}/messages?limit=50&after=${encodeURIComponent(userMessage.timestamp)}&afterId=${userMessage.id}`,
     );
     expect(useChatStore.getState().messages[jid]).toEqual([
       userMessage,

@@ -37,6 +37,20 @@ vi.mock('../src/memory-store.js', () => ({
   getCloudMemory: getCloudMemoryMock,
 }));
 
+function onlineAgentRunMeta(agentClientId = 'claude-code') {
+  return {
+    capabilities: ['agent.run'],
+    runtimes: [
+      {
+        runtimeId: `cl_1234567890abcdef:${agentClientId}`,
+        deviceLinkId: 'cl_1234567890abcdef',
+        agentClientId,
+        status: 'idle',
+      },
+    ],
+  };
+}
+
 describe('agent-link run context forwarding', () => {
   beforeEach(() => {
     getSessionMock.mockReset();
@@ -721,9 +735,7 @@ describe('agent-link run context forwarding', () => {
       content: '用户偏好：回答要简洁，并优先使用中文。',
     });
     getOnlineMetaMock.mockImplementation((linkId: string) =>
-      linkId === 'cl_1234567890abcdef'
-        ? { capabilities: ['agent.run'] }
-        : undefined,
+      linkId === 'cl_1234567890abcdef' ? onlineAgentRunMeta() : undefined,
     );
     getSessionMock.mockReturnValue({
       state: 'open',
@@ -808,15 +820,13 @@ describe('agent-link run context forwarding', () => {
     await promise;
   });
 
-  test('runViaAgentLink only forwards OctoDeck system prompt to new device agent.run sessions', async () => {
+  test('runViaAgentLink forwards OctoDeck system prompt to continued device agent.run sessions', async () => {
     const sent: any[] = [];
     getCloudMemoryMock.mockReturnValue({
-      content: '全局记忆：仅新 session 注入。',
+      content: '全局记忆：继续 session 也要注入。',
     });
     getOnlineMetaMock.mockImplementation((linkId: string) =>
-      linkId === 'cl_1234567890abcdef'
-        ? { capabilities: ['agent.run'] }
-        : undefined,
+      linkId === 'cl_1234567890abcdef' ? onlineAgentRunMeta() : undefined,
     );
     getSessionMock.mockReturnValue({
       state: 'open',
@@ -863,7 +873,68 @@ describe('agent-link run context forwarding', () => {
       input: { sessionId: 'native-session-1' },
       policy: { model: 'sonnet' },
     });
-    expect(sent[0].policy.systemPrompt).toBeUndefined();
+    expect(sent[0].policy.systemPrompt).toContain('<behavior>');
+    expect(sent[0].policy.systemPrompt).toContain('<cloud-global-memory>');
+    expect(sent[0].policy.systemPrompt).toContain(
+      '全局记忆：继续 session 也要注入。',
+    );
+
+    registerRunMock.mock.calls.at(-1)?.[0].finish({
+      ok: true,
+      result: 'ok',
+      error: null,
+      timedOut: false,
+      durationMs: 1,
+    });
+    await promise;
+  });
+
+  test('runViaAgentLink preserves product permission mode in agent.run policy', async () => {
+    const sent: any[] = [];
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef' ? onlineAgentRunMeta('traex-acp') : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Device TraeX',
+          folder: 'device-traex',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:traex-acp',
+          runtimeProfile: 'device-cli-agent',
+          permissionMode: 'default',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: 'hello',
+          chatJid: 'web:device-traex',
+          currentSourceJid: 'web:device-traex',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: 'device-traex',
+        agentClientId: 'traex-acp',
+        resolveBinary: () => '/usr/local/bin/traex',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:traex-acp',
+    );
+
+    expect(sent[0].policy.permissionMode).toBe('default');
 
     registerRunMock.mock.calls.at(-1)?.[0].finish({
       ok: true,
@@ -878,9 +949,7 @@ describe('agent-link run context forwarding', () => {
   test('runViaAgentLink isolates agent.run workspace by OctoDeck workspace session', async () => {
     const sent: any[] = [];
     getOnlineMetaMock.mockImplementation((linkId: string) =>
-      linkId === 'cl_1234567890abcdef'
-        ? { capabilities: ['agent.run'] }
-        : undefined,
+      linkId === 'cl_1234567890abcdef' ? onlineAgentRunMeta() : undefined,
     );
     getSessionMock.mockReturnValue({
       state: 'open',
@@ -927,13 +996,19 @@ describe('agent-link run context forwarding', () => {
         folder: 'device-session',
         scope: 'session',
         scopeId: 'ws-session-a',
+        sessionRoot: 'ws-session-a',
       },
       workspaceRepo: {
         groupFolder: 'device-session',
         scope: 'session',
         scopeId: 'ws-session-a',
       },
-      input: { metadata: { workspaceSessionId: 'ws-session-a' } },
+      input: {
+        metadata: {
+          serverConversationId: 'ws-session-a',
+          workspaceSessionId: 'ws-session-a',
+        },
+      },
     });
 
     registerRunMock.mock.calls.at(-1)?.[0].finish({
@@ -1000,9 +1075,7 @@ describe('agent-link run context forwarding', () => {
   test('runViaAgentLink sends agent.run.cancel when AbortSignal aborts agent runtime runs', async () => {
     const sent: any[] = [];
     getOnlineMetaMock.mockImplementation((linkId: string) =>
-      linkId === 'cl_1234567890abcdef'
-        ? { capabilities: ['agent.run'] }
-        : undefined,
+      linkId === 'cl_1234567890abcdef' ? onlineAgentRunMeta() : undefined,
     );
     getSessionMock.mockReturnValue({
       state: 'open',
@@ -1062,9 +1135,7 @@ describe('agent-link run context forwarding', () => {
     const sent: any[] = [];
     const outputs: any[] = [];
     getOnlineMetaMock.mockImplementation((linkId: string) =>
-      linkId === 'cl_1234567890abcdef'
-        ? { capabilities: ['agent.run'] }
-        : undefined,
+      linkId === 'cl_1234567890abcdef' ? onlineAgentRunMeta() : undefined,
     );
     getSessionMock.mockReturnValue({
       state: 'open',
@@ -1414,9 +1485,7 @@ describe('agent-link run context forwarding', () => {
     const sent: any[] = [];
     const outputs: any[] = [];
     getOnlineMetaMock.mockImplementation((linkId: string) =>
-      linkId === 'cl_1234567890abcdef'
-        ? { capabilities: ['agent.run'] }
-        : undefined,
+      linkId === 'cl_1234567890abcdef' ? onlineAgentRunMeta() : undefined,
     );
     getSessionMock.mockReturnValue({
       state: 'open',
@@ -1500,6 +1569,235 @@ describe('agent-link run context forwarding', () => {
     });
   });
 
+  test('agent runtime maps TraeX ACP tool_call_update fields for platform display', async () => {
+    const sent: any[] = [];
+    const outputs: any[] = [];
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef'
+        ? onlineAgentRunMeta('traex')
+        : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'TraeX ACP Tool Fields',
+          folder: 'traex-acp-tool-fields',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:traex',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: 'hello',
+          chatJid: 'web:traex-acp-tool-fields',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+        onOutput: vi.fn(async (output) => outputs.push(output)),
+      },
+      {
+        backendId: 'mac-traex',
+        resolveBinary: () => '/usr/local/bin/traex',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+        agentClientId: 'traex',
+        agentClientTransport: 'acp',
+      },
+      'runtime:cl_1234567890abcdef:traex',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'agent.run.request' });
+    const controller = registerRunMock.mock.calls.at(-1)?.[0] as any;
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'tool_use_start',
+      sessionId: 'sess-traex-tool',
+      payload: {
+        type: 'tool_call_update',
+        toolCallId: 'tool-traex-1',
+        title: 'Read file',
+        rawInput: { path: 'README.md' },
+      },
+    });
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'tool_use_end',
+      sessionId: 'sess-traex-tool',
+      payload: {
+        type: 'tool_call_update',
+        toolCallId: 'tool-traex-1',
+        status: 'completed',
+        rawOutput: { ok: true },
+      },
+    });
+    controller.finish({
+      type: 'agent.run.result',
+      runId: controller.runId,
+      ok: true,
+      result: 'done',
+      error: null,
+      sessionId: 'sess-traex-tool',
+      timedOut: false,
+      durationMs: 1,
+    });
+
+    await promise;
+    const streamEvents = outputs
+      .map((output) => output.streamEvent)
+      .filter(Boolean);
+    expect(
+      streamEvents.find((event) => event.eventType === 'tool_use_start'),
+    ).toMatchObject({
+      toolName: 'Read file',
+      toolUseId: 'tool-traex-1',
+      toolInputSummary: 'path: README.md',
+      detail: '{\n  "path": "README.md"\n}',
+    });
+    expect(
+      streamEvents.find((event) => event.eventType === 'tool_use_end'),
+    ).toMatchObject({
+      toolName: 'Read file',
+      toolUseId: 'tool-traex-1',
+      detail: '{\n  "ok": true\n}',
+    });
+  });
+
+  test('agent runtime maps TraeX payload-only reasoning and nested tool fields', async () => {
+    const sent: any[] = [];
+    const outputs: any[] = [];
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef'
+        ? onlineAgentRunMeta('traex')
+        : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'TraeX Nested Reason Tool',
+          folder: 'traex-nested-reason-tool',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:traex',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: 'hello',
+          chatJid: 'web:traex-nested-reason-tool',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+        onOutput: vi.fn(async (output) => outputs.push(output)),
+      },
+      {
+        backendId: 'mac-traex',
+        resolveBinary: () => '/usr/local/bin/traex',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+        agentClientId: 'traex',
+        agentClientTransport: 'acp',
+      },
+      'runtime:cl_1234567890abcdef:traex',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'agent.run.request' });
+    const controller = registerRunMock.mock.calls.at(-1)?.[0] as any;
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'thinking_delta',
+      sessionId: 'sess-traex-nested',
+      payload: {
+        type: 'reasoning_delta',
+        update: { delta: 'payload only reason' },
+      },
+    });
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'tool_use_start',
+      sessionId: 'sess-traex-nested',
+      payload: {
+        type: 'tool_call_update',
+        update: {
+          toolCallId: 'tool-nested-1',
+          title: 'Bash',
+          rawInput: { command: 'pwd' },
+        },
+      },
+    });
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'tool_use_end',
+      sessionId: 'sess-traex-nested',
+      payload: {
+        type: 'tool_call_update',
+        update: {
+          toolCallId: 'tool-nested-1',
+          status: 'completed',
+          rawOutput: '/repo',
+        },
+      },
+    });
+    controller.finish({
+      type: 'agent.run.result',
+      runId: controller.runId,
+      ok: true,
+      result: 'done',
+      error: null,
+      sessionId: 'sess-traex-nested',
+      timedOut: false,
+      durationMs: 1,
+    });
+
+    await promise;
+    const streamEvents = outputs
+      .map((output) => output.streamEvent)
+      .filter(Boolean);
+    expect(
+      streamEvents.find((event) => event.eventType === 'thinking_delta'),
+    ).toMatchObject({ text: 'payload only reason' });
+    expect(
+      streamEvents.find((event) => event.eventType === 'tool_use_start'),
+    ).toMatchObject({
+      toolName: 'Bash',
+      toolUseId: 'tool-nested-1',
+      toolInputSummary: 'command: pwd',
+      detail: '{\n  "command": "pwd"\n}',
+    });
+    expect(
+      streamEvents.find((event) => event.eventType === 'tool_use_end'),
+    ).toMatchObject({
+      toolName: 'Bash',
+      toolUseId: 'tool-nested-1',
+      detail: '/repo',
+    });
+  });
+
   // 回归：device daemon 在解析 stream-json 末尾的 {"type":"result"} 时会发出
   // eventType="final_result" 的 agent.run.event 帧（agent_runtime.go
   // normalizeAgentJSONLineFrames 第 3 段）。
@@ -1525,9 +1823,7 @@ describe('agent-link run context forwarding', () => {
     const sent: any[] = [];
     const outputs: any[] = [];
     getOnlineMetaMock.mockImplementation((linkId: string) =>
-      linkId === 'cl_1234567890abcdef'
-        ? { capabilities: ['agent.run'] }
-        : undefined,
+      linkId === 'cl_1234567890abcdef' ? onlineAgentRunMeta() : undefined,
     );
     getSessionMock.mockReturnValue({
       state: 'open',
@@ -1611,9 +1907,7 @@ describe('agent-link run context forwarding', () => {
     const sent: any[] = [];
     const outputs: any[] = [];
     getOnlineMetaMock.mockImplementation((linkId: string) =>
-      linkId === 'cl_1234567890abcdef'
-        ? { capabilities: ['agent.run'] }
-        : undefined,
+      linkId === 'cl_1234567890abcdef' ? onlineAgentRunMeta() : undefined,
     );
     getSessionMock.mockReturnValue({
       state: 'open',
@@ -1690,6 +1984,95 @@ describe('agent-link run context forwarding', () => {
           outputTokens: 30,
           cacheReadInputTokens: 7,
           cacheCreationInputTokens: 5,
+        },
+      },
+    });
+  });
+
+  test('agent.run.result usage from TraeX ACP adapter full usage is normalized', async () => {
+    const sent: any[] = [];
+    const outputs: any[] = [];
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef'
+        ? onlineAgentRunMeta('traex-acp')
+        : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'TraeX ACP Usage',
+          folder: 'traex-acp-usage',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:traex-acp',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: 'hello',
+          chatJid: 'web:traex-acp-usage',
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+        onOutput: vi.fn(async (output) => outputs.push(output)),
+      },
+      {
+        backendId: 'mac-traex-acp',
+        model: 'kimi-k2',
+        resolveBinary: () => '/usr/local/bin/traex',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:traex-acp',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'agent.run.request' });
+    const controller = registerRunMock.mock.calls.at(-1)?.[0] as any;
+    controller.finish({
+      type: 'agent.run.result',
+      runId: controller.runId,
+      ok: true,
+      result: 'done',
+      error: null,
+      sessionId: 'sess-traex-acp-usage',
+      usage: {
+        inputTokens: 321,
+        outputTokens: 45,
+        totalTokens: 366,
+        cachedReadTokens: 12,
+        thoughtTokens: 7,
+        size: 128000,
+        cost: { amount: 0.0123, currency: 'USD' },
+      },
+      timedOut: false,
+      durationMs: 789,
+    });
+
+    await promise;
+    const usageEvent = outputs
+      .map((output) => output.streamEvent)
+      .find((event) => event?.eventType === 'usage');
+    expect(usageEvent?.usage).toMatchObject({
+      inputTokens: 321,
+      outputTokens: 45,
+      cacheReadInputTokens: 12,
+      costUSD: 0.0123,
+      modelUsage: {
+        'kimi-k2': {
+          inputTokens: 321,
+          outputTokens: 45,
+          cacheReadInputTokens: 12,
+          costUSD: 0.0123,
         },
       },
     });
@@ -1879,6 +2262,73 @@ describe('agent-link run context forwarding', () => {
     registerRunMock.mock.calls
       .at(-1)?.[0]
       .finish({ exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    await promise;
+  });
+
+  test('runViaAgentLink uses agent.run for ACP TraeCLI clients instead of print-mode argv', async () => {
+    const sent: any[] = [];
+    getOnlineMetaMock.mockReturnValue({
+      capabilities: ['agent.run'],
+      runtimes: [],
+    });
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'ACP TraeCLI',
+          folder: 'acp-traecli',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:traecli',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: '今天做什么？',
+          chatJid: 'web:acp-traecli',
+          isHome: false,
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: 'mac-traecli',
+        resolveBinary: () => '/usr/local/bin/traecli',
+        buildArgv: ({ prompt }) => [
+          '-p',
+          prompt,
+          '--output-format=stream-json',
+        ],
+        outputProtocol: 'jsonline-stream-json',
+        agentClientId: 'traecli',
+        agentClientTransport: 'acp',
+      },
+      'runtime:cl_1234567890abcdef:traecli',
+    );
+
+    expect(sent[0]).toMatchObject({
+      type: 'agent.run.request',
+      agentId: 'traecli',
+      input: { prompt: '今天做什么？' },
+    });
+    expect(sent[0]).not.toHaveProperty('argv');
+
+    registerRunMock.mock.calls.at(-1)?.[0].finish({
+      ok: true,
+      result: 'done',
+      error: null,
+      timedOut: false,
+      durationMs: 1,
+    });
     await promise;
   });
 

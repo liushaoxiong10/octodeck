@@ -43,6 +43,7 @@ import {
 } from './runtime-config.js';
 import { providerPool } from './provider-pool.js';
 import {
+  clearSessionId,
   deleteSession,
   getSessionProviderId,
   setSessionProviderId,
@@ -161,7 +162,11 @@ function ensureSymlinkTo(localPath: string, targetPath: string): void {
       // an attacker could swap the symlink between lstat and readlink.
       const realTarget = fs.realpathSync(localPath);
       const expectedReal = (() => {
-        try { return fs.realpathSync(targetPath); } catch { return targetPath; }
+        try {
+          return fs.realpathSync(targetPath);
+        } catch {
+          return targetPath;
+        }
       })();
       if (realTarget === expectedReal) {
         return; // 已经是正确的 symlink
@@ -1019,11 +1024,9 @@ export async function runContainerAgent(
       },
       'Clearing Claude session after switching providers',
     );
-    // deleteSession removes the whole sessions row, including the provider_id
-    // binding trySelectPoolProvider just wrote. Re-bind the freshly-selected
-    // provider so the next turn stays sticky to it instead of degrading to a
-    // fresh pool pick.
-    deleteSession(group.folder, input.agentId);
+    // Keep the OctoDeck workspace_session_id stable; only the provider-native
+    // session id must be cleared when the selected provider changes.
+    clearSessionId(group.folder, input.agentId);
     if (selectedProfileId) {
       setSessionProviderId(group.folder, input.agentId, selectedProfileId);
     }
@@ -1586,10 +1589,9 @@ export async function runHostAgent(
       },
       'Clearing Claude session after switching providers',
     );
-    // deleteSession removes the whole sessions row, including the provider_id
-    // binding trySelectPoolProvider just wrote. Re-bind so the next turn stays
-    // sticky to the freshly-selected provider (mirrors the container path).
-    deleteSession(group.folder, input.agentId);
+    // Keep the OctoDeck workspace_session_id stable; only the provider-native
+    // session id must be cleared when the selected provider changes.
+    clearSessionId(group.folder, input.agentId);
     if (hostSelectedProfileId) {
       setSessionProviderId(group.folder, input.agentId, hostSelectedProfileId);
     }

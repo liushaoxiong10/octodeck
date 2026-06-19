@@ -100,9 +100,9 @@ describe('frontend agents module', () => {
     expect(form).toContain(
       'deviceLinkId: form.deviceLinkId.trim() || undefined',
     );
-    expect(form).toContain(
-      "agentClientId: form.runtime === 'local-device' ? form.agentClientId : undefined",
-    );
+    expect(form).toContain('agentClientId:');
+    expect(form).toContain("form.runtime === 'local-device'");
+    expect(form).toContain('form.agentClientId');
     expect(form).toContain("form.runtime === 'local-device' ? (");
     expect(form).toContain('Server Side Provider');
   });
@@ -131,8 +131,9 @@ describe('frontend agents module', () => {
       'utf8',
     );
 
-    expect(form).toContain('默认运行位置');
-    expect(form).toContain('Agent 创建时默认不绑定 Workdir');
+    expect(form).toContain('Workdir');
+    expect(form).toContain('Agent 创建时默认不绑定');
+    expect(form).toContain('实际运行目录会在每次任务/会话启动时');
     expect(form).toContain("form.workdirMode === 'custom'");
     expect(list).toContain('自动继承任务/Workspace');
   });
@@ -366,7 +367,7 @@ describe('frontend agents module', () => {
     expect(agentsPage).toContain('从商店添加');
     expect(agentsPage).toContain('agency-agents');
     expect(teamStore).toContain('AgentMdStoreEntry');
-    expect(teamStore).toContain('AGENCY_AGENTS_INDEX_URL');
+    expect(teamStore).toContain('AGENT_MD_STORE_SOURCES');
     expect(teamStore).toContain('data.jsdelivr.com');
     expect(teamStore).toContain('cdn.jsdelivr.net');
     expect(teamStore).toContain('AGENT_MD_STORE_CACHE_TTL_MS');

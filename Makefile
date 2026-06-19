@@ -403,10 +403,10 @@ build-daemon: ## 构建 octodeck-daemon 二进制（可选 GOOS= GOARCH= 交叉�
 		mkdir -p "$(DAEMON_DIST_DIR)"; \
 		out="octodeck-daemon-$(GOOS)-$(GOARCH)"; \
 		echo "🔨 cross-compile octodeck-daemon $(GOOS)/$(GOARCH) -> $(DAEMON_DIST_DIR)/$$out"; \
-		(cd $(DAEMON_SRC_DIR) && GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "dist/$$out" .); \
+		(cd $(DAEMON_SRC_DIR) && GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "dist/$$out" ./cmd/octodeck-daemon); \
 	else \
 		echo "🔨 build native octodeck-daemon -> $(DAEMON_SRC_DIR)/octodeck-daemon"; \
-		(cd $(DAEMON_SRC_DIR) && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o octodeck-daemon .); \
+		(cd $(DAEMON_SRC_DIR) && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o octodeck-daemon ./cmd/octodeck-daemon); \
 	fi
 
 # 一次性交叉编译 4 个平台的二进制，产物落在 client/octodeck-daemon/dist/
@@ -417,7 +417,7 @@ build-daemon-all: ## 交叉编译 Darwin/Linux x86_64 + arm64 共 4 份 daemon �
 		goos=$${pair%/*}; goarch=$${pair#*/}; \
 		out="octodeck-daemon-$$goos-$$goarch"; \
 		echo "🔨 $$goos/$$goarch -> $(DAEMON_DIST_DIR)/$$out"; \
-		(cd $(DAEMON_SRC_DIR) && GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "dist/$$out" .); \
+		(cd $(DAEMON_SRC_DIR) && GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "dist/$$out" ./cmd/octodeck-daemon); \
 	done
 	@echo ""
 	@echo "✅ daemon 二进制产物："

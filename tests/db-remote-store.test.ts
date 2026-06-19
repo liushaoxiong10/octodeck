@@ -8,6 +8,7 @@ import Database from '../src/sqlite-compat.js';
 import {
   DebouncedRemotePersistenceController,
   NoopPersistenceController,
+  createPostgresqlPoolConfig,
   prepareSqlitePathForBackend,
   RemoteSqliteStore,
 } from '../src/db-remote-store.js';
@@ -115,5 +116,21 @@ describe('database remote store persistence controllers', () => {
       fallbackToSqlite: true,
     }, makeTempFile());
     expect(controller.backend).toBe('sqlite');
+  });
+
+  test('postgresql pool config strips IPv6 URL brackets for node-postgres', () => {
+    expect(createPostgresqlPoolConfig(
+      'postgresql://octodeck:secret@[2605:340:cd51:8000:0:4a9b:28f5:3c32]:5432/octodeck?options=-c%20search_path%3Doctodeck',
+    )).toMatchObject({
+      host: '2605:340:cd51:8000:0:4a9b:28f5:3c32',
+      port: 5432,
+      user: 'octodeck',
+      password: 'secret',
+      database: 'octodeck',
+      options: '-c search_path=octodeck',
+    });
+
+    expect(createPostgresqlPoolConfig('postgresql://octodeck:secret@127.0.0.1:5432/octodeck'))
+      .toEqual({ connectionString: 'postgresql://octodeck:secret@127.0.0.1:5432/octodeck' });
   });
 });

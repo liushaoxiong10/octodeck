@@ -82,6 +82,52 @@ export function showToast(
   setTimeout(dismiss, durationMs);
 }
 
+export function showActionToast(
+  title: string,
+  body: string | undefined,
+  actions: Array<{ label: string; onClick: () => void | Promise<void>; tone?: 'primary' | 'danger' }>,
+  durationMs = 30000,
+): void {
+  const { el, dismiss } = createToastElement();
+
+  const titleEl = document.createElement('div');
+  titleEl.style.fontWeight = '600';
+  titleEl.textContent = title;
+  el.appendChild(titleEl);
+
+  if (body) {
+    const bodyEl = document.createElement('div');
+    bodyEl.style.cssText = 'margin-top:4px;font-size:13px;opacity:0.85;';
+    bodyEl.textContent = body.length > 140 ? body.slice(0, 140) + '...' : body;
+    el.appendChild(bodyEl);
+  }
+
+  const actionsEl = document.createElement('div');
+  actionsEl.style.cssText = 'display:flex;gap:8px;margin-top:10px;';
+  for (const action of actions) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = action.label;
+    button.style.cssText =
+      'border:0;border-radius:6px;padding:5px 10px;font-size:13px;font-weight:600;cursor:pointer;' +
+      (action.tone === 'danger'
+        ? 'background:#fee2e2;color:#991b1b;'
+        : 'background:#ccfbf1;color:#115e59;');
+    button.onclick = () => {
+      button.disabled = true;
+      void Promise.resolve(action.onClick())
+        .then(dismiss)
+        .catch(() => {
+          button.disabled = false;
+        });
+    };
+    actionsEl.appendChild(button);
+  }
+  el.appendChild(actionsEl);
+
+  setTimeout(dismiss, durationMs);
+}
+
 /**
  * Send a browser Notification when the page is in the background.
  * Only fires if permission was already granted — never prompts the user

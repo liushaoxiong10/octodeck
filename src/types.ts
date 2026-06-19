@@ -252,6 +252,9 @@ export interface AgentLink {
     displayName: string;
     binary: string;
     version?: string;
+    family?: 'claude' | 'codex' | 'traecli' | 'traex';
+    provider?: string;
+    transport?: 'stdio' | 'acp' | 'a2a' | 'http';
     permissionModes?: string[];
     capabilities?: string[];
   }>;
@@ -847,7 +850,7 @@ export type WsMessageOut =
       userId: string;
       usage: BillingAccessResult;
     }
-  | { type: 'ws_error'; error: string; chatJid?: string }
+  | { type: 'ws_error'; error: string; chatJid?: string; agentId?: string }
   | {
       type: 'stream_snapshot';
       chatJid: string;
@@ -924,6 +927,12 @@ export type WsMessageIn =
       content: string;
       attachments?: MessageAttachment[];
       agentId?: string;
+      clientTrace?: {
+        conversationCreatedAt?: number;
+        tabSelectedAt?: number;
+        sendInvokedAt?: number;
+        wsSendAt?: number;
+      };
     }
   | { type: 'terminal_start'; chatJid: string; cols: number; rows: number }
   | { type: 'terminal_input'; chatJid: string; data: string }

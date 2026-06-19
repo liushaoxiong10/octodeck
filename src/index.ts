@@ -32,6 +32,7 @@ import { resolveBackend } from './backends/registry.js';
 import { loadCustomBackendsFromDisk } from './backends/custom-loader.js';
 import {
   closeAllSessions as closeAllAgentLinkSessions,
+  getSession as getAgentLinkSession,
   setServerVersion as setAgentLinkServerVersion,
 } from './agent-link/registry.js';
 import {
@@ -61,6 +62,7 @@ import {
   initDatabase,
   isGroupShared,
   listUsers,
+  clearSessionId,
   setLastGroupSync,
   setRegisteredGroup,
   setRouterState,
@@ -130,6 +132,7 @@ import {
   getStreamingSession,
   StreamingCardController,
 } from './feishu-streaming-card.js';
+import { buildFeishuApprovalRequestCard } from './feishu.js';
 import {
   formatContextMessages,
   formatWorkspaceList,
@@ -849,7 +852,8 @@ function resolveEffectiveGroup(group: RegisteredGroup): {
       const agent = getAgent(group.target_agent_id);
       const targetJid = agent?.chat_jid;
       if (!targetJid) return null;
-      const targetGroup = registeredGroups[targetJid] ?? getRegisteredGroup(targetJid);
+      const targetGroup =
+        registeredGroups[targetJid] ?? getRegisteredGroup(targetJid);
       if (targetGroup && !registeredGroups[targetJid]) {
         registeredGroups[targetJid] = targetGroup;
       }
@@ -859,7 +863,8 @@ function resolveEffectiveGroup(group: RegisteredGroup): {
     if (group.target_main_jid) {
       const targetJid = resolveWorkspaceJid(group.target_main_jid);
       if (!targetJid) return null;
-      const targetGroup = registeredGroups[targetJid] ?? getRegisteredGroup(targetJid);
+      const targetGroup =
+        registeredGroups[targetJid] ?? getRegisteredGroup(targetJid);
       if (targetGroup && !registeredGroups[targetJid]) {
         registeredGroups[targetJid] = targetGroup;
       }
@@ -2698,7 +2703,8 @@ function loadState(): void {
 
     // Determine expected mode based on the owner's role
     // Admin home groups use host mode, member home groups use container mode
-    const isAdminHome = jid === DEFAULT_MAIN_JID || group.executionMode === 'host';
+    const isAdminHome =
+      jid === DEFAULT_MAIN_JID || group.executionMode === 'host';
     const expectedMode = isAdminHome ? 'host' : 'container';
 
     if (group.executionMode !== expectedMode) {
@@ -3341,6 +3347,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           if (result.status === 'stream' && result.streamEvent) {
             broadcastStreamEvent(chatJid, result.streamEvent);
             persistToolMessage(chatJid, result.streamEvent);
+            if (result.streamEvent.eventType === 'permission_request') {
+              void maybeSendFeishuApprovalCard(chatJid, result.streamEvent);
+            }
 
             // ── 累积 text_delta / thinking_delta 文本（中断时用于保存已输出内容）──
             if (
@@ -4610,33 +4619,48 @@ export function buildOverflowPartialReply(partialText: string): string {
 
 function compactToolValue(value: unknown, max = 3000): string | null {
   if (value === undefined || value === null || value === '') return null;
-  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  const text =
+    typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
 function toolMessageContent(event: StreamEvent): string {
-  const label = event.skillName || event.toolName || event.toolUseId || 'unknown';
+  const label =
+    event.skillName || event.toolName || event.toolUseId || 'unknown';
   const lines = [
-    event.eventType === 'tool_use_end' ? `工具响应: ${label}` : `工具调用: ${label}`,
+    event.eventType === 'tool_use_end'
+      ? `工具响应: ${label}`
+      : `工具调用: ${label}`,
   ];
   if (event.toolUseId) lines.push(`id: ${event.toolUseId}`);
   if (event.parentToolUseId) lines.push(`parent: ${event.parentToolUseId}`);
   if (event.toolInputSummary) lines.push(`summary: ${event.toolInputSummary}`);
   const input = compactToolValue(event.toolInput ?? event.rawEvent);
-  if (event.eventType === 'tool_use_start' && input) lines.push(`input:\n${input}`);
+  if (event.eventType === 'tool_use_start' && input)
+    lines.push(`input:\n${input}`);
   const response = compactToolValue(event.detail ?? event.rawEvent);
-  if (event.eventType === 'tool_use_end' && response) lines.push(`response:\n${response}`);
+  if (event.eventType === 'tool_use_end' && response)
+    lines.push(`response:\n${response}`);
   return lines.join('\n');
 }
 
-function persistToolMessage(chatJid: string, event: StreamEvent, agentId?: string): void {
-  if (event.eventType !== 'tool_use_start' && event.eventType !== 'tool_use_end') return;
+function persistToolMessage(
+  chatJid: string,
+  event: StreamEvent,
+  agentId?: string,
+): void {
+  if (
+    event.eventType !== 'tool_use_start' &&
+    event.eventType !== 'tool_use_end'
+  )
+    return;
   const msgId = `tool-${event.toolUseId || crypto.randomUUID()}-${event.eventType === 'tool_use_start' ? 'start' : 'end'}`;
   const timestamp = new Date().toISOString();
   const targetJid = agentId ? `${chatJid}#agent:${agentId}` : chatJid;
   ensureChatExists(targetJid);
   const content = toolMessageContent(event);
-  const sourceKind = event.eventType === 'tool_use_start' ? 'tool_call' : 'tool_result';
+  const sourceKind =
+    event.eventType === 'tool_use_start' ? 'tool_call' : 'tool_result';
   const persistedMsgId = storeMessageDirect(
     msgId,
     targetJid,
@@ -4674,6 +4698,43 @@ function persistToolMessage(chatJid: string, event: StreamEvent, agentId?: strin
     },
     agentId,
   );
+}
+
+const sentFeishuApprovalCards = new Set<string>();
+
+async function maybeSendFeishuApprovalCard(
+  chatJid: string,
+  event: StreamEvent,
+): Promise<void> {
+  if (
+    !chatJid.startsWith('feishu:') ||
+    event.eventType !== 'permission_request'
+  ) {
+    return;
+  }
+  const req = event.permissionRequest;
+  if (!req?.linkId || !req.runId || !req.requestId) return;
+  const key = `${chatJid}:${req.runId}:${req.requestId}`;
+  if (sentFeishuApprovalCards.has(key)) return;
+  sentFeishuApprovalCards.add(key);
+  const card = buildFeishuApprovalRequestCard({
+    linkId: req.linkId,
+    runId: req.runId,
+    requestId: req.requestId,
+    title: req.title || event.title,
+    summary: req.summary || event.summary,
+    toolName: req.toolName || event.toolName,
+    detail: event.detail,
+  });
+  try {
+    await imManager.sendMessage(chatJid, JSON.stringify(card));
+  } catch (err) {
+    sentFeishuApprovalCards.delete(key);
+    logger.warn(
+      { err, chatJid, runId: req.runId, requestId: req.requestId },
+      'Failed to send Feishu approval card',
+    );
+  }
 }
 
 /**
@@ -5538,7 +5599,10 @@ async function processTaskIpc(
   ): Promise<void> => {
     const requestId = data.requestId;
     if (!requestId || !SAFE_REQUEST_ID_RE.test(requestId)) {
-      logger.warn({ sourceGroup: group, requestId }, `Rejected ${type} request with invalid requestId`);
+      logger.warn(
+        { sourceGroup: group, requestId },
+        `Rejected ${type} request with invalid requestId`,
+      );
       return;
     }
     const tasksDir = path.join(DATA_DIR, 'ipc', group, 'tasks');
@@ -5546,7 +5610,10 @@ async function processTaskIpc(
     const resultFileName = `${type}_result_${requestId}.json`;
     const resultFilePath = path.resolve(tasksDir, resultFileName);
     if (!resultFilePath.startsWith(tasksDirResolved + path.sep)) {
-      logger.warn({ sourceGroup: group, requestId, resultFilePath }, `Rejected ${type} request with unsafe result path`);
+      logger.warn(
+        { sourceGroup: group, requestId, resultFilePath },
+        `Rejected ${type} request with unsafe result path`,
+      );
       return;
     }
     fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
@@ -6031,41 +6098,51 @@ async function processTaskIpc(
     // --- Issue management IPC handlers (MCP tool round-trips) ---
 
     case 'issue_list':
-      await handleIpcResultReply(data, sourceGroup, 'issue_list', async (taskDir, taskDirResolved) => {
-        void taskDir; void taskDirResolved;
-        // Resolve the effective owner user for this IPC caller.
-        const callerUserId = sourceGroupEntry?.created_by;
-        const isAdmin = !!isAdminHome;
-        const accessibleJids: string[] | undefined = (() => {
-          if (isAdmin) return undefined;
-          if (!callerUserId) return [];
-          return Object.entries(getAllRegisteredGroups())
-            .filter(([jid, g]) => {
-              if (g.created_by === callerUserId) return true;
-              // Non-admins only see workspaces they created.
-              return false;
-            })
-            .map(([jid]) => jid);
-        })();
-        const { issues, total } = listIssues({
-          workspaceJid: data.workspace_jid as string | undefined,
-          workspaceJids: accessibleJids,
-          query: data.query as string | undefined,
-          statuses: data.status ? [data.status as any] : undefined,
-          priorities: data.priority ? [data.priority as any] : undefined,
-          assigneeUserId: data.assignee as string | undefined,
-          limit: Math.min(Number(data.limit ?? 20), 100),
-          offset: 0,
-        });
-        return {
-          issues: issues.map((i) => ({
-            id: i.id, title: i.title, status: i.status, priority: i.priority,
-            assignee_user_id: i.assignee_user_id,
-            created_at: i.created_at, updated_at: i.updated_at,
-          })),
-          total,
-        };
-      });
+      await handleIpcResultReply(
+        data,
+        sourceGroup,
+        'issue_list',
+        async (taskDir, taskDirResolved) => {
+          void taskDir;
+          void taskDirResolved;
+          // Resolve the effective owner user for this IPC caller.
+          const callerUserId = sourceGroupEntry?.created_by;
+          const isAdmin = !!isAdminHome;
+          const accessibleJids: string[] | undefined = (() => {
+            if (isAdmin) return undefined;
+            if (!callerUserId) return [];
+            return Object.entries(getAllRegisteredGroups())
+              .filter(([jid, g]) => {
+                if (g.created_by === callerUserId) return true;
+                // Non-admins only see workspaces they created.
+                return false;
+              })
+              .map(([jid]) => jid);
+          })();
+          const { issues, total } = listIssues({
+            workspaceJid: data.workspace_jid as string | undefined,
+            workspaceJids: accessibleJids,
+            query: data.query as string | undefined,
+            statuses: data.status ? [data.status as any] : undefined,
+            priorities: data.priority ? [data.priority as any] : undefined,
+            assigneeUserId: data.assignee as string | undefined,
+            limit: Math.min(Number(data.limit ?? 20), 100),
+            offset: 0,
+          });
+          return {
+            issues: issues.map((i) => ({
+              id: i.id,
+              title: i.title,
+              status: i.status,
+              priority: i.priority,
+              assignee_user_id: i.assignee_user_id,
+              created_at: i.created_at,
+              updated_at: i.updated_at,
+            })),
+            total,
+          };
+        },
+      );
       break;
 
     case 'issue_get':
@@ -6082,12 +6159,16 @@ async function processTaskIpc(
         }
         return {
           issue: {
-            id: issue.id, title: issue.title, description: issue.description,
-            status: issue.status, priority: issue.priority,
+            id: issue.id,
+            title: issue.title,
+            description: issue.description,
+            status: issue.status,
+            priority: issue.priority,
             assignee_user_id: issue.assignee_user_id,
             due_date: issue.due_date,
             workspace_jid: issue.workspace_jid,
-            created_at: issue.created_at, updated_at: issue.updated_at,
+            created_at: issue.created_at,
+            updated_at: issue.updated_at,
             closed_at: issue.closed_at,
             last_run_status: issue.last_run_status,
           },
@@ -6096,245 +6177,378 @@ async function processTaskIpc(
       break;
 
     case 'issue_create':
-      await handleIpcResultReply(data, sourceGroup, 'issue_create', async () => {
-        const callerUserId = sourceGroupEntry?.created_by;
-        if (!callerUserId) return { error: 'Cannot determine caller identity' };
-        // Resolve target workspace: explicit workspace_jid, else caller's home group.
-        let workspaceJid = data.workspace_jid as string | undefined;
-        let workspaceFolder: string | undefined;
-        if (workspaceJid) {
-          const rg = getRegisteredGroup(workspaceJid);
-          if (!rg) return { error: 'Workspace not found' };
-          // RBAC: non-admin can only create issues in own workspaces.
-          if (!isAdminHome && rg.created_by !== callerUserId) return { error: 'Workspace not found' };
-          workspaceFolder = rg.folder;
-        } else {
-          const home = getUserHomeGroup(callerUserId);
-          if (!home) return { error: 'User has no home workspace' };
-          workspaceJid = home.jid;
-          workspaceFolder = home.folder;
-        }
-
-        // Resolve optional project repo
-        let repoFields: Record<string, unknown> = {};
-        const projectRepoId = data.project_repo_id as string | undefined;
-        if (projectRepoId) {
-          const repo = getManagedRepoById(projectRepoId);
-          if (repo && repo.createdBy === callerUserId) {
-            repoFields = {
-              project_repo_id: repo.id,
-              project_git_url: repo.gitUrl ?? null,
-              project_device_path: repo.devicePath ?? null,
-              project_device_link_id: repo.deviceLinkId ?? null,
-            };
+      await handleIpcResultReply(
+        data,
+        sourceGroup,
+        'issue_create',
+        async () => {
+          const callerUserId = sourceGroupEntry?.created_by;
+          if (!callerUserId)
+            return { error: 'Cannot determine caller identity' };
+          // Resolve target workspace: explicit workspace_jid, else caller's home group.
+          let workspaceJid = data.workspace_jid as string | undefined;
+          let workspaceFolder: string | undefined;
+          if (workspaceJid) {
+            const rg = getRegisteredGroup(workspaceJid);
+            if (!rg) return { error: 'Workspace not found' };
+            // RBAC: non-admin can only create issues in own workspaces.
+            if (!isAdminHome && rg.created_by !== callerUserId)
+              return { error: 'Workspace not found' };
+            workspaceFolder = rg.folder;
+          } else {
+            const home = getUserHomeGroup(callerUserId);
+            if (!home) return { error: 'User has no home workspace' };
+            workspaceJid = home.jid;
+            workspaceFolder = home.folder;
           }
-        }
 
-        const now = new Date().toISOString();
-        const issue = createIssue({
-          id: `iss_${crypto.randomBytes(8).toString('hex')}`,
-          workspace_jid: workspaceJid,
-          workspace_folder: workspaceFolder,
-          title: (data.title as string) || '(untitled)',
-          description: (data.description as string) || '',
-          status: (data.status as any) ?? 'todo',
-          priority: (data.priority as any) ?? 'medium',
-          assignee_user_id: (data.assignee_user_id as string) ?? null,
-          due_date: (data.due_date as string) ?? null,
-          ...repoFields,
-          agent_link_id: (data.agent_link_id as string) ?? null,
-          agent_client_id: (data.agent_client_id as string) ?? null,
-          execution_node: (data.execution_node as string) ?? null,
-          backend: (data.backend as string) ?? null,
-          selected_skills: undefined,
-          created_by: callerUserId,
-          created_at: now,
-          updated_at: now,
-        });
+          // Resolve optional project repo
+          let repoFields: Record<string, unknown> = {};
+          const projectRepoId = data.project_repo_id as string | undefined;
+          if (projectRepoId) {
+            const repo = getManagedRepoById(projectRepoId);
+            if (repo && repo.createdBy === callerUserId) {
+              repoFields = {
+                project_repo_id: repo.id,
+                project_git_url: repo.gitUrl ?? null,
+                project_device_path: repo.devicePath ?? null,
+                project_device_link_id: repo.deviceLinkId ?? null,
+              };
+            }
+          }
 
-        const evCreated = createIssueEvent({
-          issue_id: issue.id, event_type: 'created',
-          actor_id: callerUserId, actor_type: 'agent',
-          title: 'Issue created by agent',
-          summary: `${issue.status} · ${issue.priority}`,
-          detail: { status: issue.status, priority: issue.priority },
-          created_at: now,
-        });
-        afterIssueEventCreated(evCreated, issue);
-
-        // Optional: immediately enqueue an agent run
-        let run: any = null;
-        if (data.start_agent === true) {
-          run = createIssueAgentRun({
-            id: `irun_${crypto.randomBytes(8).toString('hex')}`,
-            issue_id: issue.id,
-            workspace_jid: issue.workspace_jid,
-            workspace_folder: issue.workspace_folder,
-            status: 'queued',
+          const now = new Date().toISOString();
+          const issue = createIssue({
+            id: `iss_${crypto.randomBytes(8).toString('hex')}`,
+            workspace_jid: workspaceJid,
+            workspace_folder: workspaceFolder,
+            title: (data.title as string) || '(untitled)',
+            description: (data.description as string) || '',
+            status: (data.status as any) ?? 'todo',
+            priority: (data.priority as any) ?? 'medium',
+            assignee_user_id: (data.assignee_user_id as string) ?? null,
+            due_date: (data.due_date as string) ?? null,
+            ...repoFields,
+            agent_link_id: (data.agent_link_id as string) ?? null,
+            agent_client_id: (data.agent_client_id as string) ?? null,
+            execution_node: (data.execution_node as string) ?? null,
+            backend: (data.backend as string) ?? null,
+            selected_skills: undefined,
             created_by: callerUserId,
-            created_at: new Date().toISOString(),
+            created_at: now,
+            updated_at: now,
           });
-          updateIssueLastRun(issue.id, run.id, 'queued');
-          const evRun = createIssueEvent({
-            issue_id: issue.id, run_id: run.id, event_type: 'run_created',
-            actor_id: callerUserId, actor_type: 'agent',
-            title: 'Run enqueued', summary: 'Created from agent tool call',
-            detail: { run_id: run.id, status: run.status, trigger: 'issue_create' },
-          });
-          afterIssueEventCreated(evRun, issue);
-          // Enqueue via queue. The queue.runIssueAgent pattern mirrors routes.
-          const deps = getWebDeps();
-          if (deps?.queue) {
-            const runChatJid = `${issue.workspace_jid}#issue:${run.id}`;
-            deps.queue.enqueueTask(runChatJid, `issue:${run.id}`, async () => {
-              await runIssueAgent(issue.id, run.id, {
-                queue: deps.queue,
-                broadcastStreamEvent: deps.broadcastStreamEvent,
-              });
-            });
-          }
-        }
 
-        return {
-          issue: { id: issue.id, title: issue.title, status: issue.status },
-          run: run ? { id: run.id, status: run.status } : undefined,
-        };
-      });
+          const evCreated = createIssueEvent({
+            issue_id: issue.id,
+            event_type: 'created',
+            actor_id: callerUserId,
+            actor_type: 'agent',
+            title: 'Issue created by agent',
+            summary: `${issue.status} · ${issue.priority}`,
+            detail: { status: issue.status, priority: issue.priority },
+            created_at: now,
+          });
+          afterIssueEventCreated(evCreated, issue);
+
+          // Optional: immediately enqueue an agent run
+          let run: any = null;
+          if (data.start_agent === true) {
+            run = createIssueAgentRun({
+              id: `irun_${crypto.randomBytes(8).toString('hex')}`,
+              issue_id: issue.id,
+              workspace_jid: issue.workspace_jid,
+              workspace_folder: issue.workspace_folder,
+              status: 'queued',
+              created_by: callerUserId,
+              created_at: new Date().toISOString(),
+            });
+            updateIssueLastRun(issue.id, run.id, 'queued');
+            const evRun = createIssueEvent({
+              issue_id: issue.id,
+              run_id: run.id,
+              event_type: 'run_created',
+              actor_id: callerUserId,
+              actor_type: 'agent',
+              title: 'Run enqueued',
+              summary: 'Created from agent tool call',
+              detail: {
+                run_id: run.id,
+                status: run.status,
+                trigger: 'issue_create',
+              },
+            });
+            afterIssueEventCreated(evRun, issue);
+            // Enqueue via queue. The queue.runIssueAgent pattern mirrors routes.
+            const deps = getWebDeps();
+            if (deps?.queue) {
+              const runChatJid = `${issue.workspace_jid}#issue:${run.id}`;
+              deps.queue.enqueueTask(
+                runChatJid,
+                `issue:${run.id}`,
+                async () => {
+                  await runIssueAgent(issue.id, run.id, {
+                    queue: deps.queue,
+                    broadcastStreamEvent: deps.broadcastStreamEvent,
+                  });
+                },
+              );
+            }
+          }
+
+          return {
+            issue: { id: issue.id, title: issue.title, status: issue.status },
+            run: run ? { id: run.id, status: run.status } : undefined,
+          };
+        },
+      );
       break;
 
     case 'issue_update':
-      await handleIpcResultReply(data, sourceGroup, 'issue_update', async () => {
-        const id = data.id as string;
-        if (!id) return { error: 'Missing issue id' };
-        const issue = getIssueById(id);
-        if (!issue) return { error: 'Issue not found' };
-        const callerUserId = sourceGroupEntry?.created_by;
-        const group = getRegisteredGroup(issue.workspace_jid);
-        if (!isAdminHome && group?.created_by !== callerUserId) return { error: 'Issue not found' };
+      await handleIpcResultReply(
+        data,
+        sourceGroup,
+        'issue_update',
+        async () => {
+          const id = data.id as string;
+          if (!id) return { error: 'Missing issue id' };
+          const issue = getIssueById(id);
+          if (!issue) return { error: 'Issue not found' };
+          const callerUserId = sourceGroupEntry?.created_by;
+          const group = getRegisteredGroup(issue.workspace_jid);
+          if (!isAdminHome && group?.created_by !== callerUserId)
+            return { error: 'Issue not found' };
 
-        // Build patch from provided fields only (explicit undefineds are respected for nullable fields)
-        const patch: Record<string, unknown> = {};
-        if ('title' in data && data.title !== undefined) patch.title = data.title;
-        if ('description' in data && data.description !== undefined) patch.description = data.description;
-        if ('status' in data && data.status !== undefined) patch.status = data.status;
-        if ('priority' in data && data.priority !== undefined) patch.priority = data.priority;
-        if ('assignee_user_id' in data) patch.assignee_user_id = data.assignee_user_id;
-        if ('due_date' in data) patch.due_date = data.due_date;
+          // Build patch from provided fields only (explicit undefineds are respected for nullable fields)
+          const patch: Record<string, unknown> = {};
+          if ('title' in data && data.title !== undefined)
+            patch.title = data.title;
+          if ('description' in data && data.description !== undefined)
+            patch.description = data.description;
+          if ('status' in data && data.status !== undefined)
+            patch.status = data.status;
+          if ('priority' in data && data.priority !== undefined)
+            patch.priority = data.priority;
+          if ('assignee_user_id' in data)
+            patch.assignee_user_id = data.assignee_user_id;
+          if ('due_date' in data) patch.due_date = data.due_date;
 
-        if (Object.keys(patch).length === 0) {
-          return { issue: { id: issue.id, title: issue.title, status: issue.status } };
-        }
+          if (Object.keys(patch).length === 0) {
+            return {
+              issue: { id: issue.id, title: issue.title, status: issue.status },
+            };
+          }
 
-        updateIssue(issue.id, patch);
-        const updated = getIssueById(issue.id)!;
+          updateIssue(issue.id, patch);
+          const updated = getIssueById(issue.id)!;
 
-        const patchEvents: Array<{ type: any; title: string; summary?: string; detail?: Record<string, unknown> }> = [];
-        if (issue.status !== updated.status) patchEvents.push({ type: 'status_changed', title: 'Status changed by agent', summary: `${issue.status} → ${updated.status}`, detail: { from: issue.status, to: updated.status, cause: 'agent_tool' } });
-        if (issue.priority !== updated.priority) patchEvents.push({ type: 'priority_changed', title: 'Priority changed by agent', summary: `${issue.priority} → ${updated.priority}`, detail: { from: issue.priority, to: updated.priority } });
-        if (issue.assignee_user_id !== updated.assignee_user_id) patchEvents.push({ type: 'assignee_changed', title: 'Assignee changed', summary: `${issue.assignee_user_id ?? 'none'} → ${updated.assignee_user_id ?? 'none'}`, detail: { from: issue.assignee_user_id ?? null, to: updated.assignee_user_id ?? null } });
-        if (issue.due_date !== updated.due_date) patchEvents.push({ type: 'due_date_changed', title: 'Due date changed', detail: { from: issue.due_date ?? null, to: updated.due_date ?? null } });
-        if (issue.title !== updated.title) patchEvents.push({ type: 'title_changed', title: 'Title changed', summary: `${issue.title.slice(0, 80)} → ${updated.title.slice(0, 80)}`, detail: { from: issue.title, to: updated.title } });
-        if (issue.description !== updated.description) patchEvents.push({ type: 'description_changed', title: 'Description changed', detail: { from_length: issue.description.length, to_length: updated.description.length } });
-        if (patchEvents.length === 0) patchEvents.push({ type: 'updated', title: 'Issue updated' });
+          const patchEvents: Array<{
+            type: any;
+            title: string;
+            summary?: string;
+            detail?: Record<string, unknown>;
+          }> = [];
+          if (issue.status !== updated.status)
+            patchEvents.push({
+              type: 'status_changed',
+              title: 'Status changed by agent',
+              summary: `${issue.status} → ${updated.status}`,
+              detail: {
+                from: issue.status,
+                to: updated.status,
+                cause: 'agent_tool',
+              },
+            });
+          if (issue.priority !== updated.priority)
+            patchEvents.push({
+              type: 'priority_changed',
+              title: 'Priority changed by agent',
+              summary: `${issue.priority} → ${updated.priority}`,
+              detail: { from: issue.priority, to: updated.priority },
+            });
+          if (issue.assignee_user_id !== updated.assignee_user_id)
+            patchEvents.push({
+              type: 'assignee_changed',
+              title: 'Assignee changed',
+              summary: `${issue.assignee_user_id ?? 'none'} → ${updated.assignee_user_id ?? 'none'}`,
+              detail: {
+                from: issue.assignee_user_id ?? null,
+                to: updated.assignee_user_id ?? null,
+              },
+            });
+          if (issue.due_date !== updated.due_date)
+            patchEvents.push({
+              type: 'due_date_changed',
+              title: 'Due date changed',
+              detail: {
+                from: issue.due_date ?? null,
+                to: updated.due_date ?? null,
+              },
+            });
+          if (issue.title !== updated.title)
+            patchEvents.push({
+              type: 'title_changed',
+              title: 'Title changed',
+              summary: `${issue.title.slice(0, 80)} → ${updated.title.slice(0, 80)}`,
+              detail: { from: issue.title, to: updated.title },
+            });
+          if (issue.description !== updated.description)
+            patchEvents.push({
+              type: 'description_changed',
+              title: 'Description changed',
+              detail: {
+                from_length: issue.description.length,
+                to_length: updated.description.length,
+              },
+            });
+          if (patchEvents.length === 0)
+            patchEvents.push({ type: 'updated', title: 'Issue updated' });
 
-        for (const ev of patchEvents) {
-          const event = createIssueEvent({
-            issue_id: issue.id, event_type: ev.type,
-            actor_id: callerUserId ?? null, actor_type: 'agent',
-            title: ev.title, summary: ev.summary ?? null, detail: ev.detail ?? null,
-          });
-          afterIssueEventCreated(event, updated);
-        }
+          for (const ev of patchEvents) {
+            const event = createIssueEvent({
+              issue_id: issue.id,
+              event_type: ev.type,
+              actor_id: callerUserId ?? null,
+              actor_type: 'agent',
+              title: ev.title,
+              summary: ev.summary ?? null,
+              detail: ev.detail ?? null,
+            });
+            afterIssueEventCreated(event, updated);
+          }
 
-        return { issue: { id: updated.id, title: updated.title, status: updated.status } };
-      });
+          return {
+            issue: {
+              id: updated.id,
+              title: updated.title,
+              status: updated.status,
+            },
+          };
+        },
+      );
       break;
 
     case 'issue_comment':
-      await handleIpcResultReply(data, sourceGroup, 'issue_comment', async () => {
-        const id = data.id as string;
-        const body = data.body as string;
-        if (!id || !body) return { error: 'Missing issue id or body' };
-        const issue = getIssueById(id);
-        if (!issue) return { error: 'Issue not found' };
-        const callerUserId = sourceGroupEntry?.created_by;
-        const group = getRegisteredGroup(issue.workspace_jid);
-        if (!isAdminHome && group?.created_by !== callerUserId) return { error: 'Issue not found' };
+      await handleIpcResultReply(
+        data,
+        sourceGroup,
+        'issue_comment',
+        async () => {
+          const id = data.id as string;
+          const body = data.body as string;
+          if (!id || !body) return { error: 'Missing issue id or body' };
+          const issue = getIssueById(id);
+          if (!issue) return { error: 'Issue not found' };
+          const callerUserId = sourceGroupEntry?.created_by;
+          const group = getRegisteredGroup(issue.workspace_jid);
+          if (!isAdminHome && group?.created_by !== callerUserId)
+            return { error: 'Issue not found' };
 
-        const comment = createIssueComment({
-          issue_id: issue.id,
-          workspace_jid: issue.workspace_jid,
-          body,
-          created_by: callerUserId ?? null,
-          source_type: 'agent',
-        });
-        const ev = createIssueEvent({
-          issue_id: issue.id, event_type: 'comment_created',
-          actor_id: callerUserId ?? null, actor_type: 'agent',
-          title: 'Agent commented',
-          summary: comment.body.length > 160 ? comment.body.slice(0, 160) + '...' : comment.body,
-          detail: { comment_id: comment.id, body_length: comment.body.length },
-          reference_id: comment.id,
-        });
-        afterIssueEventCreated(ev, issue);
+          const comment = createIssueComment({
+            issue_id: issue.id,
+            workspace_jid: issue.workspace_jid,
+            body,
+            created_by: callerUserId ?? null,
+            source_type: 'agent',
+          });
+          const ev = createIssueEvent({
+            issue_id: issue.id,
+            event_type: 'comment_created',
+            actor_id: callerUserId ?? null,
+            actor_type: 'agent',
+            title: 'Agent commented',
+            summary:
+              comment.body.length > 160
+                ? comment.body.slice(0, 160) + '...'
+                : comment.body,
+            detail: {
+              comment_id: comment.id,
+              body_length: comment.body.length,
+            },
+            reference_id: comment.id,
+          });
+          afterIssueEventCreated(ev, issue);
 
-        return { comment: { id: comment.id, created_at: comment.created_at } };
-      });
+          return {
+            comment: { id: comment.id, created_at: comment.created_at },
+          };
+        },
+      );
       break;
 
     case 'issue_ask_user':
-      await handleIpcResultReply(data, sourceGroup, 'issue_ask_user', async () => {
-        const askData = data as Record<string, unknown>;
-        const runId = askData.runId as string | undefined;
-        const issueId = askData.issueId as string | undefined;
-        const question = askData.question as string | undefined;
-        const choices = (askData.choices as string[] | undefined) ?? undefined;
-        if (!runId || !issueId || !question) {
-          return { error: 'Missing runId, issueId or question' };
-        }
-        const issue = getIssueById(issueId);
-        if (!issue) return { error: 'Issue not found' };
-        const callerUserId = sourceGroupEntry?.created_by;
-        const group = getRegisteredGroup(issue.workspace_jid);
-        if (!isAdminHome && group?.created_by !== callerUserId) return { error: 'Issue not found' };
-        const run = getIssueAgentRunById(runId);
-        if (!run || run.issue_id !== issueId) return { error: 'Run not found' };
+      await handleIpcResultReply(
+        data,
+        sourceGroup,
+        'issue_ask_user',
+        async () => {
+          const askData = data as Record<string, unknown>;
+          const runId = askData.runId as string | undefined;
+          const issueId = askData.issueId as string | undefined;
+          const question = askData.question as string | undefined;
+          const choices =
+            (askData.choices as string[] | undefined) ?? undefined;
+          if (!runId || !issueId || !question) {
+            return { error: 'Missing runId, issueId or question' };
+          }
+          const issue = getIssueById(issueId);
+          if (!issue) return { error: 'Issue not found' };
+          const callerUserId = sourceGroupEntry?.created_by;
+          const group = getRegisteredGroup(issue.workspace_jid);
+          if (!isAdminHome && group?.created_by !== callerUserId)
+            return { error: 'Issue not found' };
+          const run = getIssueAgentRunById(runId);
+          if (!run || run.issue_id !== issueId)
+            return { error: 'Run not found' };
 
-        const now = new Date().toISOString();
-        const expiresAt = new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString();
-        const reqId = `iaq_${crypto.randomBytes(8).toString('hex')}`;
-        const req = createIssueAgentRequest({
-          id: reqId,
-          issue_id: issueId,
-          run_id: runId,
-          kind: 'clarification',
-          title: 'Agent asked a question',
-          summary: question.slice(0, 200),
-          payload: { question, choices: choices ?? [] },
-          status: 'pending',
-          created_at: now,
-          expires_at: expiresAt,
-        });
-        setIssueAgentRunAwaiting(runId, 'clarification', req.id);
-        if (issue.status !== 'waiting_for_human') {
-          updateIssue(issueId, { status: 'waiting_for_human' });
-        }
-        const ev = createIssueEvent({
-          issue_id: issueId,
-          run_id: runId,
-          event_type: 'agent_request_created',
-          actor_id: callerUserId ?? null,
-          actor_type: 'agent',
-          title: 'Agent asked a question',
-          summary: question.slice(0, 200),
-          payload: { requestId: req.id, kind: 'clarification', question, choices: choices ?? [] },
-          reference_id: req.id,
-        });
-        afterIssueEventCreated(ev, issue);
-        const deps = getWebDeps();
-        deps?.broadcastIssueRequest?.(issue.workspace_jid, issueId, req, 'issue_request_created');
-        return { requestId: req.id };
-      });
+          const now = new Date().toISOString();
+          const expiresAt = new Date(
+            Date.now() + 5 * 60 * 60 * 1000,
+          ).toISOString();
+          const reqId = `iaq_${crypto.randomBytes(8).toString('hex')}`;
+          const req = createIssueAgentRequest({
+            id: reqId,
+            issue_id: issueId,
+            run_id: runId,
+            kind: 'clarification',
+            title: 'Agent asked a question',
+            summary: question.slice(0, 200),
+            payload: { question, choices: choices ?? [] },
+            status: 'pending',
+            created_at: now,
+            expires_at: expiresAt,
+          });
+          setIssueAgentRunAwaiting(runId, 'clarification', req.id);
+          if (issue.status !== 'waiting_for_human') {
+            updateIssue(issueId, { status: 'waiting_for_human' });
+          }
+          const ev = createIssueEvent({
+            issue_id: issueId,
+            run_id: runId,
+            event_type: 'agent_request_created',
+            actor_id: callerUserId ?? null,
+            actor_type: 'agent',
+            title: 'Agent asked a question',
+            summary: question.slice(0, 200),
+            payload: {
+              requestId: req.id,
+              kind: 'clarification',
+              question,
+              choices: choices ?? [],
+            },
+            reference_id: req.id,
+          });
+          afterIssueEventCreated(ev, issue);
+          const deps = getWebDeps();
+          deps?.broadcastIssueRequest?.(
+            issue.workspace_jid,
+            issueId,
+            req,
+            'issue_request_created',
+          );
+          return { requestId: req.id };
+        },
+      );
       break;
 
     case 'send_file':
@@ -6588,6 +6802,11 @@ async function processAgentConversation(
   chatJid: string,
   agentId: string,
 ): Promise<void> {
+  const processStartedAt = Date.now();
+  logger.info(
+    { chatJid, agentId },
+    'processAgentConversation entered',
+  );
   const agent = getAgent(agentId);
   if (!agent || (agent.kind !== 'conversation' && agent.kind !== 'spawn')) {
     logger.warn(
@@ -6612,6 +6831,18 @@ async function processAgentConversation(
   // Get pending messages
   const sinceCursor = lastAgentTimestamp[virtualChatJid] || EMPTY_CURSOR;
   let missedMessages = getMessagesSince(virtualChatJid, sinceCursor);
+  logger.info(
+    {
+      chatJid,
+      virtualChatJid,
+      agentId,
+      missedMessageCount: missedMessages.length,
+      sinceTimestamp: sinceCursor.timestamp,
+      sinceId: sinceCursor.id,
+      elapsedMs: Date.now() - processStartedAt,
+    },
+    'processAgentConversation loaded pending messages',
+  );
 
   // Owner gate (single chokepoint for all 5 call sites: normal dispatch,
   // IM-restart recovery, unconsumed-IPC recovery, /spawn). The main message
@@ -6893,6 +7124,20 @@ async function processAgentConversation(
   };
 
   const wrappedOnOutput = async (output: ContainerOutput) => {
+    const outputStartedAt = Date.now();
+    logger.info(
+      {
+        chatJid,
+        virtualChatJid,
+        agentId,
+        status: output.status,
+        streamEventType: output.streamEvent?.eventType,
+        resultBytes:
+          typeof output.result === 'string' ? output.result.length : undefined,
+        hasError: !!output.error,
+      },
+      'processAgentConversation onOutput started',
+    );
     // #547: warm-lifecycle bookkeeping — mark activity, and flag query-idle on
     // a substantive result / interruption so the runner can be kept warm.
     queue.markRunnerActivity(virtualJid);
@@ -6909,7 +7154,7 @@ async function processAgentConversation(
     // the next turn starts fresh on the newly-selected provider.
     if (output.providerFailure) {
       try {
-        deleteSession(effectiveGroup.folder, agentId);
+        clearSessionId(effectiveGroup.folder, agentId);
         currentAgentSessionId = undefined;
       } catch (err) {
         logger.warn(
@@ -6933,6 +7178,9 @@ async function processAgentConversation(
     if (output.status === 'stream' && output.streamEvent) {
       broadcastStreamEvent(chatJid, output.streamEvent, agentId);
       persistToolMessage(chatJid, output.streamEvent, agentId);
+      if (output.streamEvent.eventType === 'permission_request') {
+        void maybeSendFeishuApprovalCard(chatJid, output.streamEvent);
+      }
 
       // ── 累积 text_delta 文本（中断时用于保存已输出内容）──
       if (
@@ -7034,8 +7282,7 @@ async function processAgentConversation(
           // Write to usage_records + usage_daily_summary
           // Sub-Agent 的 effectiveGroup 可能没有 created_by，从父群组继承
           writeUsageRecords({
-            userId:
-              resolveUsageOwnerId(effectiveGroup, chatJid) || 'system',
+            userId: resolveUsageOwnerId(effectiveGroup, chatJid) || 'system',
             groupFolder: effectiveGroup.folder,
             agentId,
             messageId: lastAgentReplyMsgId,
@@ -7060,7 +7307,10 @@ async function processAgentConversation(
             }
             const owner = getUserById(usageOwnerId);
             if (owner && owner.role !== 'admin') {
-              const freshAccess = checkBillingAccessFresh(usageOwnerId, owner.role);
+              const freshAccess = checkBillingAccessFresh(
+                usageOwnerId,
+                owner.role,
+              );
               if (freshAccess.usage) {
                 broadcastBillingUpdate(usageOwnerId, { ...freshAccess });
               }
@@ -7077,6 +7327,17 @@ async function processAgentConversation(
       // Reset idle timer on stream events so long-running tool calls
       // don't get killed while the agent is actively working.
       resetIdleTimer();
+      logger.info(
+        {
+          chatJid,
+          virtualChatJid,
+          agentId,
+          status: output.status,
+          streamEventType: output.streamEvent.eventType,
+          elapsedMs: Date.now() - outputStartedAt,
+        },
+        'processAgentConversation onOutput finished',
+      );
       return;
     }
 
@@ -7096,6 +7357,17 @@ async function processAgentConversation(
         'Provider failure result suppressed from user (silent switch)',
       );
       resetIdleTimer();
+      logger.info(
+        {
+          chatJid,
+          virtualChatJid,
+          agentId,
+          status: output.status,
+          providerFailure: true,
+          elapsedMs: Date.now() - outputStartedAt,
+        },
+        'processAgentConversation onOutput finished',
+      );
       return;
     }
 
@@ -7318,11 +7590,36 @@ async function processAgentConversation(
       hadError = true;
       if (output.error) lastError = output.error;
     }
+    logger.info(
+      {
+        chatJid,
+        virtualChatJid,
+        agentId,
+        status: output.status,
+        resultBytes:
+          typeof output.result === 'string' ? output.result.length : undefined,
+        hadError,
+        elapsedMs: Date.now() - outputStartedAt,
+      },
+      'processAgentConversation onOutput finished',
+    );
   };
 
   ipcWatcherManager?.watchGroup(effectiveGroup.folder);
   try {
     const executionMode = effectiveGroup.executionMode || 'container';
+    logger.info(
+      {
+        chatJid,
+        virtualChatJid,
+        agentId,
+        executionMode,
+        groupFolder: effectiveGroup.folder,
+        backendId: backendForPromptPolicy.id,
+        elapsedMs: Date.now() - processStartedAt,
+      },
+      'processAgentConversation starting backend run',
+    );
     const onProcessCb = (
       proc: ChildProcess,
       identifier: string,
@@ -7336,6 +7633,18 @@ async function processAgentConversation(
         agentId,
         selectedProviderId,
       });
+      logger.info(
+        {
+          chatJid,
+          virtualChatJid,
+          agentId,
+          executionMode,
+          identifier,
+          selectedProviderId,
+          elapsedMs: Date.now() - processStartedAt,
+        },
+        'processAgentConversation backend process registered',
+      );
     };
 
     const containerInput: ContainerInput = {
@@ -8837,8 +9146,7 @@ function buildResolveEffectiveChatJid(): (
       messageMeta &&
       (messageMeta?.threadId || messageMeta?.rootId)
     ) {
-      const threadContextId =
-        messageMeta.threadId || messageMeta.rootId;
+      const threadContextId = messageMeta.threadId || messageMeta.rootId;
       if (!threadContextId) return null;
       const workspaceJid = resolveWorkspaceJid(group.target_main_jid);
       if (!workspaceJid) {
@@ -9069,6 +9377,34 @@ function handleCardInterrupt(chatJid: string): void {
   }
 }
 
+async function handleFeishuApprovalDecision(decision: {
+  linkId: string;
+  runId: string;
+  requestId: string;
+  decision: 'approve' | 'reject';
+}): Promise<void> {
+  const session = getAgentLinkSession(decision.linkId);
+  if (!session || session.state !== 'open') {
+    logger.warn(
+      { linkId: decision.linkId, runId: decision.runId },
+      'Feishu approval decision dropped: agent-link offline',
+    );
+    return;
+  }
+  const ok = session.send({
+    type: 'agent.permission.decision',
+    runId: decision.runId,
+    requestId: decision.requestId,
+    decision: decision.decision,
+  });
+  if (!ok) {
+    logger.warn(
+      { linkId: decision.linkId, runId: decision.runId },
+      'Feishu approval decision send failed',
+    );
+  }
+}
+
 /**
  * Connect IM channels for a specific user via imManager.
  * Reads the user's IM config and connects if enabled.
@@ -9134,6 +9470,7 @@ async function connectUserIMChannels(
           isGroupOwnerMessage,
           isSenderAllowedInGroup,
           onCardInterrupt: handleCardInterrupt,
+          onApprovalDecision: handleFeishuApprovalDecision,
           onP2pSender: onFeishuP2pSender,
         })
       : Promise.resolve(false);
@@ -9431,7 +9768,10 @@ async function main(): Promise<void> {
       'Imported non-database data directory objects into database',
     );
   } catch (err) {
-    logger.warn({ err }, 'Failed to import data directory objects into database');
+    logger.warn(
+      { err },
+      'Failed to import data directory objects into database',
+    );
   }
 
   // Load custom backends from disk and register into the backend registry
@@ -9681,6 +10021,7 @@ async function main(): Promise<void> {
           isGroupOwnerMessage,
           isSenderAllowedInGroup,
           onCardInterrupt: handleCardInterrupt,
+          onApprovalDecision: handleFeishuApprovalDecision,
           onP2pSender: onAdminP2pSender,
         },
       );
@@ -9812,6 +10153,7 @@ async function main(): Promise<void> {
             isGroupOwnerMessage,
             isSenderAllowedInGroup,
             onCardInterrupt: handleCardInterrupt,
+            onApprovalDecision: handleFeishuApprovalDecision,
             onP2pSender: onReloadP2pSender,
           },
         );

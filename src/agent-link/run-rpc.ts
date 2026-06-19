@@ -56,6 +56,8 @@ export interface AgentRunController {
 
 const controllers = new Map<string, RunController>();
 const agentControllers = new Map<string, AgentRunController>();
+const agentRunRegisteredAt = new Map<string, number>();
+const agentRunFirstEventLogged = new Set<string>();
 
 export function registerRun(controller: RunController): void {
   if (controllers.has(controller.runId)) {
@@ -83,10 +85,14 @@ export function registerAgentRun(controller: AgentRunController): void {
     );
   }
   agentControllers.set(controller.runId, controller);
+  agentRunRegisteredAt.set(controller.runId, Date.now());
+  agentRunFirstEventLogged.delete(controller.runId);
 }
 
 export function unregisterAgentRun(runId: string): void {
   agentControllers.delete(runId);
+  agentRunRegisteredAt.delete(runId);
+  agentRunFirstEventLogged.delete(runId);
 }
 
 export function getAgentRun(runId: string): AgentRunController | undefined {
@@ -154,7 +160,25 @@ export function deliverResult(frame: RunResultFrame): void {
 
 export function deliverAgentRunStatus(frame: AgentRunStatusFrame): void {
   const ctrl = agentControllers.get(frame.runId);
-  if (!ctrl?.onStatus) return;
+  if (!ctrl?.onStatus) {
+    logger.debug(
+      { runId: frame.runId, status: frame.status },
+      'agent-run-rpc: drop status for unknown runId',
+    );
+    return;
+  }
+  const registeredAt = agentRunRegisteredAt.get(frame.runId);
+  logger.info(
+    {
+      runId: frame.runId,
+      linkId: ctrl.linkId,
+      agentId: frame.agentId,
+      status: frame.status,
+      elapsedSinceRegisterMs:
+        registeredAt === undefined ? undefined : Date.now() - registeredAt,
+    },
+    'agent-run-rpc: delivered status from daemon',
+  );
   try {
     ctrl.onStatus(frame);
   } catch (err) {
@@ -173,6 +197,24 @@ export function deliverAgentRunEvent(frame: AgentRunEventFrame): void {
       'agent-run-rpc: drop event for unknown runId',
     );
     return;
+  }
+  if (!agentRunFirstEventLogged.has(frame.runId)) {
+    agentRunFirstEventLogged.add(frame.runId);
+    const registeredAt = agentRunRegisteredAt.get(frame.runId);
+    logger.info(
+      {
+        runId: frame.runId,
+        linkId: ctrl.linkId,
+        agentId: frame.agentId,
+        eventType: frame.eventType,
+        textLength: frame.text?.length ?? 0,
+        hasPayload: !!frame.payload,
+        sessionId: frame.sessionId,
+        elapsedSinceRegisterMs:
+          registeredAt === undefined ? undefined : Date.now() - registeredAt,
+      },
+      'agent-run-rpc: delivered first event from daemon',
+    );
   }
   try {
     ctrl.onEvent(frame);
@@ -194,6 +236,24 @@ export function deliverAgentRunResult(frame: AgentRunResultFrame): void {
     return;
   }
   agentControllers.delete(frame.runId);
+  const registeredAt = agentRunRegisteredAt.get(frame.runId);
+  agentRunRegisteredAt.delete(frame.runId);
+  agentRunFirstEventLogged.delete(frame.runId);
+  logger.info(
+    {
+      runId: frame.runId,
+      linkId: ctrl.linkId,
+      agentId: frame.agentId,
+      ok: frame.ok,
+      timedOut: frame.timedOut,
+      durationMs: frame.durationMs,
+      resultLength: frame.result?.length ?? 0,
+      hasError: !!frame.error,
+      elapsedSinceRegisterMs:
+        registeredAt === undefined ? undefined : Date.now() - registeredAt,
+    },
+    'agent-run-rpc: delivered result from daemon',
+  );
   try {
     ctrl.finish(frame);
   } catch (err) {

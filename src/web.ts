@@ -955,6 +955,16 @@ async function handleAgentConversationMessage(
     }
     // No running process — force close any stale state and start fresh.
     // Mirrors the reliable IM path in buildOnAgentMessage() (#240).
+    logger.info(
+      {
+        chatJid,
+        virtualChatJid,
+        agentId,
+        messageId,
+        reason: 'no_active_runner',
+      },
+      'Agent conversation cold-start enqueue requested',
+    );
     deps.queue.closeStdin(virtualChatJid);
     if (deps.processAgentConversation) {
       const taskId = `agent-conv:${agentId}:${Date.now()}`;
@@ -962,6 +972,16 @@ async function handleAgentConversationMessage(
         await deps!.processAgentConversation!(chatJid, agentId);
       });
     }
+  } else {
+    logger.info(
+      {
+        chatJid,
+        virtualChatJid,
+        agentId,
+        messageId,
+      },
+      'Agent conversation message piped to active runner',
+    );
   }
   // 'sent' needs no further action
 }
@@ -1217,8 +1237,12 @@ function setupWebSocket(server: any): WebSocketServer {
 
         const msg: WsMessageIn = JSON.parse(data.toString());
 
-        const sendWsError = (error: string, chatJid?: string) => {
-          const msg: WsMessageOut = { type: 'ws_error', error, chatJid };
+        const sendWsError = (
+          error: string,
+          chatJid?: string,
+          agentId?: string,
+        ) => {
+          const msg: WsMessageOut = { type: 'ws_error', error, chatJid, agentId };
           ws.send(JSON.stringify(msg));
         };
 
@@ -1375,6 +1399,57 @@ function setupWebSocket(server: any): WebSocketServer {
 
           // Route to agent conversation handler if agentId is present
           if (agentId && deps) {
+            const agent = getAgent(agentId);
+            if (!agent || agent.kind !== 'conversation' || agent.chat_jid !== chatJid) {
+              sendWsError('会话不存在或已失效，请刷新后重试', chatJid, agentId);
+              logger.warn(
+                { chatJid, agentId, userId: session.user_id },
+                'WebSocket send_message rejected: stale or invalid agent conversation',
+              );
+              return;
+            }
+            const clientTrace = (msg as {
+              clientTrace?: {
+                conversationCreatedAt?: number;
+                tabSelectedAt?: number;
+                sendInvokedAt?: number;
+                wsSendAt?: number;
+              };
+            }).clientTrace;
+            const serverReceivedAt = Date.now();
+            logger.info(
+              {
+                chatJid,
+                agentId,
+                userId: session.user_id,
+                contentLength: content.trim().length,
+                attachmentCount: attachments?.length ?? 0,
+                rawMessageKeys: Object.keys(msg as Record<string, unknown>).sort(),
+                hasClientTrace: !!clientTrace,
+                clientTrace,
+                clientTraceKeys: clientTrace
+                  ? Object.keys(clientTrace as Record<string, unknown>).sort()
+                  : [],
+                serverReceivedAt,
+                elapsedSinceConversationCreatedMs:
+                  typeof clientTrace?.conversationCreatedAt === 'number'
+                    ? serverReceivedAt - clientTrace.conversationCreatedAt
+                    : undefined,
+                elapsedSinceTabSelectedMs:
+                  typeof clientTrace?.tabSelectedAt === 'number'
+                    ? serverReceivedAt - clientTrace.tabSelectedAt
+                    : undefined,
+                elapsedSinceSendInvokedMs:
+                  typeof clientTrace?.sendInvokedAt === 'number'
+                    ? serverReceivedAt - clientTrace.sendInvokedAt
+                    : undefined,
+                elapsedSinceClientWsSendMs:
+                  typeof clientTrace?.wsSendAt === 'number'
+                    ? serverReceivedAt - clientTrace.wsSendAt
+                    : undefined,
+              },
+              'Agent conversation WebSocket message received',
+            );
             await handleAgentConversationMessage(
               chatJid,
               agentId,

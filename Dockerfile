@@ -75,6 +75,7 @@ WORKDIR /src
 
 # Prefetch modules for better layer cache
 COPY client/octodeck-daemon/go.mod client/octodeck-daemon/go.sum ./
+COPY client/octodeck-daemon/third_party/acp-adapter/go.mod ./third_party/acp-adapter/go.mod
 RUN GOPROXY=https://goproxy.cn,direct go mod download
 
 # Copy source
@@ -88,7 +89,7 @@ RUN set -eux; \
       goarch="${pair#*/}"; \
       out="/out/dist/octodeck-daemon-${goos}-${goarch}"; \
       CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
-        go build -trimpath -ldflags="-s -w" -o "${out}" .; \
+        go build -trimpath -ldflags="-s -w" -o "${out}" ./cmd/octodeck-daemon; \
     done; \
     # 为旧路由 /api/daemon/octodeck-daemon-bin (无后缀) 准备一个当前平台的默认副本
     cp /out/dist/octodeck-daemon-linux-amd64 /out/octodeck-daemon; \
@@ -139,7 +140,7 @@ COPY --from=builder /app/config ./config
 # Copy Go daemon binaries (4 platforms + legacy single-binary fallback)
 COPY --from=daemon-builder /out/octodeck-daemon ./client/octodeck-daemon/octodeck-daemon
 COPY --from=daemon-builder /out/dist/         ./client/octodeck-daemon/dist/
-COPY client/octodeck-daemon/VERSION ./client/octodeck-daemon/VERSION
+COPY client/octodeck-daemon/cmd/octodeck-daemon/VERSION ./client/octodeck-daemon/cmd/octodeck-daemon/VERSION
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \

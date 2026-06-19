@@ -1195,7 +1195,10 @@ function initializeSqliteDatabase(
     repoKnowledgeFtsAvailable = true;
   } catch (err) {
     repoKnowledgeFtsAvailable = false;
-    logger.warn({ err }, 'SQLite FTS5 unavailable for repo knowledge; falling back to LIKE search');
+    logger.warn(
+      { err },
+      'SQLite FTS5 unavailable for repo knowledge; falling back to LIKE search',
+    );
   }
 
   // Lightweight migrations for existing DBs
@@ -1209,7 +1212,11 @@ function initializeSqliteDatabase(
   ensureColumn('users', 'avatar_emoji', 'TEXT');
   ensureColumn('users', 'avatar_color', 'TEXT');
   ensureColumn('repos', 'main_branch', 'TEXT');
-  ensureColumn('repo_knowledge_chunks', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(
+    'repo_knowledge_chunks',
+    'metadata_json',
+    "TEXT NOT NULL DEFAULT '{}'",
+  );
   ensureColumn('chats', 'archived_at', 'TEXT');
   ensureColumn('chats', 'archive_reason', 'TEXT');
   ensureColumn(
@@ -1928,7 +1935,9 @@ function initializeSqliteDatabase(
   // rows into the new issue_events table.
   {
     const hasIssueEvents = db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_events'")
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='issue_events'",
+      )
       .get();
     if (!hasIssueEvents) {
       db.exec(`
@@ -1952,7 +1961,9 @@ function initializeSqliteDatabase(
       `);
     }
     const hasIssueComments = db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_comments'")
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='issue_comments'",
+      )
       .get();
     if (!hasIssueComments) {
       db.exec(`
@@ -1973,7 +1984,9 @@ function initializeSqliteDatabase(
       `);
     }
     const hasIssueEventNotifications = db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_event_notifications'")
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='issue_event_notifications'",
+      )
       .get();
     if (!hasIssueEventNotifications) {
       db.exec(`
@@ -1991,8 +2004,18 @@ function initializeSqliteDatabase(
 
     // Migrate legacy issue_agent_run_events into issue_events if any rows
     // exist and issue_events is empty for those run ids.
-    const legacyCount = (db.prepare("SELECT COUNT(*) as c FROM issue_agent_run_events").get() as { c: number }).c;
-    const migratedCount = (db.prepare("SELECT COUNT(*) as c FROM issue_events WHERE run_id IS NOT NULL").get() as { c: number }).c;
+    const legacyCount = (
+      db.prepare('SELECT COUNT(*) as c FROM issue_agent_run_events').get() as {
+        c: number;
+      }
+    ).c;
+    const migratedCount = (
+      db
+        .prepare(
+          'SELECT COUNT(*) as c FROM issue_events WHERE run_id IS NOT NULL',
+        )
+        .get() as { c: number }
+    ).c;
     if (legacyCount > 0 && migratedCount === 0) {
       const insert = db.prepare(`
         INSERT INTO issue_events
@@ -2000,7 +2023,9 @@ function initializeSqliteDatabase(
         VALUES
           (@id, @issue_id, @run_id, @event_type, NULL, 'agent', @title, @summary, @detail, @payload, NULL, @created_at)
       `);
-      const select = db.prepare("SELECT id, issue_id, run_id, event_type, title, summary, detail, payload, created_at FROM issue_agent_run_events");
+      const select = db.prepare(
+        'SELECT id, issue_id, run_id, event_type, title, summary, detail, payload, created_at FROM issue_agent_run_events',
+      );
       const tx = db.transaction((rows: unknown[]) => {
         for (const row of rows) insert.run(row as any);
       });
@@ -2008,7 +2033,8 @@ function initializeSqliteDatabase(
       if (allRows.length <= 500) {
         tx(allRows);
       } else {
-        for (let i = 0; i < allRows.length; i += 500) tx(allRows.slice(i, i + 500));
+        for (let i = 0; i < allRows.length; i += 500)
+          tx(allRows.slice(i, i + 500));
       }
     }
   }
@@ -2016,9 +2042,12 @@ function initializeSqliteDatabase(
   // v39 → v40: repo_knowledge_runs 增加 task-agent 所需字段和 timeline 存储
   {
     const ensure = (col: string, decl: string) => {
-      const has = db.prepare("PRAGMA table_info('repo_knowledge_runs')").all()
+      const has = db
+        .prepare("PRAGMA table_info('repo_knowledge_runs')")
+        .all()
         .some((c: any) => c.name === col);
-      if (!has) db.exec(`ALTER TABLE repo_knowledge_runs ADD COLUMN ${col} ${decl}`);
+      if (!has)
+        db.exec(`ALTER TABLE repo_knowledge_runs ADD COLUMN ${col} ${decl}`);
     };
     ensure('agent_client_id', 'TEXT');
     ensure('upload_token_hash', 'TEXT');
@@ -2107,7 +2136,9 @@ function normalizeDataObjectPath(relativePath: string): string {
     throw new Error(`Invalid data object path: ${relativePath}`);
   }
   if (normalized === 'db' || normalized.startsWith('db/')) {
-    throw new Error('data/db is owned by the database backend and cannot be stored as a data object');
+    throw new Error(
+      'data/db is owned by the database backend and cannot be stored as a data object',
+    );
   }
   return normalized;
 }
@@ -2194,7 +2225,11 @@ export function deleteDataObject(relativePath: string): void {
   if (!db) throw new Error('Database not initialized');
   db.prepare(
     'UPDATE data_objects SET deleted_at = ?, updated_at = ? WHERE key = ?',
-  ).run(new Date().toISOString(), new Date().toISOString(), dataObjectKey(relativePath));
+  ).run(
+    new Date().toISOString(),
+    new Date().toISOString(),
+    dataObjectKey(relativePath),
+  );
 }
 
 export function listDataObjects(prefix = ''): DataObjectRecord[] {
@@ -2220,7 +2255,12 @@ export function listDataObjects(prefix = ''): DataObjectRecord[] {
 
 export function importDataFileToDatabase(absPath: string): void {
   const relativePath = path.relative(DATA_DIR, absPath).replace(/\\/g, '/');
-  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) return;
+  if (
+    !relativePath ||
+    relativePath.startsWith('..') ||
+    path.isAbsolute(relativePath)
+  )
+    return;
   if (relativePath === 'db' || relativePath.startsWith('db/')) return;
   const stat = fs.statSync(absPath);
   if (stat.isDirectory()) {
@@ -2242,7 +2282,10 @@ export function importDataFileToDatabase(absPath: string): void {
   });
 }
 
-export function migrateDataDirectoryToDatabase(): { files: number; directories: number } {
+export function migrateDataDirectoryToDatabase(): {
+  files: number;
+  directories: number;
+} {
   if (!db) throw new Error('Database not initialized');
   if (!fs.existsSync(DATA_DIR)) return { files: 0, directories: 0 };
   let files = 0;
@@ -2546,9 +2589,9 @@ export function recordAgentTeamArtifact(record: AgentTeamArtifactRecord): void {
     record.visibility ?? 'run',
     createdAt,
   );
-  db.prepare('DELETE FROM agent_team_artifact_edges WHERE child_artifact_id = ?').run(
-    record.id,
-  );
+  db.prepare(
+    'DELETE FROM agent_team_artifact_edges WHERE child_artifact_id = ?',
+  ).run(record.id);
   const insertEdge = db.prepare(
     `INSERT OR REPLACE INTO agent_team_artifact_edges (
       parent_artifact_id, child_artifact_id, relationship, created_at
@@ -2807,7 +2850,9 @@ export function listAgentTeamBlackboard(
     .all(runId) as Array<Record<string, unknown>>;
 }
 
-function artifactFromRow(row: Record<string, unknown>): AgentTeamArtifactRecord {
+function artifactFromRow(
+  row: Record<string, unknown>,
+): AgentTeamArtifactRecord {
   const parentRows = db
     ?.prepare(
       `SELECT parent_artifact_id AS parentArtifactId
@@ -2829,8 +2874,7 @@ function artifactFromRow(row: Record<string, unknown>): AgentTeamArtifactRecord 
       typeof row.sourceTaskId === 'string' ? row.sourceTaskId : undefined,
     sourceRoleId:
       typeof row.sourceRoleId === 'string' ? row.sourceRoleId : undefined,
-    confidence:
-      typeof row.confidence === 'number' ? row.confidence : undefined,
+    confidence: typeof row.confidence === 'number' ? row.confidence : undefined,
     visibility:
       row.visibility === 'role' || row.visibility === 'system'
         ? row.visibility
@@ -4379,12 +4423,17 @@ function mapIssueRunRow(row: unknown): IssueAgentRun {
 }
 
 function mapIssueRunEventRow(row: unknown): IssueAgentRunEvent {
-  const r = row as Omit<IssueAgentRunEvent, 'payload'> & { payload?: string | null };
+  const r = row as Omit<IssueAgentRunEvent, 'payload'> & {
+    payload?: string | null;
+  };
   let payload: Record<string, unknown> | null = null;
   if (r.payload) {
     try {
       const parsed = JSON.parse(r.payload);
-      payload = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { value: parsed };
+      payload =
+        parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? parsed
+          : { value: parsed };
     } catch {
       payload = { raw: r.payload };
     }
@@ -4424,7 +4473,9 @@ export interface IssueListFilters {
 }
 
 export function createIssue(
-  issue: Omit<WorkspaceIssue, 'selected_skills'> & { selected_skills?: string[] | null },
+  issue: Omit<WorkspaceIssue, 'selected_skills'> & {
+    selected_skills?: string[] | null;
+  },
 ): WorkspaceIssue {
   db.prepare(
     `
@@ -4489,7 +4540,9 @@ export function listIssues(filters: IssueListFilters = {}): {
     if (workspaceJids.length === 0) {
       where.push('1 = 0');
     } else {
-      where.push(`workspace_jid IN (${workspaceJids.map(() => '?').join(',')})`);
+      where.push(
+        `workspace_jid IN (${workspaceJids.map(() => '?').join(',')})`,
+      );
       values.push(...workspaceJids);
     }
   }
@@ -4532,7 +4585,9 @@ export function listIssues(filters: IssueListFilters = {}): {
   const limit = Math.max(1, Math.min(200, filters.limit ?? 100));
   const offset = Math.max(0, filters.offset ?? 0);
   const total = (
-    db.prepare(`SELECT COUNT(*) as total FROM issues ${whereSql}`).get(...values) as {
+    db
+      .prepare(`SELECT COUNT(*) as total FROM issues ${whereSql}`)
+      .get(...values) as {
       total: number;
     }
   ).total;
@@ -4610,31 +4665,50 @@ export function updateIssue(
     fields.push(`${column} = ?`);
     values.push(value);
   };
-  if (updates.title !== undefined) add('title', toUtf8String(updates.title, 'issues.title'));
+  if (updates.title !== undefined)
+    add('title', toUtf8String(updates.title, 'issues.title'));
   if (updates.description !== undefined)
     add('description', toUtf8String(updates.description, 'issues.description'));
   if (updates.status !== undefined) {
     add('status', updates.status);
-    add('closed_at', updates.status === 'done' || updates.status === 'canceled' ? new Date().toISOString() : null);
+    add(
+      'closed_at',
+      updates.status === 'done' || updates.status === 'canceled'
+        ? new Date().toISOString()
+        : null,
+    );
   }
   if (updates.priority !== undefined) add('priority', updates.priority);
-  if (updates.assignee_user_id !== undefined) add('assignee_user_id', updates.assignee_user_id);
+  if (updates.assignee_user_id !== undefined)
+    add('assignee_user_id', updates.assignee_user_id);
   if (updates.due_date !== undefined) add('due_date', updates.due_date);
-  if (updates.project_repo_id !== undefined) add('project_repo_id', updates.project_repo_id);
-  if (updates.project_git_url !== undefined) add('project_git_url', updates.project_git_url);
-  if (updates.project_device_path !== undefined) add('project_device_path', updates.project_device_path);
-  if (updates.project_device_link_id !== undefined) add('project_device_link_id', updates.project_device_link_id);
-  if (updates.agent_link_id !== undefined) add('agent_link_id', updates.agent_link_id);
-  if (updates.agent_client_id !== undefined) add('agent_client_id', updates.agent_client_id);
-  if (updates.execution_node !== undefined) add('execution_node', updates.execution_node);
+  if (updates.project_repo_id !== undefined)
+    add('project_repo_id', updates.project_repo_id);
+  if (updates.project_git_url !== undefined)
+    add('project_git_url', updates.project_git_url);
+  if (updates.project_device_path !== undefined)
+    add('project_device_path', updates.project_device_path);
+  if (updates.project_device_link_id !== undefined)
+    add('project_device_link_id', updates.project_device_link_id);
+  if (updates.agent_link_id !== undefined)
+    add('agent_link_id', updates.agent_link_id);
+  if (updates.agent_client_id !== undefined)
+    add('agent_client_id', updates.agent_client_id);
+  if (updates.execution_node !== undefined)
+    add('execution_node', updates.execution_node);
   if (updates.backend !== undefined) add('backend', updates.backend);
   if (updates.selected_skills !== undefined)
-    add('selected_skills', updates.selected_skills ? JSON.stringify(updates.selected_skills) : null);
+    add(
+      'selected_skills',
+      updates.selected_skills ? JSON.stringify(updates.selected_skills) : null,
+    );
   if (updates.closed_at !== undefined) add('closed_at', updates.closed_at);
   if (fields.length === 0) return;
   add('updated_at', new Date().toISOString());
   values.push(id);
-  db.prepare(`UPDATE issues SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  db.prepare(`UPDATE issues SET ${fields.join(', ')} WHERE id = ?`).run(
+    ...values,
+  );
 }
 
 export function updateIssueLastRun(
@@ -4663,7 +4737,9 @@ export function deleteIssue(id: string): void {
 }
 
 export function createIssueAgentRun(
-  run: Omit<IssueAgentRun, 'selected_skills'> & { selected_skills?: string[] | null },
+  run: Omit<IssueAgentRun, 'selected_skills'> & {
+    selected_skills?: string[] | null;
+  },
 ): IssueAgentRun {
   db.prepare(
     `
@@ -4685,8 +4761,12 @@ export function createIssueAgentRun(
     run.backend ?? null,
     run.selected_skills ? JSON.stringify(run.selected_skills) : null,
     run.status,
-    run.result == null ? null : toUtf8String(run.result, 'issue_agent_runs.result'),
-    run.error == null ? null : toUtf8String(run.error, 'issue_agent_runs.error'),
+    run.result == null
+      ? null
+      : toUtf8String(run.result, 'issue_agent_runs.result'),
+    run.error == null
+      ? null
+      : toUtf8String(run.error, 'issue_agent_runs.error'),
     run.session_id ?? null,
     run.parent_run_id ?? null,
     run.awaiting_kind ?? null,
@@ -4710,7 +4790,9 @@ export function getIssueAgentRunById(id: string): IssueAgentRun | undefined {
 
 export function listIssueAgentRuns(issueId: string): IssueAgentRun[] {
   return db
-    .prepare('SELECT * FROM issue_agent_runs WHERE issue_id = ? ORDER BY created_at DESC')
+    .prepare(
+      'SELECT * FROM issue_agent_runs WHERE issue_id = ? ORDER BY created_at DESC',
+    )
     .all(issueId)
     .map(mapIssueRunRow);
 }
@@ -4742,24 +4824,45 @@ export function updateIssueAgentRun(
   };
   if (updates.status !== undefined) add('status', updates.status);
   if (updates.result !== undefined)
-    add('result', updates.result == null ? null : toUtf8String(updates.result, 'issue_agent_runs.result'));
+    add(
+      'result',
+      updates.result == null
+        ? null
+        : toUtf8String(updates.result, 'issue_agent_runs.result'),
+    );
   if (updates.error !== undefined)
-    add('error', updates.error == null ? null : toUtf8String(updates.error, 'issue_agent_runs.error'));
+    add(
+      'error',
+      updates.error == null
+        ? null
+        : toUtf8String(updates.error, 'issue_agent_runs.error'),
+    );
   if (updates.session_id !== undefined) add('session_id', updates.session_id);
-  if (updates.parent_run_id !== undefined) add('parent_run_id', updates.parent_run_id);
-  if (updates.awaiting_kind !== undefined) add('awaiting_kind', updates.awaiting_kind);
-  if (updates.awaiting_payload_id !== undefined) add('awaiting_payload_id', updates.awaiting_payload_id);
-  if (updates.last_seen_at !== undefined) add('last_seen_at', updates.last_seen_at);
-  if (updates.heartbeat_deadline_at !== undefined) add('heartbeat_deadline_at', updates.heartbeat_deadline_at);
-  if (updates.run_started_at !== undefined) add('run_started_at', updates.run_started_at);
-  if (updates.run_completed_at !== undefined) add('run_completed_at', updates.run_completed_at);
+  if (updates.parent_run_id !== undefined)
+    add('parent_run_id', updates.parent_run_id);
+  if (updates.awaiting_kind !== undefined)
+    add('awaiting_kind', updates.awaiting_kind);
+  if (updates.awaiting_payload_id !== undefined)
+    add('awaiting_payload_id', updates.awaiting_payload_id);
+  if (updates.last_seen_at !== undefined)
+    add('last_seen_at', updates.last_seen_at);
+  if (updates.heartbeat_deadline_at !== undefined)
+    add('heartbeat_deadline_at', updates.heartbeat_deadline_at);
+  if (updates.run_started_at !== undefined)
+    add('run_started_at', updates.run_started_at);
+  if (updates.run_completed_at !== undefined)
+    add('run_completed_at', updates.run_completed_at);
   if (fields.length === 0) return;
   values.push(id);
-  db.prepare(`UPDATE issue_agent_runs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  db.prepare(
+    `UPDATE issue_agent_runs SET ${fields.join(', ')} WHERE id = ?`,
+  ).run(...values);
 }
 
 export function createIssueAgentRunEvent(
-  event: Omit<IssueAgentRunEvent, 'payload'> & { payload?: Record<string, unknown> | null },
+  event: Omit<IssueAgentRunEvent, 'payload'> & {
+    payload?: Record<string, unknown> | null;
+  },
 ): IssueAgentRunEvent {
   db.prepare(
     `
@@ -4772,20 +4875,30 @@ export function createIssueAgentRunEvent(
     event.issue_id,
     event.run_id,
     event.event_type,
-    event.title == null ? null : toUtf8String(event.title, 'issue_agent_run_events.title'),
-    event.summary == null ? null : toUtf8String(event.summary, 'issue_agent_run_events.summary'),
-    event.detail == null ? null : toUtf8String(event.detail, 'issue_agent_run_events.detail'),
+    event.title == null
+      ? null
+      : toUtf8String(event.title, 'issue_agent_run_events.title'),
+    event.summary == null
+      ? null
+      : toUtf8String(event.summary, 'issue_agent_run_events.summary'),
+    event.detail == null
+      ? null
+      : toUtf8String(event.detail, 'issue_agent_run_events.detail'),
     event.payload == null ? null : JSON.stringify(event.payload),
     event.created_at,
   );
-  const created = db.prepare('SELECT * FROM issue_agent_run_events WHERE id = ?').get(event.id);
+  const created = db
+    .prepare('SELECT * FROM issue_agent_run_events WHERE id = ?')
+    .get(event.id);
   if (!created) throw new Error('Failed to create issue agent run event');
   return mapIssueRunEventRow(created);
 }
 
 export function listIssueAgentRunEvents(runId: string): IssueAgentRunEvent[] {
   return db
-    .prepare('SELECT * FROM issue_agent_run_events WHERE run_id = ? ORDER BY created_at ASC')
+    .prepare(
+      'SELECT * FROM issue_agent_run_events WHERE run_id = ? ORDER BY created_at ASC',
+    )
     .all(runId)
     .map(mapIssueRunEventRow);
 }
@@ -4817,7 +4930,10 @@ export function markIssueAgentRunLost(runId: string, reason: string): void {
   ).run(reason, runId);
 }
 
-export function findStaleRunningRuns(now: string, staleMs: number): IssueAgentRun[] {
+export function findStaleRunningRuns(
+  now: string,
+  staleMs: number,
+): IssueAgentRun[] {
   const threshold = new Date(new Date(now).getTime() - staleMs).toISOString();
   const rows = db
     .prepare(
@@ -4853,12 +4969,17 @@ export function clearIssueAgentRunAwaiting(runId: string): void {
 // --- Issue agent requests (P1) ---
 
 function mapIssueAgentRequestRow(row: unknown): IssueAgentRequest {
-  const r = row as Omit<IssueAgentRequest, 'payload'> & { payload?: string | null };
+  const r = row as Omit<IssueAgentRequest, 'payload'> & {
+    payload?: string | null;
+  };
   let payload: Record<string, unknown> | null = null;
   if (r.payload) {
     try {
       const parsed = JSON.parse(r.payload);
-      payload = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { value: parsed };
+      payload =
+        parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? parsed
+          : { value: parsed };
     } catch {
       payload = { raw: r.payload };
     }
@@ -4874,7 +4995,9 @@ function mapIssueAgentRequestRow(row: unknown): IssueAgentRequest {
 }
 
 export function createIssueAgentRequest(
-  input: Omit<IssueAgentRequest, 'payload'> & { payload?: Record<string, unknown> | null },
+  input: Omit<IssueAgentRequest, 'payload'> & {
+    payload?: Record<string, unknown> | null;
+  },
 ): IssueAgentRequest {
   db.prepare(
     `INSERT INTO issue_agent_requests (
@@ -4887,13 +5010,21 @@ export function createIssueAgentRequest(
     input.run_id,
     input.kind,
     input.correlation_id ?? null,
-    input.title == null ? null : toUtf8String(input.title, 'issue_agent_requests.title'),
-    input.summary == null ? null : toUtf8String(input.summary, 'issue_agent_requests.summary'),
-    input.detail == null ? null : toUtf8String(input.detail, 'issue_agent_requests.detail'),
+    input.title == null
+      ? null
+      : toUtf8String(input.title, 'issue_agent_requests.title'),
+    input.summary == null
+      ? null
+      : toUtf8String(input.summary, 'issue_agent_requests.summary'),
+    input.detail == null
+      ? null
+      : toUtf8String(input.detail, 'issue_agent_requests.detail'),
     input.payload == null ? null : JSON.stringify(input.payload),
     input.status,
     input.decision ?? null,
-    input.answer == null ? null : toUtf8String(input.answer, 'issue_agent_requests.answer'),
+    input.answer == null
+      ? null
+      : toUtf8String(input.answer, 'issue_agent_requests.answer'),
     input.answered_at ?? null,
     input.answered_by ?? null,
     input.consumed_at ?? null,
@@ -4905,8 +5036,12 @@ export function createIssueAgentRequest(
   return created;
 }
 
-export function getIssueAgentRequestById(id: string): IssueAgentRequest | undefined {
-  const row = db.prepare('SELECT * FROM issue_agent_requests WHERE id = ?').get(id);
+export function getIssueAgentRequestById(
+  id: string,
+): IssueAgentRequest | undefined {
+  const row = db
+    .prepare('SELECT * FROM issue_agent_requests WHERE id = ?')
+    .get(id);
   return row ? mapIssueAgentRequestRow(row) : undefined;
 }
 
@@ -4914,7 +5049,9 @@ export function getIssueAgentRequestByCorrelationId(
   correlationId: string,
 ): IssueAgentRequest | undefined {
   const row = db
-    .prepare('SELECT * FROM issue_agent_requests WHERE correlation_id = ? ORDER BY created_at DESC')
+    .prepare(
+      'SELECT * FROM issue_agent_requests WHERE correlation_id = ? ORDER BY created_at DESC',
+    )
     .get(correlationId);
   return row ? mapIssueAgentRequestRow(row) : undefined;
 }
@@ -4960,7 +5097,9 @@ export function answerIssueAgentRequest(
      WHERE id = ? AND status = 'pending'`,
   ).run(
     args.decision,
-    args.answer == null ? null : toUtf8String(args.answer, 'issue_agent_requests.answer'),
+    args.answer == null
+      ? null
+      : toUtf8String(args.answer, 'issue_agent_requests.answer'),
     args.answered_by ?? null,
     args.now,
     id,
@@ -4984,13 +5123,16 @@ export function expireIssueAgentRequests(now: string): IssueAgentRequest[] {
   if (rows.length === 0) return [];
   const ids = rows.map((row) => row.id);
   const placeholders = ids.map(() => '?').join(',');
-  db.prepare(`UPDATE issue_agent_requests SET status = 'expired' WHERE id IN (${placeholders})`).run(
-    ...ids,
-  );
+  db.prepare(
+    `UPDATE issue_agent_requests SET status = 'expired' WHERE id IN (${placeholders})`,
+  ).run(...ids);
   return rows.map(mapIssueAgentRequestRow);
 }
 
-export function getLastCompletedIssueRunAt(issueId: string, excludeRunId?: string): string | null {
+export function getLastCompletedIssueRunAt(
+  issueId: string,
+  excludeRunId?: string,
+): string | null {
   const args: unknown[] = [issueId];
   let excludeSql = '';
   if (excludeRunId) {
@@ -5007,7 +5149,9 @@ export function getLastCompletedIssueRunAt(issueId: string, excludeRunId?: strin
   return row?.run_completed_at ?? null;
 }
 
-export function createIssueAttachment(input: Omit<IssueAttachment, 'created_at'> & { created_at?: string }): IssueAttachment {
+export function createIssueAttachment(
+  input: Omit<IssueAttachment, 'created_at'> & { created_at?: string },
+): IssueAttachment {
   const createdAt = input.created_at ?? new Date().toISOString();
   db.prepare(
     `INSERT INTO issue_attachments (id, issue_id, filename, mime_type, size_bytes, data_url, created_by, created_at)
@@ -5027,20 +5171,28 @@ export function createIssueAttachment(input: Omit<IssueAttachment, 'created_at'>
   return attachment;
 }
 
-export function getIssueAttachmentById(id: string): IssueAttachment | undefined {
-  const row = db.prepare('SELECT * FROM issue_attachments WHERE id = ?').get(id);
+export function getIssueAttachmentById(
+  id: string,
+): IssueAttachment | undefined {
+  const row = db
+    .prepare('SELECT * FROM issue_attachments WHERE id = ?')
+    .get(id);
   return row ? mapIssueAttachmentRow(row) : undefined;
 }
 
 export function listIssueAttachments(issueId: string): IssueAttachment[] {
   return db
-    .prepare('SELECT * FROM issue_attachments WHERE issue_id = ? ORDER BY created_at DESC')
+    .prepare(
+      'SELECT * FROM issue_attachments WHERE issue_id = ? ORDER BY created_at DESC',
+    )
     .all(issueId)
     .map(mapIssueAttachmentRow);
 }
 
 export function deleteIssueAttachment(id: string): boolean {
-  const result = db.prepare('DELETE FROM issue_attachments WHERE id = ?').run(id);
+  const result = db
+    .prepare('DELETE FROM issue_attachments WHERE id = ?')
+    .run(id);
   return result.changes > 0;
 }
 
@@ -5051,11 +5203,15 @@ type IssueEventRow = Omit<IssueEvent, 'detail' | 'payload' | 'source_meta'> & {
   payload?: string | null;
 };
 
-function parseNullableJson<T = Record<string, unknown>>(value: string | null | undefined): T | null {
+function parseNullableJson<T = Record<string, unknown>>(
+  value: string | null | undefined,
+): T | null {
   if (!value) return null;
   try {
     const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as T) : null;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as T)
+      : null;
   } catch {
     return null;
   }
@@ -5128,7 +5284,10 @@ export interface ListIssueEventsFilters {
   limit?: number;
 }
 
-export function listIssueEvents(issueId: string, filters: ListIssueEventsFilters = {}): IssueEvent[] {
+export function listIssueEvents(
+  issueId: string,
+  filters: ListIssueEventsFilters = {},
+): IssueEvent[] {
   const where: string[] = ['issue_id = ?'];
   const values: unknown[] = [issueId];
   if (filters.runId) {
@@ -5144,25 +5303,37 @@ export function listIssueEvents(issueId: string, filters: ListIssueEventsFilters
     values.push(filters.sinceAt);
   }
   if (filters.eventTypes?.length) {
-    where.push(`event_type IN (${filters.eventTypes.map(() => '?').join(',')})`);
+    where.push(
+      `event_type IN (${filters.eventTypes.map(() => '?').join(',')})`,
+    );
     values.push(...filters.eventTypes);
   }
   const limit = Math.max(1, Math.min(1000, filters.limit ?? 500));
   const whereSql = `WHERE ${where.join(' AND ')}`;
   const rows = db
-    .prepare(`SELECT * FROM issue_events ${whereSql} ORDER BY created_at ASC, id ASC LIMIT ?`)
+    .prepare(
+      `SELECT * FROM issue_events ${whereSql} ORDER BY created_at ASC, id ASC LIMIT ?`,
+    )
     .all(...values, limit);
   return rows.map(mapIssueEventRow);
 }
 
-export function markIssueEventNotified(eventId: string, channel: string, target: string): void {
+export function markIssueEventNotified(
+  eventId: string,
+  channel: string,
+  target: string,
+): void {
   db.prepare(
     `INSERT OR IGNORE INTO issue_event_notifications (event_id, channel, target, sent_at)
      VALUES (?, ?, ?, ?)`,
   ).run(eventId, channel, target, new Date().toISOString());
 }
 
-export function isIssueEventNotified(eventId: string, channel: string, target: string): boolean {
+export function isIssueEventNotified(
+  eventId: string,
+  channel: string,
+  target: string,
+): boolean {
   const row = db
     .prepare(
       `SELECT 1 FROM issue_event_notifications WHERE event_id = ? AND channel = ? AND target = ?`,
@@ -5173,7 +5344,9 @@ export function isIssueEventNotified(eventId: string, channel: string, target: s
 
 // --- Issue comments ---
 
-type IssueCommentRow = Omit<IssueComment, 'source_meta'> & { source_meta?: string | null };
+type IssueCommentRow = Omit<IssueComment, 'source_meta'> & {
+  source_meta?: string | null;
+};
 
 function mapIssueCommentRow(row: unknown): IssueComment {
   const r = row as IssueCommentRow;
@@ -5199,7 +5372,9 @@ export interface CreateIssueCommentInput {
   created_at?: string;
 }
 
-export function createIssueComment(input: CreateIssueCommentInput): IssueComment {
+export function createIssueComment(
+  input: CreateIssueCommentInput,
+): IssueComment {
   const id = input.id ?? `icm_${crypto_random_16()}`;
   const now = new Date().toISOString();
   db.prepare(
@@ -5216,29 +5391,38 @@ export function createIssueComment(input: CreateIssueCommentInput): IssueComment
     input.source_meta == null ? null : JSON.stringify(input.source_meta),
     input.created_at ?? now,
   );
-  const created = db.prepare('SELECT * FROM issue_comments WHERE id = ?').get(id);
+  const created = db
+    .prepare('SELECT * FROM issue_comments WHERE id = ?')
+    .get(id);
   if (!created) throw new Error('Failed to create issue comment');
   return mapIssueCommentRow(created);
 }
 
 export function getIssueCommentById(id: string): IssueComment | undefined {
-  const row = db.prepare("SELECT * FROM issue_comments WHERE id = ? AND deleted_at IS NULL").get(id);
+  const row = db
+    .prepare('SELECT * FROM issue_comments WHERE id = ? AND deleted_at IS NULL')
+    .get(id);
   return row ? mapIssueCommentRow(row) : undefined;
 }
 
 export interface ListIssueCommentsFilters {
-  cursor?: string;        // last seen id for pagination (not strictly needed, since we expect O(100) per issue)
-  sinceAt?: string;       // comments created after timestamp (used for run context injection)
+  cursor?: string; // last seen id for pagination (not strictly needed, since we expect O(100) per issue)
+  sinceAt?: string; // comments created after timestamp (used for run context injection)
   limit?: number;
   includeDeleted?: boolean;
 }
 
-export function listIssueComments(issueId: string, filters: ListIssueCommentsFilters = {}): IssueComment[] {
+export function listIssueComments(
+  issueId: string,
+  filters: ListIssueCommentsFilters = {},
+): IssueComment[] {
   const where: string[] = ['issue_id = ?'];
   const values: unknown[] = [issueId];
   if (!filters.includeDeleted) where.push('deleted_at IS NULL');
   if (filters.sinceAt) {
-    where.push('(created_at > ? OR (updated_at IS NOT NULL AND updated_at > ?))');
+    where.push(
+      '(created_at > ? OR (updated_at IS NOT NULL AND updated_at > ?))',
+    );
     values.push(filters.sinceAt, filters.sinceAt);
   }
   if (filters.cursor) {
@@ -5248,12 +5432,17 @@ export function listIssueComments(issueId: string, filters: ListIssueCommentsFil
   const limit = Math.max(1, Math.min(500, filters.limit ?? 200));
   const whereSql = `WHERE ${where.join(' AND ')}`;
   const rows = db
-    .prepare(`SELECT * FROM issue_comments ${whereSql} ORDER BY created_at ASC, id ASC LIMIT ?`)
+    .prepare(
+      `SELECT * FROM issue_comments ${whereSql} ORDER BY created_at ASC, id ASC LIMIT ?`,
+    )
     .all(...values, limit);
   return rows.map(mapIssueCommentRow);
 }
 
-export function updateIssueComment(id: string, body: string): IssueComment | undefined {
+export function updateIssueComment(
+  id: string,
+  body: string,
+): IssueComment | undefined {
   const now = new Date().toISOString();
   db.prepare(
     `UPDATE issue_comments SET body = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
@@ -5264,7 +5453,9 @@ export function updateIssueComment(id: string, body: string): IssueComment | und
 export function softDeleteIssueComment(id: string): boolean {
   const now = new Date().toISOString();
   const result = db
-    .prepare(`UPDATE issue_comments SET deleted_at = ?, body = '' WHERE id = ? AND deleted_at IS NULL`)
+    .prepare(
+      `UPDATE issue_comments SET deleted_at = ?, body = '' WHERE id = ? AND deleted_at IS NULL`,
+    )
     .run(now, id);
   return result.changes > 0;
 }
@@ -5346,6 +5537,24 @@ export function setSession(
   ).run(groupFolder, sessionId, effectiveAgentId);
 }
 
+export function clearSessionId(
+  groupFolder: string,
+  agentId?: string | null,
+): void {
+  const effectiveAgentId = agentId || '';
+  db.prepare(
+    `INSERT INTO sessions (group_folder, session_id, agent_id) VALUES (?, '', ?)
+     ON CONFLICT(group_folder, agent_id) DO UPDATE SET session_id = ''`,
+  ).run(groupFolder, effectiveAgentId);
+}
+
+export function clearSessionIdsForFolder(groupFolder: string): number {
+  const result = db
+    .prepare('UPDATE sessions SET session_id = ? WHERE group_folder = ?')
+    .run('', groupFolder);
+  return result.changes ?? 0;
+}
+
 export function getSessionWorkspaceSessionId(
   groupFolder: string,
   agentId?: string | null,
@@ -5376,7 +5585,9 @@ export function ensureSessionWorkspaceSessionId(
      ON CONFLICT(group_folder, agent_id) DO UPDATE SET
        workspace_session_id = COALESCE(sessions.workspace_session_id, excluded.workspace_session_id)`,
   ).run(groupFolder, effectiveAgentId, workspaceSessionId);
-  return getSessionWorkspaceSessionId(groupFolder, agentId) || workspaceSessionId;
+  return (
+    getSessionWorkspaceSessionId(groupFolder, agentId) || workspaceSessionId
+  );
 }
 
 export function deleteSession(
@@ -5510,6 +5721,26 @@ function parseRuntimeProfile(
   return undefined;
 }
 
+function parseAgentPermissionMode(
+  raw: string | null,
+): import('./types.js').AgentPermissionMode | undefined {
+  switch (raw) {
+    case 'default':
+    case 'acceptEdits':
+    case 'bypassPermissions':
+    case 'plan':
+      return raw;
+    case 'workspace-write':
+      return 'acceptEdits';
+    case 'full-access':
+    case 'danger-full-access':
+    case 'bypass_permissions':
+      return 'bypassPermissions';
+    default:
+      return undefined;
+  }
+}
+
 /** Raw row shape from registered_groups table — single source of truth for column mapping. */
 type RegisteredGroupRow = {
   jid: string;
@@ -5613,13 +5844,7 @@ function parseGroupRow(
       row.agent_access_scope === 'all' || row.agent_access_scope === 'workspace'
         ? row.agent_access_scope
         : undefined,
-    permissionMode:
-      row.permission_mode === 'default' ||
-      row.permission_mode === 'acceptEdits' ||
-      row.permission_mode === 'bypassPermissions' ||
-      row.permission_mode === 'plan'
-        ? row.permission_mode
-        : undefined,
+    permissionMode: parseAgentPermissionMode(row.permission_mode),
     systemPrompt: row.system_prompt ?? undefined,
     backend: row.backend ?? undefined,
     executionNode: row.execution_node ?? undefined,
@@ -5718,18 +5943,15 @@ export function moveWorkspaceFolderReferences(
 ): void {
   if (!oldFolder || !newFolder || oldFolder === newFolder) return;
   const tx = db.transaction(() => {
-    db.prepare('UPDATE group_members SET group_folder = ? WHERE group_folder = ?').run(
-      newFolder,
-      oldFolder,
-    );
-    db.prepare('UPDATE scheduled_tasks SET group_folder = ? WHERE group_folder = ?').run(
-      newFolder,
-      oldFolder,
-    );
-    db.prepare('UPDATE scheduled_tasks SET workspace_folder = ? WHERE workspace_folder = ?').run(
-      newFolder,
-      oldFolder,
-    );
+    db.prepare(
+      'UPDATE group_members SET group_folder = ? WHERE group_folder = ?',
+    ).run(newFolder, oldFolder);
+    db.prepare(
+      'UPDATE scheduled_tasks SET group_folder = ? WHERE group_folder = ?',
+    ).run(newFolder, oldFolder);
+    db.prepare(
+      'UPDATE scheduled_tasks SET workspace_folder = ? WHERE workspace_folder = ?',
+    ).run(newFolder, oldFolder);
     db.prepare('UPDATE agents SET group_folder = ? WHERE group_folder = ?').run(
       newFolder,
       oldFolder,
@@ -5828,13 +6050,23 @@ export function deleteManagedRepo(id: string, userId: string): boolean {
       .prepare('DELETE FROM repos WHERE id = ? AND created_by = ?')
       .run(id, userId);
     if (result.changes > 0) {
-      db.prepare('DELETE FROM repo_knowledge_chunks WHERE repo_id = ? AND user_id = ?').run(id, userId);
+      db.prepare(
+        'DELETE FROM repo_knowledge_chunks WHERE repo_id = ? AND user_id = ?',
+      ).run(id, userId);
       if (repoKnowledgeFtsAvailable) {
-        db.prepare('DELETE FROM repo_knowledge_chunks_fts WHERE repo_id = ? AND user_id = ?').run(id, userId);
+        db.prepare(
+          'DELETE FROM repo_knowledge_chunks_fts WHERE repo_id = ? AND user_id = ?',
+        ).run(id, userId);
       }
-      db.prepare('DELETE FROM repo_knowledge_graph_edges WHERE repo_id = ? AND user_id = ?').run(id, userId);
-      db.prepare('DELETE FROM repo_knowledge_indexes WHERE repo_id = ? AND user_id = ?').run(id, userId);
-      db.prepare('DELETE FROM repo_knowledge_runs WHERE repo_id = ? AND user_id = ?').run(id, userId);
+      db.prepare(
+        'DELETE FROM repo_knowledge_graph_edges WHERE repo_id = ? AND user_id = ?',
+      ).run(id, userId);
+      db.prepare(
+        'DELETE FROM repo_knowledge_indexes WHERE repo_id = ? AND user_id = ?',
+      ).run(id, userId);
+      db.prepare(
+        'DELETE FROM repo_knowledge_runs WHERE repo_id = ? AND user_id = ?',
+      ).run(id, userId);
     }
     return result.changes > 0;
   });
@@ -5903,7 +6135,9 @@ type RepoKnowledgeGraphEdgeRow = {
   updated_at: string;
 };
 
-function parseJsonObject(value: string | null | undefined): Record<string, unknown> {
+function parseJsonObject(
+  value: string | null | undefined,
+): Record<string, unknown> {
   if (!value) return {};
   try {
     const parsed = JSON.parse(value) as unknown;
@@ -5915,9 +6149,13 @@ function parseJsonObject(value: string | null | undefined): Record<string, unkno
   }
 }
 
-function parseRepoKnowledgeIndexRow(row: RepoKnowledgeIndexRow): RepoKnowledgeIndex {
+function parseRepoKnowledgeIndexRow(
+  row: RepoKnowledgeIndexRow,
+): RepoKnowledgeIndex {
   const status: RepoKnowledgeStatus =
-    row.status === 'indexing' || row.status === 'ready' || row.status === 'error'
+    row.status === 'indexing' ||
+    row.status === 'ready' ||
+    row.status === 'error'
       ? row.status
       : 'none';
   return {
@@ -5945,7 +6183,11 @@ function parseJsonArray<T = unknown>(value: string | null | undefined): T[] {
 
 function parseRepoKnowledgeRunRow(row: RepoKnowledgeRunRow): RepoKnowledgeRun {
   const status: RepoKnowledgeRunStatus =
-    row.status === 'queued' || row.status === 'running' || row.status === 'uploading' || row.status === 'ready' || row.status === 'error'
+    row.status === 'queued' ||
+    row.status === 'running' ||
+    row.status === 'uploading' ||
+    row.status === 'ready' ||
+    row.status === 'error'
       ? row.status
       : 'error';
   return {
@@ -5969,9 +6211,15 @@ function parseRepoKnowledgeRunRow(row: RepoKnowledgeRunRow): RepoKnowledgeRun {
   };
 }
 
-function parseRepoKnowledgeChunkRow(row: RepoKnowledgeChunkRow): RepoKnowledgeChunk {
+function parseRepoKnowledgeChunkRow(
+  row: RepoKnowledgeChunkRow,
+): RepoKnowledgeChunk {
   const kind: RepoKnowledgeChunkKind =
-    row.kind === 'overview' || row.kind === 'symbol' || row.kind === 'dependency' || row.kind === 'doc' || row.kind === 'graph'
+    row.kind === 'overview' ||
+    row.kind === 'symbol' ||
+    row.kind === 'dependency' ||
+    row.kind === 'doc' ||
+    row.kind === 'graph'
       ? row.kind
       : 'file';
   return {
@@ -5991,7 +6239,9 @@ function parseRepoKnowledgeChunkRow(row: RepoKnowledgeChunkRow): RepoKnowledgeCh
   };
 }
 
-function parseRepoKnowledgeGraphEdgeRow(row: RepoKnowledgeGraphEdgeRow): RepoKnowledgeGraphEdge {
+function parseRepoKnowledgeGraphEdgeRow(
+  row: RepoKnowledgeGraphEdgeRow,
+): RepoKnowledgeGraphEdge {
   const edgeKind: RepoKnowledgeGraphEdgeKind =
     row.edge_kind === 'imports' ||
     row.edge_kind === 'imported_by' ||
@@ -6021,14 +6271,20 @@ export function getRepoKnowledgeIndex(
   userId: string,
 ): RepoKnowledgeIndex | undefined {
   const row = db
-    .prepare('SELECT * FROM repo_knowledge_indexes WHERE repo_id = ? AND user_id = ?')
+    .prepare(
+      'SELECT * FROM repo_knowledge_indexes WHERE repo_id = ? AND user_id = ?',
+    )
     .get(repoId, userId) as RepoKnowledgeIndexRow | undefined;
   return row ? parseRepoKnowledgeIndexRow(row) : undefined;
 }
 
-export function listRepoKnowledgeIndexesByUser(userId: string): RepoKnowledgeIndex[] {
+export function listRepoKnowledgeIndexesByUser(
+  userId: string,
+): RepoKnowledgeIndex[] {
   const rows = db
-    .prepare('SELECT * FROM repo_knowledge_indexes WHERE user_id = ? ORDER BY updated_at DESC')
+    .prepare(
+      'SELECT * FROM repo_knowledge_indexes WHERE user_id = ? ORDER BY updated_at DESC',
+    )
     .all(userId) as RepoKnowledgeIndexRow[];
   return rows.map(parseRepoKnowledgeIndexRow);
 }
@@ -6077,7 +6333,10 @@ export function createRepoKnowledgeRun(input: {
   return getRepoKnowledgeRun(input.id, input.userId)!;
 }
 
-export function getRepoKnowledgeRun(id: string, userId: string): RepoKnowledgeRun | undefined {
+export function getRepoKnowledgeRun(
+  id: string,
+  userId: string,
+): RepoKnowledgeRun | undefined {
   const row = db
     .prepare('SELECT * FROM repo_knowledge_runs WHERE id = ? AND user_id = ?')
     .get(id, userId) as RepoKnowledgeRunRow | undefined;
@@ -6085,7 +6344,9 @@ export function getRepoKnowledgeRun(id: string, userId: string): RepoKnowledgeRu
 }
 
 /** 通过一次性 upload token 查询（不校验 userId，用于上传端点；调用方自己校验 token） */
-export function getRepoKnowledgeRunByUploadTokenHash(hash: string): RepoKnowledgeRun | undefined {
+export function getRepoKnowledgeRunByUploadTokenHash(
+  hash: string,
+): RepoKnowledgeRun | undefined {
   if (!hash) return undefined;
   const row = db
     .prepare('SELECT * FROM repo_knowledge_runs WHERE upload_token_hash = ?')
@@ -6143,13 +6404,25 @@ export function updateRepoKnowledgeRun(
   ).run(
     patch.status ?? current.status,
     JSON.stringify(patch.stats ?? current.stats ?? {}),
-    patch.error === undefined ? current.error ?? null : patch.error,
-    patch.startedAt === undefined ? current.startedAt ?? null : patch.startedAt,
-    patch.completedAt === undefined ? current.completedAt ?? null : patch.completedAt,
-    patch.filesUploadedAt === undefined ? current.filesUploadedAt ?? null : patch.filesUploadedAt,
-    patch.uploadTokenHash === undefined ? current.uploadTokenHash ?? null : patch.uploadTokenHash,
-    patch.agentClientId === undefined ? current.agentClientId ?? null : patch.agentClientId,
-    patch.executionDeviceLinkId === undefined ? current.executionDeviceLinkId ?? null : patch.executionDeviceLinkId,
+    patch.error === undefined ? (current.error ?? null) : patch.error,
+    patch.startedAt === undefined
+      ? (current.startedAt ?? null)
+      : patch.startedAt,
+    patch.completedAt === undefined
+      ? (current.completedAt ?? null)
+      : patch.completedAt,
+    patch.filesUploadedAt === undefined
+      ? (current.filesUploadedAt ?? null)
+      : patch.filesUploadedAt,
+    patch.uploadTokenHash === undefined
+      ? (current.uploadTokenHash ?? null)
+      : patch.uploadTokenHash,
+    patch.agentClientId === undefined
+      ? (current.agentClientId ?? null)
+      : patch.agentClientId,
+    patch.executionDeviceLinkId === undefined
+      ? (current.executionDeviceLinkId ?? null)
+      : patch.executionDeviceLinkId,
     JSON.stringify(patch.enabledSkills ?? current.enabledSkills ?? []),
     updatedAt,
     id,
@@ -6165,7 +6438,9 @@ export function listRepoKnowledgeRuns(input: {
 }): RepoKnowledgeRun[] {
   const limit = Math.max(1, Math.min(input.limit ?? 20, 100));
   const rows = db
-    .prepare('SELECT * FROM repo_knowledge_runs WHERE repo_id = ? AND user_id = ? ORDER BY queued_at DESC LIMIT ?')
+    .prepare(
+      'SELECT * FROM repo_knowledge_runs WHERE repo_id = ? AND user_id = ? ORDER BY queued_at DESC LIMIT ?',
+    )
     .all(input.repoId, input.userId, limit) as RepoKnowledgeRunRow[];
   return rows.map(parseRepoKnowledgeRunRow);
 }
@@ -6214,14 +6489,22 @@ export function replaceRepoKnowledgeChunks(input: {
   repoId: string;
   userId: string;
   chunks: Array<Omit<RepoKnowledgeChunk, 'updatedAt' | 'repoId' | 'userId'>>;
-  edges?: Array<Omit<RepoKnowledgeGraphEdge, 'updatedAt' | 'repoId' | 'userId'>>;
+  edges?: Array<
+    Omit<RepoKnowledgeGraphEdge, 'updatedAt' | 'repoId' | 'userId'>
+  >;
 }): void {
   const now = new Date().toISOString();
   const transaction = db.transaction(() => {
-    db.prepare('DELETE FROM repo_knowledge_chunks WHERE repo_id = ? AND user_id = ?').run(input.repoId, input.userId);
-    db.prepare('DELETE FROM repo_knowledge_graph_edges WHERE repo_id = ? AND user_id = ?').run(input.repoId, input.userId);
+    db.prepare(
+      'DELETE FROM repo_knowledge_chunks WHERE repo_id = ? AND user_id = ?',
+    ).run(input.repoId, input.userId);
+    db.prepare(
+      'DELETE FROM repo_knowledge_graph_edges WHERE repo_id = ? AND user_id = ?',
+    ).run(input.repoId, input.userId);
     if (repoKnowledgeFtsAvailable) {
-      db.prepare('DELETE FROM repo_knowledge_chunks_fts WHERE repo_id = ? AND user_id = ?').run(input.repoId, input.userId);
+      db.prepare(
+        'DELETE FROM repo_knowledge_chunks_fts WHERE repo_id = ? AND user_id = ?',
+      ).run(input.repoId, input.userId);
     }
     const insert = db.prepare(
       `INSERT OR REPLACE INTO repo_knowledge_chunks (
@@ -6381,7 +6664,9 @@ export function listRelatedRepoKnowledge(input: {
   chunkId?: string;
   limit?: number;
 }): { edges: RepoKnowledgeGraphEdge[]; chunks: RepoKnowledgeChunk[] } {
-  const chunk = input.chunkId ? getRepoKnowledgeChunk(input.chunkId, input.userId) : undefined;
+  const chunk = input.chunkId
+    ? getRepoKnowledgeChunk(input.chunkId, input.userId)
+    : undefined;
   const pathRef = input.path ?? chunk?.path;
   if (!pathRef) return { edges: [], chunks: [] };
   const edges = listRepoKnowledgeGraphEdges({
@@ -6390,10 +6675,23 @@ export function listRelatedRepoKnowledge(input: {
     path: pathRef,
     limit: input.limit,
   });
-  const relatedPaths = Array.from(new Set(edges.flatMap((edge) => [edge.fromPath, edge.toPath].filter(Boolean) as string[]))).filter((p) => p !== pathRef);
-  const chunks = relatedPaths.slice(0, Math.max(1, Math.min(input.limit ?? 20, 50))).flatMap((pathName) =>
-    listRepoKnowledgeChunks({ repoId: input.repoId, userId: input.userId, path: pathName, limit: 3 }),
-  );
+  const relatedPaths = Array.from(
+    new Set(
+      edges.flatMap(
+        (edge) => [edge.fromPath, edge.toPath].filter(Boolean) as string[],
+      ),
+    ),
+  ).filter((p) => p !== pathRef);
+  const chunks = relatedPaths
+    .slice(0, Math.max(1, Math.min(input.limit ?? 20, 50)))
+    .flatMap((pathName) =>
+      listRepoKnowledgeChunks({
+        repoId: input.repoId,
+        userId: input.userId,
+        path: pathName,
+        limit: 3,
+      }),
+    );
   return { edges, chunks };
 }
 
@@ -6416,13 +6714,30 @@ export function getRepoKnowledgeContext(input: {
   const anchor = input.chunkId
     ? getRepoKnowledgeChunk(input.chunkId, input.userId)
     : input.query
-      ? searchRepoKnowledge({ repoId: input.repoId, userId: input.userId, query: input.query, limit: 1 })[0]
+      ? searchRepoKnowledge({
+          repoId: input.repoId,
+          userId: input.userId,
+          query: input.query,
+          limit: 1,
+        })[0]
       : input.path
-        ? listRepoKnowledgeChunks({ repoId: input.repoId, userId: input.userId, path: input.path, limit: 1 })[0]
+        ? listRepoKnowledgeChunks({
+            repoId: input.repoId,
+            userId: input.userId,
+            path: input.path,
+            limit: 1,
+          })[0]
         : undefined;
   const pathRef = input.path ?? anchor?.path;
   if (!pathRef) {
-    return { anchor, sameFileChunks: [], relatedChunks: [], edges: [], dependencies: [], docs: [] };
+    return {
+      anchor,
+      sameFileChunks: [],
+      relatedChunks: [],
+      edges: [],
+      dependencies: [],
+      docs: [],
+    };
   }
   const sameFileChunks = listRepoKnowledgeChunks({
     repoId: input.repoId,
@@ -6454,8 +6769,17 @@ export function getRepoKnowledgeContext(input: {
   };
 }
 
-function scoreKnowledgeChunk(chunk: RepoKnowledgeChunk, terms: string[]): number {
-  const haystack = [chunk.name, chunk.path, chunk.language, chunk.keywords, chunk.content]
+function scoreKnowledgeChunk(
+  chunk: RepoKnowledgeChunk,
+  terms: string[],
+): number {
+  const haystack = [
+    chunk.name,
+    chunk.path,
+    chunk.language,
+    chunk.keywords,
+    chunk.content,
+  ]
     .filter(Boolean)
     .join('\n')
     .toLowerCase();
@@ -6472,7 +6796,11 @@ function scoreKnowledgeChunk(chunk: RepoKnowledgeChunk, terms: string[]): number
   return score;
 }
 
-function buildKnowledgeSnippet(content: string, terms: string[], maxLength = 700): string {
+function buildKnowledgeSnippet(
+  content: string,
+  terms: string[],
+  maxLength = 700,
+): string {
   const lower = content.toLowerCase();
   const firstHit = terms
     .map((term) => lower.indexOf(term))
@@ -6550,14 +6878,23 @@ export function searchRepoKnowledge(input: {
           ...chunk,
           score: scoreKnowledgeChunk(chunk, terms) + 5,
           snippet: buildKnowledgeSnippet(chunk.content, terms),
-          related: input.includeRelated && input.repoId
-            ? listRepoKnowledgeGraphEdges({ repoId: input.repoId, userId: input.userId, path: chunk.path, limit: 10 })
-            : undefined,
+          related:
+            input.includeRelated && input.repoId
+              ? listRepoKnowledgeGraphEdges({
+                  repoId: input.repoId,
+                  userId: input.userId,
+                  path: chunk.path,
+                  limit: 10,
+                })
+              : undefined,
         }))
         .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
         .slice(0, limit);
     } catch (err) {
-      logger.warn({ err }, 'Repo knowledge FTS query failed; falling back to LIKE search');
+      logger.warn(
+        { err },
+        'Repo knowledge FTS query failed; falling back to LIKE search',
+      );
     }
   }
   const where = ['user_id = ?'];
@@ -6579,10 +6916,14 @@ export function searchRepoKnowledge(input: {
     args.push(`${input.pathPrefix.replace(/[%_]/g, '\\$&')}%`);
   }
   const like = `%${terms[0].replace(/[%_]/g, '\\$&')}%`;
-  where.push('(path LIKE ? OR name LIKE ? OR keywords LIKE ? OR content LIKE ?)');
+  where.push(
+    '(path LIKE ? OR name LIKE ? OR keywords LIKE ? OR content LIKE ?)',
+  );
   args.push(like, like, like, like);
   const rows = db
-    .prepare(`SELECT * FROM repo_knowledge_chunks WHERE ${where.join(' AND ')} LIMIT 1000`)
+    .prepare(
+      `SELECT * FROM repo_knowledge_chunks WHERE ${where.join(' AND ')} LIMIT 1000`,
+    )
     .all(...args) as RepoKnowledgeChunkRow[];
   return rows
     .map(parseRepoKnowledgeChunkRow)
@@ -6590,9 +6931,15 @@ export function searchRepoKnowledge(input: {
       ...chunk,
       score: scoreKnowledgeChunk(chunk, terms),
       snippet: buildKnowledgeSnippet(chunk.content, terms),
-      related: input.includeRelated && input.repoId
-        ? listRepoKnowledgeGraphEdges({ repoId: input.repoId, userId: input.userId, path: chunk.path, limit: 10 })
-        : undefined,
+      related:
+        input.includeRelated && input.repoId
+          ? listRepoKnowledgeGraphEdges({
+              repoId: input.repoId,
+              userId: input.userId,
+              path: chunk.path,
+              limit: 10,
+            })
+          : undefined,
     }))
     .filter((hit) => hit.score > 0)
     .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
@@ -7030,7 +7377,8 @@ export function getMessagesPage(
   limit = 50,
   sessionId?: string,
 ): Array<NewMessage & { is_from_me: boolean }> {
-  const sessionFilter = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
+  const sessionFilter =
+    typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
   const sql = sessionFilter
     ? before
       ? `
@@ -7090,25 +7438,32 @@ export function getMessagesAfter(
   after: string,
   limit = 50,
   sessionId?: string,
+  afterId?: string,
 ): Array<NewMessage & { is_from_me: boolean }> {
-  const sessionFilter = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
+  const sessionFilter =
+    typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
+  const cursorId = typeof afterId === 'string' ? afterId : '';
   const rows = db
     .prepare(
       sessionFilter
         ? `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
-       WHERE chat_jid = ? AND timestamp > ? AND session_id = ?
-       ORDER BY timestamp ASC
+       WHERE chat_jid = ? AND (timestamp > ? OR (timestamp = ? AND id > ?)) AND session_id = ?
+       ORDER BY timestamp ASC, id ASC
        LIMIT ?`
         : `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
-       WHERE chat_jid = ? AND timestamp > ?
-       ORDER BY timestamp ASC
+       WHERE chat_jid = ? AND (timestamp > ? OR (timestamp = ? AND id > ?))
+       ORDER BY timestamp ASC, id ASC
        LIMIT ?`,
     )
-    .all(...(sessionFilter ? [chatJid, after, sessionFilter, limit] : [chatJid, after, limit])) as Array<NewMessage & { is_from_me: number }>;
+    .all(
+      ...(sessionFilter
+        ? [chatJid, after, after, cursorId, sessionFilter, limit]
+        : [chatJid, after, after, cursorId, limit]),
+    ) as Array<NewMessage & { is_from_me: number }>;
 
   return rows.map((row) => normalizeMessageRow(row));
 }
@@ -7123,10 +7478,12 @@ export function getMessagesPageMulti(
   sessionId?: string,
 ): Array<NewMessage & { is_from_me: boolean }> {
   if (chatJids.length === 0) return [];
-  if (chatJids.length === 1) return getMessagesPage(chatJids[0], before, limit, sessionId);
+  if (chatJids.length === 1)
+    return getMessagesPage(chatJids[0], before, limit, sessionId);
 
   const placeholders = chatJids.map(() => '?').join(',');
-  const sessionFilter = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
+  const sessionFilter =
+    typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
   const sql = sessionFilter
     ? before
       ? `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
@@ -7177,31 +7534,37 @@ export function getMessagesAfterMulti(
   after: string,
   limit = 50,
   sessionId?: string,
+  afterId?: string,
 ): Array<NewMessage & { is_from_me: boolean }> {
   if (chatJids.length === 0) return [];
-  if (chatJids.length === 1) return getMessagesAfter(chatJids[0], after, limit, sessionId);
+  if (chatJids.length === 1)
+    return getMessagesAfter(chatJids[0], after, limit, sessionId, afterId);
 
   const placeholders = chatJids.map(() => '?').join(',');
-  const sessionFilter = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
+  const sessionFilter =
+    typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
+  const cursorId = typeof afterId === 'string' ? afterId : '';
   const rows = db
     .prepare(
       sessionFilter
         ? `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
-       WHERE chat_jid IN (${placeholders}) AND timestamp > ? AND session_id = ?
-       ORDER BY timestamp ASC
+       WHERE chat_jid IN (${placeholders}) AND (timestamp > ? OR (timestamp = ? AND id > ?)) AND session_id = ?
+       ORDER BY timestamp ASC, id ASC
        LIMIT ?`
         : `SELECT id, chat_jid, source_jid, sender, sender_name, role, content, timestamp, is_from_me, attachments, token_usage,
               turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason
        FROM messages
-       WHERE chat_jid IN (${placeholders}) AND timestamp > ?
-       ORDER BY timestamp ASC
+       WHERE chat_jid IN (${placeholders}) AND (timestamp > ? OR (timestamp = ? AND id > ?))
+       ORDER BY timestamp ASC, id ASC
        LIMIT ?`,
     )
-    .all(...(sessionFilter ? [...chatJids, after, sessionFilter, limit] : [...chatJids, after, limit])) as Array<
-    NewMessage & { is_from_me: number }
-  >;
+    .all(
+      ...(sessionFilter
+        ? [...chatJids, after, after, cursorId, sessionFilter, limit]
+        : [...chatJids, after, after, cursorId, limit]),
+    ) as Array<NewMessage & { is_from_me: number }>;
 
   return rows.map((row) => normalizeMessageRow(row));
 }
@@ -7277,7 +7640,9 @@ export interface SystemHistoryFlow {
   stages: SystemHistoryFlowStage[];
 }
 
-export function listSystemHistory(filters: SystemHistoryFilters = {}): SystemHistoryItem[] {
+export function listSystemHistory(
+  filters: SystemHistoryFilters = {},
+): SystemHistoryItem[] {
   const limit = Math.max(1, Math.min(200, filters.limit ?? 100));
   const offset = Math.max(0, filters.offset ?? 0);
   const type = filters.type ?? 'all';
@@ -7303,10 +7668,20 @@ export function listSystemHistory(filters: SystemHistoryFilters = {}): SystemHis
         status: String(row.status || ''),
         actor: String(row.execution_type || 'task'),
         workspace: String(row.group_folder || row.chat_jid || ''),
-        summary: typeof row.result === 'string' ? row.result.slice(0, 240) : null,
-        detail: typeof row.error === 'string' && row.error ? row.error : typeof row.result === 'string' ? row.result : null,
+        summary:
+          typeof row.result === 'string' ? row.result.slice(0, 240) : null,
+        detail:
+          typeof row.error === 'string' && row.error
+            ? row.error
+            : typeof row.result === 'string'
+              ? row.result
+              : null,
         startedAt: String(row.run_at || ''),
-        completedAt: row.duration_ms ? new Date(new Date(String(row.run_at)).getTime() + Number(row.duration_ms)).toISOString() : null,
+        completedAt: row.duration_ms
+          ? new Date(
+              new Date(String(row.run_at)).getTime() + Number(row.duration_ms),
+            ).toISOString()
+          : null,
         createdAt: String(row.run_at || ''),
         targetUrl: '/tasks',
         payload: { taskId: row.task_id, durationMs: row.duration_ms },
@@ -7330,24 +7705,41 @@ export function listSystemHistory(filters: SystemHistoryFilters = {}): SystemHis
         type: 'issue',
         title: String(row.issue_title || row.issue_id || 'Issue run'),
         status: String(row.status || ''),
-        actor: String(row.backend || row.agent_client_id || row.execution_node || 'issue-agent'),
+        actor: String(
+          row.backend ||
+            row.agent_client_id ||
+            row.execution_node ||
+            'issue-agent',
+        ),
         workspace: String(row.workspace_folder || row.workspace_jid || ''),
-        summary: typeof row.result === 'string' ? row.result.slice(0, 240) : null,
-        detail: typeof row.error === 'string' && row.error ? row.error : typeof row.result === 'string' ? row.result : null,
-        startedAt: typeof row.run_started_at === 'string' ? row.run_started_at : null,
-        completedAt: typeof row.run_completed_at === 'string' ? row.run_completed_at : null,
+        summary:
+          typeof row.result === 'string' ? row.result.slice(0, 240) : null,
+        detail:
+          typeof row.error === 'string' && row.error
+            ? row.error
+            : typeof row.result === 'string'
+              ? row.result
+              : null,
+        startedAt:
+          typeof row.run_started_at === 'string' ? row.run_started_at : null,
+        completedAt:
+          typeof row.run_completed_at === 'string'
+            ? row.run_completed_at
+            : null,
         createdAt: String(row.created_at || ''),
         targetUrl: '/issues',
-        payload: { issueId: row.issue_id, runId: row.id, priority: row.issue_priority },
+        payload: {
+          issueId: row.issue_id,
+          runId: row.id,
+          priority: row.issue_priority,
+        },
       });
     }
   }
 
   if (type === 'all' || type === 'team') {
     const rows = db
-      .prepare(
-        `SELECT * FROM agent_team_runs ORDER BY created_at DESC LIMIT ?`,
-      )
+      .prepare(`SELECT * FROM agent_team_runs ORDER BY created_at DESC LIMIT ?`)
       .all(limit * 2) as Array<Record<string, unknown>>;
     for (const row of rows) {
       items.push({
@@ -7357,10 +7749,19 @@ export function listSystemHistory(filters: SystemHistoryFilters = {}): SystemHis
         status: String(row.status || ''),
         actor: String(row.team_id || 'agent-team'),
         workspace: null,
-        summary: typeof row.final_result === 'string' ? row.final_result.slice(0, 240) : null,
-        detail: typeof row.error === 'string' && row.error ? row.error : typeof row.final_result === 'string' ? row.final_result : null,
+        summary:
+          typeof row.final_result === 'string'
+            ? row.final_result.slice(0, 240)
+            : null,
+        detail:
+          typeof row.error === 'string' && row.error
+            ? row.error
+            : typeof row.final_result === 'string'
+              ? row.final_result
+              : null,
         startedAt: typeof row.started_at === 'string' ? row.started_at : null,
-        completedAt: typeof row.completed_at === 'string' ? row.completed_at : null,
+        completedAt:
+          typeof row.completed_at === 'string' ? row.completed_at : null,
         createdAt: String(row.created_at || ''),
         targetUrl: '/agents',
         payload: { teamId: row.team_id, runId: row.id, traceId: row.trace_id },
@@ -7388,20 +7789,35 @@ export function listSystemHistory(filters: SystemHistoryFilters = {}): SystemHis
         status: String(row.role || (row.is_from_me ? 'agent' : 'user')),
         actor: String(row.sender_name || row.sender || ''),
         workspace: String(row.chat_jid || ''),
-        summary: typeof row.content === 'string' ? row.content.slice(0, 240) : null,
+        summary:
+          typeof row.content === 'string' ? row.content.slice(0, 240) : null,
         detail: typeof row.content === 'string' ? row.content : null,
         startedAt: String(row.timestamp || ''),
         completedAt: null,
         createdAt: String(row.timestamp || ''),
         targetUrl: '/chat',
-        payload: { chatJid: row.chat_jid, messageId: row.id, sessionId: row.session_id, turnId: row.turn_id, sourceKind: row.source_kind, role: row.role },
+        payload: {
+          chatJid: row.chat_jid,
+          messageId: row.id,
+          sessionId: row.session_id,
+          turnId: row.turn_id,
+          sourceKind: row.source_kind,
+          role: row.role,
+        },
       });
     }
   }
 
   const filtered = query
     ? items.filter((item) =>
-        [item.title, item.status, item.actor, item.workspace, item.summary, item.detail]
+        [
+          item.title,
+          item.status,
+          item.actor,
+          item.workspace,
+          item.summary,
+          item.detail,
+        ]
           .filter(Boolean)
           .join('\n')
           .toLowerCase()
@@ -7417,7 +7833,9 @@ function parseHistoryPayload(value: unknown): Record<string, unknown> | null {
   if (typeof value !== 'string' || !value) return null;
   try {
     const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { value: parsed };
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed
+      : { value: parsed };
   } catch {
     return { raw: value };
   }
@@ -7426,32 +7844,40 @@ function parseHistoryPayload(value: unknown): Record<string, unknown> | null {
 function shortHistorySession(value: unknown): string | null {
   if (typeof value !== 'string' || !value.trim()) return null;
   const trimmed = value.trim();
-  return trimmed.length > 18 ? `${trimmed.slice(0, 8)}…${trimmed.slice(-6)}` : trimmed;
+  return trimmed.length > 18
+    ? `${trimmed.slice(0, 8)}…${trimmed.slice(-6)}`
+    : trimmed;
 }
 
 function compactHistoryJson(value: unknown, max = 4000): string | null {
   if (value === undefined || value === null) return null;
-  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  const text =
+    typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
-function nestedHistoryValue(source: Record<string, unknown> | null | undefined, keys: string[]): unknown {
+function nestedHistoryValue(
+  source: Record<string, unknown> | null | undefined,
+  keys: string[],
+): unknown {
   if (!source) return undefined;
   for (const key of keys) {
     const value = source[key];
     if (value !== undefined && value !== null && value !== '') return value;
   }
-  const rawEvent = source.rawEvent && typeof source.rawEvent === 'object'
-    ? (source.rawEvent as Record<string, unknown>)
-    : null;
+  const rawEvent =
+    source.rawEvent && typeof source.rawEvent === 'object'
+      ? (source.rawEvent as Record<string, unknown>)
+      : null;
   if (rawEvent) {
     for (const key of keys) {
       const value = rawEvent[key];
       if (value !== undefined && value !== null && value !== '') return value;
     }
-    const message = rawEvent.message && typeof rawEvent.message === 'object'
-      ? (rawEvent.message as Record<string, unknown>)
-      : null;
+    const message =
+      rawEvent.message && typeof rawEvent.message === 'object'
+        ? (rawEvent.message as Record<string, unknown>)
+        : null;
     const blocks = message?.content;
     if (Array.isArray(blocks)) {
       for (const block of blocks) {
@@ -7459,7 +7885,8 @@ function nestedHistoryValue(source: Record<string, unknown> | null | undefined, 
         const record = block as Record<string, unknown>;
         for (const key of keys) {
           const value = record[key];
-          if (value !== undefined && value !== null && value !== '') return value;
+          if (value !== undefined && value !== null && value !== '')
+            return value;
         }
       }
     }
@@ -7467,18 +7894,34 @@ function nestedHistoryValue(source: Record<string, unknown> | null | undefined, 
   return undefined;
 }
 
-function historyToolPayload(streamEvent: Record<string, unknown> | null, toolNames: Map<string, string>): Record<string, unknown> | null {
+function historyToolPayload(
+  streamEvent: Record<string, unknown> | null,
+  toolNames: Map<string, string>,
+): Record<string, unknown> | null {
   if (!streamEvent) return null;
   const eventType = String(streamEvent.eventType || '');
-  if (!eventType.includes('tool_') && !eventType.includes('permission_denied')) return null;
-  const toolUseId = typeof streamEvent.toolUseId === 'string' ? streamEvent.toolUseId : null;
-  const toolName = typeof streamEvent.toolName === 'string'
-    ? streamEvent.toolName
-    : toolUseId
-      ? toolNames.get(toolUseId) ?? null
-      : null;
-  const input = streamEvent.toolInput ?? nestedHistoryValue(streamEvent, ['input', 'arguments', 'params']);
-  const response = streamEvent.detail ?? nestedHistoryValue(streamEvent, ['content', 'result', 'output', 'text', 'error']);
+  if (!eventType.includes('tool_') && !eventType.includes('permission_denied'))
+    return null;
+  const toolUseId =
+    typeof streamEvent.toolUseId === 'string' ? streamEvent.toolUseId : null;
+  const toolName =
+    typeof streamEvent.toolName === 'string'
+      ? streamEvent.toolName
+      : toolUseId
+        ? (toolNames.get(toolUseId) ?? null)
+        : null;
+  const input =
+    streamEvent.toolInput ??
+    nestedHistoryValue(streamEvent, ['input', 'arguments', 'params']);
+  const response =
+    streamEvent.detail ??
+    nestedHistoryValue(streamEvent, [
+      'content',
+      'result',
+      'output',
+      'text',
+      'error',
+    ]);
   return {
     toolName,
     toolUseId,
@@ -7490,10 +7933,20 @@ function historyToolPayload(streamEvent: Record<string, unknown> | null, toolNam
   };
 }
 
-function historyToolTitle(eventType: string, streamEvent: Record<string, unknown> | null, toolNames: Map<string, string>): string | null {
+function historyToolTitle(
+  eventType: string,
+  streamEvent: Record<string, unknown> | null,
+  toolNames: Map<string, string>,
+): string | null {
   if (!streamEvent) return null;
-  const toolUseId = typeof streamEvent.toolUseId === 'string' ? streamEvent.toolUseId : null;
-  const toolName = typeof streamEvent.toolName === 'string' ? streamEvent.toolName : toolUseId ? toolNames.get(toolUseId) : null;
+  const toolUseId =
+    typeof streamEvent.toolUseId === 'string' ? streamEvent.toolUseId : null;
+  const toolName =
+    typeof streamEvent.toolName === 'string'
+      ? streamEvent.toolName
+      : toolUseId
+        ? toolNames.get(toolUseId)
+        : null;
   const label = toolName || (toolUseId ? `#${toolUseId.slice(0, 8)}` : 'Tool');
   if (eventType.includes('tool_use_start')) return `工具调用 · ${label}`;
   if (eventType.includes('tool_use_end')) return `工具响应 · ${label}`;
@@ -7502,21 +7955,28 @@ function historyToolTitle(eventType: string, streamEvent: Record<string, unknown
   return null;
 }
 
-function chatHistoryTargetUrl(chatJid: unknown, sessionId?: unknown, groupFolder?: unknown): string {
+function chatHistoryTargetUrl(
+  chatJid: unknown,
+  sessionId?: unknown,
+  groupFolder?: unknown,
+): string {
   const jid = typeof chatJid === 'string' ? chatJid : '';
   const agentMarker = '#agent:';
   const agentIndex = jid.indexOf(agentMarker);
   const baseJid = agentIndex >= 0 ? jid.slice(0, agentIndex) : jid;
-  const agentId = agentIndex >= 0 ? jid.slice(agentIndex + agentMarker.length) : '';
-  const folder = typeof groupFolder === 'string' && groupFolder
-    ? groupFolder
-    : baseJid.startsWith('web:')
-      ? baseJid.slice(4)
-      : '';
+  const agentId =
+    agentIndex >= 0 ? jid.slice(agentIndex + agentMarker.length) : '';
+  const folder =
+    typeof groupFolder === 'string' && groupFolder
+      ? groupFolder
+      : baseJid.startsWith('web:')
+        ? baseJid.slice(4)
+        : '';
   const base = folder ? `/chat/${encodeURIComponent(folder)}` : '/chat';
   const params = new URLSearchParams();
   if (agentId) params.set('agent', agentId);
-  const session = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : '';
+  const session =
+    typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : '';
   if (session) params.set('session', session);
   const query = params.toString();
   return query ? `${base}?${query}` : base;
@@ -7541,7 +8001,9 @@ function archiveChatRecord(chatJid: string, reason: string): void {
   ).run(chatJid, chatJid, now, now, reason);
 }
 
-export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): SystemHistoryFlow[] {
+export function listSystemHistoryFlows(
+  filters: SystemHistoryFilters = {},
+): SystemHistoryFlow[] {
   const limit = Math.max(1, Math.min(100, filters.limit ?? 50));
   const offset = Math.max(0, filters.offset ?? 0);
   const type = filters.type ?? 'all';
@@ -7566,11 +8028,15 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
         taskValues.push(scopedUserId);
       }
       if (accessibleWorkspaceJids.length > 0) {
-        taskAccess.push(`t.chat_jid IN (${placeholders(accessibleWorkspaceJids)})`);
+        taskAccess.push(
+          `t.chat_jid IN (${placeholders(accessibleWorkspaceJids)})`,
+        );
         taskValues.push(...accessibleWorkspaceJids);
       }
       if (accessibleGroupFolders.length > 0) {
-        taskAccess.push(`t.group_folder IN (${placeholders(accessibleGroupFolders)})`);
+        taskAccess.push(
+          `t.group_folder IN (${placeholders(accessibleGroupFolders)})`,
+        );
         taskValues.push(...accessibleGroupFolders);
       }
     }
@@ -7601,9 +8067,20 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
         actor: String(row.execution_type || 'task'),
         workspace: String(row.group_folder || row.chat_jid || ''),
         startedAt: at,
-        updatedAt: row.duration_ms ? new Date(new Date(at).getTime() + Number(row.duration_ms)).toISOString() : at,
-        summary: typeof row.error === 'string' && row.error ? row.error : typeof row.result === 'string' ? row.result.slice(0, 240) : null,
-        targetUrl: row.group_folder ? `/tasks?workspace=${encodeURIComponent(String(row.group_folder))}&task=${encodeURIComponent(String(row.task_id || ''))}` : '/tasks',
+        updatedAt: row.duration_ms
+          ? new Date(
+              new Date(at).getTime() + Number(row.duration_ms),
+            ).toISOString()
+          : at,
+        summary:
+          typeof row.error === 'string' && row.error
+            ? row.error
+            : typeof row.result === 'string'
+              ? row.result.slice(0, 240)
+              : null,
+        targetUrl: row.group_folder
+          ? `/tasks?workspace=${encodeURIComponent(String(row.group_folder))}&task=${encodeURIComponent(String(row.task_id || ''))}`
+          : '/tasks',
         metrics: { stages: 1, durationMs: Number(row.duration_ms || 0) },
         stages: [
           {
@@ -7612,8 +8089,14 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
             title: `Task ${row.status || 'run'}`,
             status: String(row.status || ''),
             at,
-            summary: typeof row.result === 'string' ? row.result.slice(0, 240) : null,
-            detail: typeof row.error === 'string' && row.error ? row.error : typeof row.result === 'string' ? row.result : null,
+            summary:
+              typeof row.result === 'string' ? row.result.slice(0, 240) : null,
+            detail:
+              typeof row.error === 'string' && row.error
+                ? row.error
+                : typeof row.result === 'string'
+                  ? row.result
+                  : null,
             payload: { taskId: row.task_id, durationMs: row.duration_ms },
           },
         ],
@@ -7630,11 +8113,15 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
         issueValues.push(scopedUserId);
       }
       if (accessibleWorkspaceJids.length > 0) {
-        issueAccess.push(`r.workspace_jid IN (${placeholders(accessibleWorkspaceJids)})`);
+        issueAccess.push(
+          `r.workspace_jid IN (${placeholders(accessibleWorkspaceJids)})`,
+        );
         issueValues.push(...accessibleWorkspaceJids);
       }
       if (accessibleGroupFolders.length > 0) {
-        issueAccess.push(`r.workspace_folder IN (${placeholders(accessibleGroupFolders)})`);
+        issueAccess.push(
+          `r.workspace_folder IN (${placeholders(accessibleGroupFolders)})`,
+        );
         issueValues.push(...accessibleGroupFolders);
       }
     }
@@ -7654,32 +8141,48 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
       )
       .all(...issueValues, limit * 2) as Array<Record<string, unknown>>;
     for (const row of rows) {
-      const sessionLabel = shortHistorySession(row.session_id) || String(row.id || '').slice(0, 12);
+      const sessionLabel =
+        shortHistorySession(row.session_id) ||
+        String(row.id || '').slice(0, 12);
       const eventRows = db
-        .prepare('SELECT * FROM issue_agent_run_events WHERE run_id = ? ORDER BY created_at ASC LIMIT 500')
+        .prepare(
+          'SELECT * FROM issue_agent_run_events WHERE run_id = ? ORDER BY created_at ASC LIMIT 500',
+        )
         .all(row.id) as Array<Record<string, unknown>>;
       const toolNames = new Map<string, string>();
       for (const event of eventRows) {
         const payload = parseHistoryPayload(event.payload);
-        const streamEvent = payload?.streamEvent && typeof payload.streamEvent === 'object'
-          ? (payload.streamEvent as Record<string, unknown>)
-          : null;
-        if (typeof streamEvent?.toolUseId === 'string' && typeof streamEvent.toolName === 'string') {
+        const streamEvent =
+          payload?.streamEvent && typeof payload.streamEvent === 'object'
+            ? (payload.streamEvent as Record<string, unknown>)
+            : null;
+        if (
+          typeof streamEvent?.toolUseId === 'string' &&
+          typeof streamEvent.toolName === 'string'
+        ) {
           toolNames.set(streamEvent.toolUseId, streamEvent.toolName);
         }
       }
       const stages = eventRows.map((event) => {
         const payload = parseHistoryPayload(event.payload);
-        const streamEvent = payload?.streamEvent && typeof payload.streamEvent === 'object'
-          ? (payload.streamEvent as Record<string, unknown>)
-          : null;
+        const streamEvent =
+          payload?.streamEvent && typeof payload.streamEvent === 'object'
+            ? (payload.streamEvent as Record<string, unknown>)
+            : null;
         const eventType = String(event.event_type || 'event');
-        const toolName = typeof streamEvent?.toolName === 'string' ? streamEvent.toolName : null;
-        const toolSummary = typeof streamEvent?.toolInputSummary === 'string' ? streamEvent.toolInputSummary : null;
+        const toolName =
+          typeof streamEvent?.toolName === 'string'
+            ? streamEvent.toolName
+            : null;
+        const toolSummary =
+          typeof streamEvent?.toolInputSummary === 'string'
+            ? streamEvent.toolInputSummary
+            : null;
         const toolPayload = historyToolPayload(streamEvent, toolNames);
         const toolResponse = toolPayload?.response;
-        const title = historyToolTitle(eventType, streamEvent, toolNames)
-          ?? (eventType.includes('tool_')
+        const title =
+          historyToolTitle(eventType, streamEvent, toolNames) ??
+          (eventType.includes('tool_')
             ? `${toolName || 'Tool'} · ${eventType.replace('stream:', '')}`
             : String(event.title || event.event_type || 'Event'));
         return {
@@ -7688,9 +8191,19 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
           title,
           status: null,
           at: String(event.created_at || row.created_at || ''),
-          summary: toolSummary || (typeof event.summary === 'string' ? event.summary : null) || (toolResponse ? compactHistoryJson(toolResponse, 240) : null),
-          detail: typeof event.detail === 'string' ? event.detail : toolResponse ? compactHistoryJson(toolResponse) : null,
-          payload: toolPayload ? { ...payload, toolAudit: toolPayload } : payload,
+          summary:
+            toolSummary ||
+            (typeof event.summary === 'string' ? event.summary : null) ||
+            (toolResponse ? compactHistoryJson(toolResponse, 240) : null),
+          detail:
+            typeof event.detail === 'string'
+              ? event.detail
+              : toolResponse
+                ? compactHistoryJson(toolResponse)
+                : null,
+          payload: toolPayload
+            ? { ...payload, toolAudit: toolPayload }
+            : payload,
         };
       });
       flows.push({
@@ -7698,13 +8211,32 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
         type: 'issue',
         title: `${String(row.issue_title || row.issue_id || 'Issue run')} · ${sessionLabel}`,
         status: String(row.status || ''),
-        actor: String(row.backend || row.agent_client_id || row.execution_node || 'issue-agent'),
+        actor: String(
+          row.backend ||
+            row.agent_client_id ||
+            row.execution_node ||
+            'issue-agent',
+        ),
         workspace: String(row.workspace_folder || row.workspace_jid || ''),
         startedAt: String(row.run_started_at || row.created_at || ''),
-        updatedAt: String(row.run_completed_at || row.run_started_at || row.created_at || ''),
-        summary: typeof row.error === 'string' && row.error ? row.error : typeof row.result === 'string' ? row.result.slice(0, 240) : null,
+        updatedAt: String(
+          row.run_completed_at || row.run_started_at || row.created_at || '',
+        ),
+        summary:
+          typeof row.error === 'string' && row.error
+            ? row.error
+            : typeof row.result === 'string'
+              ? row.result.slice(0, 240)
+              : null,
         targetUrl: `/issues/${encodeURIComponent(String(row.workspace_folder || ''))}?issue=${encodeURIComponent(String(row.issue_id || ''))}&run=${encodeURIComponent(String(row.id || ''))}`,
-        metrics: { stages: stages.length, durationMs: row.run_started_at && row.run_completed_at ? new Date(String(row.run_completed_at)).getTime() - new Date(String(row.run_started_at)).getTime() : null },
+        metrics: {
+          stages: stages.length,
+          durationMs:
+            row.run_started_at && row.run_completed_at
+              ? new Date(String(row.run_completed_at)).getTime() -
+                new Date(String(row.run_started_at)).getTime()
+              : null,
+        },
         stages: stages.length
           ? stages
           : [
@@ -7714,9 +8246,24 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
                 title: `Issue run ${row.status || ''}`,
                 status: String(row.status || ''),
                 at: String(row.created_at || ''),
-                summary: typeof row.result === 'string' ? row.result.slice(0, 240) : typeof row.error === 'string' ? row.error : null,
-                detail: typeof row.error === 'string' && row.error ? row.error : typeof row.result === 'string' ? row.result : null,
-                payload: { issueId: row.issue_id, runId: row.id, sessionId: row.session_id, priority: row.issue_priority },
+                summary:
+                  typeof row.result === 'string'
+                    ? row.result.slice(0, 240)
+                    : typeof row.error === 'string'
+                      ? row.error
+                      : null,
+                detail:
+                  typeof row.error === 'string' && row.error
+                    ? row.error
+                    : typeof row.result === 'string'
+                      ? row.result
+                      : null,
+                payload: {
+                  issueId: row.issue_id,
+                  runId: row.id,
+                  sessionId: row.session_id,
+                  priority: row.issue_priority,
+                },
               },
             ],
       });
@@ -7724,21 +8271,35 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
   }
 
   if (type === 'all' || type === 'team') {
-    const teamWhere = includeAllUsers ? '' : scopedUserId ? 'WHERE user_id = ?' : 'WHERE 1 = 0';
+    const teamWhere = includeAllUsers
+      ? ''
+      : scopedUserId
+        ? 'WHERE user_id = ?'
+        : 'WHERE 1 = 0';
     const teamValues = includeAllUsers || !scopedUserId ? [] : [scopedUserId];
-    const rows = db.prepare(`SELECT * FROM agent_team_runs ${teamWhere} ORDER BY created_at DESC LIMIT ?`).all(...teamValues, limit * 2) as Array<Record<string, unknown>>;
+    const rows = db
+      .prepare(
+        `SELECT * FROM agent_team_runs ${teamWhere} ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(...teamValues, limit * 2) as Array<Record<string, unknown>>;
     for (const row of rows) {
       const eventRows = db
-        .prepare('SELECT * FROM agent_team_events WHERE run_id = ? ORDER BY timestamp ASC LIMIT 80')
+        .prepare(
+          'SELECT * FROM agent_team_events WHERE run_id = ? ORDER BY timestamp ASC LIMIT 80',
+        )
         .all(row.id) as Array<Record<string, unknown>>;
       const sessionIds = [
         ...new Set(
           eventRows
-            .map((event) => (typeof event.session_id === 'string' ? event.session_id : null))
+            .map((event) =>
+              typeof event.session_id === 'string' ? event.session_id : null,
+            )
             .filter((value): value is string => !!value),
         ),
       ];
-      const sessionLabel = sessionIds.length ? sessionIds.map(shortHistorySession).filter(Boolean).join(', ') : String(row.trace_id || row.id || '').slice(0, 12);
+      const sessionLabel = sessionIds.length
+        ? sessionIds.map(shortHistorySession).filter(Boolean).join(', ')
+        : String(row.trace_id || row.id || '').slice(0, 12);
       const stages = eventRows.map((event) => ({
         id: `team-event:${event.id}`,
         type: String(event.type || 'event'),
@@ -7757,10 +8318,24 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
         actor: String(row.team_id || 'agent-team'),
         workspace: null,
         startedAt: String(row.started_at || row.created_at || ''),
-        updatedAt: String(row.completed_at || row.updated_at || row.created_at || ''),
-        summary: typeof row.error === 'string' && row.error ? row.error : typeof row.final_result === 'string' ? row.final_result.slice(0, 240) : null,
+        updatedAt: String(
+          row.completed_at || row.updated_at || row.created_at || '',
+        ),
+        summary:
+          typeof row.error === 'string' && row.error
+            ? row.error
+            : typeof row.final_result === 'string'
+              ? row.final_result.slice(0, 240)
+              : null,
         targetUrl: `/agents?run=${encodeURIComponent(String(row.id || ''))}&team=${encodeURIComponent(String(row.team_id || ''))}`,
-        metrics: { stages: stages.length, durationMs: row.started_at && row.completed_at ? new Date(String(row.completed_at)).getTime() - new Date(String(row.started_at)).getTime() : null },
+        metrics: {
+          stages: stages.length,
+          durationMs:
+            row.started_at && row.completed_at
+              ? new Date(String(row.completed_at)).getTime() -
+                new Date(String(row.started_at)).getTime()
+              : null,
+        },
         stages,
       });
     }
@@ -7795,7 +8370,7 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
          LEFT JOIN registered_groups g ON g.jid = ${baseChatJidExpr}
          ${messageWhere}
          ORDER BY m.timestamp DESC
-         LIMIT ?`, 
+         LIMIT ?`,
       )
       .all(...messageValues, limit * 8) as Array<Record<string, unknown>>;
     const byChat = new Map<string, Array<Record<string, unknown>>>();
@@ -7805,15 +8380,25 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
       arr.push(row);
       byChat.set(key, arr);
     }
-    const grouped: Array<{ key: string; chatJid: string; sessionId: string | null; messages: Array<Record<string, unknown>> }> = [];
+    const grouped: Array<{
+      key: string;
+      chatJid: string;
+      sessionId: string | null;
+      messages: Array<Record<string, unknown>>;
+    }> = [];
     for (const [chatJid, chatMessages] of byChat) {
-      chatMessages.sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
+      chatMessages.sort((a, b) =>
+        String(a.timestamp || '').localeCompare(String(b.timestamp || '')),
+      );
       const bySession = new Map<string, Array<Record<string, unknown>>>();
       const sessionOrder: string[] = [];
       let pendingNoSession: Array<Record<string, unknown>> = [];
       let index = 0;
       for (const message of chatMessages) {
-        const sessionId = typeof message.session_id === 'string' && message.session_id.trim() ? message.session_id.trim() : null;
+        const sessionId =
+          typeof message.session_id === 'string' && message.session_id.trim()
+            ? message.session_id.trim()
+            : null;
         if (!sessionId) {
           pendingNoSession.push(message);
           continue;
@@ -7830,24 +8415,49 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
         bucket.push(message);
       }
       if (pendingNoSession.length > 0) {
-        grouped.push({ key: `${chatJid}:local:${index++}`, chatJid, sessionId: null, messages: pendingNoSession });
+        grouped.push({
+          key: `${chatJid}:local:${index++}`,
+          chatJid,
+          sessionId: null,
+          messages: pendingNoSession,
+        });
       }
       for (const sessionId of sessionOrder) {
-        grouped.push({ key: `${chatJid}:session:${sessionId}`, chatJid, sessionId, messages: bySession.get(sessionId) ?? [] });
+        grouped.push({
+          key: `${chatJid}:session:${sessionId}`,
+          chatJid,
+          sessionId,
+          messages: bySession.get(sessionId) ?? [],
+        });
       }
     }
     for (const { key, sessionId, messages } of grouped) {
       if (messages.length === 0) continue;
       const first = messages[0];
       const last = messages[messages.length - 1];
-      const userCount = messages.filter((message) => String(message.role || (Number(message.is_from_me || 0) === 1 ? 'assistant' : 'user')) === 'user').length;
-      const toolCount = messages.filter((message) => String(message.role || '') === 'tool').length;
+      const userCount = messages.filter(
+        (message) =>
+          String(
+            message.role ||
+              (Number(message.is_from_me || 0) === 1 ? 'assistant' : 'user'),
+          ) === 'user',
+      ).length;
+      const toolCount = messages.filter(
+        (message) => String(message.role || '') === 'tool',
+      ).length;
       const agentCount = messages.length - userCount - toolCount;
       const sessionLabel = shortHistorySession(sessionId) || 'local';
-      const workspaceLabel = String(last.group_name || last.chat_name || last.group_folder || last.chat_jid || 'Workspace');
-      const archivedAt = typeof last.chat_archived_at === 'string' && last.chat_archived_at
-        ? last.chat_archived_at
-        : null;
+      const workspaceLabel = String(
+        last.group_name ||
+          last.chat_name ||
+          last.group_folder ||
+          last.chat_jid ||
+          'Workspace',
+      );
+      const archivedAt =
+        typeof last.chat_archived_at === 'string' && last.chat_archived_at
+          ? last.chat_archived_at
+          : null;
       flows.push({
         id: `conversation:${key}`,
         type: 'conversation',
@@ -7858,20 +8468,51 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
         workspace: String(last.chat_jid || ''),
         startedAt: String(first.timestamp || ''),
         updatedAt: String(last.timestamp || ''),
-        summary: typeof last.content === 'string' ? last.content.slice(0, 240) : null,
-        targetUrl: chatHistoryTargetUrl(last.chat_jid, sessionId, last.group_folder),
+        summary:
+          typeof last.content === 'string' ? last.content.slice(0, 240) : null,
+        targetUrl: chatHistoryTargetUrl(
+          last.chat_jid,
+          sessionId,
+          last.group_folder,
+        ),
         metrics: { stages: messages.length, messages: messages.length },
         stages: messages.map((message) => {
-          const role = String(message.role || (Number(message.is_from_me || 0) === 1 ? 'assistant' : 'user'));
+          const role = String(
+            message.role ||
+              (Number(message.is_from_me || 0) === 1 ? 'assistant' : 'user'),
+          );
           return {
             id: `message:${message.chat_jid}:${message.id}`,
-            type: role === 'tool' ? 'tool_message' : message.is_from_me ? 'agent_message' : 'user_message',
-            title: role === 'tool' ? 'Tool' : message.is_from_me ? 'Agent output' : 'User input',
+            type:
+              role === 'tool'
+                ? 'tool_message'
+                : message.is_from_me
+                  ? 'agent_message'
+                  : 'user_message',
+            title:
+              role === 'tool'
+                ? 'Tool'
+                : message.is_from_me
+                  ? 'Agent output'
+                  : 'User input',
             status: role,
             at: String(message.timestamp || ''),
-            summary: typeof message.content === 'string' ? message.content.slice(0, 240) : null,
-            detail: typeof message.content === 'string' ? message.content : null,
-            payload: { chatJid: message.chat_jid, messageId: message.id, sessionId: message.session_id, turnId: message.turn_id, sourceKind: message.source_kind, role, archivedAt, archiveReason: last.chat_archive_reason },
+            summary:
+              typeof message.content === 'string'
+                ? message.content.slice(0, 240)
+                : null,
+            detail:
+              typeof message.content === 'string' ? message.content : null,
+            payload: {
+              chatJid: message.chat_jid,
+              messageId: message.id,
+              sessionId: message.session_id,
+              turnId: message.turn_id,
+              sourceKind: message.source_kind,
+              role,
+              archivedAt,
+              archiveReason: last.chat_archive_reason,
+            },
           };
         }),
       });
@@ -7880,14 +8521,27 @@ export function listSystemHistoryFlows(filters: SystemHistoryFilters = {}): Syst
 
   const filtered = query
     ? flows.filter((flow) =>
-        [flow.title, flow.status, flow.actor, flow.workspace, flow.summary, ...flow.stages.flatMap((stage) => [stage.title, stage.summary, stage.detail])]
+        [
+          flow.title,
+          flow.status,
+          flow.actor,
+          flow.workspace,
+          flow.summary,
+          ...flow.stages.flatMap((stage) => [
+            stage.title,
+            stage.summary,
+            stage.detail,
+          ]),
+        ]
           .filter(Boolean)
           .join('\n')
           .toLowerCase()
           .includes(query),
       )
     : flows;
-  return filtered.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(offset, offset + limit);
+  return filtered
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(offset, offset + limit);
 }
 
 // ===================== Daily Summary Queries =====================
@@ -10710,6 +11364,11 @@ function parseAgentLinkRow(row: AgentLinkRow): AgentLink {
           displayName: typeof c.displayName === 'string' ? c.displayName : c.id,
           binary: c.binary,
           ...(typeof c.version === 'string' ? { version: c.version } : {}),
+          ...(typeof c.family === 'string' ? { family: c.family } : {}),
+          ...(typeof c.provider === 'string' ? { provider: c.provider } : {}),
+          ...(typeof c.transport === 'string'
+            ? { transport: c.transport }
+            : {}),
           ...(Array.isArray(c.permissionModes)
             ? {
                 permissionModes: c.permissionModes.filter(
@@ -10787,7 +11446,9 @@ function parseAgentLinkRow(row: AgentLinkRow): AgentLink {
                     ? { diskUsedPercent: disk.diskUsedPercent }
                     : {}),
                 }))
-                .filter((disk: { mountPoint: string }) => disk.mountPoint !== '—'),
+                .filter(
+                  (disk: { mountPoint: string }) => disk.mountPoint !== '—',
+                ),
             }
           : {}),
         ...(typeof parsed.collectedAt === 'string'
@@ -11128,6 +11789,8 @@ export function deleteCloudSkill(userId: string, skillId: string): boolean {
 }
 
 export function deleteCloudSkillsByUser(userId: string): number {
-  const result = db.prepare('DELETE FROM cloud_skills WHERE user_id = ?').run(userId);
+  const result = db
+    .prepare('DELETE FROM cloud_skills WHERE user_id = ?')
+    .run(userId);
   return result.changes;
 }

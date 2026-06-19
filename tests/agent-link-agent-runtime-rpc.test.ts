@@ -29,6 +29,7 @@ describe('agent-link agent runtime rpc', () => {
           id: 'claude-code',
           displayName: 'Claude Code',
           binary: '/usr/bin/claude',
+          family: 'claude',
         },
       ],
       error: null,
@@ -36,7 +37,7 @@ describe('agent-link agent runtime rpc', () => {
     });
     await expect(promise).resolves.toMatchObject({
       ok: true,
-      agents: [{ id: 'claude-code' }],
+      agents: [{ id: 'claude-code', family: 'claude' }],
     });
   });
 

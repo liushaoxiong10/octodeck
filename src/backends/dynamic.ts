@@ -47,6 +47,8 @@ export interface CustomBackendDef {
   deviceLinkId?: string | null;
   /** Agent client discovered by octodeck-daemon on the selected device. */
   agentClientId?: string | null;
+  /** Transport reported by octodeck-daemon for agentClientId, e.g. stdio / acp. */
+  agentClientTransport?: string | null;
   /** Optional reusable agent.md definition used as this Agent's identity. */
   agentMdId?: string | null;
   createdAt?: string;
@@ -157,6 +159,7 @@ export function buildDynamicBackend(def: CustomBackendDef): AgentBackend {
         model,
         permissionMode: def.permissionMode,
         agentClientId: def.agentClientId ?? def.id,
+        agentClientTransport: def.agentClientTransport ?? null,
         workdirMode: def.workdirMode,
         workdir: def.workdir,
       };

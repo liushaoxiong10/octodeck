@@ -134,6 +134,12 @@ export interface ConnectFeishuOptions {
   isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
   isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
   onCardInterrupt?: (chatJid: string) => void;
+  onApprovalDecision?: (decision: {
+    linkId: string;
+    runId: string;
+    requestId: string;
+    decision: 'approve' | 'reject';
+  }) => void | Promise<void>;
   onP2pSender?: (senderOpenId: string) => void;
 }
 
@@ -485,6 +491,7 @@ class IMConnectionManager {
       isGroupOwnerMessage: options?.isGroupOwnerMessage,
       isSenderAllowedInGroup: options?.isSenderAllowedInGroup,
       onCardInterrupt: options?.onCardInterrupt,
+      onApprovalDecision: options?.onApprovalDecision,
       onP2pSender: options?.onP2pSender,
     });
   }

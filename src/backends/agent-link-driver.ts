@@ -44,7 +44,6 @@ import type { BackendRunArgs } from './types.js';
 import type { HostCliDriverConfig } from './host-cli-driver.js';
 import {
   applyAgentPermissionArgs,
-  normalizePermissionModeForAgent,
 } from './agent-permission-args.js';
 import { loadUserMcpServers } from '../mcp-utils.js';
 import { listManagedReposByUser } from '../db.js';
@@ -267,6 +266,21 @@ function valueFromPayload(
     const value = payload[key];
     if (value !== undefined && value !== null) return value;
   }
+  for (const containerKey of [
+    'update',
+    'delta',
+    'toolCall',
+    'tool_call',
+    'toolUse',
+    'tool_use',
+    'item',
+  ]) {
+    const nested = payload[containerKey];
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      const value = valueFromPayload(nested as Record<string, unknown>, keys);
+      if (value !== undefined && value !== null) return value;
+    }
+  }
   const blocks = (payload.message as Record<string, unknown> | undefined)
     ?.content;
   if (Array.isArray(blocks)) {
@@ -276,6 +290,48 @@ function valueFromPayload(
       for (const key of keys) {
         const value = record[key];
         if (value !== undefined && value !== null) return value;
+      }
+    }
+  }
+  return undefined;
+}
+
+function stringFromPayload(
+  payload: Record<string, unknown> | undefined,
+  keys: string[],
+): string | undefined {
+  if (!payload) return undefined;
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  for (const containerKey of [
+    'update',
+    'delta',
+    'toolCall',
+    'tool_call',
+    'toolUse',
+    'tool_use',
+    'item',
+  ]) {
+    const nested = payload[containerKey];
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      const value = stringFromPayload(
+        nested as Record<string, unknown>,
+        keys,
+      );
+      if (value) return value;
+    }
+  }
+  const blocks = (payload.message as Record<string, unknown> | undefined)
+    ?.content;
+  if (Array.isArray(blocks)) {
+    for (const block of blocks) {
+      if (!block || typeof block !== 'object') continue;
+      const record = block as Record<string, unknown>;
+      for (const key of keys) {
+        const value = record[key];
+        if (typeof value === 'string' && value.trim()) return value;
       }
     }
   }
@@ -318,6 +374,9 @@ function normalizeModelUsagePayload(
         'input_tokens',
         'inputTokenCount',
         'input_token_count',
+        'used',
+        'usedTokens',
+        'used_tokens',
         'promptTokens',
         'prompt_tokens',
         'promptTokenCount',
@@ -372,6 +431,27 @@ function firstStringFromPayload(
   return undefined;
 }
 
+function costUSDFromPayload(payload: Record<string, unknown>): number {
+  const cost = payload.cost;
+  if (!cost || typeof cost !== 'object' || Array.isArray(cost)) return 0;
+  const record = cost as Record<string, unknown>;
+  const currency =
+    typeof record.currency === 'string'
+      ? record.currency.trim().toUpperCase()
+      : '';
+  if (currency && currency !== 'USD') return 0;
+  const amount = record.amount;
+  if (typeof amount === 'number' && Number.isFinite(amount)) return amount;
+  if (
+    typeof amount === 'string' &&
+    amount.trim() &&
+    Number.isFinite(Number(amount))
+  ) {
+    return Number(amount);
+  }
+  return 0;
+}
+
 function normalizeUsagePayload(
   payload: Record<string, unknown> | undefined,
   fallbackModel?: string,
@@ -397,6 +477,9 @@ function normalizeUsagePayload(
       'input_tokens',
       'inputTokenCount',
       'input_token_count',
+      'used',
+      'usedTokens',
+      'used_tokens',
       'promptTokens',
       'prompt_tokens',
       'promptTokenCount',
@@ -434,7 +517,9 @@ function normalizeUsagePayload(
       'cachedWriteTokens',
       'cached_write_tokens',
     ),
-    costUSD: num('costUSD', 'cost_usd', 'cost'),
+    costUSD:
+      num('costUSD', 'cost_usd', 'costAmountUSD', 'cost_amount_usd', 'cost') ||
+      costUSDFromPayload(usage),
     durationMs: num('durationMs', 'duration_ms'),
     numTurns: num('numTurns', 'num_turns'),
   };
@@ -465,24 +550,60 @@ function normalizeUsagePayload(
 
 function streamEventFromAgentRunFrame(
   frame: {
+    runId?: string;
     eventType: string;
     text?: string;
     sessionId?: string;
     payload?: Record<string, unknown>;
   },
   fallbackModel?: string,
+  linkId?: string,
 ): StreamEvent | null {
+  if (frame.eventType === 'thinking_delta') {
+    const text =
+      frame.text ||
+      stringFromPayload(frame.payload, [
+        'reasoning',
+        'thinking',
+        'reason',
+        'text',
+        'delta',
+        'content',
+        'message',
+      ]);
+    if (!text) return null;
+    return {
+      eventType: 'thinking_delta',
+      sessionId: frame.sessionId,
+      text,
+      rawEvent: frame.payload,
+    };
+  }
   if (frame.eventType === 'tool_call' || frame.eventType === 'tool_use_start') {
     const input = valueFromPayload(frame.payload, [
       'input',
+      'rawInput',
+      'raw_input',
       'arguments',
       'params',
     ]);
     const toolUseId = String(
-      valueFromPayload(frame.payload, ['id', 'toolUseId', 'tool_use_id']) || '',
+      valueFromPayload(frame.payload, [
+        'id',
+        'toolUseId',
+        'tool_use_id',
+        'toolCallId',
+        'tool_call_id',
+      ]) || '',
     );
     const toolName = String(
-      valueFromPayload(frame.payload, ['name', 'toolName']) || 'unknown',
+      stringFromPayload(frame.payload, [
+        'name',
+        'toolName',
+        'tool_name',
+        'title',
+        'message',
+      ]) || 'unknown',
     );
     if (toolUseId && toolName !== 'unknown') {
       TOOL_RESULT_NAME_BY_ID.set(toolUseId, toolName);
@@ -506,17 +627,31 @@ function streamEventFromAgentRunFrame(
     const content = valueFromPayload(frame.payload, [
       'content',
       'result',
-      'text',
+      'rawOutput',
+      'raw_output',
       'output',
+      'text',
     ]);
     const isError = Boolean(
       valueFromPayload(frame.payload, ['is_error', 'isError', 'error']),
     );
     const toolUseId = String(
-      valueFromPayload(frame.payload, ['toolUseId', 'tool_use_id', 'id']) || '',
+      valueFromPayload(frame.payload, [
+        'toolUseId',
+        'tool_use_id',
+        'toolCallId',
+        'tool_call_id',
+        'id',
+      ]) || '',
     );
     const toolName = String(
-      valueFromPayload(frame.payload, ['name', 'toolName']) ||
+      stringFromPayload(frame.payload, [
+        'name',
+        'toolName',
+        'tool_name',
+        'title',
+        'message',
+      ]) ||
         TOOL_RESULT_NAME_BY_ID.get(toolUseId) ||
         'unknown',
     );
@@ -537,6 +672,33 @@ function streamEventFromAgentRunFrame(
     const toolName =
       (typeof payload.toolName === 'string' ? payload.toolName : undefined) ??
       (typeof payload.tool_name === 'string' ? payload.tool_name : undefined);
+    const requestId =
+      (typeof payload.requestId === 'string' ? payload.requestId : undefined) ??
+      (typeof payload.request_id === 'string' ? payload.request_id : undefined) ??
+      (typeof payload.permissionRequestId === 'string'
+        ? payload.permissionRequestId
+        : undefined) ??
+      (typeof payload.id === 'string' ? payload.id : undefined);
+    const permissionRequest =
+      frame.runId && requestId
+        ? {
+            ...(linkId ? { linkId } : {}),
+            runId: frame.runId,
+            requestId,
+            ...(toolName ? { toolName } : {}),
+            title: toolName
+              ? `Permission request: ${toolName}`
+              : 'Permission request',
+            summary: toolName
+              ? `Agent is requesting permission to use ${toolName}.`
+              : 'Agent is requesting permission.',
+            ...(linkId
+              ? {
+                  decisionUrl: `/api/agent-links/${encodeURIComponent(linkId)}/agents/runs/${encodeURIComponent(frame.runId)}/permissions/${encodeURIComponent(requestId)}/decision`,
+                }
+              : {}),
+          }
+        : undefined;
     return {
       eventType: 'permission_request',
       sessionId: frame.sessionId,
@@ -549,6 +711,7 @@ function streamEventFromAgentRunFrame(
         : 'Agent is requesting permission.',
       detail: compactJson(frame.payload) ?? undefined,
       rawEvent: frame.payload,
+      permissionRequest,
     };
   }
   if (frame.eventType === 'usage') {
@@ -747,17 +910,12 @@ function buildAgentRunPolicy(
 ): Record<string, unknown> {
   const policy: Record<string, unknown> = {};
   if (cfg.model) policy.model = cfg.model;
-  const permissionMode = normalizePermissionModeForAgent(
-    agentClientId ?? cfg.agentClientId ?? cfg.backendId,
-    group.permissionMode ?? cfg.permissionMode,
-  );
-  if (permissionMode && permissionMode !== 'default') {
+  const permissionMode = (group.permissionMode ?? cfg.permissionMode)?.trim();
+  if (permissionMode) {
     policy.permissionMode = permissionMode;
   }
-  if (isStartingNewDeviceCliSession(input)) {
-    const systemPrompt = buildDeviceCliSystemPrompt(input, group, ownerUserId);
-    if (systemPrompt) policy.systemPrompt = systemPrompt;
-  }
+  const systemPrompt = buildDeviceCliSystemPrompt(input, group, ownerUserId);
+  if (systemPrompt) policy.systemPrompt = systemPrompt;
   return policy;
 }
 
@@ -1169,16 +1327,28 @@ function buildRemoteWorkspaceMeta(
   };
 }
 
-function supportsAgentRun(linkId: string, agentClientId?: string): boolean {
+function supportsAgentRun(
+  linkId: string,
+  agentClientId?: string,
+  agentClientTransport?: string | null,
+): boolean {
   if (!agentClientId) return false;
   const meta = getOnlineMeta(linkId);
   if (!meta?.capabilities?.includes('agent.run')) return false;
   const runtimes = meta.runtimes ?? [];
-  if (runtimes.length === 0) return true;
-  return runtimes.some(
-    (runtime) =>
-      runtime.agentClientId === agentClientId && runtime.status !== 'offline',
-  );
+  if (
+    runtimes.some(
+      (runtime) =>
+        runtime.agentClientId === agentClientId && runtime.status !== 'offline',
+    )
+  ) {
+    return true;
+  }
+  // ACP transports are exposed by the daemon as native agent runtimes. During
+  // reconnect/discover races older server state may not have a fresh runtimes
+  // snapshot yet; still prefer agent.run so we do not fall back to legacy
+  // run.request and rebuild a print-mode argv such as `traecli -p ...`.
+  return agentClientTransport === 'acp';
 }
 
 function buildRemoteEnv(
@@ -1241,6 +1411,24 @@ async function runViaAgentRuntime(opts: {
   const runId = newRunId();
   const processId = `${cfg.backendId}-${group.folder}-${linkId}-${agentClientId}-${startTime}`;
   const chatId = buildStableChatId(args);
+  logger.info(
+    {
+      group: group.name,
+      groupFolder: group.folder,
+      backendId: cfg.backendId,
+      runId,
+      processId,
+      linkId,
+      agentClientId,
+      chatId,
+      promptLength: input.prompt.length,
+      sessionId: input.sessionId,
+      workspaceSessionId: input.workspaceSessionId,
+      timeoutMs,
+      maxOutputBytes,
+    },
+    'Agent Link agent-run initializing',
+  );
 
   return new Promise<ContainerOutput>((resolve) => {
     let settled = false;
@@ -1249,10 +1437,27 @@ async function runViaAgentRuntime(opts: {
     let lastStatusMessage = '';
     let lastSessionId: string | undefined = input.sessionId;
     let usageEventSeen = false;
+    let firstEventLogged = false;
     let onAbort: (() => void) | undefined;
     const resolveOnce = (out: ContainerOutput): void => {
       if (settled) return;
       settled = true;
+      logger.info(
+        {
+          group: group.name,
+          backendId: cfg.backendId,
+          runId,
+          processId,
+          linkId,
+          agentClientId,
+          status: out.status,
+          elapsedMs: Date.now() - startTime,
+          resultLength: out.result?.length ?? 0,
+          hasError: !!out.error,
+          newSessionId: out.newSessionId,
+        },
+        'Agent Link agent-run resolved',
+      );
       if (onAbort) args.signal?.removeEventListener('abort', onAbort);
       unregisterAgentRun(runId);
       resolve(out);
@@ -1280,6 +1485,19 @@ async function runViaAgentRuntime(opts: {
       kill: (_signal?: NodeJS.Signals | number): boolean => {
         const s = getSession(linkId);
         if (s && s.state === 'open') {
+          logger.info(
+            {
+              group: group.name,
+              backendId: cfg.backendId,
+              runId,
+              processId,
+              linkId,
+              agentClientId,
+              signal: _signal,
+              elapsedMs: Date.now() - startTime,
+            },
+            'Agent Link agent-run kill requested',
+          );
           s.send({ type: 'agent.run.cancel', runId, reason: 'user_abort' });
         }
         return true;
@@ -1288,6 +1506,19 @@ async function runViaAgentRuntime(opts: {
     onAbort = () => {
       const s = getSession(linkId);
       if (s && s.state === 'open') {
+        logger.info(
+          {
+            group: group.name,
+            backendId: cfg.backendId,
+            runId,
+            processId,
+            linkId,
+            agentClientId,
+            reason: cancelReasonFromSignal(args.signal),
+            elapsedMs: Date.now() - startTime,
+          },
+          'Agent Link agent-run abort signal received',
+        );
         s.send({
           type: 'agent.run.cancel',
           runId,
@@ -1298,6 +1529,18 @@ async function runViaAgentRuntime(opts: {
     args.signal?.addEventListener('abort', onAbort, { once: true });
     if (args.signal?.aborted) onAbort();
     onProcess(fakeProc, processId, null);
+    logger.info(
+      {
+        group: group.name,
+        backendId: cfg.backendId,
+        runId,
+        processId,
+        linkId,
+        agentClientId,
+        elapsedMs: Date.now() - startTime,
+      },
+      'Agent Link agent-run process registered',
+    );
 
     const finalize = async (
       info:
@@ -1313,6 +1556,19 @@ async function runViaAgentRuntime(opts: {
           }
         | { kind: 'fail'; reason: string },
     ): Promise<void> => {
+      logger.info(
+        {
+          group: group.name,
+          backendId: cfg.backendId,
+          runId,
+          processId,
+          linkId,
+          agentClientId,
+          kind: info.kind,
+          elapsedMs: Date.now() - startTime,
+        },
+        'Agent Link agent-run finalize started',
+      );
       try {
         const ts = new Date(startTime).toISOString().replace(/[:.]/g, '-');
         const logFile = path.join(logsDir, `${cfg.backendId}-${ts}.log`);
@@ -1335,6 +1591,20 @@ async function runViaAgentRuntime(opts: {
           ].join('\n'),
           { mode: 0o600 },
         );
+        logger.info(
+          {
+            group: group.name,
+            backendId: cfg.backendId,
+            runId,
+            processId,
+            linkId,
+            agentClientId,
+            textBytes: textAccum.length,
+            logBytes: logAccum.length,
+            elapsedMs: Date.now() - startTime,
+          },
+          'Agent Link agent-run finalize log written',
+        );
       } catch (err) {
         logger.warn(
           { group: group.name, err },
@@ -1349,6 +1619,18 @@ async function runViaAgentRuntime(opts: {
           error: `agent-run failed: ${info.reason}`,
           newSessionId: lastSessionId,
         };
+        logger.info(
+          {
+            group: group.name,
+            backendId: cfg.backendId,
+            runId,
+            processId,
+            linkId,
+            agentClientId,
+            elapsedMs: Date.now() - startTime,
+          },
+          'Agent Link agent-run emitting fail output',
+        );
         await emitWrapped(out);
         resolveOnce(out);
         return;
@@ -1358,6 +1640,18 @@ async function runViaAgentRuntime(opts: {
         const usage = normalizeUsagePayload(info.usage, cfg.model);
         if (usage) {
           usageEventSeen = true;
+          logger.info(
+            {
+              group: group.name,
+              backendId: cfg.backendId,
+              runId,
+              processId,
+              linkId,
+              agentClientId,
+              elapsedMs: Date.now() - startTime,
+            },
+            'Agent Link agent-run emitting usage output',
+          );
           await emitWrapped({
             status: 'stream',
             result: null,
@@ -1379,6 +1673,18 @@ async function runViaAgentRuntime(opts: {
           error: `${cfg.backendId} timeout after ${info.durationMs}ms (agent-run)`,
           newSessionId: lastSessionId,
         };
+        logger.info(
+          {
+            group: group.name,
+            backendId: cfg.backendId,
+            runId,
+            processId,
+            linkId,
+            agentClientId,
+            elapsedMs: Date.now() - startTime,
+          },
+          'Agent Link agent-run emitting timeout output',
+        );
         await emitWrapped(out);
         resolveOnce(out);
         return;
@@ -1395,7 +1701,34 @@ async function runViaAgentRuntime(opts: {
               cleanError || resultText || `${cfg.backendId} reported failure`,
             newSessionId: lastSessionId,
           };
+      logger.info(
+        {
+          group: group.name,
+          backendId: cfg.backendId,
+          runId,
+          processId,
+          linkId,
+          agentClientId,
+          status: out.status,
+          resultBytes:
+            typeof out.result === 'string' ? out.result.length : undefined,
+          elapsedMs: Date.now() - startTime,
+        },
+        'Agent Link agent-run emitting final output',
+      );
       await emitWrapped(out);
+      logger.info(
+        {
+          group: group.name,
+          backendId: cfg.backendId,
+          runId,
+          processId,
+          linkId,
+          agentClientId,
+          elapsedMs: Date.now() - startTime,
+        },
+        'Agent Link agent-run final output emitted',
+      );
       resolveOnce(out);
     };
 
@@ -1417,6 +1750,24 @@ async function runViaAgentRuntime(opts: {
       runId,
       linkId,
       onEvent(frame) {
+        if (!firstEventLogged && frame.eventType !== 'log') {
+          firstEventLogged = true;
+          logger.info(
+            {
+              group: group.name,
+              backendId: cfg.backendId,
+              runId,
+              processId,
+              linkId,
+              agentClientId,
+              eventType: frame.eventType,
+              textLength: frame.text?.length ?? 0,
+              sessionId: frame.sessionId,
+              elapsedMs: Date.now() - startTime,
+            },
+            'Agent Link agent-run event handled',
+          );
+        }
         if (frame.sessionId) lastSessionId = frame.sessionId;
         if (frame.eventType === 'log') {
           if (frame.text && logAccum.length < 20000) {
@@ -1434,10 +1785,24 @@ async function runViaAgentRuntime(opts: {
           }
           return;
         }
-        const structuredEvent = streamEventFromAgentRunFrame(frame, cfg.model);
+        const structuredEvent = streamEventFromAgentRunFrame(
+          frame,
+          cfg.model,
+          linkId,
+        );
         if (structuredEvent) {
           if (structuredEvent.eventType === 'usage' && structuredEvent.usage) {
             usageEventSeen = true;
+          }
+          if (
+            structuredEvent.eventType === 'text_delta' &&
+            structuredEvent.text &&
+            textAccum.length < maxOutputBytes
+          ) {
+            textAccum += structuredEvent.text.slice(
+              0,
+              maxOutputBytes - textAccum.length,
+            );
           }
           void emitWrapped({
             status: 'stream',
@@ -1451,6 +1816,9 @@ async function runViaAgentRuntime(opts: {
           (frame.eventType === 'text_delta' ||
             frame.eventType === 'thinking_delta')
         ) {
+          if (structuredEvent?.eventType === frame.eventType) {
+            return;
+          }
           if (
             frame.eventType !== 'thinking_delta' &&
             textAccum.length < maxOutputBytes
@@ -1473,9 +1841,40 @@ async function runViaAgentRuntime(opts: {
         }
       },
       onStatus(status) {
+        logger.info(
+          {
+            group: group.name,
+            backendId: cfg.backendId,
+            runId,
+            processId,
+            linkId,
+            agentClientId,
+            status: status.status,
+            message: status.message,
+            elapsedMs: Date.now() - startTime,
+          },
+          'Agent Link agent-run status handled',
+        );
         if (status.message) lastStatusMessage = status.message;
       },
       finish(result) {
+        logger.info(
+          {
+            group: group.name,
+            backendId: cfg.backendId,
+            runId,
+            processId,
+            linkId,
+            agentClientId,
+            ok: result.ok,
+            timedOut: result.timedOut,
+            durationMs: result.durationMs,
+            resultLength: result.result?.length ?? 0,
+            hasError: !!result.error,
+            elapsedMs: Date.now() - startTime,
+          },
+          'Agent Link agent-run result handled',
+        );
         clearTimeout(timer);
         void finalize({
           kind: 'result',
@@ -1489,12 +1888,37 @@ async function runViaAgentRuntime(opts: {
         });
       },
       fail(reason) {
+        logger.warn(
+          {
+            group: group.name,
+            backendId: cfg.backendId,
+            runId,
+            processId,
+            linkId,
+            agentClientId,
+            reason,
+            elapsedMs: Date.now() - startTime,
+          },
+          'Agent Link agent-run failed before result',
+        );
         clearTimeout(timer);
         void finalize({ kind: 'fail', reason });
       },
     };
 
     registerAgentRun(controller);
+    logger.info(
+      {
+        group: group.name,
+        backendId: cfg.backendId,
+        runId,
+        processId,
+        linkId,
+        agentClientId,
+        elapsedMs: Date.now() - startTime,
+      },
+      'Agent Link agent-run controller registered',
+    );
     const remoteEnv = buildRemoteEnv(
       cfg.envOverrides,
       group.created_by,
@@ -1507,11 +1931,13 @@ async function runViaAgentRuntime(opts: {
         : group.folder;
     const workspaceId = remoteWorkspaceFolder || group.folder;
     const sessionScopeId = buildRemoteSessionScopeId(args, workspaceId);
+    const serverConversationId = input.workspaceSessionId || sessionScopeId;
     const workspacePayload: Record<string, unknown> = {
       kind: 'workspace',
       cwd: groupDir,
       folder: remoteWorkspaceFolder,
       ...workspaceMeta,
+      sessionRoot: serverConversationId,
       scopeId:
         workspaceMeta.scope === 'session' ||
         workspaceMeta.scope === 'direct_session'
@@ -1533,6 +1959,7 @@ async function runViaAgentRuntime(opts: {
         metadata: {
           scheduledTask: !!input.isScheduledTask,
           workspaceId,
+          serverConversationId,
           workspaceSessionId: input.workspaceSessionId,
           groupFolder: group.folder,
           chatId,
@@ -1545,12 +1972,35 @@ async function runViaAgentRuntime(opts: {
       env: remoteEnv,
       timeoutMs,
       maxOutputBytes,
-      policy: buildAgentRunPolicy(cfg, input, group, agentClientId, group.created_by),
+      policy: buildAgentRunPolicy(
+        cfg,
+        input,
+        group,
+        agentClientId,
+        group.created_by,
+      ),
       context: runContext,
       remoteCwdPlaceholder: REMOTE_CWD_PLACEHOLDER,
       workspaceRepos: workspaceRepos.length > 0 ? workspaceRepos : undefined,
       workspaceRepo: primaryRepo,
     });
+    logger.info(
+      {
+        group: group.name,
+        backendId: cfg.backendId,
+        runId,
+        processId,
+        linkId,
+        agentClientId,
+        sent: ok,
+        elapsedMs: Date.now() - startTime,
+        workspaceId,
+        serverConversationId,
+        remoteWorkspaceFolder,
+        cwd: groupDir,
+      },
+      'Agent Link agent-run request sent to daemon',
+    );
     if (!ok) {
       clearTimeout(timer);
       void finalize({ kind: 'fail', reason: 'send_failed' });
@@ -1656,7 +2106,13 @@ export async function runViaAgentLink(
     (cfg.maxOutputBytes && cfg.maxOutputBytes > 0 ? cfg.maxOutputBytes : 0) ||
     settings.containerMaxOutputSize;
 
-  if (supportsAgentRun(linkId, resolvedTarget?.agentClientId)) {
+  if (
+    supportsAgentRun(
+      linkId,
+      resolvedTarget?.agentClientId,
+      cfg.agentClientTransport,
+    )
+  ) {
     return runViaAgentRuntime({
       args,
       cfg,
@@ -1691,7 +2147,11 @@ export async function runViaAgentLink(
     const promptForArgv = shouldInlineSystemPromptForLegacyDeviceCli(
       resolvedTarget?.agentClientId,
     )
-      ? buildDeviceCliUserPromptWithSystemContext(input, group, group.created_by)
+      ? buildDeviceCliUserPromptWithSystemContext(
+          input,
+          group,
+          group.created_by,
+        )
       : input.prompt;
     argv = cfg.buildArgv({
       prompt: promptForArgv,
@@ -1812,7 +2272,10 @@ export async function runViaAgentLink(
           if (usagePayload) finalUsage = usagePayload;
           const structuredEvent = streamEventFromCocoEvent(evt);
           if (structuredEvent) {
-            if (structuredEvent.eventType === 'usage' && structuredEvent.usage) {
+            if (
+              structuredEvent.eventType === 'usage' &&
+              structuredEvent.usage
+            ) {
               usageEventSeen = true;
             }
             void emitWrapped({

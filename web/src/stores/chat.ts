@@ -3,7 +3,7 @@ import { api } from '../api/client';
 import { wsManager } from '../api/ws';
 import { useFileStore } from './files';
 import { useAuthStore } from './auth';
-import { showToast, notifyIfHidden, shouldEmitBackgroundTaskNotice, showNotificationPromptToast } from '../utils/toast';
+import { showActionToast, showToast, notifyIfHidden, shouldEmitBackgroundTaskNotice, showNotificationPromptToast } from '../utils/toast';
 import { invalidateGroupCache, invalidateGroupsListCache, invalidateWorkspaceGroupCaches } from '../utils/pwaCache';
 import {
   deleteAgentMessageSnapshot,
@@ -174,6 +174,47 @@ function mergeMessagesChronologically(
   return result;
 }
 
+const OPTIMISTIC_MESSAGE_PREFIX = 'local-agent-msg:';
+
+function isOptimisticAgentMessage(message: Message): boolean {
+  return message.id.startsWith(OPTIMISTIC_MESSAGE_PREFIX);
+}
+
+function parseMessageTimeMs(value: string): number {
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? t : 0;
+}
+
+function reconcileOptimisticAgentMessages(
+  existing: Message[],
+  incoming: Message[],
+): Message[] {
+  const authoritativeHumanMessages = incoming.filter((m) => !m.is_from_me && !isOptimisticAgentMessage(m));
+  if (authoritativeHumanMessages.length === 0) return existing;
+
+  return existing.filter((old) => {
+    if (!isOptimisticAgentMessage(old)) return true;
+    const oldTime = parseMessageTimeMs(old.timestamp);
+    return !authoritativeHumanMessages.some((m) => {
+      if (m.content !== old.content) return false;
+      if (m.sender !== old.sender) return false;
+      const newTime = parseMessageTimeMs(m.timestamp);
+      if (oldTime === 0 || newTime === 0) return true;
+      return Math.abs(newTime - oldTime) <= 30_000;
+    });
+  });
+}
+
+function mergeAgentMessagesChronologically(
+  existing: Message[],
+  incoming: Message[],
+): Message[] {
+  return mergeMessagesChronologically(
+    reconcileOptimisticAgentMessages(existing, incoming),
+    incoming,
+  );
+}
+
 const MAX_THINKING_CACHE_SIZE = 500;
 
 /** Evict oldest entries when cache exceeds capacity (relies on insertion order) */
@@ -256,6 +297,7 @@ interface ChatState {
   agentMessages: Record<string, Message[]>;          // agentId → messages
   agentWaiting: Record<string, boolean>;             // agentId → waiting for reply
   agentHasMore: Record<string, boolean>;             // agentId → has more messages
+  agentClientTrace: Record<string, { conversationCreatedAt?: number; tabSelectedAt?: number }>;
   loadGroups: () => Promise<void>;
   selectGroup: (jid: string) => void;
   loadMessages: (jid: string, loadMore?: boolean, sessionId?: string | null) => Promise<void>;
@@ -274,6 +316,7 @@ interface ChatState {
   handleStreamEvent: (chatJid: string, event: StreamEvent, agentId?: string) => void;
   handleWsNewMessage: (chatJid: string, wsMsg: any, agentId?: string, source?: string) => void;
   handleAgentStatus: (chatJid: string, agentId: string, status: AgentInfo['status'], name: string, prompt: string, resultSummary?: string, kind?: AgentInfo['kind'], titleGenerating?: boolean) => void;
+  handleWsError: (chatJid?: string, agentId?: string) => void;
   clearStreaming: (
     chatJid: string,
     options?: { preserveThinking?: boolean },
@@ -391,6 +434,32 @@ function streamIdentityFromEvent(event: Pick<StreamEvent, 'turnId' | 'sessionId'
   return '';
 }
 
+function maybeShowPermissionRequestToast(event: StreamEvent): void {
+  const request = event.permissionRequest;
+  if (event.eventType !== 'permission_request' || !request?.decisionUrl) return;
+  const key = `${request.runId}:${request.requestId}`;
+  if (permissionToastKeys.has(key)) return;
+  permissionToastKeys.add(key);
+
+  const decide = async (decision: 'approve' | 'reject') => {
+    await api.post(request.decisionUrl!, { decision }, 30000);
+    showToast(decision === 'approve' ? '已批准' : '已拒绝', request.toolName || request.summary);
+  };
+
+  const title = request.title || event.title || 'Agent 请求审批';
+  const body = request.summary || event.summary || event.detail;
+  showActionToast(
+    title,
+    body,
+    [
+      { label: '批准', onClick: () => decide('approve') },
+      { label: '拒绝', tone: 'danger', onClick: () => decide('reject') },
+    ],
+    5 * 60 * 1000,
+  );
+  notifyIfHidden(`OctoDeck: ${title}`, body);
+}
+
 const MAX_STREAMING_TEXT = 16000;
 const MAX_THINKING_TEXT = 8000;
 const MAX_EVENT_LOG = 30;
@@ -400,6 +469,7 @@ const SDK_TASK_AUTO_CLOSE_MS = 3000;
 const SDK_TASK_TOOL_END_FALLBACK_CLOSE_MS = 1200;
 const SDK_TASK_STALE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes stale timeout for non-teammate tasks
 const sdkTaskCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const permissionToastKeys = new Set<string>();
 const sdkTaskStaleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 /** 已完成/出错的 SDK Task ID，防止迟到事件 re-create */
@@ -1126,6 +1196,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   agentMessages: {},
   agentWaiting: {},
   agentHasMore: {},
+  agentClientTrace: {},
   drafts: {},
   unreadReplies: {},
 
@@ -1221,12 +1292,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const state = get();
     const epochAtStart = state.clearEpoch[jid] || 0;
     const existing = state.messages[jid] || [];
-    const lastTs = existing.length > 0 ? existing[existing.length - 1].timestamp : undefined;
+    const last = existing.length > 0 ? existing[existing.length - 1] : undefined;
 
     try {
       // Fetch messages newer than the last one we have
       const params = new URLSearchParams({ limit: '50' });
-      if (lastTs) params.set('after', lastTs);
+      if (last?.timestamp) params.set('after', last.timestamp);
+      if (last?.id) params.set('afterId', last.id);
       if (sessionId) params.set('session', sessionId);
 
       const data = await api.get<{ messages: Message[] }>(
@@ -1339,6 +1411,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // The context_reset divider arrives via WS new_message and triggers state cleanup.
       if (isClearedResponse(data)) return true;
       // Add user message to local state immediately
+      const mainKey = `main:${jid}`;
+      const pendingEntry = pendingDeltas.get(mainKey);
+      if (pendingEntry) {
+        cancelAnimationFrame(pendingEntry.raf);
+        pendingDeltas.delete(mainKey);
+      }
+      clearStreamingFromSession(jid);
       const authState = useAuthStore.getState();
       const sender = authState.user?.id || 'web-user';
       const senderName = authState.user?.display_name || authState.user?.username || 'Web';
@@ -1365,12 +1444,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
           !!latest &&
           latest.is_from_me === false &&
           !isTerminalSystemMessage(latest);
+        const nextStreaming = { ...s.streaming };
+        delete nextStreaming[jid];
+        const nextPendingThinking = { ...s.pendingThinking };
+        delete nextPendingThinking[jid];
+        const nextPendingThinkingDuration = { ...s.pendingThinkingDuration };
+        delete nextPendingThinkingDuration[jid];
         return {
           messages: {
             ...s.messages,
             [jid]: merged,
           },
           waiting: { ...s.waiting, [jid]: shouldWait },
+          streaming: nextStreaming,
+          pendingThinking: nextPendingThinking,
+          pendingThinkingDuration: nextPendingThinkingDuration,
           error: null,
         };
       });
@@ -1753,6 +1841,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         `/api/groups/${encodeURIComponent(jid)}`,
         patch,
       );
+      await invalidateGroupsListCache();
       set((s) => {
         const group = s.groups[jid];
         if (!group) return { error: null } as Partial<ChatState>;
@@ -1935,6 +2024,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   handleStreamEvent: (chatJid, event, agentId?) => {
     // Skip while clearHistory is in-flight
     if (get().clearing[chatJid]) return;
+    maybeShowPermissionRequestToast(event);
 
     // ⓪ text_delta / thinking_delta — rAF batch for both agent and main conversation
     if ((event.eventType === 'text_delta' || event.eventType === 'thinking_delta') && (agentId || !event.parentToolUseId)) {
@@ -2339,7 +2429,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       let snapshotHasMore = false;
       set((s) => {
         const existing = s.agentMessages[agentId] || [];
-        const updated = mergeMessagesChronologically(existing, [msg]);
+        const updated = mergeAgentMessagesChronologically(existing, [msg]);
         snapshotMessages = updated;
         snapshotHasMore = !!s.agentHasMore[agentId];
         const isAgentReply =
@@ -2616,6 +2706,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  handleWsError: (chatJid, agentId) => {
+    set((s) => {
+      if (agentId) {
+        const nextAgentWaiting = { ...s.agentWaiting };
+        const nextAgentStreaming = { ...s.agentStreaming };
+        delete nextAgentWaiting[agentId];
+        delete nextAgentStreaming[agentId];
+        return {
+          agentWaiting: nextAgentWaiting,
+          agentStreaming: nextAgentStreaming,
+        };
+      }
+      if (!chatJid) return s;
+      const nextWaiting = { ...s.waiting };
+      const nextStreaming = { ...s.streaming };
+      delete nextWaiting[chatJid];
+      delete nextStreaming[chatJid];
+      return {
+        waiting: nextWaiting,
+        streaming: nextStreaming,
+      };
+    });
+  },
+
   // 加载子 Agent 列表
   loadAgents: async (jid, opts) => {
     // Skip network call if agents are already cached.  WebSocket events
@@ -2755,6 +2869,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setActiveAgentTab: (jid, agentId) => {
     set((s) => ({
       activeAgentTab: { ...s.activeAgentTab, [jid]: agentId },
+      ...(agentId
+        ? {
+            agentClientTrace: {
+              ...s.agentClientTrace,
+              [agentId]: {
+                ...(s.agentClientTrace[agentId] || {}),
+                tabSelectedAt: Date.now(),
+              },
+            },
+          }
+        : {}),
     }));
   },
 
@@ -2775,6 +2900,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   createConversation: async (jid, name, description?) => {
+    const requestedAt = Date.now();
     try {
       const data = await api.post<{ agent: AgentInfo }>(
         `/api/groups/${encodeURIComponent(jid)}/agents`,
@@ -2782,9 +2908,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       set((s) => {
         const existing = s.agents[jid] || [];
+        const nextTrace = {
+          ...s.agentClientTrace,
+          [data.agent.id]: { conversationCreatedAt: requestedAt },
+        };
         // WS agent_status broadcast may have already added it
-        if (existing.some((a) => a.id === data.agent.id)) return s;
-        return { agents: { ...s.agents, [jid]: [...existing, data.agent] } };
+        if (existing.some((a) => a.id === data.agent.id)) {
+          return { agentClientTrace: nextTrace };
+        }
+        return {
+          agents: { ...s.agents, [jid]: [...existing, data.agent] },
+          agentClientTrace: nextTrace,
+        };
       });
       return data.agent;
     } catch (err) {
@@ -2825,8 +2960,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       let snapshotMessages = sorted;
       set((s) => {
         const nextMessages = loadMore
-          ? mergeMessagesChronologically(s.agentMessages[agentId] || [], sorted)
-          : sorted;
+          ? mergeAgentMessagesChronologically(s.agentMessages[agentId] || [], sorted)
+          : mergeAgentMessagesChronologically(s.agentMessages[agentId] || [], sorted);
         snapshotMessages = nextMessages;
         return {
           agentMessages: { ...s.agentMessages, [agentId]: nextMessages },
@@ -2856,7 +2991,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (get().clearing[jid]) return;
     set((s) => {
       const existing = s.agentMessages[agentId] || [];
-      const merged = mergeMessagesChronologically(existing, snapshot.messages);
+      const merged = mergeAgentMessagesChronologically(existing, snapshot.messages);
       return {
         agentMessages: { ...s.agentMessages, [agentId]: merged },
         agentHasMore: {
@@ -2868,13 +3003,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendAgentMessage: (jid, agentId, content, attachments?) => {
-    // Send via WebSocket with agentId.
-    // NOTE: 先尝试 ws.send，成功后再清 agentStreaming / 置 agentWaiting，
-    // 避免失败时 UI 进入"等待中但消息没发出"的不一致状态。
+    const sendInvokedAt = Date.now();
+    const authState = useAuthStore.getState();
+    const sender = authState.user?.id || 'web-user';
+    const senderName = authState.user?.display_name || authState.user?.username || 'Web';
     const normalizedAttachments = attachments && attachments.length > 0
       ? attachments.map(att => ({ type: 'image' as const, ...att }))
       : undefined;
-    const sent = wsManager.send({ type: 'send_message', chatJid: jid, content, agentId, attachments: normalizedAttachments });
+    const optimisticMessage: Message = {
+      id: `${OPTIMISTIC_MESSAGE_PREFIX}${agentId}:${sendInvokedAt}`,
+      chat_jid: jid,
+      sender,
+      sender_name: senderName,
+      role: 'user',
+      content,
+      timestamp: new Date(sendInvokedAt).toISOString(),
+      is_from_me: false,
+      attachments: normalizedAttachments ? JSON.stringify(normalizedAttachments) : undefined,
+    };
+    // Send via WebSocket with agentId.
+    // NOTE: 先尝试 ws.send，成功后再清 agentStreaming / 置 agentWaiting，
+    // 避免失败时 UI 进入"等待中但消息没发出"的不一致状态。
+    const trace = get().agentClientTrace[agentId] || {};
+    const sent = wsManager.send({
+      type: 'send_message',
+      chatJid: jid,
+      content,
+      agentId,
+      attachments: normalizedAttachments,
+      clientTrace: {
+        ...trace,
+        sendInvokedAt,
+        wsSendAt: Date.now(),
+      },
+    });
     if (!sent) {
       showToast('发送失败', 'WebSocket 未连接，输入已保留，请稍后重试');
       return false;
@@ -2882,11 +3044,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => {
       const nextAgentStreaming = { ...s.agentStreaming };
       delete nextAgentStreaming[agentId];
+      const merged = mergeAgentMessagesChronologically(
+        s.agentMessages[agentId] || [],
+        [optimisticMessage],
+      );
       return {
         agentStreaming: nextAgentStreaming,
         agentWaiting: { ...s.agentWaiting, [agentId]: true },
+        agentMessages: { ...s.agentMessages, [agentId]: merged },
       };
     });
+    void saveAgentMessageSnapshot(
+      jid,
+      agentId,
+      get().agentMessages[agentId] || [],
+      !!get().agentHasMore[agentId],
+    );
     // Agent tab sends are WebSocket-only and do not receive an HTTP ack with
     // the persisted message id. If the server-side new_message broadcast is
     // missed during a reconnect/race, the input appears to vanish until the
@@ -2915,7 +3088,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         let snapshotMessages: Message[] | null = null;
         let snapshotHasMore = false;
         set((s) => {
-          const merged = mergeMessagesChronologically(
+          const merged = mergeAgentMessagesChronologically(
             s.agentMessages[agentId] || [],
             data.messages,
           );

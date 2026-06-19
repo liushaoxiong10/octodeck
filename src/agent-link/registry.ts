@@ -52,9 +52,10 @@ import { dirname, resolve } from 'node:path';
 
 function loadDaemonVersion(): string {
   // src/agent-link/registry.ts and dist/agent-link/registry.js both sit two
-  // levels below the repo (or image) root that holds client/octodeck-daemon/VERSION.
+  // levels below the repo (or image) root that holds the daemon's single
+  // version source used by //go:embed.
   const here = dirname(fileURLToPath(import.meta.url));
-  const versionPath = resolve(here, '../../client/octodeck-daemon/VERSION');
+  const versionPath = resolve(here, '../../client/octodeck-daemon/cmd/octodeck-daemon/VERSION');
   const raw = readFileSync(versionPath, 'utf8').trim();
   return `octodeck-daemon/${raw}`;
 }
@@ -452,6 +453,7 @@ function buildRuntimeStatuses(
       deviceLinkId: linkId,
       agentClientId: client.id,
       displayName: client.displayName,
+      family: client.family,
       provider: client.provider,
       transport: client.transport,
       status: clientRuns.length > 0 ? 'busy' : 'idle',

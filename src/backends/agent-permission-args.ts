@@ -1,3 +1,5 @@
+import { inferAgentClientFamily } from './agent-client-families.js';
+
 function hasArg(argv: string[], ...names: string[]): boolean {
   return argv.some((arg) => names.includes(arg) || names.some((name) => arg.startsWith(`${name}=`)));
 }
@@ -9,12 +11,7 @@ function insertBeforeTail(argv: string[], tailCount: number, extra: string[]): s
 }
 
 function agentFamily(agentClientId: string | undefined | null): 'claude' | 'codex' | 'traecli' | 'traex' | 'unknown' {
-  const id = (agentClientId || '').toLowerCase();
-  if (id === 'claude-code' || id === 'claude-acp' || id.includes('claude')) return 'claude';
-  if (id === 'traex' || id === 'traex-acp' || id.includes('traex')) return 'traex';
-  if (id === 'codex' || id === 'codex-acp' || id.includes('codex')) return 'codex';
-  if (id === 'traecli' || id === 'traecli-acp' || id.includes('traecli')) return 'traecli';
-  return 'unknown';
+  return inferAgentClientFamily(agentClientId) ?? 'unknown';
 }
 
 export function normalizePermissionModeForAgent(
@@ -22,10 +19,15 @@ export function normalizePermissionModeForAgent(
   permissionMode: string | null | undefined,
 ): string | undefined {
   const mode = permissionMode?.trim();
-  if (!mode || mode === 'default') return undefined;
+  if (!mode) return undefined;
   const family = agentFamily(agentClientId);
   if (family === 'codex') {
     switch (mode) {
+      case 'default':
+      case 'plan':
+        return 'read-only';
+      case 'acceptEdits':
+        return 'workspace-write';
       case 'bypassPermissions':
       case 'dangerously-skip-permissions':
       case 'no-approval':
@@ -37,8 +39,13 @@ export function normalizePermissionModeForAgent(
   }
   if (family === 'traex') {
     // traex 区分「审批预设」(--permission-mode) 与「沙箱策略」(--sandbox)，
-    // 这里只把各种免审批别名归一到 bypassPermissions，其余模式原样保留。
+    // default / plan 走 TraeX 原生 permission preset，其余按沙箱或免审批别名映射。
     switch (mode) {
+      case 'default':
+      case 'plan':
+        return mode;
+      case 'acceptEdits':
+        return 'workspace-write';
       case 'dangerously-skip-permissions':
       case 'no-approval':
       case 'auto-approve':
@@ -52,14 +59,20 @@ export function normalizePermissionModeForAgent(
 
 // traex 把 OctoDeck 的权限模式映射到自身原生的根级参数：
 //   bypassPermissions -> --permission-mode bypass_permissions（免审批，保留沙箱）
+//   default / plan -> --permission-mode <mode>（使用 TraeX 原生审批预设）
+//   acceptEdits -> --sandbox workspace-write（工作区编辑免逐次审批）
 //   read-only / workspace-write / full-access -> --sandbox <policy>（沙箱级别）
 // 这些都是根级参数，必须置于 exec / acp 等子命令之前。
 function traexPermissionArgs(mode: string): string[] {
   switch (mode) {
+    case 'default':
+    case 'plan':
+      return ['--permission-mode', mode];
     case 'bypassPermissions':
       return ['--permission-mode', 'bypass_permissions'];
     case 'read-only':
       return ['--sandbox', 'read-only'];
+    case 'acceptEdits':
     case 'workspace-write':
       return ['--sandbox', 'workspace-write'];
     case 'full-access':

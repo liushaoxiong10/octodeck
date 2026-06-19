@@ -26,6 +26,7 @@ describe('agent client adapter', () => {
       resumeArgvTemplate: ['exec', 'resume', '--json', '--skip-git-repo-check', '-m', '{model}', '{sessionId}', '{prompt}'],
       deviceLinkId: 'cl_1234567890abcdef',
       agentClientId: 'codex',
+      agentClientTransport: 'stdio',
     });
     expect(def.argvTemplate.join('\n')).toContain('{prompt}');
   });
@@ -136,6 +137,18 @@ describe('agent client adapter', () => {
     ]);
   });
 
+  test('adapts OctoDeck approval modes to Codex sandbox argv', () => {
+    expect(normalizePermissionModeForAgent('codex', 'default')).toBe('read-only');
+    expect(normalizePermissionModeForAgent('codex', 'plan')).toBe('read-only');
+    expect(normalizePermissionModeForAgent('codex', 'acceptEdits')).toBe('workspace-write');
+    expect(
+      applyAgentPermissionArgs(['exec', '--json', 'hello'], 'codex', 'default'),
+    ).toEqual(['exec', '--json', '--sandbox', 'read-only', 'hello']);
+    expect(
+      applyAgentPermissionArgs(['exec', '--json', 'hello'], 'codex', 'acceptEdits'),
+    ).toEqual(['exec', '--json', '--sandbox', 'workspace-write', 'hello']);
+  });
+
   test('adapts bypass permission mode to TraeX no-approval argv', () => {
     expect(normalizePermissionModeForAgent('traex', 'bypassPermissions')).toBe('bypassPermissions');
     expect(
@@ -157,6 +170,12 @@ describe('agent client adapter', () => {
   });
 
   test('adapts sandbox permission modes to TraeX --sandbox argv', () => {
+    expect(
+      applyAgentPermissionArgs(['exec', '--json', 'hello'], 'traex', 'default'),
+    ).toEqual(['--permission-mode', 'default', 'exec', '--json', 'hello']);
+    expect(
+      applyAgentPermissionArgs(['exec', '--json', 'hello'], 'traex', 'acceptEdits'),
+    ).toEqual(['--sandbox', 'workspace-write', 'exec', '--json', 'hello']);
     expect(
       applyAgentPermissionArgs(['exec', '--json', 'hello'], 'traex', 'read-only'),
     ).toEqual(['--sandbox', 'read-only', 'exec', '--json', 'hello']);
@@ -250,6 +269,7 @@ describe('agent client adapter', () => {
 
     expect(def.outputProtocol).toBe('jsonline-stream-json');
     expect(def.supportsNativeSessions).toBe(true);
+    expect(def.agentClientTransport).toBe('acp');
     expect(def.sessionArgvTemplate).toEqual(['--resume={sessionId}']);
     expect(def.argvTemplate).toEqual([
       '-p',
@@ -259,6 +279,56 @@ describe('agent client adapter', () => {
       '--output-format=stream-json',
       '--include-partial-messages',
       '__OCTODECK_AGENT_TEAM_MCP_PROJECT_CONFIG__',
+    ]);
+  });
+
+  test('uses family metadata to select independent templates', () => {
+    const codex = buildAgentBackendFromClient({
+      id: 'device-codex-acp',
+      displayName: 'Device Codex ACP',
+      deviceLinkId: 'cl_1234567890abcdef',
+      agentClientId: 'codex-acp',
+      discoveredClient: {
+        id: 'codex-acp',
+        family: 'codex',
+        displayName: 'Codex ACP',
+        binary: '/usr/local/bin/codex',
+      },
+    });
+    const traecli = buildAgentBackendFromClient({
+      id: 'device-traecli-acp',
+      displayName: 'Device TraeCLI ACP',
+      deviceLinkId: 'cl_1234567890abcdef',
+      agentClientId: 'traecli-acp',
+      discoveredClient: {
+        id: 'traecli-acp',
+        family: 'traecli',
+        displayName: 'TraeCLI ACP',
+        binary: '/usr/local/bin/traecli',
+      },
+    });
+    const traex = buildAgentBackendFromClient({
+      id: 'device-traex-acp',
+      displayName: 'Device TraeX ACP',
+      deviceLinkId: 'cl_1234567890abcdef',
+      agentClientId: 'traex-acp',
+      discoveredClient: {
+        id: 'traex-acp',
+        family: 'traex',
+        displayName: 'TraeX ACP',
+        binary: '/usr/local/bin/traex',
+      },
+    });
+
+    expect(codex.resumeArgvTemplate?.slice(0, 2)).toEqual(['exec', 'resume']);
+    expect(traecli.argvTemplate).toContain('model.name={model}');
+    expect(traex.argvTemplate).toEqual([
+      'exec',
+      '--json',
+      '--skip-git-repo-check',
+      '-m',
+      '{model}',
+      '{prompt}',
     ]);
   });
 
@@ -290,6 +360,7 @@ describe('agent client adapter', () => {
     expect(def.outputProtocol).toBe('jsonline-stream-json');
     expect(def.supportsNativeSessions).toBe(true);
     expect(def.sessionArgvTemplate).toEqual(['--resume={sessionId}']);
+    expect(def.agentClientTransport).toBe('acp');
   });
 
   test('rejects clients not reported by the selected device', () => {

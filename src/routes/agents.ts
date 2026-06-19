@@ -16,6 +16,8 @@ import {
   createAgent,
   ensureChatExists,
   deleteMessagesForChatJid,
+  getSession,
+  getSessionWorkspaceSessionId,
   deleteSession,
   ensureSessionWorkspaceSessionId,
   getGroupsByTargetAgent,
@@ -34,6 +36,7 @@ import type { RegisteredGroup, SubAgent } from '../types.js';
 import { logger } from '../logger.js';
 import { getChannelType, extractChatId } from '../im-channel.js';
 import { ensureAgentDirectories } from '../utils.js';
+import { cleanupDeletedConversationAgentDaemonSessions } from '../agent-session-cleanup.js';
 
 const router = new Hono<{ Variables: Variables }>();
 
@@ -378,6 +381,12 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
   }
 
   // Delete session records
+  await cleanupDeletedConversationAgentDaemonSessions({
+    group,
+    agentId,
+    providerSessionId: getSession(group.folder, agentId),
+    workspaceSessionId: getSessionWorkspaceSessionId(group.folder, agentId),
+  });
   deleteSession(group.folder, agentId);
 
   deleteAgent(agentId);
