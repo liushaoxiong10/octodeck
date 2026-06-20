@@ -31,7 +31,7 @@ func Discover(cfg Config) []Info {
 		}
 		dirs := defaultSearchDirs()
 		if len(d.SearchDirs) > 0 {
-			dirs = append(append([]string(nil), d.SearchDirs...), dirs...)
+			dirs = append(dirs, d.SearchDirs...)
 		}
 		bin := findExecutableInDirs(d.Binary, dirs)
 		if bin == "" {

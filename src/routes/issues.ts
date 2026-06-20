@@ -586,9 +586,21 @@ function fixRunOutcomeEventType(status: FixRunOutcomeStatus): string {
 }
 
 function buildIssueRunResolutionGatePayload(issue: WorkspaceIssue, run: IssueAgentRun): ResolutionGatePayload {
+  const outcome = buildIssueRunFixRunOutcomePayload(issue, run);
+  const fixRunId = outcome.fixRunOutcome?.fixRunId;
+  const approvalApproved = Boolean(
+    fixRunId && listIssueAgentRequests(issue.id, { runId: fixRunId }).some((request) => (
+      request.kind === 'permission' &&
+      request.status === 'answered' &&
+      request.decision === 'approve' &&
+      request.payload?.resolutionGate === true &&
+      (request.payload.fixRunId === undefined || request.payload.fixRunId === fixRunId)
+    )),
+  );
   return buildResolutionGate({
     issue: { id: issue.id, title: issue.title, status: issue.status },
-    fixRunOutcome: buildIssueRunFixRunOutcomePayload(issue, run),
+    fixRunOutcome: outcome,
+    approvalApproved,
   });
 }
 

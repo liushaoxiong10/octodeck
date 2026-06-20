@@ -10,6 +10,7 @@ export interface ResolutionGateInput {
     status?: string | null;
   };
   fixRunOutcome: FixRunOutcomePayload | null;
+  approvalApproved?: boolean;
 }
 
 export interface ResolutionGate {
@@ -76,7 +77,7 @@ export function buildResolutionGate(input: ResolutionGateInput): ResolutionGateP
   }
   if (outcome.status !== 'resolved') return blocked(input, 'fix_run_not_resolved');
   if (outcome.failedSignals.length > 0) return blocked(input, 'failed_signals_present');
-  if (outcome.riskLevel === 'critical') {
+  if (outcome.riskLevel === 'critical' && !input.approvalApproved) {
     return {
       resolutionGate: {
         status: 'approval_required',
@@ -106,7 +107,11 @@ export function buildResolutionGate(input: ResolutionGateInput): ResolutionGateP
       sourceRunId: outcome.sourceRunId,
       fixRunId: outcome.fixRunId,
       riskLevel: outcome.riskLevel,
-      rationale: [outcome.summary, ...outcome.resolvedSignals],
+      rationale: [
+        outcome.summary,
+        ...(outcome.riskLevel === 'critical' && input.approvalApproved ? ['Critical-risk resolution approval is recorded.'] : []),
+        ...outcome.resolvedSignals,
+      ],
       checklist: outcome.verificationChecklist,
     },
   };
