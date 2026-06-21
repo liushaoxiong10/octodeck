@@ -131,6 +131,34 @@ type ThreadItem struct {
 	Content []UserInput `json:"content,omitempty"`
 }
 
+func (i *ThreadItem) UnmarshalJSON(data []byte) error {
+	type threadItem ThreadItem
+	var raw struct {
+		threadItem
+		Content json.RawMessage `json:"content,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*i = ThreadItem(raw.threadItem)
+	if len(raw.Content) == 0 || bytes.Equal(raw.Content, []byte("null")) {
+		return nil
+	}
+	var structured []UserInput
+	if err := json.Unmarshal(raw.Content, &structured); err == nil {
+		i.Content = structured
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(raw.Content, &text); err != nil {
+		return err
+	}
+	if text != "" {
+		i.Content = []UserInput{{Type: "text", Text: text}}
+	}
+	return nil
+}
+
 // ThreadResumeParams resumes a persisted thread into memory.
 type ThreadResumeParams struct {
 	ThreadID       string `json:"threadId"`

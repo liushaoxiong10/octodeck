@@ -86,6 +86,24 @@ interface CocoEvent {
 
 const TOOL_RESULT_NAME_BY_ID = new Map<string, string>();
 
+function isLifecycleMarkerText(text: string | undefined): boolean {
+  switch ((text || '').trim().toLowerCase()) {
+    case 'turn_started':
+    case 'turn_completed':
+    case 'turn_cancelled':
+    case 'turn_error':
+    case 'item_started':
+    case 'item_completed':
+    case 'started':
+    case 'completed':
+    case 'cancelled':
+    case 'error':
+      return true;
+    default:
+      return false;
+  }
+}
+
 /**
  * Try to extract a human-readable error message from a string that may be a
  * JSON-RPC error object. Some ACP/MCP SDKs wrap transport errors in a
@@ -193,7 +211,7 @@ function streamEventFromCocoEvent(evt: CocoEvent): StreamEvent | null {
       'text',
       'content',
     ]);
-    if (text) {
+    if (text && !isLifecycleMarkerText(text)) {
       return {
         eventType: 'thinking_delta',
         sessionId,
@@ -571,7 +589,7 @@ function streamEventFromAgentRunFrame(
         'content',
         'message',
       ]);
-    if (!text) return null;
+    if (!text || isLifecycleMarkerText(text)) return null;
     return {
       eventType: 'thinking_delta',
       sessionId: frame.sessionId,
@@ -1816,6 +1834,12 @@ async function runViaAgentRuntime(opts: {
           (frame.eventType === 'text_delta' ||
             frame.eventType === 'thinking_delta')
         ) {
+          if (
+            frame.eventType === 'thinking_delta' &&
+            isLifecycleMarkerText(frame.text)
+          ) {
+            return;
+          }
           if (structuredEvent?.eventType === frame.eventType) {
             return;
           }

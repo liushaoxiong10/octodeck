@@ -22,6 +22,9 @@ func PumpStdout(ctx context.Context, r io.Reader, req *AgentRunRequestFrame, jso
 		PumpLogAsText(r, req, sent, emit)
 		return
 	}
+	if emit == nil {
+		emit = func(AgentRunEventFrame) {}
+	}
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -57,6 +60,9 @@ func PumpStdout(ctx context.Context, r io.Reader, req *AgentRunRequestFrame, jso
 
 // PumpLog 把子进程的 stderr 流以 "log" 事件上报。
 func PumpLog(r io.Reader, req *AgentRunRequestFrame, sent *atomic.Int64, emit func(AgentRunEventFrame)) {
+	if emit == nil {
+		emit = func(AgentRunEventFrame) {}
+	}
 	PumpLogAsText(r, req, sent, func(frame AgentRunEventFrame) {
 		frame.EventType = "log"
 		emit(frame)
@@ -65,6 +71,9 @@ func PumpLog(r io.Reader, req *AgentRunRequestFrame, sent *atomic.Int64, emit fu
 
 // PumpLogAsText 是裸字节流读取入口；调用方决定上报时挂什么 EventType。
 func PumpLogAsText(r io.Reader, req *AgentRunRequestFrame, sent *atomic.Int64, emit func(AgentRunEventFrame)) {
+	if emit == nil {
+		emit = func(AgentRunEventFrame) {}
+	}
 	reader := bufio.NewReader(r)
 	buf := make([]byte, 8192)
 	for {

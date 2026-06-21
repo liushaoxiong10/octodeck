@@ -130,6 +130,28 @@ func TestSessionUpdateRawDoesNotTreatLifecycleStatusAsReasoning(t *testing.T) {
 	}
 }
 
+func TestSessionUpdateRawDoesNotTreatSDKStatusUpdateAsReasoning(t *testing.T) {
+	req := &proto.AgentRunRequestFrame{RunID: "run-1", AgentID: "traex-acp"}
+	var frames []proto.AgentRunEventFrame
+	bridge := &SDKBridge{Req: req, Dispatch: func(frame *proto.AgentRunEventFrame) {
+		frames = append(frames, *frame)
+	}}
+
+	input := `{"sessionId":"sess-1","update":{"sessionUpdate":"status","status":"item_started","itemType":"reasoning"}}`
+	if err := bridge.SessionUpdateRaw(context.Background(), json.RawMessage(input)); err != nil {
+		t.Fatalf("SessionUpdateRaw(%s): %v", input, err)
+	}
+	if len(frames) != 1 {
+		t.Fatalf("frames len = %d, want 1: %#v", len(frames), frames)
+	}
+	if frames[0].EventType == "thinking_delta" {
+		t.Fatalf("status update emitted thinking_delta: %#v", frames[0])
+	}
+	if frames[0].EventType != "session" && frames[0].EventType != "log" {
+		t.Fatalf("status update EventType = %q, want session/log", frames[0].EventType)
+	}
+}
+
 func TestSessionUpdateRawMapsTraexReasoningContentDelta(t *testing.T) {
 	req := &proto.AgentRunRequestFrame{RunID: "run-1", AgentID: "traex-acp"}
 	var frames []proto.AgentRunEventFrame
@@ -179,6 +201,54 @@ func TestUsageFromPayloadAcceptsAdapterPromptResultUsageSnapshot(t *testing.T) {
 	}
 	if usage["outputTokens"] != 45 {
 		t.Fatalf("usage outputTokens = %#v, want 45", usage["outputTokens"])
+	}
+}
+
+func TestMergeUsageMapsKeepsOutputTokensFromEarlierSnapshot(t *testing.T) {
+	got := MergeUsageMaps(
+		map[string]any{
+			"inputTokens":      321,
+			"outputTokens":     45,
+			"totalTokens":      366,
+			"cachedReadTokens": 12,
+		},
+		map[string]any{
+			"inputTokens":  400,
+			"outputTokens": 0,
+			"totalTokens":  400,
+		},
+	)
+
+	if got["inputTokens"] != 400 {
+		t.Fatalf("inputTokens = %#v, want 400", got["inputTokens"])
+	}
+	if got["outputTokens"] != 45 {
+		t.Fatalf("outputTokens = %#v, want 45", got["outputTokens"])
+	}
+	if got["totalTokens"] != 400 {
+		t.Fatalf("totalTokens = %#v, want 400", got["totalTokens"])
+	}
+}
+
+func TestMergeUsageMapsKeepsSnakeCaseOutputTokensFromEarlierSnapshot(t *testing.T) {
+	got := MergeUsageMaps(
+		map[string]any{
+			"input_tokens":  321,
+			"output_tokens": 45,
+			"total_tokens":  366,
+		},
+		map[string]any{
+			"input_tokens":  400,
+			"output_tokens": 0,
+			"total_tokens":  400,
+		},
+	)
+
+	if got["input_tokens"] != 400 {
+		t.Fatalf("input_tokens = %#v, want 400", got["input_tokens"])
+	}
+	if got["output_tokens"] != 45 {
+		t.Fatalf("output_tokens = %#v, want 45", got["output_tokens"])
 	}
 }
 

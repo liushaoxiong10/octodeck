@@ -1876,6 +1876,26 @@ func mapACPUpdateForClient(update SessionUpdateParams) map[string]any {
 			mapped["usage"] = cloneSessionUsage(update.Usage)
 		}
 		return mapped
+	case "status":
+		mapped := map[string]any{
+			"sessionUpdate": "status",
+		}
+		if update.Status != "" {
+			mapped["status"] = update.Status
+		}
+		if update.Message != "" {
+			mapped["message"] = update.Message
+		}
+		if update.ItemID != "" {
+			mapped["itemId"] = update.ItemID
+		}
+		if update.ItemType != "" {
+			mapped["itemType"] = update.ItemType
+		}
+		if update.Phase != "" {
+			mapped["phase"] = update.Phase
+		}
+		return mapped
 	default:
 		text := strings.TrimSpace(update.Delta)
 		if text == "" {

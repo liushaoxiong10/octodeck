@@ -256,6 +256,13 @@ func (d *Driver) Prompt(ctx context.Context, fp *agentprotocol.FamilyProcess, re
 	var sent atomic.Int64
 	var finalText atomicString
 	var finalUsage atomic.Value
+	mergeFinalUsage := func(next map[string]any) {
+		if next == nil {
+			return
+		}
+		existing, _ := finalUsage.Load().(map[string]any)
+		finalUsage.Store(MergeUsageMaps(existing, next))
+	}
 	started := time.Now()
 	firstTurn := fp.CreatedNew
 	fp.CreatedNew = false
@@ -304,7 +311,7 @@ func (d *Driver) Prompt(ctx context.Context, fp *agentprotocol.FamilyProcess, re
 		}
 		if frame.EventType == "usage" {
 			if usage := UsageFromPayload(frame.Payload); usage != nil {
-				finalUsage.Store(usage)
+				mergeFinalUsage(usage)
 			}
 		}
 		if frame.EventType != "log" && firstEventLogged.CompareAndSwap(false, true) {
@@ -332,7 +339,7 @@ func (d *Driver) Prompt(ctx context.Context, fp *agentprotocol.FamilyProcess, re
 	})
 	log.Printf("octodeck-daemon: traex acp prompt returned runId=%s agent=%s sessionId=%s ok=%t elapsedMs=%d rawEventCount=%d emittedEventCount=%d suppressedEventCount=%d err=%v", req.RunID, req.AgentID, proc.sessionID, promptErr == nil, time.Since(started).Milliseconds(), rawEventCount.Load(), emittedEventCount.Load(), suppressedEventCount.Load(), promptErr)
 	if promptErr == nil && promptResp.Usage != nil {
-		finalUsage.Store(UsageToMap(promptResp.Usage))
+		mergeFinalUsage(UsageToMap(promptResp.Usage))
 	}
 
 	usage, _ := finalUsage.Load().(map[string]any)

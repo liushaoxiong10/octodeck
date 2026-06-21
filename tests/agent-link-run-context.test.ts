@@ -1199,6 +1199,103 @@ describe('agent-link run context forwarding', () => {
     ).toMatchObject({ toolUseId: 'tool-1', detail: '/repo' });
   });
 
+  test('runViaAgentLink ignores lifecycle markers in thinking events', async () => {
+    const sent: any[] = [];
+    const outputs: any[] = [];
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef'
+        ? onlineAgentRunMeta('traex-acp')
+        : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Device Lifecycle Events',
+          folder: 'device-lifecycle-events',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:traex-acp',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt: 'hello',
+          chatJid: 'web:device-lifecycle-events',
+          isHome: false,
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+        onOutput: vi.fn(async (output) => {
+          outputs.push(output);
+        }),
+      },
+      {
+        backendId: 'traex-acp',
+        resolveBinary: () => '/usr/local/bin/traex',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+      },
+      'runtime:cl_1234567890abcdef:traex-acp',
+    );
+
+    expect(sent[0]).toMatchObject({ type: 'agent.run.request' });
+    const controller = registerRunMock.mock.calls.at(-1)?.[0] as any;
+    expect(controller).toBeTruthy();
+
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'thinking_delta',
+      text: 'item_started',
+      sessionId: 'sess-1',
+      payload: {
+        update: {
+          sessionUpdate: 'status',
+          status: 'item_started',
+          itemType: 'reasoning',
+        },
+      },
+    });
+    controller.onEvent({
+      type: 'agent.run.event',
+      runId: controller.runId,
+      eventType: 'text_delta',
+      text: '最终回答',
+      sessionId: 'sess-1',
+    });
+    controller.finish({
+      type: 'agent.run.result',
+      runId: controller.runId,
+      ok: true,
+      error: null,
+      sessionId: 'sess-1',
+      timedOut: false,
+      durationMs: 1,
+    });
+
+    const result = await promise;
+    expect(result.result).toBe('最终回答');
+    const streamEvents = outputs
+      .map((output) => output.streamEvent)
+      .filter(Boolean);
+    expect(streamEvents.map((event) => event.eventType)).not.toContain(
+      'thinking_delta',
+    );
+    expect(streamEvents.map((event) => event.eventType)).toContain(
+      'text_delta',
+    );
+  });
+
   test('runViaAgentLink parses legacy device stream-json thinking and tool events', async () => {
     const sent: any[] = [];
     const outputs: any[] = [];

@@ -365,6 +365,34 @@ func TestBuildSessionUpdatePayloadToolCallContent(t *testing.T) {
 	}
 }
 
+func TestBuildSessionUpdatePayloadStatusDoesNotMapToAgentThought(t *testing.T) {
+	t.Parallel()
+
+	payload := buildSessionUpdatePayload(SessionUpdateParams{
+		SessionID: "session-1",
+		TurnID:    "turn-1",
+		Type:      "status",
+		Phase:     "streaming",
+		ItemID:    "item-1",
+		ItemType:  "reasoning",
+		Status:    "item_started",
+	})
+
+	update, ok := payload["update"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload missing update envelope: %+v", payload)
+	}
+	if got, _ := update["sessionUpdate"].(string); got != "status" {
+		t.Fatalf("update.sessionUpdate=%q, want status", got)
+	}
+	if got, _ := update["status"].(string); got != "item_started" {
+		t.Fatalf("update.status=%q, want item_started", got)
+	}
+	if _, ok := update["content"]; ok {
+		t.Fatalf("status update should not include thought content: %+v", update)
+	}
+}
+
 func TestServerStdioSessionListIncludesLiveSessionBeforeThreadListHistory(t *testing.T) {
 	t.Parallel()
 
