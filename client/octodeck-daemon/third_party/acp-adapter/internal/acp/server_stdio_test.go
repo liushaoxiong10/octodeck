@@ -78,8 +78,8 @@ func TestServerStdioBaselineInitializeNewPrompt(t *testing.T) {
 	if err := json.Unmarshal(newResponse.Result, &newPayload); err != nil {
 		t.Fatalf("decode session/new result: %v", err)
 	}
-	if strings.TrimSpace(newPayload.SessionID) == "" {
-		t.Fatalf("session/new returned empty sessionId")
+	if newPayload.SessionID != "thread-1" {
+		t.Fatalf("session/new returned sessionId=%q, want thread-1", newPayload.SessionID)
 	}
 
 	writeRPCRequest(t, clientToServerWriter, "3", "session/prompt", map[string]any{
@@ -125,6 +125,86 @@ func TestServerStdioBaselineInitializeNewPrompt(t *testing.T) {
 	case err := <-serveErrCh:
 		if err != nil {
 			t.Fatalf("server serve error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for server shutdown")
+	}
+}
+
+func TestServerStdioSessionLoadResumesProviderSessionInFreshServer(t *testing.T) {
+	t.Parallel()
+
+	clientToServerReader, clientToServerWriter := io.Pipe()
+	serverToClientReader, serverToClientWriter := io.Pipe()
+	defer func() {
+		_ = clientToServerReader.Close()
+		_ = clientToServerWriter.Close()
+		_ = serverToClientReader.Close()
+		_ = serverToClientWriter.Close()
+	}()
+
+	mockApp := &stdioMockAppClient{}
+	server := NewServer(
+		NewStdioCodec(clientToServerReader, serverToClientWriter),
+		mockApp,
+		bridge.NewStore(),
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		ServerOptions{
+			PatchApplyMode:   "appserver",
+			RetryTurnOnCrash: true,
+			InitialAuthMode:  "chatgpt_subscription",
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveErrCh := make(chan error, 1)
+	go func() {
+		serveErrCh <- server.Serve(ctx)
+	}()
+
+	msgCh := make(chan RPCMessage, 64)
+	readErrCh := make(chan error, 1)
+	go scanRPCStream(serverToClientReader, msgCh, readErrCh)
+
+	writeRPCRequest(t, clientToServerWriter, "1", "initialize", map[string]any{
+		"protocolVersion": 1,
+	})
+	initResponse := mustReadRPCMessage(t, msgCh, readErrCh, 2*time.Second)
+	if initResponse.Error != nil {
+		t.Fatalf("initialize failed: %+v", initResponse.Error)
+	}
+
+	writeRPCRequest(t, clientToServerWriter, "2", "session/load", map[string]any{
+		"sessionId": "thread-1",
+		"cwd":       "/tmp/resume-session",
+	})
+
+	var loadResponse RPCMessage
+	for {
+		msg := mustReadRPCMessage(t, msgCh, readErrCh, 2*time.Second)
+		if messageIDString(msg.ID) != "2" {
+			continue
+		}
+		loadResponse = msg
+		break
+	}
+	if loadResponse.Error != nil {
+		t.Fatalf("session/load failed: %+v", loadResponse.Error)
+	}
+	threadID, err := server.sessions.ThreadID("thread-1")
+	if err != nil {
+		t.Fatalf("fresh server did not bind resumed provider session: %v", err)
+	}
+	if threadID != "thread-1" {
+		t.Fatalf("bound threadID=%q, want thread-1", threadID)
+	}
+
+	_ = clientToServerWriter.Close()
+	select {
+	case err := <-serveErrCh:
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("server exited with error: %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for server shutdown")
@@ -499,6 +579,21 @@ type stdioMockAppClient struct{}
 
 func (m *stdioMockAppClient) ThreadStart(ctx context.Context, cwd string, options codex.RunOptions) (string, error) {
 	return "thread-1", nil
+}
+
+func (m *stdioMockAppClient) ThreadResume(
+	ctx context.Context,
+	threadID string,
+	cwd string,
+	options codex.RunOptions,
+) (codex.ThreadResumeResult, error) {
+	return codex.ThreadResumeResult{
+		CWD: cwd,
+		Thread: codex.Thread{
+			ID:  threadID,
+			CWD: cwd,
+		},
+	}, nil
 }
 
 func (m *stdioMockAppClient) TurnStart(

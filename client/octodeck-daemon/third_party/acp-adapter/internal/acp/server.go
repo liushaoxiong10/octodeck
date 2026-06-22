@@ -612,6 +612,19 @@ func (s *Server) handleSessionLoad(ctx context.Context, id json.RawMessage, para
 				return
 			}
 		}
+	case hasLoader:
+		threadID = params.SessionID
+		resumed, err = loader.ThreadResume(ctx, threadID, params.CWD, options)
+		if err == nil {
+			if bindErr := s.sessions.Bind(params.SessionID, threadID); bindErr != nil {
+				s.writeInternalError(id, "bind resumed session failed", map[string]any{
+					"error":     bindErr.Error(),
+					"sessionId": params.SessionID,
+					"threadId":  threadID,
+				})
+				return
+			}
+		}
 	default:
 		s.writeInternalError(id, "unknown session", map[string]any{
 			"error":     err.Error(),
@@ -709,7 +722,22 @@ func (s *Server) handleSessionNew(ctx context.Context, id json.RawMessage, param
 		return
 	}
 
-	sessionID := s.sessions.Create(threadID)
+	sessionID := ""
+	if _, hasExternalLoader := s.app.(appSessionExternalLoader); hasExternalLoader {
+		sessionID = s.sessions.Create(threadID)
+	} else if _, hasLoader := s.app.(appSessionLoader); hasLoader {
+		sessionID = threadID
+		if bindErr := s.sessions.Bind(sessionID, threadID); bindErr != nil {
+			s.writeInternalError(id, "bind new session failed", map[string]any{
+				"error":     bindErr.Error(),
+				"sessionId": sessionID,
+				"threadId":  threadID,
+			})
+			return
+		}
+	} else {
+		sessionID = s.sessions.Create(threadID)
+	}
 	s.setSessionConfig(sessionID, options)
 	configOptions := s.buildSessionConfigOptions(ctx, options)
 	s.setSessionConfigOptions(sessionID, configOptions)
