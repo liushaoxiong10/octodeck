@@ -753,6 +753,82 @@ describe('agent-link run context forwarding', () => {
     await promise;
   });
 
+  test('runViaAgentLink forwards downloaded image files to device agent.run clients', async () => {
+    const sent: any[] = [];
+    getOnlineMetaMock.mockImplementation((linkId: string) =>
+      linkId === 'cl_1234567890abcdef' ? onlineAgentRunMeta() : undefined,
+    );
+    getSessionMock.mockReturnValue({
+      state: 'open',
+      send(frame: any) {
+        sent.push(frame);
+        return true;
+      },
+    });
+
+    const { runViaAgentLink } =
+      await import('../src/backends/agent-link-driver.js');
+    const promise = runViaAgentLink(
+      {
+        group: {
+          name: 'Device Image',
+          folder: 'device-image',
+          added_at: '2026-01-01T00:00:00.000Z',
+          executionMode: 'host',
+          executionNode: 'runtime:cl_1234567890abcdef:claude-code',
+          runtimeProfile: 'device-cli-agent',
+          created_by: 'u1',
+        } as any,
+        input: {
+          prompt:
+            '<messages><message>[图片: downloads/feishu/a.png]</message></messages>',
+          chatJid: 'web:device-image',
+          isHome: false,
+          imageFiles: [
+            {
+              path: 'downloads/feishu/a.png',
+              data: 'iVBORw0KGgo=',
+              mimeType: 'image/png',
+            },
+          ],
+        } as any,
+        executionMode: 'host',
+        onProcess: vi.fn(),
+      },
+      {
+        backendId: 'mac-claude-code',
+        resolveBinary: () => '/usr/local/bin/claude',
+        buildArgv: ({ prompt }) => [prompt],
+        outputProtocol: 'jsonline-stream-json',
+        agentClientId: 'claude-code',
+      },
+      'runtime:cl_1234567890abcdef:claude-code',
+    );
+
+    expect(sent[0]).toMatchObject({
+      type: 'agent.run.request',
+      agentId: 'claude-code',
+      input: {
+        imageFiles: [
+          {
+            path: 'downloads/feishu/a.png',
+            data: 'iVBORw0KGgo=',
+            mimeType: 'image/png',
+          },
+        ],
+      },
+    });
+
+    registerRunMock.mock.calls.at(-1)?.[0].finish({
+      ok: true,
+      result: 'ok',
+      error: null,
+      timedOut: false,
+      durationMs: 1,
+    });
+    await promise;
+  });
+
   test('runViaAgentLink forwards OctoDeck system prompt to continued device agent.run sessions', async () => {
     const sent: any[] = [];
     getCloudMemoryMock.mockReturnValue({

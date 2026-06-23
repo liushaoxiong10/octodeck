@@ -2,15 +2,24 @@ package agentruntime
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	agentprotocol "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/agentprotocol"
 	daemonconfig "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/config"
 	inventory "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/inventory"
 	proto "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/protocol"
+)
+
+const (
+	maxAgentRunImageFiles     = 32
+	maxAgentRunImageFileBytes = 50 * 1024 * 1024
 )
 
 // NewRuntimeChildServer wires the generic JSON-RPC child server to the daemon
@@ -236,6 +245,11 @@ func childRun(ctx context.Context, cfg *daemonconfig.Config, agents map[string]A
 		return proto.AgentRunResultFrame{}, err
 	}
 	log.Printf("octodeck-daemon: child agent.run cwd resolved runId=%s agent=%s cwd=%s elapsedMs=%d", req.RunID, req.AgentID, cwd, time.Since(started).Milliseconds())
+	localImagePaths, err := materializeAgentRunImageFiles(cwd, req.Input.ImageFiles)
+	if err != nil {
+		return proto.AgentRunResultFrame{}, err
+	}
+	appendLocalImagePathsToPrompt(req, localImagePaths)
 	server.Notify("agent.run.status", &proto.AgentRunStatusFrame{Type: proto.TAgentRunStatus, RunID: req.RunID, AgentID: req.AgentID, Status: "running", Cwd: cwd, StartedAt: FormatTime(started)})
 	log.Printf("octodeck-daemon: child agent.run running status sent runId=%s agent=%s elapsedMs=%d", req.RunID, req.AgentID, time.Since(started).Milliseconds())
 
@@ -284,6 +298,71 @@ func childRun(ctx context.Context, cfg *daemonconfig.Config, agents map[string]A
 	result.AgentID = req.AgentID
 	result.DurationMs = time.Since(started).Milliseconds()
 	return result, nil
+}
+
+func materializeAgentRunImageFiles(cwd string, images []proto.AgentRunInputImage) ([]string, error) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+	if len(images) > maxAgentRunImageFiles {
+		return nil, errors.New("too many input image files")
+	}
+	root, err := filepath.Abs(cwd)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(images))
+	for _, image := range images {
+		rel := filepath.Clean(filepath.FromSlash(strings.TrimSpace(image.Path)))
+		if rel == "." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+			return nil, errors.New("invalid input image path")
+		}
+		data, err := base64.StdEncoding.DecodeString(image.Data)
+		if err != nil {
+			return nil, err
+		}
+		if len(data) > maxAgentRunImageFileBytes {
+			return nil, errors.New("input image file too large")
+		}
+		abs := filepath.Join(root, rel)
+		if !strings.HasPrefix(abs, root+string(filepath.Separator)) && abs != root {
+			return nil, errors.New("input image path escapes cwd")
+		}
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(abs, data, 0o644); err != nil {
+			return nil, err
+		}
+		paths = append(paths, abs)
+	}
+	return paths, nil
+}
+
+func appendLocalImagePathsToPrompt(req *proto.AgentRunRequestFrame, paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimRight(req.Input.Prompt, "\n"))
+	b.WriteString("\n\n<local_image_files>\n")
+	for _, p := range paths {
+		b.WriteString("<image path=\"")
+		b.WriteString(escapePromptAttr(p))
+		b.WriteString("\" />\n")
+	}
+	b.WriteString("</local_image_files>")
+	req.Input.Prompt = b.String()
+}
+
+func escapePromptAttr(value string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		"\"", "&quot;",
+		"<", "&lt;",
+		">", "&gt;",
+	)
+	return replacer.Replace(value)
 }
 
 func childRunErrorResult(req *proto.AgentRunRequestFrame, err error, timedOut bool, started time.Time) proto.AgentRunResultFrame {

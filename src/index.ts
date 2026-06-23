@@ -2929,6 +2929,53 @@ export function collectMessageImages(
   return images;
 }
 
+export function collectMessageImageFiles(
+  chatJid: string,
+  groupFolder: string,
+  messages: NewMessage[],
+): Array<{ path: string; data: string; mimeType: string }> {
+  const files: Array<{ path: string; data: string; mimeType: string }> = [];
+  const groupRoot = path.join(GROUPS_DIR, groupFolder);
+  for (const msg of messages) {
+    const matches = msg.content.matchAll(/\[图片:\s*([^\]\r\n]+?)\s*\]/g);
+    for (const match of matches) {
+      const relPath = match[1]?.trim();
+      if (!relPath) continue;
+      const absPath = path.resolve(groupRoot, relPath);
+      if (!absPath.startsWith(groupRoot + path.sep)) {
+        logger.warn(
+          { chatJid, messageId: msg.id, relPath },
+          'Skip image path outside group root',
+        );
+        continue;
+      }
+      try {
+        const stat = fs.statSync(absPath);
+        if (
+          !stat.isFile() ||
+          stat.size > 50 * 1024 * 1024 ||
+          files.length >= 32
+        )
+          continue;
+        const buffer = fs.readFileSync(absPath);
+        const mimeType = detectImageMimeType(buffer);
+        if (!mimeType) continue;
+        files.push({
+          path: relPath.replace(/\\/g, '/'),
+          data: buffer.toString('base64'),
+          mimeType,
+        });
+      } catch (err) {
+        logger.warn(
+          { chatJid, messageId: msg.id, relPath, err },
+          'Failed to read downloaded image file for agent',
+        );
+      }
+    }
+  }
+  return files;
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -3133,6 +3180,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const images = collectMessageImages(chatJid, missedMessages);
   const imagesForAgent = images.length > 0 ? images : undefined;
+  const imageFiles = collectMessageImageFiles(
+    chatJid,
+    effectiveGroup.folder,
+    missedMessages,
+  );
+  const imageFilesForAgent = imageFiles.length > 0 ? imageFiles : undefined;
 
   // Extract task_id from the most recent task-prompt message (if any).
   // See extractLastTaskId() for semantics; see §C of the routing fix plan for
@@ -3145,6 +3198,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       messageCount: missedMessages.length,
       directImReply,
       imageCount: images.length,
+      imageFileCount: imageFiles.length,
       shared,
       isRecovery,
       messageTaskId,
@@ -3926,6 +3980,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         }
       },
       imagesForAgent,
+      imageFilesForAgent,
       messageTaskId,
       currentSourceJid,
     );
@@ -4358,6 +4413,7 @@ async function runAgent(
   turnId?: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
   images?: Array<{ data: string; mimeType?: string }>,
+  imageFiles?: Array<{ path: string; data: string; mimeType?: string }>,
   messageTaskId?: string,
   currentSourceJid?: string,
 ): Promise<{ status: 'success' | 'error' | 'closed'; error?: string }> {
@@ -4472,6 +4528,7 @@ async function runAgent(
           isHome,
           isAdminHome,
           images,
+          imageFiles,
           messageTaskId,
           permissionMode: group.permissionMode ?? 'bypassPermissions',
         },
@@ -7022,6 +7079,12 @@ async function processAgentConversation(
   }
   const images = collectMessageImages(virtualChatJid, missedMessages);
   const imagesForAgent = images.length > 0 ? images : undefined;
+  const imageFiles = collectMessageImageFiles(
+    virtualChatJid,
+    effectiveGroup.folder,
+    missedMessages,
+  );
+  const imageFilesForAgent = imageFiles.length > 0 ? imageFiles : undefined;
   // For agent conversations, route reply to IM based on the most recent
   // message's source.  Unlike the main conversation (#99), agent conversations
   // are explicitly bound to IM groups, so the user expects replies to go back
@@ -7660,6 +7723,7 @@ async function processAgentConversation(
       agentId,
       agentName: agent.name,
       images: imagesForAgent,
+      imageFiles: imageFilesForAgent,
       permissionMode: effectiveGroup.permissionMode ?? 'bypassPermissions',
     };
 

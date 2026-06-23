@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	state "github.com/liushaoxiong10/octodeck/client/octodeck-daemon/internal/state"
@@ -22,6 +23,7 @@ func BuildEnv(cfg EnvConfig, overrides map[string]string, runCtx any, base map[s
 	if base == nil {
 		base = EnvSnapshot()
 	}
+	augmentTrustedPath(base)
 	if safeGroupFolder == nil {
 		safeGroupFolder = func(s string) string { return s }
 	}
@@ -62,6 +64,95 @@ func BuildEnv(cfg EnvConfig, overrides map[string]string, runCtx any, base map[s
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+func augmentTrustedPath(base map[string]string) {
+	if base == nil {
+		return
+	}
+	current := base["PATH"]
+	seen := map[string]struct{}{}
+	for _, dir := range filepath.SplitList(current) {
+		if dir != "" {
+			seen[dir] = struct{}{}
+		}
+	}
+	add := func(dir string) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			return
+		}
+		if expanded, err := filepath.Abs(dir); err == nil {
+			dir = expanded
+		}
+		if _, ok := seen[dir]; ok {
+			return
+		}
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			return
+		}
+		seen[dir] = struct{}{}
+		if current == "" {
+			current = dir
+		} else {
+			current = dir + string(os.PathListSeparator) + current
+		}
+	}
+
+	for _, dir := range filepath.SplitList(os.Getenv("OCTODECK_DAEMON_EXTRA_PATH")) {
+		add(dir)
+	}
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		for _, rel := range []string{
+			".local/bin",
+			"bin",
+			".bun/bin",
+			".npm-global/bin",
+			".volta/bin",
+			".yarn/bin",
+		} {
+			add(filepath.Join(home, rel))
+		}
+		for _, pattern := range []string{
+			filepath.Join(home, ".nvm", "versions", "node", "*", "bin"),
+			filepath.Join(home, ".fnm", "node-versions", "*", "installation", "bin"),
+			filepath.Join(home, "sdk", "go*", "bin"),
+		} {
+			matches, _ := filepath.Glob(pattern)
+			for _, dir := range matches {
+				add(dir)
+			}
+		}
+	}
+
+	for _, dir := range []string{
+		"/data00/home/liushaoxiong12/code/app/octodeck/node_modules/.bin",
+		"/data00/home/liushaoxiong12/code/app/octodeck/web/node_modules/.bin",
+		"/usr/local/go/bin",
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		"/usr/bin",
+		"/bin",
+		"/usr/sbin",
+		"/sbin",
+	} {
+		add(dir)
+	}
+	if runtime.GOOS == "darwin" {
+		for _, dir := range []string{
+			"/Applications/cmux.app/Contents/Resources/bin",
+			"/Applications/Trae.app/Contents/Resources/app/bin",
+			"/Applications/TRAE CN.app/Contents/Resources/app/bin",
+			"/Applications/TRAE SOLO CN.app/Contents/Resources/app/bin",
+		} {
+			add(dir)
+		}
+	}
+	if current != "" {
+		base["PATH"] = current
+	}
 }
 
 // EnvSnapshot returns the current process environment as a map.

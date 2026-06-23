@@ -18,7 +18,7 @@ type HelloFrame struct {
 	Arch                     string              `json:"arch,omitempty"`
 	Hostname                 string              `json:"hostname,omitempty"`
 	Capabilities             []string            `json:"capabilities"`
-	AgentClients             []inventory.Info  `json:"agentClients,omitempty"`
+	AgentClients             []inventory.Info    `json:"agentClients,omitempty"`
 	AgentRuntimeCapabilities []RuntimeCapability `json:"agentRuntimeCapabilities,omitempty"`
 	Resources                inventory.Snapshot  `json:"resources"`
 }
@@ -147,7 +147,7 @@ type AgentDiscoverResultFrame struct {
 	Type                FrameType           `json:"type"`
 	RequestID           string              `json:"requestId"`
 	OK                  bool                `json:"ok"`
-	Agents              []inventory.Info  `json:"agents"`
+	Agents              []inventory.Info    `json:"agents"`
 	RuntimeCapabilities []RuntimeCapability `json:"runtimeCapabilities,omitempty"`
 	Error               *string             `json:"error"`
 	DurationMs          int64               `json:"durationMs"`
@@ -318,9 +318,16 @@ type AgentRunWorkspace struct {
 }
 
 type AgentRunInput struct {
-	Prompt    string         `json:"prompt"`
-	SessionID string         `json:"sessionId,omitempty"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
+	Prompt     string               `json:"prompt"`
+	SessionID  string               `json:"sessionId,omitempty"`
+	Metadata   map[string]any       `json:"metadata,omitempty"`
+	ImageFiles []AgentRunInputImage `json:"imageFiles,omitempty"`
+}
+
+type AgentRunInputImage struct {
+	Path     string `json:"path"`
+	Data     string `json:"data"`
+	MimeType string `json:"mimeType,omitempty"`
 }
 
 type AgentRunPolicy struct {

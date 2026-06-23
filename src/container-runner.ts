@@ -268,6 +268,7 @@ export interface ContainerInput {
   /** True when this scheduled task is explicitly bound to a workspace. */
   scheduledTaskHasWorkspace?: boolean;
   images?: Array<{ data: string; mimeType?: string }>;
+  imageFiles?: Array<{ path: string; data: string; mimeType?: string }>;
   agentId?: string;
   agentName?: string;
   /**

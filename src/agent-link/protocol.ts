@@ -146,6 +146,16 @@ export const AgentRunInputSchema = z.object({
   prompt: z.string(),
   sessionId: z.string().max(256).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  imageFiles: z
+    .array(
+      z.object({
+        path: z.string().max(4096),
+        data: z.string(),
+        mimeType: z.string().max(128).optional(),
+      }),
+    )
+    .max(32)
+    .optional(),
 });
 export type AgentRunInput = z.infer<typeof AgentRunInputSchema>;
 

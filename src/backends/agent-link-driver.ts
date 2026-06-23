@@ -1980,6 +1980,7 @@ async function runViaAgentRuntime(opts: {
       input: {
         prompt: input.prompt,
         sessionId: input.sessionId,
+        imageFiles: input.imageFiles,
         metadata: {
           scheduledTask: !!input.isScheduledTask,
           workspaceId,
