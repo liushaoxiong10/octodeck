@@ -131,6 +131,15 @@ export interface StreamEvent {
     reason?: string;
     message: string;
   };
+  permissionRequest?: {
+    linkId?: string;
+    runId: string;
+    requestId: string;
+    toolName?: string;
+    title?: string;
+    summary?: string;
+    decisionUrl?: string;
+  };
   isBackground?: boolean;
   isTeammate?: boolean;
   toolInput?: Record<string, unknown>;
