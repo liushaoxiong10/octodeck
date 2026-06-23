@@ -173,6 +173,11 @@ interface IncomingMessagePayload {
   senderName?: string;
 }
 
+export interface FeishuReferencedMessage {
+  messageId: string;
+  text: string;
+}
+
 function normalizeFeishuChatType(chatType: string | undefined): string | undefined {
   if (!chatType) return chatType;
   // Feishu topic/thread groups may surface as topic/thread-like chat types in
@@ -509,6 +514,25 @@ function extractMessageContent(
     );
     return { text: `[${messageType}]` };
   }
+}
+
+export function quoteReferencedText(text: string): string {
+  const normalized = text.trim();
+  if (!normalized) return '> [无法解析的引用内容]';
+  return normalized
+    .split(/\r?\n/)
+    .slice(0, 20)
+    .map((line) => `> ${line}`)
+    .join('\n');
+}
+
+export function prependReferencedMessageContext(
+  text: string,
+  referenced: FeishuReferencedMessage | null,
+): string {
+  if (!referenced) return text;
+  const quoted = quoteReferencedText(referenced.text);
+  return text?.trim() ? `${quoted}\n\n${text}` : quoted;
 }
 
 /**
@@ -1044,6 +1068,53 @@ export function createFeishuConnection(
     }
   }
 
+  async function fetchReferencedMessage(
+    messageId: string | undefined,
+    currentMessageId: string,
+  ): Promise<FeishuReferencedMessage | null> {
+    if (!client || !messageId || messageId === currentMessageId) return null;
+    try {
+      const response = (await client.im.v1.message.get({
+        path: { message_id: messageId },
+      })) as {
+        data?: {
+          items?: Array<{
+            message_id?: string;
+            msg_type?: string;
+            message_type?: string;
+            body?: { content?: string };
+            content?: string;
+            deleted?: boolean;
+          }>;
+          message_id?: string;
+          msg_type?: string;
+          message_type?: string;
+          body?: { content?: string };
+          content?: string;
+          deleted?: boolean;
+        };
+      };
+      const item = response.data?.items?.[0] ?? response.data;
+      if (!item || item.deleted === true) return null;
+      const messageType = item.msg_type || item.message_type || '';
+      const rawContent = item.body?.content || item.content || '';
+      if (!messageType || !rawContent) return null;
+      const extracted = extractMessageContent(messageType, rawContent);
+      const quotedText = extracted.text?.trim();
+      if (!quotedText) return null;
+      return {
+        messageId: item.message_id || messageId,
+        text: quotedText,
+      };
+    } catch (err) {
+      logger.warn(
+        { err, messageId, currentMessageId },
+        'Failed to fetch referenced Feishu message',
+      );
+      return null;
+    }
+  }
+
   async function handleIncomingMessage(
     payload: IncomingMessagePayload,
     source: 'ws' | 'backfill',
@@ -1450,6 +1521,14 @@ export function createFeishuConnection(
           }
           return;
         }
+      }
+
+      const referencedMessage = await fetchReferencedMessage(
+        parentId,
+        messageId,
+      );
+      if (referencedMessage) {
+        text = prependReferencedMessageContext(text, referencedMessage);
       }
 
       const agentRouting = resolveEffectiveChatJid?.(chatJid, {

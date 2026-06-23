@@ -1,6 +1,10 @@
 import { describe, expect, test, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { parseFeishuRouteTarget } from '../src/feishu.js';
+import {
+  parseFeishuRouteTarget,
+  prependReferencedMessageContext,
+  quoteReferencedText,
+} from '../src/feishu.js';
 import { StreamingCardController } from '../src/feishu-streaming-card.js';
 
 describe('parseFeishuRouteTarget', () => {
@@ -115,5 +119,24 @@ describe('Feishu thread_map routing guard', () => {
     expect(source).not.toContain(
       'messageMeta.threadId || messageMeta.rootId || messageMeta.messageId',
     );
+  });
+});
+
+describe('Feishu referenced message context', () => {
+  test('prepends the replied message as quoted context', () => {
+    expect(
+      prependReferencedMessageContext('@OctoDeck 总结一下', {
+        messageId: 'om_parent',
+        text: '第一行\n第二行',
+      }),
+    ).toBe('> 第一行\n> 第二行\n\n@OctoDeck 总结一下');
+  });
+
+  test('limits quoted context to the first 20 lines', () => {
+    const lines = Array.from({ length: 25 }, (_, i) => `line-${i + 1}`);
+    const quoted = quoteReferencedText(lines.join('\n'));
+    expect(quoted.split('\n')).toHaveLength(20);
+    expect(quoted).toContain('> line-20');
+    expect(quoted).not.toContain('line-21');
   });
 });
